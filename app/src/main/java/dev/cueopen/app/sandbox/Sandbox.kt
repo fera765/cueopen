@@ -47,7 +47,7 @@ class Sandbox(private val ctx: Context) {
     private val http = OkHttpClient.Builder().readTimeout(10, TimeUnit.MINUTES).build()
     private var axsProcess: Process? = null
 
-    fun isInstalled() = File(prefix, ".configured").exists() && File(alpineDir, "bin/sh").exists()
+    fun isInstalled() = File(prefix, ".configured").exists() && File(alpineDir, "bin/busybox").exists()
 
     fun workspaceFor(sessionId: String) = File(workspaceRoot, sessionId).apply { mkdirs() }
     /** Caminho visto de dentro do sandbox. */
@@ -130,7 +130,9 @@ class Sandbox(private val ctx: Context) {
                 listOf("/system/bin/sh", File(prefix, "init-sandbox.sh").absolutePath, "--installing"),
                 extraEnv = mapOf("CUE_PACKAGES" to packages),
             )
-            if (!isInstalled()) error("Configuração terminou com código $code")
+            if (code != 0) error("Configuração terminou com código $code")
+            File(prefix, ".configured").mkdirs()
+            if (!isInstalled()) error("Sistema de arquivos incompleto (busybox ausente)")
             appendLog("✅  Sandbox pronto")
             _state.value = State.READY
             true

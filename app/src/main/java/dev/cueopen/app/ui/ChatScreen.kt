@@ -108,7 +108,7 @@ fun ChatScreen(nav: NavController, sessionId: String) {
                 items(session.items, key = { it.id }) { item -> TimelineItem(item, onOpenComputer = { tab -> nav.navigate("computer/$sessionId?tab=$tab") }) }
                 if (running) item { ThinkingRow(act) }
                 if (session.status == SessionStatus.STOPPED) item { InfoRow(Icons.Rounded.StopCircle, "Tarefa interrompida. Envie uma mensagem para continuar.") }
-                if (session.status == SessionStatus.DONE) item { DoneRow(onReplay = { nav.navigate("replay/$sessionId") }, onShare = { shareSession(ctx, session) }) }
+                if (session.status == SessionStatus.DONE) item { DoneRow(onCopy = { copyText(ctx, lastAnswer(session)) }, onShare = { shareSession(ctx, session) }) }
             }
             AnimatedVisibility(running || act.kind != Activity.Kind.IDLE) {
                 LiveComputerCard(act, agent?.name ?: "CueOpen") { nav.navigate("computer/$sessionId") }
@@ -314,14 +314,24 @@ private fun InfoRow(icon: ImageVector, text: String, tint: Color = Cue.c.ink2) {
 }
 
 @Composable
-private fun DoneRow(onReplay: () -> Unit, onShare: () -> Unit) {
+private fun DoneRow(onCopy: () -> Unit, onShare: () -> Unit) {
     val c = Cue.c
-    Row(Modifier.fillMaxWidth().padding(top = 4.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        Icon(Icons.Rounded.TaskAlt, null, tint = c.ok, modifier = Modifier.size(18.dp))
-        Text("Tarefa concluída", color = c.ok, fontSize = 14.sp, modifier = Modifier.weight(1f))
-        Chip("Replay", icon = Icons.Rounded.PlayArrow, onClick = onReplay)
-        Chip("Compartilhar", icon = Icons.Rounded.IosShare, onClick = onShare)
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+        listOf(Icons.Rounded.ContentCopy to onCopy, Icons.Rounded.IosShare to onShare).forEach { (ic, fn) ->
+            Box(Modifier.size(30.dp).clip(CircleShape).clickable(onClick = fn), contentAlignment = Alignment.Center) {
+                Icon(ic, null, Modifier.size(16.dp), tint = c.ink3)
+            }
+        }
     }
+}
+
+fun lastAnswer(s: Session): String =
+    (s.items.lastOrNull { it is ChatItem.Assistant } as? ChatItem.Assistant)?.text ?: sessionMarkdown(s)
+
+fun copyText(ctx: android.content.Context, text: String) {
+    val cm = ctx.getSystemService(android.content.ClipboardManager::class.java)
+    cm.setPrimaryClip(android.content.ClipData.newPlainText("CueOpen", text))
+    android.widget.Toast.makeText(ctx, "Copiado", android.widget.Toast.LENGTH_SHORT).show()
 }
 
 /** Card "Computador do agente" que fica acima do composer enquanto a tarefa roda (como no Cue). */

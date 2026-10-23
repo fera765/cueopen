@@ -147,8 +147,8 @@ enum class ThemeMode { SYSTEM, LIGHT, DARK }
 data class Settings(
     val apiKey: String = "",
     val baseUrl: String = "https://openrouter.ai/api/v1",
-    val model: String = "anthropic/claude-sonnet-4.5",
-    val fastModel: String = "google/gemini-2.5-flash",
+    val model: String = "deepseek/deepseek-v4-flash",
+    val fastModel: String = "deepseek/deepseek-v4-flash",
     val disableThinking: Boolean = true,
     val maxSteps: Int = 40,
     val theme: ThemeMode = ThemeMode.SYSTEM,

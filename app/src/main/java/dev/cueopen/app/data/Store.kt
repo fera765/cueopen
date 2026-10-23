@@ -36,6 +36,12 @@ class Store(context: Context) {
         // Tarefas que estavam rodando quando o app morreu viram "interrompidas"
         s.copy(
             skills = s.skills + missing,
+            settings = s.settings.let { st ->
+                st.copy(
+                    model = if (st.model == "anthropic/claude-sonnet-4.5") "deepseek/deepseek-v4-flash" else st.model,
+                    fastModel = if (st.fastModel == "google/gemini-2.5-flash") "deepseek/deepseek-v4-flash" else st.fastModel,
+                )
+            },
             sessions = s.sessions.map {
                 if (it.status == SessionStatus.RUNNING) it.copy(status = SessionStatus.STOPPED) else it
             },

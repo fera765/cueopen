@@ -98,8 +98,8 @@ fun PillButton(text: String, icon: ImageVector? = null, primary: Boolean = true,
             containerColor = if (primary) c.ink else c.surface2, contentColor = if (primary) c.bg else c.ink,
         ),
     ) {
-        if (icon != null) { Icon(icon, null, Modifier.size(18.dp)); Spacer(Modifier.width(8.dp)) }
-        Text(text, fontWeight = FontWeight.SemiBold)
+        if (icon != null) { Icon(icon, null, Modifier.size(18.dp), tint = if (primary) c.bg else c.ink); Spacer(Modifier.width(8.dp)) }
+        Text(text, fontWeight = FontWeight.SemiBold, color = if (primary) c.bg else c.ink)
     }
 }
 

@@ -46,7 +46,7 @@ fun CueTheme(mode: ThemeMode, content: @Composable () -> Unit) {
     val c = if (dark) DarkCue else LightCue
     val scheme = if (dark) darkColorScheme(primary = c.accent, background = c.bg, surface = c.surface, onSurface = c.ink, onBackground = c.ink, surfaceVariant = c.surface2, outline = c.line)
                  else lightColorScheme(primary = c.accent, background = c.bg, surface = c.surface, onSurface = c.ink, onBackground = c.ink, surfaceVariant = c.surface2, outline = c.line)
-    val base = TextStyle(fontFamily = FontFamily.SansSerif, color = c.ink)
+    val base = TextStyle(fontFamily = FontFamily.SansSerif)
     val typo = Typography(
         headlineLarge = base.copy(fontSize = 28.sp, fontWeight = FontWeight.Bold, lineHeight = 34.sp, letterSpacing = (-0.5).sp),
         headlineSmall = base.copy(fontSize = 22.sp, fontWeight = FontWeight.Bold),

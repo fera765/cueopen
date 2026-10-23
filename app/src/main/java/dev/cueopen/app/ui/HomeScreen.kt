@@ -195,7 +195,7 @@ fun Composer(
     val voice = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { r ->
         r.data?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)?.firstOrNull()?.let { onChange((value + " " + it).trim()) }
     }
-    Column(Modifier.fillMaxWidth().navigationBarsPadding().padding(12.dp)
+    Column(Modifier.fillMaxWidth().padding(12.dp)
         .clip(RoundedCornerShape(26.dp)).background(c.surface).border(1.dp, c.line, RoundedCornerShape(26.dp)).padding(12.dp)) {
         if (files.isNotEmpty()) {
             Row(Modifier.horizontalScroll(rememberScrollState()).padding(bottom = 8.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
