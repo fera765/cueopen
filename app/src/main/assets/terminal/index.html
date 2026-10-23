@@ -1,0 +1,40 @@
+<!doctype html>
+<html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<link rel="stylesheet" href="xterm.css">
+<style>
+ html,body{margin:0;height:100%;background:var(--bg,#0f1115);overflow:hidden}
+ #t{position:absolute;inset:6px 4px 4px 8px}
+ #msg{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:#888;font:14px sans-serif;text-align:center;padding:24px}
+</style>
+<script src="xterm.js"></script><script src="addon-fit.js"></script><script src="addon-web-links.js"></script>
+</head><body><div id="t"></div><div id="msg">Iniciando sandbox…</div>
+<script>
+// Frontend de terminal igual ao do Acode: xterm.js <-> WebSocket do axs.
+// Modo "shell": PTY interativo (ws://127.0.0.1:8767/terminals/{pid})
+// Modo "log": somente leitura, recebe a saída dos comandos do agente via CueBridge.write().
+var params=new URLSearchParams(location.search), mode=params.get('mode')||'shell', dark=params.get('dark')!=='0';
+document.documentElement.style.setProperty('--bg', dark?'#0f1115':'#fbfaf7');
+var term=new Terminal({fontSize:13,fontFamily:'monospace',cursorBlink:mode==='shell',convertEol:mode==='log',
+  disableStdin:mode!=='shell',scrollback:5000,allowProposedApi:true,
+  theme: dark?{background:'#0f1115',foreground:'#e6e6e6',cursor:'#ff6b3d'}:{background:'#fbfaf7',foreground:'#1b1b1b',cursor:'#ff6b3d',selectionBackground:'#ffd5c6'}});
+var fit=new FitAddon.FitAddon(); term.loadAddon(fit); term.loadAddon(new WebLinksAddon.WebLinksAddon());
+term.open(document.getElementById('t')); fit.fit();
+var ws=null,pid=null;
+window.CueTerm={
+  write:function(s){document.getElementById('msg').style.display='none';term.write(s)},
+  clear:function(){term.clear()},
+  size:function(){return JSON.stringify({cols:term.cols,rows:term.rows})},
+  attach:function(p){ pid=p; document.getElementById('msg').style.display='none';
+    ws=new WebSocket('ws://127.0.0.1:8767/terminals/'+p); ws.binaryType='arraybuffer';
+    ws.onmessage=function(e){ term.write(typeof e.data==='string'?e.data:new Uint8Array(e.data)); };
+    ws.onclose=function(){ term.write('\r\n\x1b[33m[sessão encerrada]\x1b[0m\r\n'); };
+    term.onData(function(d){ if(ws&&ws.readyState===1) ws.send(d); });
+    resize(); },
+  fail:function(m){ var el=document.getElementById('msg'); el.style.display='flex'; el.textContent=m; },
+  key:function(seq){ if(ws&&ws.readyState===1) ws.send(seq); term.focus(); }
+};
+function resize(){ fit.fit(); if(pid&&window.CueBridge){ CueBridge.resize(pid, term.cols, term.rows); } else if(pid){ fetch('http://127.0.0.1:8767/terminals/'+pid+'/resize',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({cols:term.cols,rows:term.rows})}).catch(function(){}); } }
+window.addEventListener('resize',function(){ setTimeout(resize,50); });
+if(window.CueBridge) CueBridge.ready(mode, term.cols, term.rows);
+</script></body></html>
