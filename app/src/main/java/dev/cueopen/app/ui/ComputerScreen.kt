@@ -134,7 +134,7 @@ fun TerminalView(key: String, cwd: String, modifier: Modifier = Modifier) {
         AndroidView(modifier = Modifier.weight(1f).fillMaxWidth().padding(start = 6.dp, top = 4.dp), factory = { ctx ->
             com.termux.view.TerminalView(ctx, null).apply {
                 setBackgroundColor(android.graphics.Color.parseColor("#0f1115"))
-                setTypeface(android.graphics.Typeface.MONOSPACE)
+                // setTextSize cria o renderer (monospace); setTypeface antes disso dá NPE
                 setTextSize(with(density) { 13.sp.toPx() }.toInt())
                 isFocusable = true
                 isFocusableInTouchMode = true

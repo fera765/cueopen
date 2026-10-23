@@ -56,7 +56,9 @@ fun CueTheme(mode: ThemeMode, content: @Composable () -> Unit) {
         bodyMedium = base.copy(fontSize = 14.sp, lineHeight = 20.sp),
         labelMedium = base.copy(fontSize = 12.sp, fontWeight = FontWeight.Medium, color = c.ink2),
     )
-    androidx.compose.runtime.CompositionLocalProvider(LocalCue provides c) {
-        MaterialTheme(colorScheme = scheme, typography = typo, content = content)
+    androidx.compose.runtime.CompositionLocalProvider(LocalCue provides c, androidx.compose.material3.LocalContentColor provides c.ink) {
+        MaterialTheme(colorScheme = scheme, typography = typo) {
+            androidx.compose.runtime.CompositionLocalProvider(androidx.compose.material3.LocalContentColor provides c.ink, content = content)
+        }
     }
 }
