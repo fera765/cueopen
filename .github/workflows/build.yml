@@ -13,14 +13,17 @@ jobs:
       - uses: actions/setup-java@v4
         with: { distribution: temurin, java-version: '17' }
       - uses: android-actions/setup-android@v3
+        continue-on-error: true
       - uses: gradle/actions/setup-gradle@v4
+        continue-on-error: true
         with: { gradle-version: '8.9' }
       - name: Build
         run: gradle assembleDebug --stacktrace 2>&1 | tee build.log
         continue-on-error: true
       - name: Publicar resultado na branch build-output
+        if: always()
         run: |
-          mkdir -p out && cp build.log out/
+          mkdir -p out && (cp build.log out/ || echo 'build nao rodou' > out/build.log)
           cp app/build/outputs/apk/debug/*.apk out/CueOpen.apk 2>/dev/null || echo "sem apk" > out/FAILED
           cd out && git init -q && git checkout -q -b build-output
           git config user.name ci && git config user.email ci@users.noreply.github.com
