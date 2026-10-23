@@ -16,6 +16,7 @@ class CueApp : Application() {
     lateinit var browser: BrowserHost; private set
     lateinit var llm: OpenRouter; private set
     lateinit var agent: AgentRunner; private set
+    lateinit var terminals: dev.cueopen.app.sandbox.TerminalManager; private set
 
     override fun onCreate() {
         super.onCreate()
@@ -24,7 +25,8 @@ class CueApp : Application() {
         sandbox = Sandbox(this)
         browser = BrowserHost(this)
         llm = OpenRouter { store.settings }
-        agent = AgentRunner(store, sandbox, browser, llm)
+        terminals = dev.cueopen.app.sandbox.TerminalManager(sandbox)
+        agent = AgentRunner(store, sandbox, browser, llm, terminals, this)
         getSystemService(NotificationManager::class.java).createNotificationChannel(
             NotificationChannel(CH_TASKS, "Tarefas", NotificationManager.IMPORTANCE_DEFAULT)
         )

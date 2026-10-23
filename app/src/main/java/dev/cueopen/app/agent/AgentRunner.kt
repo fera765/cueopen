@@ -56,6 +56,8 @@ class AgentRunner(
     private val sandbox: Sandbox,
     private val browser: BrowserHost,
     private val llm: OpenRouter,
+    private val terminals: dev.cueopen.app.sandbox.TerminalManager,
+    private val ctx: android.content.Context,
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val jobs = mutableMapOf<String, Job>()
@@ -82,6 +84,7 @@ class AgentRunner(
         val content = if (attachments.isEmpty()) text
         else text + "\n\n[Arquivos anexados no workspace: ${attachments.joinToString()}]"
         store.editSession(sessionId) { it.copy(llm = it.llm + LlmMessage("user", content), status = SessionStatus.RUNNING) }
+        dev.cueopen.app.sandbox.SandboxService.start(ctx, "Executando tarefa…")
         val job = scope.launch {
             try {
                 maybeTitle(sessionId, text)
@@ -94,6 +97,8 @@ class AgentRunner(
             } finally {
                 setActivity(sessionId, Activity())
                 browser.setAgentControl(false)
+                jobs.remove(sessionId, coroutineContext[Job])
+                if (jobs.values.none { it.isActive }) dev.cueopen.app.sandbox.SandboxService.start(ctx, "Terminal ativo")
                 onDone?.invoke()
             }
         }
@@ -108,7 +113,8 @@ class AgentRunner(
         store.editSession(sessionId) { it.copy(title = fallback) }
         runCatching {
             val t = llm.quick("Crie um título curto (máx 6 palavras, sem aspas, no idioma do pedido) para esta tarefa:\n$text")
-            if (t.isNotBlank()) store.editSession(sessionId) { it.copy(title = t.removeSurrounding("\"").take(60)) }
+            val clean = t.replace(Regex("^(t[ií]tulo[^:]*:)\\s*", RegexOption.IGNORE_CASE), "").trim().removeSurrounding("\"").removeSurrounding("*").take(60)
+            if (clean.isNotBlank()) store.editSession(sessionId) { it.copy(title = clean) }
         }
     }
 
@@ -301,13 +307,9 @@ class AgentRunner(
         val out: String = try {
             when (call.name) {
                 "shell" -> {
-                    val cmd = s("command")
-                    appendTerm(sessionId, "\u001b[38;5;209mcue@sandbox\u001b[0m:\u001b[36m$cwd\u001b[0m$ $cmd\r\n")
-                    if (b("background")) {
-                        sandbox.exec("nohup sh -c ${shQuote(cmd)} > /tmp/bg_${System.currentTimeMillis()}.log 2>&1 &", cwd, 20)
-                        "Iniciado em segundo plano."
-                    } else {
-                        val r = sandbox.exec(cmd, cwd, (i("timeout") ?: 180).toLong()) { appendTerm(sessionId, it.replace("\n", "\r\n")) }
+                    // tudo roda DENTRO do terminal da tarefa (visível ao vivo no Computador)
+                    val r = terminals.get(sessionId).runAgentCommand(s("command"), cwd, (i("timeout") ?: 180).toLong(), b("background"))
+                    run {
                         buildString {
                             append(r.output.takeLast(10_000))
                             if (r.timedOut) append("\n[timeout]")

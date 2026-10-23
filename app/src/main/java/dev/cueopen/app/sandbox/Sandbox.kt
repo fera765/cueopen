@@ -207,7 +207,7 @@ class Sandbox(private val ctx: Context) {
         if (!isInstalled()) return@withContext false
         if (axsAlive()) return@withContext true
         writeScripts()
-        SandboxService.start(ctx)
+        SandboxService.start(ctx, "Terminal ativo")
         val pb = ProcessBuilder("/system/bin/sh", File(prefix, "init-sandbox.sh").absolutePath)
             .directory(prefix).redirectErrorStream(true)
         pb.environment().putAll(env())
@@ -230,6 +230,7 @@ class Sandbox(private val ctx: Context) {
     }
 
     fun stopAxs() {
+        runCatching { dev.cueopen.app.CueApp.instance.terminals.closeAll() }
         axsProcess?.destroy(); axsProcess = null
         runCatching {
             val pid = File(prefix, "pid").readText().trim()

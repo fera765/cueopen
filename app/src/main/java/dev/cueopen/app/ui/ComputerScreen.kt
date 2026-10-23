@@ -103,78 +103,108 @@ fun ComputerScreen(nav: NavController, sessionId: String, initialTab: String?) {
 
 @Composable
 private fun TerminalPane(sessionId: String) {
-    var shell by remember { mutableStateOf(false) }
-    Column(Modifier.fillMaxSize()) {
-        Row(Modifier.padding(horizontal = 16.dp, vertical = 4.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Chip("Agente", selected = !shell) { shell = false }
-            Chip("Shell interativo", selected = shell) { shell = true }
-        }
-        Box(Modifier.weight(1f).padding(8.dp).clip(RoundedCornerShape(16.dp))) {
-            if (shell) XtermView(mode = "shell", modifier = Modifier.fillMaxSize(), cwd = "/root/workspace/$sessionId")
-            else AgentTerminalLog(sessionId)
-        }
+    Box(Modifier.fillMaxSize().padding(8.dp).clip(RoundedCornerShape(16.dp))) {
+        TerminalView(key = sessionId, cwd = "/root/workspace/$sessionId", modifier = Modifier.fillMaxSize())
     }
 }
 
+/**
+ * Terminal real (um PTY por tarefa). O mesmo terminal é usado pelo agente e pelo usuário:
+ * os comandos do agente aparecem aqui ao vivo e você pode digitar junto.
+ * A conexão vive no TerminalManager (Kotlin), então continua com o app em segundo plano.
+ */
+@SuppressLint("SetJavaScriptEnabled", "ClickableViewAccessibility")
 @Composable
-private fun AgentTerminalLog(sessionId: String) {
+fun TerminalView(key: String, cwd: String, modifier: Modifier = Modifier) {
     val app = CueApp.instance
-    val logs by app.agent.termLog.collectAsStateWithLifecycle()
-    val text = logs[sessionId].orEmpty()
-    var view by remember { mutableStateOf<WebView?>(null) }
-    var sent by remember { mutableIntStateOf(0) }
-    LaunchedEffect(text, view) {
-        val v = view ?: return@LaunchedEffect
-        if (text.length < sent) { v.evaluateJavascript("CueTerm.clear()", null); sent = 0 }
-        if (text.length > sent) {
-            v.evaluateJavascript("CueTerm.write(${JSONObject.quote(text.substring(sent))})", null); sent = text.length
-        }
-    }
-    XtermView("log", Modifier.fillMaxSize(), onReady = { view = it; sent = 0 })
-    if (text.isEmpty()) Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-        Text("Os comandos do agente aparecem aqui", color = Color(0xFF888888))
-    }
-}
-
-/** WebView com xterm.js — mesma estratégia do Acode (frontend web + PTY servido pelo axs). */
-@SuppressLint("SetJavaScriptEnabled")
-@Composable
-fun XtermView(mode: String, modifier: Modifier = Modifier, cwd: String? = null, onReady: (WebView) -> Unit = {}) {
-    val app = CueApp.instance
-    val dark = true
     val scope = rememberCoroutineScope()
+    val session = remember(key) { app.terminals.get(key) }
     var webRef by remember { mutableStateOf<WebView?>(null) }
-    Column(modifier) {
+    var line by remember { mutableStateOf("") }
+    val sandboxState by app.sandbox.state.collectAsStateWithLifecycle()
+
+    fun js(code: String) { webRef?.let { w -> w.post { w.evaluateJavascript(code, null) } } }
+
+    DisposableEffect(session, webRef) {
+        val w = webRef
+        if (w == null) onDispose {} else {
+            // batching: junta os chunks por ~30 ms para não afogar a WebView
+            val pending = StringBuilder()
+            val flush = Runnable {
+                val s = synchronized(pending) { pending.toString().also { pending.setLength(0) } }
+                if (s.isNotEmpty()) w.evaluateJavascript("CueTerm.write(${JSONObject.quote(s)})", null)
+            }
+            val l: (String) -> Unit = { chunk ->
+                val first = synchronized(pending) { val e = pending.isEmpty(); pending.append(chunk); e }
+                if (first) w.postDelayed(flush, 30)
+            }
+            session.addListener(l)
+            onDispose { session.removeListener(l) }
+        }
+    }
+
+    Column(modifier.background(Color(0xFF0F1115))) {
         AndroidView(modifier = Modifier.weight(1f).fillMaxWidth(), factory = { ctx ->
             WebView(ctx).apply {
                 settings.javaScriptEnabled = true
                 settings.domStorageEnabled = true
                 @Suppress("DEPRECATION") settings.allowUniversalAccessFromFileURLs = true
                 setBackgroundColor(android.graphics.Color.parseColor("#0f1115"))
+                isFocusable = true
+                isFocusableInTouchMode = true
                 webViewClient = WebViewClient()
                 val web = this
+                setOnTouchListener { v, ev ->
+                    if (ev.action == android.view.MotionEvent.ACTION_UP) { v.requestFocus(); showIme(v) }
+                    false
+                }
                 addJavascriptInterface(object {
-                    @JavascriptInterface fun ready(m: String, cols: Int, rows: Int) {
-                        web.post { onReady(web) }
-                        if (m != "shell") return
-                        scope.launch(Dispatchers.Main) {
-                            if (app.sandbox.state.value != Sandbox.State.READY) { web.evaluateJavascript("CueTerm.fail('Sandbox não instalado. Vá em Computador (sandbox) para instalar.')", null); return@launch }
-                            val pid = app.sandbox.createTerminal(cols, rows)
-                            if (pid == null) web.evaluateJavascript("CueTerm.fail('Não foi possível iniciar o servidor de terminal (axs).')", null)
-                            else {
-                                web.evaluateJavascript("CueTerm.attach(${JSONObject.quote(pid)})", null)
-                                if (cwd != null) web.postDelayed({ web.evaluateJavascript("CueTerm.key(${JSONObject.quote("mkdir -p $cwd && cd $cwd && clear\r")})", null) }, 700)
+                    @JavascriptInterface fun ready(cols: Int, rows: Int) {
+                        web.post {
+                            // reenvia todo o histórico do terminal e começa a espelhar
+                            web.evaluateJavascript("CueTerm.reset();CueTerm.write(${JSONObject.quote(session.snapshot())})", null)
+                            webRef = web
+                        }
+                        scope.launch {
+                            if (app.sandbox.state.value != Sandbox.State.READY) {
+                                js("CueTerm.fail('Sandbox não instalado. Abra Computador (sandbox) e toque em Instalar.')"); return@launch
                             }
+                            val fresh = !session.alive.value
+                            if (!session.connect(cols, rows)) { js("CueTerm.fail('Não foi possível iniciar o servidor de terminal (axs).')"); return@launch }
+                            session.resize(cols, rows)
+                            if (fresh) session.send("mkdir -p '$cwd' && cd '$cwd' && clear\r")
                         }
                     }
-                    @JavascriptInterface fun resize(pid: String, cols: Int, rows: Int) { scope.launch { app.sandbox.resizeTerminal(pid, cols, rows) } }
+                    @JavascriptInterface fun input(d: String) { session.send(d) }
+                    @JavascriptInterface fun resize(cols: Int, rows: Int) { session.resize(cols, rows) }
+                    @JavascriptInterface fun showKeyboard() { web.post { web.requestFocus(); showIme(web) } }
                 }, "CueBridge")
-                loadUrl("file:///android_asset/terminal/index.html?mode=$mode&dark=${if (dark) 1 else 0}")
-                webRef = this
+                loadUrl("file:///android_asset/terminal/index.html")
             }
         })
-        if (mode == "shell") ExtraKeys { seq -> webRef?.evaluateJavascript("CueTerm.key(${JSONObject.quote(seq)})", null) }
+        if (sandboxState == Sandbox.State.READY) {
+            ExtraKeys { seq -> session.send(seq) }
+            // Linha de comando nativa: funciona com qualquer teclado (Gboard, Samsung…)
+            Row(Modifier.fillMaxWidth().background(Color(0xFF16181D)).padding(horizontal = 8.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+                Text("$", color = Color(0xFFFF8A63), fontFamily = FontFamily.Monospace, fontSize = 15.sp)
+                Spacer(Modifier.width(8.dp))
+                BasicTextField(line, { line = it }, singleLine = true,
+                    textStyle = androidx.compose.ui.text.TextStyle(color = Color(0xFFE6E6E6), fontFamily = FontFamily.Monospace, fontSize = 14.sp),
+                    cursorBrush = SolidColor(Color(0xFFFF8A63)), modifier = Modifier.weight(1f),
+                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send, autoCorrectEnabled = false,
+                        keyboardType = androidx.compose.ui.text.input.KeyboardType.Ascii),
+                    keyboardActions = KeyboardActions(onSend = { session.send(line + "\r"); line = "" }),
+                    decorationBox = { inner -> Box { if (line.isEmpty()) Text("digite um comando…", color = Color(0xFF6B6F78), fontFamily = FontFamily.Monospace, fontSize = 14.sp); inner() } })
+                Box(Modifier.size(34.dp).clip(CircleShape).background(Color(0xFFFF6B3D)).clickable { session.send(line + "\r"); line = "" },
+                    contentAlignment = Alignment.Center) { Icon(Icons.Rounded.KeyboardReturn, "Enviar", tint = Color.White, modifier = Modifier.size(18.dp)) }
+            }
+        }
     }
+}
+
+private fun showIme(v: android.view.View) {
+    val imm = v.context.getSystemService(android.view.inputmethod.InputMethodManager::class.java)
+    imm?.showSoftInput(v, android.view.inputmethod.InputMethodManager.SHOW_IMPLICIT)
 }
 
 /** Linha de teclas extras (ESC, TAB, CTRL-C, setas…) como no Acode/Termux. */
@@ -320,7 +350,7 @@ fun StandaloneTerminalScreen(nav: NavController) {
             IconButton({ nav.popBackStack() }) { Icon(Icons.AutoMirrored.Rounded.ArrowBack, "Voltar", tint = Color.White) }
             Text("Terminal", color = Color.White, style = MaterialTheme.typography.titleMedium)
         }
-        XtermView("shell", Modifier.fillMaxSize())
+        TerminalView(key = "standalone", cwd = "/root/workspace", modifier = Modifier.fillMaxSize())
     }
 }
 
