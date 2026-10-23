@@ -63,6 +63,12 @@ fun SettingsScreen(nav: NavController) {
             SettingsLink(Icons.Rounded.Computer, "Sandbox Linux", "Instalar, pacotes, reinstalar") { nav.navigate("sandbox") }
             SettingsLink(Icons.Rounded.Terminal, "Abrir terminal", "Shell interativo no Alpine") { nav.navigate("terminal") }
             SettingsLink(Icons.Rounded.FolderOpen, "Arquivos", "/root no sandbox") { nav.navigate("files") }
+            val crash = remember { java.io.File(app.filesDir, "last_crash.txt").takeIf { it.exists() }?.readText() }
+            if (crash != null) {
+                SectionLabel("Último erro")
+                Text(crash.take(3000), Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(Color(0xFF0F1115)).padding(12.dp),
+                    color = Color(0xFFFF8A8A), fontFamily = FontFamily.Monospace, fontSize = 10.sp)
+            }
             SectionLabel("Dados")
             SettingsLink(Icons.Rounded.DeleteSweep, "Apagar todas as tarefas", "Agents, skills e knowledge são mantidos", tint = c.err) { confirmClear = true }
             Spacer(Modifier.height(12.dp))

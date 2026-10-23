@@ -308,7 +308,7 @@ class AgentRunner(
             when (call.name) {
                 "shell" -> {
                     // tudo roda DENTRO do terminal da tarefa (visível ao vivo no Computador)
-                    val r = terminals.get(sessionId).runAgentCommand(s("command"), cwd, (i("timeout") ?: 180).toLong(), b("background"))
+                    val r = terminals.get(sessionId, cwd).runAgentCommand(s("command"), (i("timeout") ?: 180).toLong(), b("background"))
                     run {
                         buildString {
                             append(r.output.takeLast(10_000))

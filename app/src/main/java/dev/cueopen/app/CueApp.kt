@@ -21,11 +21,17 @@ class CueApp : Application() {
     override fun onCreate() {
         super.onCreate()
         instance = this
+        // registra falhas para diagnóstico (Configurações > Último erro)
+        val prev = Thread.getDefaultUncaughtExceptionHandler()
+        Thread.setDefaultUncaughtExceptionHandler { t, e ->
+            runCatching { java.io.File(filesDir, "last_crash.txt").writeText("${java.util.Date()}\n${t.name}\n${e.stackTraceToString()}") }
+            prev?.uncaughtException(t, e)
+        }
         store = Store(this)
         sandbox = Sandbox(this)
         browser = BrowserHost(this)
         llm = OpenRouter { store.settings }
-        terminals = dev.cueopen.app.sandbox.TerminalManager(sandbox)
+        terminals = dev.cueopen.app.sandbox.TerminalManager(this, sandbox)
         agent = AgentRunner(store, sandbox, browser, llm, terminals, this)
         getSystemService(NotificationManager::class.java).createNotificationChannel(
             NotificationChannel(CH_TASKS, "Tarefas", NotificationManager.IMPORTANCE_DEFAULT)

@@ -6,4 +6,4 @@ dependencyResolutionManagement {
     repositories { google(); mavenCentral() }
 }
 rootProject.name = "CueOpen"
-include(":app")
+include(":app", ":terminal-emulator", ":terminal-view")

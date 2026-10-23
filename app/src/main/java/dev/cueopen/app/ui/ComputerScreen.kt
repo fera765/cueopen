@@ -53,7 +53,7 @@ import org.json.JSONObject
 import java.io.File
 
 /** "Computador" do agente em tela cheia: Terminal (agente + shell), Browser e Arquivos. */
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 fun ComputerScreen(nav: NavController, sessionId: String, initialTab: String?) {
     val app = CueApp.instance
@@ -89,7 +89,7 @@ fun ComputerScreen(nav: NavController, sessionId: String, initialTab: String?) {
             }
         }
     }) { pad ->
-        Box(Modifier.fillMaxSize().padding(pad)) {
+        Box(Modifier.fillMaxSize().padding(pad).consumeWindowInsets(pad).imePadding()) {
             when (tab) {
                 "terminal" -> TerminalPane(sessionId)
                 "browser" -> BrowserPane()
@@ -109,110 +109,90 @@ private fun TerminalPane(sessionId: String) {
 }
 
 /**
- * Terminal real (um PTY por tarefa). O mesmo terminal é usado pelo agente e pelo usuário:
- * os comandos do agente aparecem aqui ao vivo e você pode digitar junto.
- * A conexão vive no TerminalManager (Kotlin), então continua com o app em segundo plano.
+ * Terminal nativo do Termux (TerminalView + PTY real). O mesmo terminal é usado pelo agente e
+ * pelo usuário: os comandos do agente aparecem em tempo real e você digita direto nele.
  */
-@SuppressLint("SetJavaScriptEnabled", "ClickableViewAccessibility")
 @Composable
 fun TerminalView(key: String, cwd: String, modifier: Modifier = Modifier) {
     val app = CueApp.instance
-    val scope = rememberCoroutineScope()
-    val session = remember(key) { app.terminals.get(key) }
-    var webRef by remember { mutableStateOf<WebView?>(null) }
-    var line by remember { mutableStateOf("") }
+    val session = remember(key) { app.terminals.get(key, cwd) }
     val sandboxState by app.sandbox.state.collectAsStateWithLifecycle()
+    var ctrl by remember { mutableStateOf(false) }
+    var viewRef by remember { mutableStateOf<com.termux.view.TerminalView?>(null) }
+    val density = androidx.compose.ui.platform.LocalDensity.current
 
-    fun js(code: String) { webRef?.let { w -> w.post { w.evaluateJavascript(code, null) } } }
-
-    DisposableEffect(session, webRef) {
-        val w = webRef
-        if (w == null) onDispose {} else {
-            // batching: junta os chunks por ~30 ms para não afogar a WebView
-            val pending = StringBuilder()
-            val flush = Runnable {
-                val s = synchronized(pending) { pending.toString().also { pending.setLength(0) } }
-                if (s.isNotEmpty()) w.evaluateJavascript("CueTerm.write(${JSONObject.quote(s)})", null)
-            }
-            val l: (String) -> Unit = { chunk ->
-                val first = synchronized(pending) { val e = pending.isEmpty(); pending.append(chunk); e }
-                if (first) w.postDelayed(flush, 30)
-            }
-            session.addListener(l)
-            onDispose { session.removeListener(l) }
+    if (sandboxState != Sandbox.State.READY) {
+        Box(modifier.background(Color(0xFF0F1115)), contentAlignment = Alignment.Center) {
+            Text("Sandbox não instalado.\nAbra Computador (sandbox) e toque em Instalar.", color = Color(0xFF9A9A9A),
+                textAlign = androidx.compose.ui.text.style.TextAlign.Center)
         }
+        return
     }
+    DisposableEffect(session) { onDispose { viewRef?.let { session.detach(it) } } }
 
     Column(modifier.background(Color(0xFF0F1115))) {
-        AndroidView(modifier = Modifier.weight(1f).fillMaxWidth(), factory = { ctx ->
-            WebView(ctx).apply {
-                settings.javaScriptEnabled = true
-                settings.domStorageEnabled = true
-                @Suppress("DEPRECATION") settings.allowUniversalAccessFromFileURLs = true
+        AndroidView(modifier = Modifier.weight(1f).fillMaxWidth().padding(start = 6.dp, top = 4.dp), factory = { ctx ->
+            com.termux.view.TerminalView(ctx, null).apply {
                 setBackgroundColor(android.graphics.Color.parseColor("#0f1115"))
+                setTypeface(android.graphics.Typeface.MONOSPACE)
+                setTextSize(with(density) { 13.sp.toPx() }.toInt())
                 isFocusable = true
                 isFocusableInTouchMode = true
-                webViewClient = WebViewClient()
-                val web = this
-                setOnTouchListener { v, ev ->
-                    if (ev.action == android.view.MotionEvent.ACTION_UP) { v.requestFocus(); showIme(v) }
-                    false
-                }
-                addJavascriptInterface(object {
-                    @JavascriptInterface fun ready(cols: Int, rows: Int) {
-                        web.post {
-                            // reenvia todo o histórico do terminal e começa a espelhar
-                            web.evaluateJavascript("CueTerm.reset();CueTerm.write(${JSONObject.quote(session.snapshot())})", null)
-                            webRef = web
-                        }
-                        scope.launch {
-                            if (app.sandbox.state.value != Sandbox.State.READY) {
-                                js("CueTerm.fail('Sandbox não instalado. Abra Computador (sandbox) e toque em Instalar.')"); return@launch
-                            }
-                            val fresh = !session.alive.value
-                            if (!session.connect(cols, rows)) { js("CueTerm.fail('Não foi possível iniciar o servidor de terminal (axs).')"); return@launch }
-                            session.resize(cols, rows)
-                            if (fresh) session.send("mkdir -p '$cwd' && cd '$cwd' && clear\r")
-                        }
+                keepScreenOn = true
+                val tv = this
+                setTerminalViewClient(object : com.termux.view.TerminalViewClient {
+                    var fontPx = with(density) { 13.sp.toPx() }
+                    override fun onScale(scale: Float): Float {
+                        fontPx = (fontPx * scale).coerceIn(18f, 64f); tv.setTextSize(fontPx.toInt()); return 1f
                     }
-                    @JavascriptInterface fun input(d: String) { session.send(d) }
-                    @JavascriptInterface fun resize(cols: Int, rows: Int) { session.resize(cols, rows) }
-                    @JavascriptInterface fun showKeyboard() { web.post { web.requestFocus(); showIme(web) } }
-                }, "CueBridge")
-                loadUrl("file:///android_asset/terminal/index.html")
+                    override fun onSingleTapUp(e: android.view.MotionEvent?) { tv.requestFocus(); showIme(tv) }
+                    override fun shouldBackButtonBeMappedToEscape() = false
+                    override fun shouldEnforceCharBasedInput() = true
+                    override fun shouldUseCtrlSpaceWorkaround() = false
+                    override fun isTerminalViewSelected() = true
+                    override fun copyModeChanged(copyMode: Boolean) {}
+                    override fun onKeyDown(keyCode: Int, e: android.view.KeyEvent?, session: com.termux.terminal.TerminalSession?) = false
+                    override fun onKeyUp(keyCode: Int, e: android.view.KeyEvent?) = false
+                    override fun onLongPress(event: android.view.MotionEvent?) = false
+                    override fun readControlKey(): Boolean { val c = ctrl; if (c) ctrl = false; return c }
+                    override fun readAltKey() = false
+                    override fun readShiftKey() = false
+                    override fun readFnKey() = false
+                    override fun onCodePoint(codePoint: Int, ctrlDown: Boolean, session: com.termux.terminal.TerminalSession?) = false
+                    override fun onEmulatorSet() {}
+                    override fun logError(tag: String?, message: String?) {}
+                    override fun logWarn(tag: String?, message: String?) {}
+                    override fun logInfo(tag: String?, message: String?) {}
+                    override fun logDebug(tag: String?, message: String?) {}
+                    override fun logVerbose(tag: String?, message: String?) {}
+                    override fun logStackTraceWithMessage(tag: String?, message: String?, e: Exception?) {}
+                    override fun logStackTrace(tag: String?, e: Exception?) {}
+                })
+                session.attach(this)
+                viewRef = this
+                post { requestFocus() }
             }
         })
-        if (sandboxState == Sandbox.State.READY) {
-            ExtraKeys { seq -> session.send(seq) }
-            // Linha de comando nativa: funciona com qualquer teclado (Gboard, Samsung…)
-            Row(Modifier.fillMaxWidth().background(Color(0xFF16181D)).padding(horizontal = 8.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
-                Text("$", color = Color(0xFFFF8A63), fontFamily = FontFamily.Monospace, fontSize = 15.sp)
-                Spacer(Modifier.width(8.dp))
-                BasicTextField(line, { line = it }, singleLine = true,
-                    textStyle = androidx.compose.ui.text.TextStyle(color = Color(0xFFE6E6E6), fontFamily = FontFamily.Monospace, fontSize = 14.sp),
-                    cursorBrush = SolidColor(Color(0xFFFF8A63)), modifier = Modifier.weight(1f),
-                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send, autoCorrectEnabled = false,
-                        keyboardType = androidx.compose.ui.text.input.KeyboardType.Ascii),
-                    keyboardActions = KeyboardActions(onSend = { session.send(line + "\r"); line = "" }),
-                    decorationBox = { inner -> Box { if (line.isEmpty()) Text("digite um comando…", color = Color(0xFF6B6F78), fontFamily = FontFamily.Monospace, fontSize = 14.sp); inner() } })
-                Box(Modifier.size(34.dp).clip(CircleShape).background(Color(0xFFFF6B3D)).clickable { session.send(line + "\r"); line = "" },
-                    contentAlignment = Alignment.Center) { Icon(Icons.Rounded.KeyboardReturn, "Enviar", tint = Color.White, modifier = Modifier.size(18.dp)) }
-            }
-        }
+        ExtraKeys(ctrl = ctrl, onCtrl = { ctrl = !ctrl }) { seq -> session.write(seq); viewRef?.requestFocus() }
     }
 }
 
 private fun showIme(v: android.view.View) {
     val imm = v.context.getSystemService(android.view.inputmethod.InputMethodManager::class.java)
-    imm?.showSoftInput(v, android.view.inputmethod.InputMethodManager.SHOW_IMPLICIT)
+    imm?.showSoftInput(v, 0)
 }
 
-/** Linha de teclas extras (ESC, TAB, CTRL-C, setas…) como no Acode/Termux. */
+/** Linha de teclas extras (como no Termux/Acode), fica logo acima do teclado. */
 @Composable
-private fun ExtraKeys(send: (String) -> Unit) {
-    val keys = listOf("ESC" to "\u001b", "TAB" to "\t", "^C" to "\u0003", "^D" to "\u0004", "^L" to "\u000c", "^Z" to "\u001a",
-        "↑" to "\u001b[A", "↓" to "\u001b[B", "←" to "\u001b[D", "→" to "\u001b[C", "|" to "|", "/" to "/", "-" to "-", "~" to "~")
+private fun ExtraKeys(ctrl: Boolean, onCtrl: () -> Unit, send: (String) -> Unit) {
+    val keys = listOf("ESC" to "\u001b", "TAB" to "\t", "^C" to "\u0003", "^D" to "\u0004", "^L" to "\u000c",
+        "↑" to "\u001b[A", "↓" to "\u001b[B", "←" to "\u001b[D", "→" to "\u001b[C", "HOME" to "\u001b[H", "END" to "\u001b[F",
+        "|" to "|", "/" to "/", "-" to "-", "~" to "~")
     Row(Modifier.fillMaxWidth().background(Color(0xFF16181D)).horizontalScroll(rememberScrollState()).padding(4.dp)) {
+        Box(Modifier.padding(2.dp).clip(RoundedCornerShape(8.dp)).background(if (ctrl) Color(0xFFFF6B3D) else Color(0xFF23262D))
+            .clickable(onClick = onCtrl).padding(horizontal = 12.dp, vertical = 8.dp)) {
+            Text("CTRL", color = Color(0xFFE6E6E6), fontFamily = FontFamily.Monospace, fontSize = 13.sp)
+        }
         keys.forEach { (l, s) ->
             Box(Modifier.padding(2.dp).clip(RoundedCornerShape(8.dp)).background(Color(0xFF23262D)).clickable { send(s) }.padding(horizontal = 12.dp, vertical = 8.dp)) {
                 Text(l, color = Color(0xFFE6E6E6), fontFamily = FontFamily.Monospace, fontSize = 13.sp)
@@ -226,7 +206,7 @@ fun BrowserPane() {
     val app = CueApp.instance
     val ui by app.browser.ui.collectAsStateWithLifecycle()
     val c = Cue.c
-    var url by remember(ui.url) { mutableStateOf(ui.url) }
+    var url by remember(ui.url) { mutableStateOf(if (ui.url.startsWith("file:///android_asset")) "" else ui.url) }
     val scope = rememberCoroutineScope()
     Column(Modifier.fillMaxSize()) {
         Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -240,6 +220,7 @@ fun BrowserPane() {
                     keyboardOptions = KeyboardOptions(imeAction = ImeAction.Go),
                     keyboardActions = KeyboardActions(onGo = { scope.launch { app.browser.navigate(url) } }))
             }
+            IconButton({ app.browser.home() }) { Icon(Icons.Rounded.Home, "Início") }
             IconButton({ scope.launch { app.browser.reload() } }) { Icon(if (ui.loading) Icons.Rounded.Close else Icons.Rounded.Refresh, "Recarregar") }
         }
         if (ui.loading) LinearProgressIndicator(progress = { ui.progress / 100f }, Modifier.fillMaxWidth().height(2.dp), color = c.accent)

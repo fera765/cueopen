@@ -84,6 +84,11 @@ class Sandbox(private val ctx: Context) {
         "PATH" to "/system/bin:/system/xbin",
     )
 
+    fun prepareScripts() = writeScripts()
+
+    fun envArray(): Array<String> = (env() + mapOf("TERM" to "xterm-256color", "LANG" to "C.UTF-8", "COLORTERM" to "truecolor"))
+        .map { (k, v) -> "$k=$v" }.toTypedArray()
+
     private fun writeScripts() {
         listOf("init-sandbox.sh", "init-alpine.sh").forEach { name ->
             ctx.assets.open("sandbox/$name").use { i -> File(prefix, name).outputStream().use { i.copyTo(it) } }

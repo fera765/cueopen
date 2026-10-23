@@ -67,7 +67,7 @@ class BrowserHost(private val appCtx: Context) {
             override fun onReceivedTitle(view: WebView, title: String?) { sync(view) }
         }
         _view = v
-        v.loadUrl("https://duckduckgo.com/")
+        v.loadUrl(HOME)
         return v
     }
 
@@ -75,6 +75,10 @@ class BrowserHost(private val appCtx: Context) {
         _ui.value = _ui.value.copy(url = v.url ?: "", title = v.title ?: "", loading = loading,
             canBack = v.canGoBack(), canForward = v.canGoForward())
     }
+
+    fun home() { _view?.loadUrl(HOME) }
+
+    companion object { const val HOME = "file:///android_asset/start/index.html" }
 
     fun setAgentControl(on: Boolean) { _ui.value = _ui.value.copy(agentControl = on) }
 
@@ -84,7 +88,7 @@ class BrowserHost(private val appCtx: Context) {
         val target = when {
             url.startsWith("http") || url.startsWith("file:") || url.startsWith("about:") -> url
             url.contains(".") && !url.contains(" ") -> "https://$url"
-            else -> "https://duckduckgo.com/html/?q=" + java.net.URLEncoder.encode(url, "UTF-8")
+            else -> "https://www.google.com/search?q=" + java.net.URLEncoder.encode(url, "UTF-8")
         }
         pageDone = CompletableDeferred()
         view().loadUrl(target)
