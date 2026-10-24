@@ -59,6 +59,7 @@ fun ChatScreen(nav: NavController, sessionId: String) {
     val agent = st.agents.firstOrNull { it.id == session.agentId }
     val activity by app.agent.activity.collectAsStateWithLifecycle()
     val act = activity[sessionId] ?: Activity()
+    val autoAgent = st.agents.firstOrNull { it.id == session.agentId && it.autonomous && it.homeSessionId == sessionId }
     val running = session.status == SessionStatus.RUNNING
     val list = rememberLazyListState()
     var draft by remember { mutableStateOf("") }
@@ -121,6 +122,9 @@ fun ChatScreen(nav: NavController, sessionId: String) {
                     }, leadingIcon = { Icon(Icons.Rounded.Schedule, null) })
                     DropdownMenuItem({ Text("Uso e contexto") }, { menu = false; usage = true }, leadingIcon = { Icon(Icons.Rounded.DataUsage, null) })
                     DropdownMenuItem({ Text("Renomear") }, { menu = false; rename = true }, leadingIcon = { Icon(Icons.Rounded.Edit, null) })
+                    if (autoAgent != null) DropdownMenuItem({ Text("Pausar agente") }, {
+                        menu = false; app.agent.pauseAgent(autoAgent.id)
+                    }, leadingIcon = { Icon(Icons.Rounded.PauseCircle, null) })
                     DropdownMenuItem({ Text("Excluir", color = c.err) }, {
                         menu = false; app.agent.stop(sessionId); app.store.deleteSession(sessionId); nav.popBackStack()
                     }, leadingIcon = { Icon(Icons.Rounded.Delete, null, tint = c.err) })
@@ -156,7 +160,7 @@ fun ChatScreen(nav: NavController, sessionId: String) {
             Composer(
                 value = draft, onChange = { draft = it },
                 placeholder = if (session.status == SessionStatus.WAITING_USER) "Responda ao agente…" else "Envie uma mensagem",
-                running = running || session.status == SessionStatus.SLEEPING, onStop = { app.agent.stop(sessionId) },
+                running = running || session.status == SessionStatus.SLEEPING || autoAgent != null, onStop = { app.agent.stop(sessionId) },
                 onSend = { text, files ->
                     if (text.trim().startsWith("@create-agent", true)) {
                         val desc = text.trim().removePrefix("@create-agent").removePrefix("@Create-Agent").trim()

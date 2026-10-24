@@ -253,7 +253,8 @@ fun Composer(
                 runCatching { voice.launch(Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)) }
             }
             Spacer(Modifier.weight(1f))
-            if (running) {
+            // Com o agente ativo e sem texto digitado → botão PARAR. Ao digitar → botão ENVIAR.
+            if (running && value.isBlank()) {
                 Box(Modifier.size(40.dp).clip(CircleShape).background(c.ink).clickable(onClick = onStop), contentAlignment = Alignment.Center) {
                     Box(Modifier.size(12.dp).clip(RoundedCornerShape(2.dp)).background(c.bg))
                 }

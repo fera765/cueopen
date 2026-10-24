@@ -241,19 +241,23 @@ class AgentRunner(
     private fun autonomyTick() {
         val now = System.currentTimeMillis()
         val hour = java.util.Calendar.getInstance().get(java.util.Calendar.HOUR_OF_DAY)
-        store.state.value.agents.filter { it.autonomous }.forEach { a ->
+        store.state.value.agents.filter { it.autonomous && it.homeSessionId != null }.forEach { a ->
             val inHours = if (a.activeStartHour <= a.activeEndHour) hour in a.activeStartHour until a.activeEndHour
                           else hour >= a.activeStartHour || hour < a.activeEndHour
             val spent = if (a.tokensDay == today()) a.tokensToday else 0
             val due = now >= (a.lastBeatAt ?: 0) + a.heartbeatMinutes * 60_000L
-            val home = a.homeSessionId
-            if (inHours && due && spent < a.dailyTokenBudget && (home == null || jobs[home]?.isActive != true)) heartbeat(a)
+            val home = a.homeSessionId!!
+            if (inHours && due && spent < a.dailyTokenBudget && jobs[home]?.isActive != true) heartbeat(a)
         }
     }
 
-    /** Dispara um heartbeat agora (também usado pelo botão "Rodar agora"). */
+    /**
+     * Dispara um ciclo autônomo. Só roda se o agente JÁ tem uma sessão (homeSessionId) iniciada pelo
+     * usuário via set_schedule numa conversa — nunca cria sessão sozinho (evita auto-início ao criar).
+     */
     fun heartbeat(agent: AgentProfile): Job {
         var a = agent
+        if (a.homeSessionId == null) return scope.launch { }
         val home = a.homeSessionId?.let { store.session(it) } ?: Session(title = "🤖 ${a.name} · autônomo", agentId = a.id).also {
             store.upsertSession(it); a = a.copy(homeSessionId = it.id); store.upsertAgent(a)
         }
@@ -277,21 +281,26 @@ class AgentRunner(
             } finally {
                 val after = store.session(sid)
                 if (after != null) {
-                    val last = (after.items.lastOrNull { it is ChatItem.Assistant } as? ChatItem.Assistant)?.text?.trim().orEmpty()
-                    val quiet = last.equals("NO_REPLY", true) || (last.endsWith("NO_REPLY") && after.items.size - itemsMark <= 2)
+                    val lastItem = after.items.lastOrNull { it is ChatItem.Assistant } as? ChatItem.Assistant
+                    val rawLast = lastItem?.text?.trim().orEmpty()
+                    // remove qualquer NO_REPLY do texto exibido (nunca mostrar cru)
+                    val cleaned = rawLast.replace(Regex("(?i)\\bNO_REPLY\\b"), "").trim()
+                    val quiet = rawLast.contains("NO_REPLY", true) && cleaned.length < 12
                     val used = (after.tokensIn + after.tokensOut) - tokMark
                     if (quiet) {
-                        // nada a fazer: NÃO gasta contexto (recupera o llm), mas deixa um marcador VISÍVEL
-                        // na linha do tempo para o usuário ver que o ciclo rodou.
+                        // ciclo sem novidade: não gasta contexto; colapsa marcadores repetidos num só.
                         store.editSession(sid) {
+                            var items = it.items.take(itemsMark)
+                            if ((items.lastOrNull() as? ChatItem.Step)?.tool == "cycle") items = items.dropLast(1)
                             it.copy(llm = it.llm.take(llmMark),
-                                items = it.items.take(itemsMark) + ChatItem.Step(tool = "sleep", title = "Ciclo $stamp — nada novo", args = "", result = "", status = StepStatus.OK),
+                                items = items + ChatItem.Step(tool = "cycle", title = "Ciclo $stamp — nada novo", args = "", result = "", status = StepStatus.OK),
                                 status = SessionStatus.IDLE)
                         }
                     } else {
-                        // trabalhou: mantém tudo visível; o auto-compact cuida do contexto no próximo loop
+                        // trabalhou: limpa o NO_REPLY do texto exibido e mantém o resto visível
+                        if (lastItem != null && cleaned != rawLast) store.replaceItem(sid, lastItem.copy(text = cleaned.ifBlank { rawLast }))
                         store.editSession(sid) { it.copy(status = SessionStatus.IDLE) }
-                        if (a.notifyOnAction) notifyAgent(a, last.take(200))
+                        if (a.notifyOnAction) notifyAgent(a, plainText(cleaned).take(220))
                     }
                     store.agent(a.id)?.let { cur ->
                         val day = today()
@@ -308,11 +317,18 @@ class AgentRunner(
         return job
     }
 
+    /** Remove marcações Markdown para mostrar em notificação (texto puro). */
+    private fun plainText(md: String): String = md
+        .replace(Regex("```[\\s\\S]*?```"), " ")
+        .replace(Regex("[*_`#>]"), "")
+        .replace(Regex("\\[(.*?)\\]\\(.*?\\)"), "$1")
+        .replace(Regex("\\s+"), " ").trim()
+
     private fun notifyRaw(title: String, text: String) = runCatching {
         val nm = ctx.getSystemService(android.app.NotificationManager::class.java)
         nm.notify((System.nanoTime() and 0xffffff).toInt(), android.app.Notification.Builder(ctx, dev.cueopen.app.CueApp.CH_TASKS)
             .setSmallIcon(android.R.drawable.ic_dialog_info).setContentTitle(title).setContentText(text)
-            .setStyle(android.app.Notification.BigTextStyle().bigText(text)).setAutoCancel(true).build())
+            .setStyle(android.app.Notification.BigTextStyle().bigText(plainText(text))).setContentText(plainText(text).take(120)).setAutoCancel(true).build())
     }
 
     private fun notifyAgent(a: AgentProfile, text: String) = runCatching {
@@ -322,7 +338,7 @@ class AgentRunner(
             android.app.PendingIntent.FLAG_IMMUTABLE or android.app.PendingIntent.FLAG_UPDATE_CURRENT)
         nm.notify(a.id.hashCode(), android.app.Notification.Builder(ctx, dev.cueopen.app.CueApp.CH_TASKS)
             .setSmallIcon(android.R.drawable.ic_dialog_info).setContentTitle(a.name).setContentText(text.ifBlank { "Concluiu uma ação" })
-            .setStyle(android.app.Notification.BigTextStyle().bigText(text)).setContentIntent(pi).setAutoCancel(true).build())
+            .setStyle(android.app.Notification.BigTextStyle().bigText(plainText(text))).setContentText(plainText(text).take(120)).setContentIntent(pi).setAutoCancel(true).build())
     }
 
     // ===================== COMANDOS DO COMPOSER =====================
@@ -333,6 +349,15 @@ class AgentRunner(
         val after = ctxMgr.compactIfNeeded(s, force = true)
         val now = ctxMgr.estimateTokens(after.llm) + ctxMgr.estimateTokens(after.summary)
         return "Contexto compactado: ~$before → ~$now tokens."
+    }
+
+    /** Pausa a autonomia de um agente: cancela alarme/ciclos. Só volta quando o usuário reativar. */
+    fun pauseAgent(agentId: String) {
+        store.agent(agentId)?.let {
+            store.upsertAgent(it.copy(autonomous = false))
+            dev.cueopen.app.scheduler.Heartbeat.cancel(ctx, agentId)
+            it.homeSessionId?.let { sid -> jobs.remove(sid)?.cancel(); store.editSession(sid) { s -> s.copy(status = SessionStatus.STOPPED) } }
+        }
     }
 
     fun connectorTools(): List<JsonObject> = dev.cueopen.app.connectors.Connectors.toolDefinitions(store)
@@ -370,7 +395,7 @@ class AgentRunner(
             name = name, face = str("face", "wink").ifBlank { "wink" },
             color = colors.getOrElse(intf("color", 0).coerceIn(0, 7)) { 0xFFFF6B3DL },
             instructions = str("instructions", desc), mission = str("mission"),
-            autonomous = bool("autonomous", false), heartbeatMinutes = if (hb in 1..1440) hb else 30,
+            autonomous = false, heartbeatMinutes = if (hb in 1..1440) hb else 30,  // criar NUNCA inicia sozinho; liga via conversa
             useTerminal = bool("useTerminal", true), useBrowser = bool("useBrowser", true),
             skillIds = skillIds,
         )
@@ -466,7 +491,7 @@ class AgentRunner(
                 appendLine("Você é acordado a cada ${agent.heartbeatMinutes} min (heartbeat). Em cada heartbeat:")
                 appendLine("1) leia suas anotações (NOTES.md acima) para saber o estado; 2) faça só o que for necessário AGORA;")
                 appendLine("3) registre progresso/estado com notes_write (curto); 4) fatos duradouros com memory_save;")
-                appendLine("5) se nada mudou ou nada precisa ser feito, responda exatamente NO_REPLY (sem ferramentas) — isso economiza tokens.")
+                appendLine("5) sempre entregue uma atualização ÚTIL e NOVA, somando ao que já existe nas notas — nunca repita o que já foi dito. Só responda NO_REPLY (sozinho) se, de fato, não houver absolutamente nada novo e notificar de novo seria spam.")
                 appendLine("6) SEMPRE avance a partir do que já existe (leia o workspace/NOTES) e melhore a entrega; NÃO refaça o que já está pronto.")
                 appendLine("7) RESILIÊNCIA: se uma ferramenta falhar, leia o erro, ajuste a abordagem e tente outro caminho; nunca pare por causa de um erro — contorne e continue.")
                 appendLine("Seja econômico: evite repetir pesquisas já anotadas. Nunca chame sleep nem finish no modo autônomo; apenas responda ao terminar.")
@@ -731,7 +756,7 @@ class AgentRunner(
                 "device_notifications" -> dev.cueopen.app.device.NotifStore.recent(s("filter"), (i("limit") ?: 30).coerceIn(1, 100))
                     .joinToString("\n") { "[${java.text.SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(it.time))}] ${it.app}: ${it.title} — ${it.text}".take(300) }
                     .ifBlank { "Nenhuma notificação capturada ainda." }
-                "device_notify" -> { notifyRaw(s("title").ifBlank { "CueOpen" }, s("text")); "Notificação enviada." }
+                "device_notify" -> { notifyRaw(s("title").ifBlank { "CueOpen" }, plainText(s("text"))); "Notificação enviada." }
                 "device_overlay" -> { dev.cueopen.app.device.Overlay.show(ctx, s("text")); "Balão exibido." }
                 "device_screenshot" -> {
                     val f = java.io.File(sandbox.workspaceFor(sessionId), "screenshot_${System.currentTimeMillis()}.png")
