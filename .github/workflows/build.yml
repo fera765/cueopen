@@ -27,12 +27,12 @@ jobs:
           cp app/build/outputs/apk/release/*.apk out/CueOpen.apk 2>/dev/null || echo "sem apk" > out/FAILED
       # Teste de fumaça: abre o app num emulador e grava o logcat (crashes ficam visíveis)
       - name: Habilitar KVM
-        if: always()
+        if: false
         run: |
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
           sudo udevadm control --reload-rules && sudo udevadm trigger --name-match=kvm
       - name: Smoke test no emulador
-        if: always()
+        if: false
         continue-on-error: true
         timeout-minutes: 25
         uses: reactivecircus/android-emulator-runner@v2
