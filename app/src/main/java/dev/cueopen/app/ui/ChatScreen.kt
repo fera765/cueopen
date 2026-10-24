@@ -25,6 +25,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.AnnotatedString
@@ -63,10 +64,30 @@ fun ChatScreen(nav: NavController, sessionId: String) {
     var menu by remember { mutableStateOf(false) }
     var rename by remember { mutableStateOf(false) }
     var usage by remember { mutableStateOf(false) }
+    var mediaOpen by remember { mutableStateOf<String?>(null) }
     val ctx = LocalContext.current
     val c = Cue.c
 
-    LaunchedEffect(session.items.size) { if (session.items.isNotEmpty()) list.animateScrollToItem(session.items.size) }
+    // Auto-scroll: segue o stream enquanto o usuário está no fim; se ele rolar para cima, assume o controle.
+    var follow by remember { mutableStateOf(true) }
+    val atBottom by remember {
+        derivedStateOf {
+            val info = list.layoutInfo
+            val last = info.visibleItemsInfo.lastOrNull() ?: return@derivedStateOf true
+            last.index >= info.totalItemsCount - 1 && last.offset + last.size <= info.viewportEndOffset + 24
+        }
+    }
+    LaunchedEffect(list.isScrollInProgress, atBottom) {
+        if (list.isScrollInProgress) follow = atBottom   // gesto do usuário decide
+        else if (atBottom) follow = true
+    }
+    val streamKey = session.items.size to (session.items.lastOrNull()?.let { it.hashCode() } ?: 0)
+    LaunchedEffect(streamKey, running, follow) {
+        if (follow) {
+            val total = list.layoutInfo.totalItemsCount
+            if (total > 0) list.scrollToItem(total - 1, Int.MAX_VALUE / 2)
+        }
+    }
 
     Scaffold(containerColor = c.bg, topBar = {
         TopAppBar(
@@ -106,8 +127,11 @@ fun ChatScreen(nav: NavController, sessionId: String) {
         )
     }) { pad ->
         Column(Modifier.fillMaxSize().padding(pad).imePadding()) {
-            LazyColumn(Modifier.weight(1f).fillMaxWidth(), state = list, contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                items(session.items, key = { it.id }) { item -> TimelineItem(item, onOpenComputer = { tab -> nav.navigate("computer/$sessionId?tab=$tab") }) }
+          Box(Modifier.weight(1f).fillMaxWidth()) {
+            LazyColumn(Modifier.fillMaxSize(), state = list, contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                items(session.items.filter { it !is ChatItem.Plan }, key = { it.id }) { item ->
+                    TimelineItem(item, onOpenComputer = { tab -> nav.navigate("computer/$sessionId?tab=$tab") }, onOpenMedia = { mediaOpen = it })
+                }
                 if (running) item { ThinkingRow(act) }
                 if (session.status == SessionStatus.SLEEPING) item {
                     val t = session.wakeAt?.let { java.text.SimpleDateFormat("HH:mm", java.util.Locale.getDefault()).format(java.util.Date(it)) } ?: "—"
@@ -116,9 +140,17 @@ fun ChatScreen(nav: NavController, sessionId: String) {
                 if (session.status == SessionStatus.STOPPED) item { InfoRow(Icons.Rounded.StopCircle, "Tarefa interrompida. Envie uma mensagem para continuar.") }
                 if (session.status == SessionStatus.DONE) item { DoneRow(onCopy = { copyText(ctx, lastAnswer(session)) }, onShare = { shareSession(ctx, session) }) }
             }
-            AnimatedVisibility(running || act.kind != Activity.Kind.IDLE) {
-                LiveComputerCard(act, agent?.name ?: "CueOpen") { nav.navigate("computer/$sessionId") }
+            if (!follow) {
+                SmallFloatingActionButton({ follow = true }, Modifier.align(Alignment.BottomEnd).padding(16.dp), containerColor = c.ink, contentColor = c.bg) {
+                    Icon(Icons.Rounded.KeyboardArrowDown, "Ir para o fim")
+                }
             }
+          }
+            val plan = session.items.lastOrNull { it is ChatItem.Plan } as? ChatItem.Plan
+            AnimatedVisibility(running || act.kind != Activity.Kind.IDLE || (plan != null && plan.phases.any { !it.done })) {
+                LiveComputerCard(act, agent?.name ?: "CueOpen", plan, active = running) { nav.navigate("computer/$sessionId") }
+            }
+            mediaOpen?.let { p -> MediaDialog(java.io.File(p)) { mediaOpen = null } }
             Composer(
                 value = draft, onChange = { draft = it },
                 placeholder = if (session.status == SessionStatus.WAITING_USER) "Responda ao agente…" else "Envie uma mensagem",
@@ -155,12 +187,13 @@ fun ChatScreen(nav: NavController, sessionId: String) {
 }
 
 @Composable
-fun TimelineItem(item: ChatItem, onOpenComputer: (String) -> Unit) {
+fun TimelineItem(item: ChatItem, onOpenComputer: (String) -> Unit, onOpenMedia: (String) -> Unit = {}) {
     when (item) {
         is ChatItem.User -> UserBubble(item)
         is ChatItem.Assistant -> AssistantText(item)
         is ChatItem.Step -> StepRow(item, onOpenComputer)
-        is ChatItem.Plan -> PlanCard(item)
+        is ChatItem.Plan -> {}  // o plano fica no card do computador, acima do composer
+        is ChatItem.Media -> MediaCard(item, onOpenMedia)
         is ChatItem.Error -> InfoRow(Icons.Rounded.ErrorOutline, item.text, Cue.c.err)
     }
 }
@@ -353,26 +386,106 @@ fun copyText(ctx: android.content.Context, text: String) {
     android.widget.Toast.makeText(ctx, "Copiado", android.widget.Toast.LENGTH_SHORT).show()
 }
 
-/** Card "Computador do agente" que fica acima do composer enquanto a tarefa roda (como no Cue). */
+/**
+ * Card "Computador do agente" acima do composer (como no Cue). Mostra também as tarefas do plano,
+ * sempre atualizadas (o agente marca cada fase com complete_step).
+ */
 @Composable
-private fun LiveComputerCard(a: Activity, name: String, onClick: () -> Unit) {
+private fun LiveComputerCard(a: Activity, name: String, plan: ChatItem.Plan?, active: Boolean, onClick: () -> Unit) {
     val c = Cue.c
+    var expanded by remember { mutableStateOf(false) }
     val label = when (a.kind) {
         Activity.Kind.TERMINAL -> "Usando Terminal"; Activity.Kind.BROWSER -> "Usando Browser"
-        Activity.Kind.EDITOR -> "Usando Editor"; Activity.Kind.SEARCH -> "Pesquisando"; else -> "Pensando"
+        Activity.Kind.EDITOR -> "Usando Editor"; Activity.Kind.SEARCH -> "Pesquisando"
+        Activity.Kind.IDLE -> if (active) "Pensando" else "Pausado"; else -> "Pensando"
     }
     val icon = when (a.kind) { Activity.Kind.TERMINAL -> Icons.Rounded.Terminal; Activity.Kind.BROWSER -> Icons.Rounded.Language; Activity.Kind.EDITOR -> Icons.Rounded.EditNote; else -> Icons.Rounded.Computer }
-    Row(Modifier.padding(horizontal = 12.dp).fillMaxWidth().clip(RoundedCornerShape(18.dp)).background(c.surface).border(1.dp, c.line, RoundedCornerShape(18.dp))
-        .clickable(onClick = onClick).padding(10.dp), verticalAlignment = Alignment.CenterVertically) {
-        Box(Modifier.size(width = 64.dp, height = 44.dp).clip(RoundedCornerShape(10.dp)).background(Color(0xFF0F1115)), contentAlignment = Alignment.Center) {
-            Icon(icon, null, tint = Color(0xFFFF8A63), modifier = Modifier.size(22.dp))
+    Column(Modifier.padding(horizontal = 12.dp).fillMaxWidth().clip(RoundedCornerShape(18.dp)).background(c.surface).border(1.dp, c.line, RoundedCornerShape(18.dp))) {
+        Row(Modifier.fillMaxWidth().clickable(onClick = onClick).padding(10.dp), verticalAlignment = Alignment.CenterVertically) {
+            Box(Modifier.size(width = 56.dp, height = 40.dp).clip(RoundedCornerShape(10.dp)).background(Color(0xFF0F1115)), contentAlignment = Alignment.Center) {
+                Icon(icon, null, tint = Color(0xFFFF8A63), modifier = Modifier.size(20.dp))
+            }
+            Spacer(Modifier.width(12.dp))
+            Column(Modifier.weight(1f)) {
+                Text("Computador de $name", fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
+                Text("$label${if (a.detail.isNotBlank()) " · " + a.detail else ""}", fontSize = 12.sp, color = c.ink3, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }
+            Icon(Icons.Rounded.OpenInFull, null, tint = c.ink3, modifier = Modifier.size(18.dp))
         }
-        Spacer(Modifier.width(12.dp))
-        Column(Modifier.weight(1f)) {
-            Text("Computador de $name", fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
-            Text("$label${if (a.detail.isNotBlank()) " · " + a.detail else ""}", fontSize = 12.sp, color = c.ink3, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        if (plan != null && plan.phases.isNotEmpty()) {
+            val done = plan.phases.count { it.done }
+            val current = plan.phases.indexOfFirst { !it.done }
+            HorizontalDivider(color = c.line)
+            Row(Modifier.fillMaxWidth().clickable { expanded = !expanded }.padding(horizontal = 12.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Rounded.Checklist, null, Modifier.size(18.dp), tint = c.accent); Spacer(Modifier.width(8.dp))
+                Text(if (current >= 0) plan.phases[current].title else "Tudo concluído", Modifier.weight(1f), fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text("$done/${plan.phases.size}", fontSize = 12.sp, color = c.ink3)
+                Icon(if (expanded) Icons.Rounded.ExpandMore else Icons.Rounded.ExpandLess, null, tint = c.ink3)
+            }
+            LinearProgressIndicator(progress = { done / plan.phases.size.toFloat() }, Modifier.fillMaxWidth().height(3.dp), color = c.accent, trackColor = c.surface2)
+            AnimatedVisibility(expanded) {
+                Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    plan.phases.forEachIndexed { i, ph ->
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(when { ph.done -> Icons.Rounded.CheckCircle; i == current -> Icons.Rounded.RadioButtonChecked; else -> Icons.Rounded.RadioButtonUnchecked },
+                                null, Modifier.size(16.dp), tint = when { ph.done -> c.ok; i == current -> c.accent; else -> c.ink3 })
+                            Spacer(Modifier.width(8.dp))
+                            Text(ph.title, fontSize = 13.sp, color = if (ph.done) c.ink3 else c.ink)
+                        }
+                    }
+                }
+            }
         }
-        Icon(Icons.Rounded.OpenInFull, null, tint = c.ink3, modifier = Modifier.size(18.dp))
+    }
+}
+
+/** "Pílula" de mídia no chat: miniatura de imagem/SVG ou cartão do arquivo; toque abre o visualizador. */
+@Composable
+private fun MediaCard(m: ChatItem.Media, onOpen: (String) -> Unit) {
+    val c = Cue.c
+    val f = remember(m.path) { java.io.File(m.path) }
+    val ext = f.extension.lowercase()
+    val thumb by produceState<android.graphics.Bitmap?>(null, m.path) { value = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) { loadThumb(f, 900) } }
+    Column(Modifier.widthIn(max = 340.dp).clip(RoundedCornerShape(18.dp)).border(1.dp, c.line, RoundedCornerShape(18.dp)).background(c.surface).clickable { onOpen(m.path) }) {
+        val t = thumb
+        if (t != null) androidx.compose.foundation.Image(t.asImageBitmap(), m.caption, Modifier.fillMaxWidth().heightIn(max = 260.dp).background(if (ext == "svg") Color.White else c.surface2),
+            contentScale = androidx.compose.ui.layout.ContentScale.Fit)
+        Row(Modifier.padding(horizontal = 12.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+            Icon(fileIcon(f), null, Modifier.size(18.dp), tint = c.accent); Spacer(Modifier.width(8.dp))
+            Column(Modifier.weight(1f)) {
+                Text(m.caption.ifBlank { f.name }, fontSize = 14.sp, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text("${f.name} · ${if (f.exists()) humanSize(f.length()) else "removido"}", fontSize = 11.sp, color = c.ink3, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }
+            Icon(Icons.Rounded.OpenInFull, null, Modifier.size(16.dp), tint = c.ink3)
+        }
+    }
+}
+
+fun loadThumb(f: java.io.File, max: Int): android.graphics.Bitmap? = runCatching {
+    when (f.extension.lowercase()) {
+        "png", "jpg", "jpeg", "webp", "gif", "bmp" -> {
+            val o = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            android.graphics.BitmapFactory.decodeFile(f.absolutePath, o)
+            var s = 1; while (o.outWidth / s > max || o.outHeight / s > max) s *= 2
+            android.graphics.BitmapFactory.decodeFile(f.absolutePath, android.graphics.BitmapFactory.Options().apply { inSampleSize = s })
+        }
+        "svg" -> {
+            val svg = com.caverock.androidsvg.SVG.getFromString(f.readText())
+            val w = svg.documentWidth.takeIf { it > 0 } ?: 512f; val h = svg.documentHeight.takeIf { it > 0 } ?: 512f
+            val k = max / maxOf(w, h)
+            svg.setDocumentWidth("100%"); svg.setDocumentHeight("100%")
+            android.graphics.Bitmap.createBitmap((w * k).toInt().coerceAtLeast(1), (h * k).toInt().coerceAtLeast(1), android.graphics.Bitmap.Config.ARGB_8888).also {
+                svg.renderToCanvas(android.graphics.Canvas(it), android.graphics.RectF(0f, 0f, it.width.toFloat(), it.height.toFloat()))
+            }
+        }
+        else -> null
+    }
+}.getOrNull()
+
+@Composable
+private fun MediaDialog(f: java.io.File, onClose: () -> Unit) {
+    androidx.compose.ui.window.Dialog(onDismissRequest = onClose, properties = androidx.compose.ui.window.DialogProperties(usePlatformDefaultWidth = false)) {
+        Box(Modifier.fillMaxSize().background(Cue.c.bg)) { FileViewer(f, onClose = onClose, onEdit = onClose) }
     }
 }
 
@@ -385,6 +498,7 @@ fun sessionMarkdown(s: Session): String = buildString {
             is ChatItem.Step -> appendLine("> ${i.title}: `${i.args}`")
             is ChatItem.Plan -> { appendLine("**Plano:** ${i.goal}"); i.phases.forEach { appendLine("- [${if (it.done) "x" else " "}] ${it.title}") }; appendLine() }
             is ChatItem.Error -> appendLine("⚠️ ${i.text}\n")
+            is ChatItem.Media -> appendLine("🖼 ${i.caption} (${java.io.File(i.path).name})\n")
         }
     }
     appendLine("\n— gerado com CueOpen")

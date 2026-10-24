@@ -115,7 +115,7 @@ class TerminalManager(private val ctx: Context, private val sandbox: Sandbox) {
                 val id = System.nanoTime().toString(36)
                 val dir = File(sandbox.publicDir, ".cue").apply { mkdirs() }
                 val cmd = command.trim()
-                val simple = !cmd.contains('\n') && cmd.length <= 400
+                val simple = !cmd.contains('\n') && cmd.length <= 300 && !cmd.contains("<<") && cmd.count { it == '"' } % 2 == 0 && cmd.count { it == '\'' } % 2 == 0
                 val typed = when {
                     background && simple -> "( $cmd ) > /root/.cue/bg_$id.log 2>&1 &"
                     background -> { File(dir, "run_$id.sh").writeText(cmd + "\n"); "nohup bash /root/.cue/run_$id.sh > /root/.cue/bg_$id.log 2>&1 &" }
@@ -161,6 +161,7 @@ class TerminalManager(private val ctx: Context, private val sandbox: Sandbox) {
         val cue = File(sandbox.publicDir, ".cue").apply { mkdirs() }
         File(cue, "hook.sh").writeText(
             "# CueOpen: avisa o app (sequência OSC invisível) sempre que o prompt volta\n" +
+            "set +H 2>/dev/null  # sem expansão de histórico: '!' em HTML/JS não quebra comandos\n" +
             "__cue_pc() { local e=\$?; printf '\\033]777;cue;done;%s\\007' \"\$e\"; return \$e; }\n" +
             "case \"\$PROMPT_COMMAND\" in *__cue_pc*) ;; *) PROMPT_COMMAND=\"__cue_pc\${PROMPT_COMMAND:+;\$PROMPT_COMMAND}\" ;; esac\n")
         val rc = File(sandbox.publicDir, ".bashrc")

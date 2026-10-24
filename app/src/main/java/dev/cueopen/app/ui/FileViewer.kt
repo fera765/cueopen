@@ -71,7 +71,7 @@ fun FileViewer(f: File, onClose: () -> Unit, onEdit: () -> Unit) {
                 Text(f.name, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 Text("${humanSize(f.length())} · $ext", fontSize = 11.sp, color = c.ink3)
             }
-            if (ext == "md") IconButton({ rendered = !rendered }) { Icon(if (rendered) Icons.Rounded.Code else Icons.Rounded.Article, "Alternar") }
+            if (ext == "md" || ext == "html" || ext == "htm") IconButton({ rendered = !rendered }) { Icon(if (rendered) Icons.Rounded.Code else Icons.Rounded.Article, "Alternar") }
             if (isText(f)) IconButton(onEdit) { Icon(Icons.Rounded.Edit, "Editar") }
             IconButton({ openExternal(ctx, f, share = true) }) { Icon(Icons.Rounded.IosShare, "Compartilhar") }
             FilledTonalButton({ save.launch(f.name) }, shape = RoundedCornerShape(50), contentPadding = PaddingValues(horizontal = 12.dp),
@@ -85,6 +85,7 @@ fun FileViewer(f: File, onClose: () -> Unit, onEdit: () -> Unit) {
                 ext in imageExt -> ImageView(f)
                 ext == "svg" -> SvgView(f)
                 ext == "pdf" -> PdfView(f)
+                (ext == "html" || ext == "htm") && rendered -> HtmlPreview(f)
                 ext == "md" && rendered -> Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp)) { Markdown(runCatching { f.readText() }.getOrDefault("")) }
                 isText(f) || f.length() < 512_000 && looksText(f) -> CodeView(f)
                 else -> Column(Modifier.fillMaxSize(), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
@@ -263,4 +264,35 @@ object Syntax {
             }
         }
     }
+}
+
+
+/**
+ * Preview de HTML do workspace num WebView próprio (não é o browser do agente). Carregado via
+ * file:// com acesso a arquivos, então CSS/JS/imagens com caminho relativo da pasta funcionam.
+ */
+@android.annotation.SuppressLint("SetJavaScriptEnabled")
+@Composable
+private fun HtmlPreview(f: File) {
+    androidx.compose.ui.viewinterop.AndroidView(modifier = Modifier.fillMaxSize(), factory = { ctx ->
+        android.webkit.WebView(ctx).apply {
+            settings.javaScriptEnabled = true
+            settings.domStorageEnabled = true
+            settings.allowFileAccess = true
+            @Suppress("DEPRECATION") settings.allowFileAccessFromFileURLs = true
+            @Suppress("DEPRECATION") settings.allowUniversalAccessFromFileURLs = true
+            settings.loadWithOverviewMode = true
+            settings.useWideViewPort = true
+            settings.builtInZoomControls = true
+            settings.displayZoomControls = false
+            settings.mixedContentMode = android.webkit.WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
+            webViewClient = object : android.webkit.WebViewClient() {
+                // links para fora do workspace não saem do preview
+                override fun shouldOverrideUrlLoading(view: android.webkit.WebView, request: android.webkit.WebResourceRequest) =
+                    request.url.scheme !in setOf("file", "http", "https", "data", "about")
+            }
+            setBackgroundColor(android.graphics.Color.WHITE)
+            loadUrl("file://" + f.absolutePath)
+        }
+    }, update = { it.tag ?: run { it.tag = f.absolutePath } })
 }

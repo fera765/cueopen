@@ -30,7 +30,7 @@ import kotlin.coroutines.resumeWithException
 
 data class ToolCall(val id: String, val name: String, val argsJson: String)
 data class Usage(val prompt: Long = 0, val completion: Long = 0, val cached: Long = 0)
-data class LlmReply(val content: String?, val toolCalls: List<ToolCall>, val rawToolCallsJson: String?, val usage: Usage = Usage())
+data class LlmReply(val content: String?, val toolCalls: List<ToolCall>, val rawToolCallsJson: String?, val usage: Usage = Usage(), val truncated: Boolean = false)
 
 /** Cliente OpenAI-compatível (OpenRouter por padrão). Raciocínio/thinking desligado por padrão. */
 class OpenRouter(private val settings: () -> Settings) {
@@ -44,7 +44,7 @@ class OpenRouter(private val settings: () -> Settings) {
         messages: List<LlmMessage>,
         tools: JsonArray? = null,
         model: String? = null,
-        maxTokens: Int = 4096,
+        maxTokens: Int = 16000,
     ): LlmReply = withContext(Dispatchers.IO) {
         val s = settings()
         require(s.apiKey.isNotBlank()) { "Configure sua chave da OpenRouter em Configurações." }
@@ -76,7 +76,9 @@ class OpenRouter(private val settings: () -> Settings) {
         }
         val root = json.parseToJsonElement(text).jsonObject
         root["error"]?.let { throw IOException("LLM: ${it}") }
-        val msg = root["choices"]!!.jsonArray[0].jsonObject["message"]!!.jsonObject
+        val choice0 = root["choices"]!!.jsonArray[0].jsonObject
+        val finish = choice0["finish_reason"]?.let { runCatching { it.jsonPrimitive.contentOrNull }.getOrNull() }
+        val msg = choice0["message"]!!.jsonObject
         val content = msg["content"]?.let { runCatching { it.jsonPrimitive.contentOrNull }.getOrNull() }
         val tcs = msg["tool_calls"]?.takeIf { it is JsonArray }?.jsonArray
         val calls = tcs?.map { tc ->
@@ -91,7 +93,7 @@ class OpenRouter(private val settings: () -> Settings) {
         val u = root["usage"]?.let { runCatching { it.jsonObject }.getOrNull() }
         fun num(o: kotlinx.serialization.json.JsonObject?, k: String) = o?.get(k)?.let { runCatching { it.jsonPrimitive.content.toDouble().toLong() }.getOrNull() } ?: 0L
         val cachedTok = u?.get("prompt_tokens_details")?.let { runCatching { it.jsonObject }.getOrNull() }?.let { num(it, "cached_tokens") } ?: 0L
-        LlmReply(content, calls, tcs?.toString(), Usage(num(u, "prompt_tokens"), num(u, "completion_tokens"), cachedTok))
+        LlmReply(content, calls, tcs?.toString(), Usage(num(u, "prompt_tokens"), num(u, "completion_tokens"), cachedTok), truncated = finish == "length")
     }
 
     /** Pedido simples sem ferramentas (títulos, resumos), no modelo rápido. */

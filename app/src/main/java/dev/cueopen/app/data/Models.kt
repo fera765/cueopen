@@ -53,6 +53,15 @@ sealed class ChatItem {
         val phases: List<PlanPhase>,
     ) : ChatItem()
 
+    /** Arquivo/imagem gerado pelo agente, exibido inline no chat. */
+    @Serializable
+    data class Media(
+        override val id: String = newId(),
+        override val time: Long = now(),
+        val path: String,
+        val caption: String = "",
+    ) : ChatItem()
+
     @Serializable
     data class Error(
         override val id: String = newId(),

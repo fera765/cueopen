@@ -246,6 +246,9 @@ class AgentRunner(
             appendLine("1. Tarefas com várias etapas: chame `update_plan` e atualize ao concluir fases.")
             appendLine("2. Aja com ferramentas em vez de descrever. Verifique resultados.")
             appendLine("3. Economize contexto: leia só o necessário (head/grep), mande saídas longas para arquivo.")
+            appendLine("3b. Arquivos: use file_write (nunca heredoc gigante no shell). Arquivos grandes em partes com append=true. Depois confira com `ls -la` ou file_read.")
+            appendLine("3c. Ao gerar imagem/SVG/HTML/PDF, mostre ao usuário com `show_file`.")
+            appendLine("3d. Com plano ativo, chame `complete_step` ao concluir CADA fase, antes de seguir para a próxima.")
             appendLine("4. Anote em `notes_write` o que precisa lembrar durante a tarefa (achados, progresso, próximos passos).")
             appendLine("5. Fatos duradouros sobre o usuário/projeto: `memory_save`. Para lembrar algo antigo: `memory_search`.")
             appendLine("6. Para usar uma skill, chame `skill_load` com o nome e siga as instruções.")
@@ -273,6 +276,10 @@ class AgentRunner(
             if (notes.isNotBlank()) {
                 appendLine(); appendLine("## Suas anotações da tarefa (NOTES.md)"); appendLine(notes.takeLast(4000))
             }
+            (session.items.lastOrNull { it is ChatItem.Plan } as? ChatItem.Plan)?.let { p ->
+                appendLine(); appendLine("## Plano atual (marque cada fase com complete_step ao terminá-la)")
+                p.phases.forEachIndexed { i, ph -> appendLine("${i + 1}. [${if (ph.done) "x" else " "}] ${ph.title}") }
+            }
             if (session.continuous) { appendLine(); appendLine("## Estado: MODO CONTÍNUO ATIVO — continue o ciclo trabalho → notes_write → sleep.") }
         }
     }
@@ -292,9 +299,13 @@ class AgentRunner(
                 put("background", bool("Rodar em segundo plano (servidores)"))
             }, listOf("command")))
         }
-        add(tool("file_write", "Cria ou sobrescreve um arquivo de texto (caminho relativo ao workspace ou absoluto).", buildJsonObject {
-            put("path", str("Caminho")); put("content", str("Conteúdo completo"))
+        add(tool("file_write", "Cria/sobrescreve um arquivo de texto (cria as pastas). Arquivos grandes: escreva em partes com append=true (~150 linhas por chamada).", buildJsonObject {
+            put("path", str("Caminho do ARQUIVO (relativo ao workspace ou absoluto)")); put("content", str("Conteúdo")); put("append", bool("true = acrescenta ao final"))
         }, listOf("path", "content")))
+        add(tool("complete_step", "Marca a próxima fase do plano como concluída. Chame SEMPRE ao terminar cada fase.", buildJsonObject { put("note", str("O que foi feito")) }))
+        add(tool("show_file", "Mostra um arquivo gerado (imagem, SVG, HTML, PDF, código) direto no chat para o usuário.", buildJsonObject {
+            put("path", str("Caminho do arquivo")); put("caption", str("Legenda curta"))
+        }, listOf("path")))
         add(tool("file_read", "Lê um arquivo de texto.", buildJsonObject { put("path", str("Caminho")) }, listOf("path")))
         add(tool("file_list", "Lista arquivos de um diretório.", buildJsonObject { put("path", str("Diretório (padrão: workspace)")) }))
         if (web) {
@@ -335,7 +346,13 @@ class AgentRunner(
     data class ToolResult(val output: String, val stop: SessionStatus? = null, val sleepMinutes: Int? = null)
 
     private suspend fun runTool(sessionId: String, call: ToolCall): ToolResult {
-        val a: JsonObject = runCatching { json.parseToJsonElement(call.argsJson).jsonObject }.getOrDefault(JsonObject(emptyMap()))
+        val parsed = runCatching { json.parseToJsonElement(call.argsJson).jsonObject }
+        if (parsed.isFailure && call.argsJson.isNotBlank() && call.argsJson != "{}") {
+            store.addItem(sessionId, ChatItem.Step(tool = call.name, title = "Argumentos cortados", args = call.name, result = call.argsJson.takeLast(300), status = StepStatus.ERROR))
+            return ToolResult("ERRO: os argumentos de ${call.name} chegaram incompletos (sua resposta foi cortada por tamanho). " +
+                "Para arquivos grandes use file_write em partes: a 1ª com append=false e as seguintes com append=true, até ~150 linhas por chamada.")
+        }
+        val a: JsonObject = parsed.getOrDefault(JsonObject(emptyMap()))
         fun s(k: String) = a[k]?.jsonPrimitive?.contentOrNull.orEmpty()
         fun i(k: String) = a[k]?.jsonPrimitive?.intOrNull
         fun b(k: String) = a[k]?.jsonPrimitive?.booleanOrNull ?: false
@@ -346,7 +363,9 @@ class AgentRunner(
             "update_plan" -> {
                 val phases = a["phases"]?.jsonArray?.map { it.jsonPrimitive.content }.orEmpty()
                 val done = i("done_count") ?: 0
-                val plan = ChatItem.Plan(goal = s("goal"), phases = phases.mapIndexed { idx, t -> PlanPhase(t, idx < done) })
+                val prev = (store.session(sessionId)?.items?.lastOrNull { it is ChatItem.Plan } as? ChatItem.Plan)?.phases.orEmpty()
+                val plan = ChatItem.Plan(goal = s("goal"), phases = phases.mapIndexed { idx, t ->
+                    PlanPhase(t, idx < done || prev.any { it.title == t && it.done }) })
                 val existing = store.session(sessionId)?.items?.lastOrNull { it is ChatItem.Plan }
                 if (existing != null) store.replaceItem(sessionId, plan.copy(id = existing.id)) else store.addItem(sessionId, plan)
                 return ToolResult("Plano atualizado.")
@@ -365,7 +384,25 @@ class AgentRunner(
                 store.addItem(sessionId, ChatItem.Assistant(text = s("question"), final = true))
                 return ToolResult("Pergunta enviada; aguardando resposta.", SessionStatus.WAITING_USER)
             }
+            "complete_step" -> {
+                val plan = store.session(sessionId)?.items?.lastOrNull { it is ChatItem.Plan } as? ChatItem.Plan
+                    ?: return ToolResult("Não há plano. Use update_plan primeiro.")
+                val idx = plan.phases.indexOfFirst { !it.done }
+                if (idx < 0) return ToolResult("Todas as fases já estão concluídas.")
+                store.replaceItem(sessionId, plan.copy(phases = plan.phases.mapIndexed { i, p -> if (i == idx) p.copy(done = true) else p }))
+                val next = plan.phases.getOrNull(idx + 1)?.title
+                return ToolResult("Fase ${idx + 1}/${plan.phases.size} concluída." + (next?.let { " Próxima: $it" } ?: " Plano completo."))
+            }
+            "show_file" -> {
+                val f = sandbox.hostFile(s("path"), sessionId)
+                if (!f.exists() || f.isDirectory) return ToolResult("ERRO: arquivo não encontrado: ${s("path")}")
+                store.addItem(sessionId, ChatItem.Media(path = f.absolutePath, caption = s("caption")))
+                return ToolResult("Arquivo exibido no chat.")
+            }
             "finish" -> {
+                (store.session(sessionId)?.items?.lastOrNull { it is ChatItem.Plan } as? ChatItem.Plan)?.let { p ->
+                    store.replaceItem(sessionId, p.copy(phases = p.phases.map { it.copy(done = true) }))
+                }
                 val files = a["files"]?.jsonArray?.map { it.jsonPrimitive.content }.orEmpty()
                 val text = s("summary") + if (files.isNotEmpty()) "\n\n📎 " + files.joinToString("\n📎 ") else ""
                 store.addItem(sessionId, ChatItem.Assistant(text = text, final = true))
@@ -389,6 +426,7 @@ class AgentRunner(
             "memory_search" -> "Buscando na memória" to Activity.Kind.THINKING
             "notes_write" -> "Anotando" to Activity.Kind.EDITOR
             "browser_network" -> "Inspecionando rede" to Activity.Kind.BROWSER
+            "complete_step" -> "Concluindo fase" to Activity.Kind.THINKING
             "browser_console" -> "Lendo console" to Activity.Kind.BROWSER
             "create_skill" -> "Criando skill" to Activity.Kind.THINKING
             else -> call.name to Activity.Kind.THINKING
@@ -424,9 +462,24 @@ class AgentRunner(
                     }
                 }
                 "file_write" -> {
-                    val f = sandbox.hostFile(s("path"), sessionId)
-                    f.parentFile?.mkdirs(); f.writeText(s("content"))
-                    "Arquivo salvo: ${s("path")} (${f.length()} bytes)"
+                    val path = s("path").trim()
+                    val f = sandbox.hostFile(path, sessionId)
+                    when {
+                        path.isBlank() -> "ERRO: informe path."
+                        f.isDirectory -> "ERRO: $path é um diretório. Use um caminho de arquivo, ex.: $path/index.html"
+                        else -> {
+                            var p = f.parentFile
+                            while (p != null && !p.exists()) p = p.parentFile
+                            if (p != null && p.isFile) "ERRO: ${p.name} existe como arquivo e não pode ser usado como pasta."
+                            else {
+                                f.parentFile?.mkdirs()
+                                val append = a["append"]?.jsonPrimitive?.booleanOrNull == true
+                                if (append && f.exists()) f.appendText(s("content")) else f.writeText(s("content"))
+                                val lines = f.useLines { it.count() }
+                                "OK: ${if (append) "acrescentado em" else "salvo"} $path — total ${f.length()} bytes, $lines linhas."
+                            }
+                        }
+                    }
                 }
                 "file_read" -> sandbox.hostFile(s("path"), sessionId).let { if (it.exists()) it.readText().take(20_000) else "Arquivo não existe." }
                 "file_list" -> {
