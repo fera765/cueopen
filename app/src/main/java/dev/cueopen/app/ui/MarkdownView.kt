@@ -15,6 +15,12 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.border
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.padding
 import androidx.compose.ui.viewinterop.AndroidView
 import com.mikepenz.markdown.compose.components.markdownComponents
 import com.mikepenz.markdown.compose.elements.highlightedCodeBlock
@@ -48,11 +54,72 @@ fun CueMarkdown(text: String, modifier: Modifier = Modifier) {
         parts.forEach { (mermaid, content) ->
             when {
                 mermaid -> MermaidCard(content)
-                hasTable(content) -> GithubMarkdown(content)  // tabelas GFM: renderizador GitHub (WebView)
+                hasTable(content) -> renderWithTables(content)  // tabelas GFM nativas (sem WebView)
                 else -> MdBlock(content)
             }
         }
     }
+}
+
+/** Separa um bloco em trechos de texto e tabelas GFM, renderizando cada tabela nativamente. */
+@Composable
+private fun renderWithTables(md: String) {
+    val lines = md.lines()
+    val segments = remember(md) {
+        val segs = mutableListOf<Pair<Boolean, List<String>>>() // (isTable, lines)
+        var i = 0
+        val buf = mutableListOf<String>()
+        fun flush() { if (buf.isNotEmpty()) { segs += false to buf.toList(); buf.clear() } }
+        while (i < lines.size) {
+            val isHeader = i + 1 < lines.size && lines[i].contains('|') &&
+                lines[i + 1].trim().let { it.contains('-') && it.all { ch -> ch == '|' || ch == '-' || ch == ':' || ch == ' ' } && it.contains('|') }
+            if (isHeader) {
+                flush()
+                val t = mutableListOf(lines[i], lines[i + 1]); i += 2
+                while (i < lines.size && lines[i].contains('|') && lines[i].isNotBlank()) { t += lines[i]; i++ }
+                segs += true to t.toList()
+            } else { buf += lines[i]; i++ }
+        }
+        flush()
+        segs
+    }
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        segments.forEach { (isTable, ls) ->
+            if (isTable) NativeTable(ls) else { val t = ls.joinToString("\n").trim(); if (t.isNotBlank()) MdBlock(t) }
+        }
+    }
+}
+
+/** Tabela GFM nativa: cabeçalho destacado, linhas zebradas, rolagem horizontal própria. */
+@Composable
+private fun NativeTable(rows: List<String>) {
+    val c = Cue.c
+    fun cells(line: String) = line.trim().trim('|').split("|").map { it.trim() }
+    val header = cells(rows.first())
+    val body = rows.drop(2).map { cells(it) }
+    val cols = header.size
+    val colW = 150.dp
+    Column(Modifier.clip(androidx.compose.foundation.shape.RoundedCornerShape(12.dp)).border(1.dp, c.line, androidx.compose.foundation.shape.RoundedCornerShape(12.dp))
+        .horizontalScroll(rememberScrollState())) {
+        Row(Modifier.background(c.surface2)) {
+            header.forEachIndexed { i, h -> TableCell(h, colW, bold = true) }
+        }
+        body.forEachIndexed { ri, row ->
+            Row(Modifier.background(if (ri % 2 == 0) c.surface else c.surface2.copy(alpha = 0.4f))) {
+                for (ci in 0 until cols) TableCell(row.getOrElse(ci) { "" }, colW)
+            }
+        }
+    }
+}
+
+@Composable
+private fun TableCell(text: String, width: androidx.compose.ui.unit.Dp, bold: Boolean = false) {
+    val c = Cue.c
+    androidx.compose.material3.Text(
+        text.replace("**", ""), modifier = Modifier.width(width).padding(horizontal = 10.dp, vertical = 8.dp),
+        fontSize = 13.sp, color = c.ink,
+        fontWeight = if (bold) FontWeight.SemiBold else FontWeight.Normal,
+    )
 }
 
 /** Detecta uma tabela GFM (linha com | e linha separadora ---|---). */
