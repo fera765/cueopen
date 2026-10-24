@@ -7,6 +7,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -48,7 +49,7 @@ fun ConnectorsScreen(nav: NavController) {
         searching = true; searchErr = null
         scope.launch {
             runCatching { Connectors.searchRegistry(query.trim()) }
-                .onSuccess { found = it; if (it.isEmpty()) searchErr = "Nenhum servidor remoto encontrado." }
+                .onSuccess { r -> found = r.distinctBy { it.id }; if (r.isEmpty()) searchErr = "Nenhum servidor remoto encontrado." }
                 .onFailure { searchErr = "Falha na busca: ${it.message}" }
             searching = false
         }
@@ -88,7 +89,7 @@ fun ConnectorsScreen(nav: NavController) {
             searchErr?.let { item { Text(it, color = c.ink2, fontSize = 13.sp) } }
             if (found.isNotEmpty()) {
                 item { SectionLabel("Resultados da busca") }
-                items(found, key = { "reg_" + it.id }) { cat ->
+                itemsIndexed(found) { idx, cat ->
                     val already = st.connectors.any { it.id == cat.id }
                     CueCard {
                         Row(verticalAlignment = Alignment.CenterVertically) {

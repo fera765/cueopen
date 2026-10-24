@@ -73,6 +73,9 @@ class AgentRunner(
 
     fun stop(sessionId: String) {
         jobs.remove(sessionId)?.cancel()
+        store.state.value.agents.filter { it.homeSessionId == sessionId && it.autonomous }.forEach {
+            store.upsertAgent(it.copy(autonomous = false)); dev.cueopen.app.scheduler.Heartbeat.cancel(ctx, it.id)
+        }
         store.editSession(sessionId) { it.copy(status = SessionStatus.STOPPED, wakeAt = null) }
         setActivity(sessionId, Activity())
         browser.setAgentControl(false)
@@ -217,14 +220,9 @@ class AgentRunner(
 
     /** Agenda o loop de heartbeats (um tick por minuto). Mantido vivo pelo SandboxService + AutonomyWorker. */
     fun startAutonomy() {
-        if (autonomyJob?.isActive == true) return
+        // os ciclos são disparados por AlarmManager (Heartbeat), que funciona com o app fechado.
+        dev.cueopen.app.scheduler.Heartbeat.rescheduleAll(ctx)
         if (store.state.value.agents.any { it.autonomous }) dev.cueopen.app.sandbox.SandboxService.start(ctx, "Agentes autônomos ativos")
-        autonomyJob = scope.launch {
-            while (isActive) {
-                runCatching { autonomyTick() }
-                kotlinx.coroutines.delay(60_000)
-            }
-        }
     }
 
     private fun today() = SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date())
@@ -526,14 +524,16 @@ class AgentRunner(
                 if (ag == null) return ToolResult("Esta tarefa não tem um Agent. Peça ao usuário para criar/usar um Agent para rodar de forma autônoma.")
                 if (m <= 0) {
                     store.upsertAgent(ag.copy(autonomous = false))
+                    dev.cueopen.app.scheduler.Heartbeat.cancel(ctx, ag.id)
                     store.addItem(sessionId, ChatItem.Step(tool = "set_schedule", title = "Autonomia desligada", args = "", result = "", status = StepStatus.OK))
                     return ToolResult("Autonomia desligada para ${ag.name}.")
                 }
-                store.upsertAgent(ag.copy(autonomous = true, heartbeatMinutes = m.coerceIn(1, 1440),
+                val mm = m.coerceIn(1, 1440)
+                store.upsertAgent(ag.copy(autonomous = true, heartbeatMinutes = mm,
                     mission = s("mission").ifBlank { ag.mission }, homeSessionId = sessionId, lastBeatAt = System.currentTimeMillis()))
-                startAutonomy()
-                store.addItem(sessionId, ChatItem.Step(tool = "set_schedule", title = "Agendado: a cada ${m} min", args = s("mission"), result = "", status = StepStatus.OK))
-                return ToolResult("Pronto: vou verificar a cada ${m} min de forma autônoma, mesmo com o app fechado. O usuário pode parar enviando /stop ou desligando a autonomia no Agent.")
+                dev.cueopen.app.scheduler.Heartbeat.schedule(ctx, ag.id, mm)
+                store.addItem(sessionId, ChatItem.Step(tool = "set_schedule", title = "Agendado: a cada ${mm} min", args = s("mission"), result = "", status = StepStatus.OK))
+                return ToolResult("Pronto: o Android vai me acordar sozinho a cada ${mm} min (mesmo com o app fechado) e eu farei a verificação. Nada de você precisar mandar mensagem. Pare com /stop ou desligando a autonomia no Agent.")
             }
             "sleep" -> {
                 val m = (i("minutes") ?: 5).coerceIn(1, 1440)

@@ -59,35 +59,38 @@ fun SplashScreen(onDone: () -> Unit) {
     Box(Modifier.fillMaxSize().background(c.bg).alpha(alphaAll.value), contentAlignment = Alignment.Center) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
             Canvas(Modifier.size(150.dp).graphicsLayer { translationY = drop.value; scaleY = squash.value; scaleX = 2f - squash.value }) {
-                val w = size.width; val h = size.height; val ink = Color(0xFF111111); val sw = w * 0.045f
-                // antena (balança)
-                val baseX = w * .5f; val baseY = h * .2f
+                val w = size.width; val h = size.height
+                val ink = Color(0xFF14110F); val orange = Color(0xFFFF6B3D); val screen = Color(0xFF0F1115)
+                val sw = w * 0.04f
+                // --- antena curva com ponta brilhante (balança suave) ---
+                val baseX = w * .5f; val baseY = h * .22f
                 val rad = Math.toRadians(antenna.toDouble())
-                val tipX = baseX + (h * .14f * Math.sin(rad)).toFloat(); val tipY = baseY - (h * .14f * Math.cos(rad)).toFloat()
-                drawLine(ink, Offset(baseX, baseY), Offset(tipX, tipY), sw, StrokeCap.Round)
-                drawCircle(Color(0xFFFFC53D), w * .05f, Offset(tipX, tipY)); drawCircle(ink, w * .05f, Offset(tipX, tipY), style = Stroke(sw * .7f))
-                // corpo em gota
-                val body = Path().apply {
-                    moveTo(w * .5f, h * .2f)
-                    cubicTo(w * .8f, h * .2f, w * .9f, h * .38f, w * .9f, h * .58f)
-                    cubicTo(w * .9f, h * .82f, w * .72f, h * .94f, w * .5f, h * .94f)
-                    cubicTo(w * .28f, h * .94f, w * .1f, h * .82f, w * .1f, h * .58f)
-                    cubicTo(w * .1f, h * .38f, w * .2f, h * .2f, w * .5f, h * .2f); close()
+                val tipX = baseX + (h * .15f * Math.sin(rad)).toFloat(); val tipY = baseY - (h * .17f * Math.cos(rad)).toFloat()
+                val antennaPath = Path().apply { moveTo(baseX, baseY); quadraticBezierTo((baseX + tipX) / 2 + w * .03f, (baseY + tipY) / 2, tipX, tipY) }
+                drawPath(antennaPath, ink, style = Stroke(sw, cap = StrokeCap.Round))
+                drawCircle(Color(0xFFFFC53D), w * .055f, Offset(tipX, tipY))
+                drawCircle(Color.White.copy(alpha = .7f), w * .02f, Offset(tipX - w * .015f, tipY - w * .015f))
+                // --- cabeça: retângulo bem arredondado (estilo capacete minimalista) ---
+                val headL = w * .16f; val headT = h * .30f; val headW = w * .68f; val headH = h * .52f; val rr = CornerRadius(w * .26f, w * .26f)
+                drawRoundRect(orange, Offset(headL, headT), Size(headW, headH), rr)
+                drawRoundRect(ink, Offset(headL, headT), Size(headW, headH), rr, style = Stroke(sw))
+                // "viseira" escura onde ficam os olhos
+                val visL = w * .26f; val visT = h * .40f; val visW = w * .48f; val visH = h * .26f; val vr = CornerRadius(w * .16f, w * .16f)
+                drawRoundRect(screen, Offset(visL, visT), Size(visW, visH), vr)
+                // --- olhos: dois pontos que piscam, com brilho ---
+                val eyeY = visT + visH * .5f; val er = w * .052f
+                listOf(w * .40f, w * .60f).forEach { ex ->
+                    drawRoundRect(Color(0xFF66E0FF), Offset(ex - er, eyeY - er * blink), Size(er * 2, (er * 2 * blink).coerceAtLeast(2f)), CornerRadius(er, er))
                 }
-                drawPath(body, Color(0xFFFF6B3D)); drawPath(body, ink, style = Stroke(sw))
-                // bracinhos
-                drawLine(ink, Offset(w * .1f, h * .62f), Offset(w * .02f, h * .7f), sw, StrokeCap.Round)
-                drawLine(ink, Offset(w * .9f, h * .62f), Offset(w * .98f, h * .54f), sw, StrokeCap.Round)
-                // olhos (piscam)
-                val eh = h * .1f * blink
-                drawRoundRect(Color.White, Offset(w * .3f, h * .45f - eh / 2), Size(w * .14f, eh.coerceAtLeast(2f)), CornerRadius(w * .07f))
-                drawRoundRect(Color.White, Offset(w * .56f, h * .45f - eh / 2), Size(w * .14f, eh.coerceAtLeast(2f)), CornerRadius(w * .07f))
-                drawCircle(ink, w * .035f * blink.coerceAtLeast(.2f), Offset(w * .38f, h * .46f))
-                drawCircle(ink, w * .035f * blink.coerceAtLeast(.2f), Offset(w * .64f, h * .46f))
-                // boca = prompt ">_"
-                drawLine(ink, Offset(w * .38f, h * .64f), Offset(w * .45f, h * .69f), sw, StrokeCap.Round)
-                drawLine(ink, Offset(w * .45f, h * .69f), Offset(w * .38f, h * .74f), sw, StrokeCap.Round)
-                drawLine(ink.copy(alpha = cursor), Offset(w * .5f, h * .75f), Offset(w * .62f, h * .75f), sw, StrokeCap.Round)
+                if (blink > .5f) listOf(w * .40f, w * .60f).forEach { ex ->
+                    drawCircle(Color.White, w * .018f, Offset(ex + w * .012f, eyeY - w * .012f))
+                }
+                // --- bochechas (dão o toque fofo/elegante) ---
+                drawCircle(Color(0xFFFF9A77), w * .03f, Offset(w * .33f, h * .60f))
+                drawCircle(Color(0xFFFF9A77), w * .03f, Offset(w * .67f, h * .60f))
+                // --- orelhinhas/sensores laterais ---
+                drawRoundRect(ink, Offset(headL - w * .05f, h * .52f), Size(w * .05f, h * .10f), CornerRadius(w * .02f, w * .02f))
+                drawRoundRect(ink, Offset(headL + headW, h * .52f), Size(w * .05f, h * .10f), CornerRadius(w * .02f, w * .02f))
             }
             Spacer(Modifier.height(18.dp))
             Row(Modifier.alpha(title.value).graphicsLayer { translationY = (1 - title.value) * 24f }, verticalAlignment = Alignment.CenterVertically) {

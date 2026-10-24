@@ -13,6 +13,8 @@
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
+    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
+    <uses-permission android:name="android.permission.USE_EXACT_ALARM" />
 
     <application
         android:name=".CueApp"
@@ -51,6 +53,10 @@
 
         <receiver android:name=".scheduler.BootReceiver" android:exported="true">
             <intent-filter><action android:name="android.intent.action.BOOT_COMPLETED" /></intent-filter>
+        </receiver>
+
+        <receiver android:name=".scheduler.HeartbeatReceiver" android:exported="false">
+            <intent-filter><action android:name="dev.cueopen.HEARTBEAT" /></intent-filter>
         </receiver>
 
         <service

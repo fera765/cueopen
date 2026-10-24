@@ -34,8 +34,11 @@ class CueApp : Application() {
         terminals = dev.cueopen.app.sandbox.TerminalManager(this, sandbox)
         agent = AgentRunner(store, sandbox, browser, llm, terminals, this)
         agent.resumeSleeping()
+        dev.cueopen.app.scheduler.Heartbeat.rescheduleAll(this)
         agent.startAutonomy()
         dev.cueopen.app.scheduler.AutonomyWorker.ensure(this)
+        // terminal já ativo em segundo plano assim que o app abre (se o sandbox estiver instalado)
+        if (sandbox.isInstalled()) dev.cueopen.app.sandbox.SandboxService.start(this, "Terminal ativo")
         getSystemService(NotificationManager::class.java).createNotificationChannel(
             NotificationChannel(CH_TASKS, "Tarefas", NotificationManager.IMPORTANCE_DEFAULT)
         )

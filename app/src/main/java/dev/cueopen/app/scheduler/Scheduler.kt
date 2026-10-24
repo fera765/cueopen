@@ -81,8 +81,7 @@ class ScheduledWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(
  */
 class AutonomyWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, params) {
     override suspend fun doWork(): Result {
-        val app = applicationContext as CueApp
-        app.agent.startAutonomy()
+        dev.cueopen.app.scheduler.Heartbeat.rescheduleAll(applicationContext)
         return Result.success()
     }
     companion object {
@@ -98,5 +97,6 @@ class BootReceiver : android.content.BroadcastReceiver() {
     override fun onReceive(context: Context, intent: android.content.Intent) {
         // criar a Application já chama startAutonomy(); aqui só garantimos o worker
         AutonomyWorker.ensure(context)
+        dev.cueopen.app.scheduler.Heartbeat.rescheduleAll(context)
     }
 }
