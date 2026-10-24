@@ -72,6 +72,7 @@ class TerminalManager(private val ctx: Context, private val sandbox: Sandbox) {
             if (_alive.value) return
             sandbox.prepareScripts()
             File(sandbox.publicDir, cwd.removePrefix("/root/")).mkdirs()
+            installShellHook()
             val shell = "cd '$cwd' 2>/dev/null; if command -v bash >/dev/null 2>&1; then exec bash --rcfile /root/.bashrc -i; else exec sh -i; fi"
             term = TerminalSession(
                 "/system/bin/sh", sandbox.prefix.absolutePath,
@@ -99,41 +100,44 @@ class TerminalManager(private val ctx: Context, private val sandbox: Sandbox) {
             runCatching { term.emulator?.screen?.transcriptTextWithFullLinesJoined ?: "" }.getOrDefault("")
         }
 
+        @Volatile private var pending: kotlinx.coroutines.CompletableDeferred<Int>? = null
+        internal fun onPromptReturned(exit: Int) { pending?.complete(exit) }
+
         /**
-         * Executa um comando do agente dentro do terminal visível. O comando vai para um script
-         * (multilinha/aspas sem problema); início e fim são marcados com printf, cujo eco na linha
-         * digitada não coincide com o texto impresso.
+         * Executa um comando do agente no terminal visível, como uma pessoa digitando:
+         * aparece só o comando real. O fim é detectado pelo PROMPT_COMMAND do bash, que emite
+         * uma sequência OSC 777 invisível com o código de saída (nada de marcadores na tela).
          */
         suspend fun runAgentCommand(command: String, timeoutSec: Long, background: Boolean): Sandbox.ExecResult =
             agentLock.withLock {
                 withContext(Dispatchers.Main) { if (!_alive.value) start() }
-                delay(300)
+                delay(400)
                 val id = System.nanoTime().toString(36)
                 val dir = File(sandbox.publicDir, ".cue").apply { mkdirs() }
-                File(dir, "cmd_$id.sh").writeText("cd '$cwd' 2>/dev/null\n$command\n")
-                val begin = "__CUE_BEGIN_${id}__"
-                val endRe = Regex("__CUE_END_${id}_(\\d+)__")
-                val runner = if (background) "nohup sh /root/.cue/cmd_$id.sh > /root/.cue/bg_$id.log 2>&1 &"
-                             else "sh /root/.cue/cmd_$id.sh"
-                // linha visível no terminal: o usuário vê o comando sendo digitado e executado
-                write("printf '\\033[38;5;209m[agente]\\033[0m %s\\n' ${shQuote(command.lineSequence().first().take(160))}; " +
-                      "printf '__CUE_%s__\\n' BEGIN_$id; $runner; printf '__CUE_END_%s_%s__\\n' $id \$?\r")
-                var exit = -1
-                val done = withTimeoutOrNull(timeoutSec * 1000) {
-                    while (true) {
-                        val m = endRe.find(transcript())
-                        if (m != null) { exit = m.groupValues[1].toInt(); break }
-                        delay(250)
-                    }
-                    true
+                val cmd = command.trim()
+                val simple = !cmd.contains('\n') && cmd.length <= 400
+                val typed = when {
+                    background && simple -> "( $cmd ) > /root/.cue/bg_$id.log 2>&1 &"
+                    background -> { File(dir, "run_$id.sh").writeText(cmd + "\n"); "nohup bash /root/.cue/run_$id.sh > /root/.cue/bg_$id.log 2>&1 &" }
+                    simple -> cmd
+                    else -> { File(dir, "run_$id.sh").writeText(cmd + "\n"); "bash /root/.cue/run_$id.sh" }
                 }
-                if (done == null) { write("\u0003"); delay(400) }
+                val before = transcript()
+                val waiter = kotlinx.coroutines.CompletableDeferred<Int>()
+                pending = waiter
+                write("\u0015$typed\r") // Ctrl-U limpa algo digitado pela metade
+                val exit = withTimeoutOrNull(timeoutSec * 1000) { waiter.await() }
+                pending = null
+                if (exit == null) { write("\u0003"); delay(500) }
                 val t = transcript()
-                val a = t.lastIndexOf(begin).let { if (it < 0) 0 else it + begin.length }
-                val b = endRe.find(t, a)?.range?.first ?: t.length
-                val out = t.substring(a.coerceAtMost(t.length), b.coerceAtLeast(a.coerceAtMost(t.length))).trim()
-                File(dir, "cmd_$id.sh").delete()
-                Sandbox.ExecResult(exit, if (background) "Iniciado em segundo plano (log: /root/.cue/bg_$id.log)" else out, done == null)
+                val added = if (t.length >= before.length && t.startsWith(before.take(200))) t.substring(before.length) else t.takeLast(12_000)
+                val lines = added.lines()
+                // 1ª linha = eco do comando digitado; última = novo prompt
+                val out = lines.drop(1).let { if (it.isNotEmpty() && it.last().contains("@sandbox")) it.dropLast(1) else it }
+                    .joinToString("\n").trim()
+                File(dir, "run_$id.sh").delete()
+                Sandbox.ExecResult(exit ?: -1,
+                    if (background) "Iniciado em segundo plano (log: /root/.cue/bg_$id.log)" else out, exit == null)
             }
     }
 
@@ -141,6 +145,29 @@ class TerminalManager(private val ctx: Context, private val sandbox: Sandbox) {
     private val sessions = ConcurrentHashMap<String, Session>()
     private val _count = MutableStateFlow(0)
     val count: StateFlow<Int> = _count
+
+    init {
+        com.termux.terminal.TerminalEmulator.OSC_LISTENER = com.termux.terminal.TerminalEmulator.OscListener { emu, text ->
+            // formato: cue;done;<exit>
+            val parts = text.split(';')
+            if (parts.size >= 3 && parts[0] == "cue" && parts[1] == "done") {
+                val code = parts[2].trim().toIntOrNull() ?: 0
+                sessions.values.firstOrNull { s -> runCatching { s.term.emulator === emu }.getOrDefault(false) }?.onPromptReturned(code)
+            }
+        }
+    }
+
+    private fun installShellHook() {
+        val cue = File(sandbox.publicDir, ".cue").apply { mkdirs() }
+        File(cue, "hook.sh").writeText(
+            "# CueOpen: avisa o app (sequência OSC invisível) sempre que o prompt volta\n" +
+            "__cue_pc() { local e=\$?; printf '\\033]777;cue;done;%s\\007' \"\$e\"; return \$e; }\n" +
+            "case \"\$PROMPT_COMMAND\" in *__cue_pc*) ;; *) PROMPT_COMMAND=\"__cue_pc\${PROMPT_COMMAND:+;\$PROMPT_COMMAND}\" ;; esac\n")
+        val rc = File(sandbox.publicDir, ".bashrc")
+        val line = "[ -f /root/.cue/hook.sh ] && . /root/.cue/hook.sh"
+        val cur = if (rc.exists()) rc.readText() else "cd /root/workspace 2>/dev/null\n"
+        if (!cur.contains(line)) rc.writeText(cur.trimEnd() + "\n" + line + "\n")
+    }
 
     fun get(key: String, cwd: String = "/root/workspace/$key"): Session =
         sessions.getOrPut(key) { Session(key, cwd).also { _count.value = sessions.size + 1 } }

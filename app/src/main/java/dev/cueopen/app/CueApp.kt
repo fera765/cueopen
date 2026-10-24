@@ -33,6 +33,7 @@ class CueApp : Application() {
         llm = OpenRouter { store.settings }
         terminals = dev.cueopen.app.sandbox.TerminalManager(this, sandbox)
         agent = AgentRunner(store, sandbox, browser, llm, terminals, this)
+        agent.resumeSleeping()
         getSystemService(NotificationManager::class.java).createNotificationChannel(
             NotificationChannel(CH_TASKS, "Tarefas", NotificationManager.IMPORTANCE_DEFAULT)
         )

@@ -208,6 +208,9 @@ fun BrowserPane() {
     val c = Cue.c
     var url by remember(ui.url) { mutableStateOf(if (ui.url.startsWith("file:///android_asset")) "" else ui.url) }
     val scope = rememberCoroutineScope()
+    var menu by remember { mutableStateOf(false) }
+    var devtools by remember { mutableStateOf(false) }
+    val ctx = LocalContext.current
     Column(Modifier.fillMaxSize()) {
         Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
             IconButton({ scope.launch { app.browser.back() } }, enabled = ui.canBack) { Icon(Icons.AutoMirrored.Rounded.ArrowBack, "Voltar") }
@@ -220,8 +223,23 @@ fun BrowserPane() {
                     keyboardOptions = KeyboardOptions(imeAction = ImeAction.Go),
                     keyboardActions = KeyboardActions(onGo = { scope.launch { app.browser.navigate(url) } }))
             }
-            IconButton({ app.browser.home() }) { Icon(Icons.Rounded.Home, "Início") }
             IconButton({ scope.launch { app.browser.reload() } }) { Icon(if (ui.loading) Icons.Rounded.Close else Icons.Rounded.Refresh, "Recarregar") }
+            Box {
+                IconButton({ menu = true }) { Icon(Icons.Rounded.MoreVert, "Mais") }
+                DropdownMenu(menu, { menu = false }) {
+                    DropdownMenuItem({ Text("Página inicial") }, { menu = false; app.browser.home() }, leadingIcon = { Icon(Icons.Rounded.Home, null) })
+                    DropdownMenuItem({ Text(if (devtools) "Ocultar Rede/Console" else "Rede e Console") }, { menu = false; devtools = !devtools }, leadingIcon = { Icon(Icons.Rounded.NetworkCheck, null) })
+                    DropdownMenuItem({ Text(if (ui.desktop) "Versão mobile" else "Versão desktop") }, { menu = false; app.browser.setDesktop(!ui.desktop) }, leadingIcon = { Icon(Icons.Rounded.DesktopWindows, null) })
+                    DropdownMenuItem({ Text("Abrir no navegador do sistema") }, {
+                        menu = false
+                        runCatching { ctx.startActivity(android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse(ui.url))) }
+                    }, leadingIcon = { Icon(Icons.Rounded.OpenInNew, null) })
+                }
+            }
+        }
+        // status de conectividade
+        if (!ui.online) Row(Modifier.fillMaxWidth().background(c.err.copy(alpha = .15f)).padding(horizontal = 16.dp, vertical = 4.dp)) {
+            Text("Sem conexão com a internet", fontSize = 12.sp, color = c.err)
         }
         if (ui.loading) LinearProgressIndicator(progress = { ui.progress / 100f }, Modifier.fillMaxWidth().height(2.dp), color = c.accent)
         if (ui.agentControl) {
@@ -231,7 +249,67 @@ fun BrowserPane() {
                 Text("Assumir", fontSize = 12.sp, color = c.accent, fontWeight = FontWeight.Bold, modifier = Modifier.clickable { app.browser.setAgentControl(false) })
             }
         }
-        AndroidView(factory = { ctx -> app.browser.view(ctx) }, modifier = Modifier.fillMaxSize())
+        AndroidView(factory = { c2 -> app.browser.view(c2) }, modifier = Modifier.fillMaxWidth().weight(1f))
+        if (devtools) DevToolsPanel(Modifier.fillMaxWidth().height(300.dp))
+    }
+}
+
+/** Painel estilo DevTools: requisições de rede (com filtro por tipo) e console JS. */
+@Composable
+private fun DevToolsPanel(modifier: Modifier) {
+    val app = CueApp.instance
+    val net by app.browser.net.collectAsStateWithLifecycle()
+    val console by app.browser.console.collectAsStateWithLifecycle()
+    val ui by app.browser.ui.collectAsStateWithLifecycle()
+    var tab by remember { mutableStateOf("net") }
+    var type by remember { mutableStateOf("all") }
+    var selected by remember { mutableStateOf<dev.cueopen.app.browser.BrowserHost.NetEntry?>(null) }
+    val c = Cue.c
+    Column(modifier.background(c.surface).border(1.dp, c.line)) {
+        Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+            Chip("Rede (${net.size})", tab == "net") { tab = "net" }
+            Spacer(Modifier.width(6.dp))
+            Chip("Console (${console.size})", tab == "console") { tab = "console" }
+            Spacer(Modifier.weight(1f))
+            Text(ui.netType, fontSize = 11.sp, color = if (ui.online) c.ok else c.err)
+            IconButton({ app.browser.clearNet() }) { Icon(Icons.Rounded.DeleteSweep, "Limpar", Modifier.size(18.dp)) }
+        }
+        if (tab == "net") {
+            Row(Modifier.horizontalScroll(rememberScrollState()).padding(horizontal = 8.dp), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                listOf("all" to "Todos", "doc" to "Doc", "xhr" to "XHR/Fetch", "js" to "JS", "css" to "CSS", "img" to "Img", "font" to "Fonte", "media" to "Mídia", "other" to "Outros").forEach { (k, l) ->
+                    Text(l, Modifier.clip(CircleShape).background(if (type == k) c.ink else c.surface2).clickable { type = k }.padding(horizontal = 10.dp, vertical = 4.dp),
+                        fontSize = 11.sp, color = if (type == k) c.bg else c.ink)
+                }
+            }
+            val list = net.filter { type == "all" || it.type == type }.asReversed()
+            val sel = selected
+            if (sel != null) {
+                Column(Modifier.fillMaxWidth().padding(10.dp).verticalScroll(rememberScrollState())) {
+                    Text("← voltar", color = c.accent, fontSize = 12.sp, modifier = Modifier.clickable { selected = null })
+                    Text(sel.url, fontFamily = FontFamily.Monospace, fontSize = 11.sp)
+                    Text("Método: ${sel.method} · Tipo: ${sel.type} · Status: ${sel.status ?: "—"}", fontSize = 12.sp)
+                    Text("Tempo: ${sel.durationMs?.let { "$it ms" } ?: "—"} · Tamanho: ${sel.sizeBytes?.let { humanSize(it) } ?: "—"}", fontSize = 12.sp)
+                    sel.error?.let { Text("Erro: $it", color = c.err, fontSize = 12.sp) }
+                }
+            } else LazyColumn(Modifier.fillMaxSize()) {
+                items(list, key = { it.id }) { e ->
+                    val bad = (e.status ?: 0) >= 400 || e.error != null
+                    Row(Modifier.fillMaxWidth().clickable { selected = e }.padding(horizontal = 10.dp, vertical = 5.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Text("${e.status ?: if (e.error != null) "ERR" else "·"}", Modifier.width(34.dp), fontSize = 11.sp, color = if (bad) c.err else c.ok, fontFamily = FontFamily.Monospace)
+                        Text(e.type, Modifier.width(42.dp), fontSize = 11.sp, color = c.ink3)
+                        Text(e.url.substringAfter("://").take(120), Modifier.weight(1f), fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, fontFamily = FontFamily.Monospace)
+                        Text(e.durationMs?.let { "${it}ms" } ?: "", fontSize = 10.sp, color = c.ink3)
+                    }
+                }
+            }
+        } else {
+            LazyColumn(Modifier.fillMaxSize().padding(horizontal = 8.dp)) {
+                items(console.asReversed()) { m ->
+                    Text("[${m.level}] ${m.message}", fontFamily = FontFamily.Monospace, fontSize = 11.sp,
+                        color = when (m.level) { "error" -> c.err; "warning" -> c.warn; else -> c.ink2 }, modifier = Modifier.padding(vertical = 2.dp))
+                }
+            }
+        }
     }
 }
 

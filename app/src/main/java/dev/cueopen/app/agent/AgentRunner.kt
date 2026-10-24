@@ -6,6 +6,7 @@ import dev.cueopen.app.data.ChatItem
 import dev.cueopen.app.data.KnowledgeItem
 import dev.cueopen.app.data.LlmMessage
 import dev.cueopen.app.data.PlanPhase
+import dev.cueopen.app.data.Session
 import dev.cueopen.app.data.SessionStatus
 import dev.cueopen.app.data.Skill
 import dev.cueopen.app.data.StepStatus
@@ -72,7 +73,7 @@ class AgentRunner(
 
     fun stop(sessionId: String) {
         jobs.remove(sessionId)?.cancel()
-        store.editSession(sessionId) { it.copy(status = SessionStatus.STOPPED) }
+        store.editSession(sessionId) { it.copy(status = SessionStatus.STOPPED, wakeAt = null) }
         setActivity(sessionId, Activity())
         browser.setAgentControl(false)
     }
@@ -118,39 +119,62 @@ class AgentRunner(
         }
     }
 
+    private val ctxMgr = ContextManager(store, sandbox, llm)
+
     private suspend fun loop(sessionId: String) {
         val maxSteps = store.settings.maxSteps
         var steps = 0
         while (scope.isActive) {
-            val s = store.session(sessionId) ?: return
+            var s = store.session(sessionId) ?: return
             val agent = store.agent(s.agentId)
             setActivity(sessionId, Activity(Activity.Kind.THINKING, "Pensando"))
-            val sys = LlmMessage("system", systemPrompt(sessionId, agent))
-            val reply = llm.chat(listOf(sys) + trimHistory(s.llm), tools = tools(agent), model = agent?.model)
+            // Camada 2: compacta o histórico se passou do orçamento
+            if (ctxMgr.estimateTokens(s.llm) + ctxMgr.estimateTokens(s.summary) >= store.settings.contextBudget) {
+                setActivity(sessionId, Activity(Activity.Kind.THINKING, "Compactando contexto"))
+                s = ctxMgr.compactIfNeeded(s)
+            }
+            val sys = LlmMessage("system", systemPrompt(sessionId, agent, s))
+            var history = ctxMgr.microCompact(s.llm)
+            if (history.firstOrNull()?.role != "user") history = listOf(LlmMessage("user", "[Contexto anterior compactado no resumo da sessão. Continue de onde parou.]")) + history
+            val reply = llm.chat(listOf(sys) + history, tools = tools(agent), model = agent?.model)
             store.editSession(sessionId) {
-                it.copy(llm = it.llm + LlmMessage("assistant", reply.content, toolCallsJson = reply.rawToolCallsJson))
+                it.copy(llm = it.llm + LlmMessage("assistant", reply.content, toolCallsJson = reply.rawToolCallsJson),
+                    tokensIn = it.tokensIn + reply.usage.prompt, tokensOut = it.tokensOut + reply.usage.completion,
+                    tokensCached = it.tokensCached + reply.usage.cached, llmCalls = it.llmCalls + 1)
             }
             if (!reply.content.isNullOrBlank()) {
                 store.addItem(sessionId, ChatItem.Assistant(text = reply.content.trim(), final = reply.toolCalls.isEmpty()))
             }
             if (reply.toolCalls.isEmpty()) {
+                if (store.session(sessionId)?.continuous == true) {
+                    // modo contínuo: sem ferramenta = lembra de dormir até a próxima verificação
+                    store.editSession(sessionId) { it.copy(llm = it.llm + LlmMessage("user", "[Sistema] Você está em modo contínuo. Use `sleep` para aguardar a próxima verificação ou `finish` se o usuário pediu para encerrar.")) }
+                    if (++steps >= maxSteps) { sleepAndWake(sessionId, 5, "verificação periódica"); steps = 0 }
+                    continue
+                }
                 store.editSession(sessionId) { it.copy(status = SessionStatus.DONE) }
                 return
             }
             var stopLoop: SessionStatus? = null
+            var sleepReq: Pair<Int, String>? = null
             for (call in reply.toolCalls) {
                 val result = runTool(sessionId, call)
+                val ctxOut = ctxMgr.storeToolOutput(sessionId, call.id, result.output)
                 store.editSession(sessionId) {
-                    it.copy(llm = it.llm + LlmMessage("tool", result.output.take(12_000), toolCallId = call.id, name = call.name))
+                    it.copy(llm = it.llm + LlmMessage("tool", ctxOut, toolCallId = call.id, name = call.name))
                 }
                 if (result.stop != null) stopLoop = result.stop
+                if (result.sleepMinutes != null) sleepReq = result.sleepMinutes to result.output
             }
             val finalStatus = stopLoop
             if (finalStatus != null) {
-                store.editSession(sessionId) { it.copy(status = finalStatus) }
+                store.editSession(sessionId) { it.copy(status = finalStatus, continuous = if (finalStatus == SessionStatus.DONE) false else it.continuous) }
                 return
             }
+            val sl = sleepReq
+            if (sl != null) { sleepAndWake(sessionId, sl.first, sl.second); steps = 0; continue }
             if (++steps >= maxSteps) {
+                if (store.session(sessionId)?.continuous == true) { sleepAndWake(sessionId, 1, "pausa automática após $maxSteps passos"); steps = 0; continue }
                 store.addItem(sessionId, ChatItem.Error(text = "Limite de $maxSteps passos atingido. Envie \"continue\" para seguir."))
                 store.editSession(sessionId) { it.copy(status = SessionStatus.WAITING_USER) }
                 return
@@ -158,46 +182,98 @@ class AgentRunner(
         }
     }
 
-    /** Mantém o contexto enxuto: preserva as últimas mensagens e encurta saídas antigas de ferramentas. */
-    private fun trimHistory(h: List<LlmMessage>): List<LlmMessage> {
-        val keepFull = 24
-        return h.mapIndexed { i, m ->
-            if (m.role == "tool" && i < h.size - keepFull) m.copy(content = (m.content ?: "").take(800) + "\n…[truncado]") else m
+    /** Modo contínuo: dorme (o serviço em foreground + wakelock mantém o processo vivo) e retoma. */
+    private suspend fun sleepAndWake(sessionId: String, minutes: Int, reason: String) {
+        val wake = System.currentTimeMillis() + minutes * 60_000L
+        store.editSession(sessionId) { it.copy(status = SessionStatus.SLEEPING, wakeAt = wake, wakeReason = reason, continuous = true) }
+        setActivity(sessionId, Activity(Activity.Kind.IDLE, "Aguardando até ${java.text.SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(wake))}"))
+        dev.cueopen.app.sandbox.SandboxService.start(ctx, "Agente em modo contínuo")
+        store.flush()
+        while (System.currentTimeMillis() < wake) kotlinx.coroutines.delay(minOf(30_000L, wake - System.currentTimeMillis()).coerceAtLeast(1000))
+        wakeUp(sessionId)
+    }
+
+    private fun wakeUp(sessionId: String) {
+        val r = store.session(sessionId)?.wakeReason.orEmpty()
+        val now = SimpleDateFormat("dd/MM HH:mm", Locale.getDefault()).format(Date())
+        store.editSession(sessionId) {
+            it.copy(status = SessionStatus.RUNNING, wakeAt = null,
+                llm = it.llm + LlmMessage("user", "[Sistema $now] Hora de continuar (motivo do sleep: $r). Faça a próxima verificação/etapa."))
         }
     }
 
-    private fun systemPrompt(sessionId: String, agent: AgentProfile?): String {
+    /** Ao reabrir o app (ou o serviço reiniciar o processo), retoma agentes contínuos. */
+    fun resumeSleeping() {
+        store.state.value.sessions.filter { it.status == SessionStatus.SLEEPING || (it.continuous && it.status == SessionStatus.STOPPED && it.wakeAt != null) }.forEach { s ->
+            if (jobs[s.id]?.isActive == true) return@forEach
+            val wake = s.wakeAt ?: System.currentTimeMillis()
+            dev.cueopen.app.sandbox.SandboxService.start(ctx, "Agente em modo contínuo")
+            jobs[s.id] = scope.launch {
+                try {
+                    while (System.currentTimeMillis() < wake) kotlinx.coroutines.delay(minOf(30_000L, wake - System.currentTimeMillis()).coerceAtLeast(1000))
+                    wakeUp(s.id); loop(s.id)
+                } catch (c: kotlinx.coroutines.CancellationException) { throw c
+                } catch (t: Throwable) {
+                    store.addItem(s.id, ChatItem.Error(text = t.message ?: t.toString()))
+                    store.editSession(s.id) { it.copy(status = SessionStatus.ERROR) }
+                } finally { setActivity(s.id, Activity()) }
+            }
+        }
+    }
+
+    private fun systemPrompt(sessionId: String, agent: AgentProfile?, session: Session): String {
         val st = store.state.value
         val skills: List<Skill> = st.skills.filter { sk ->
             sk.enabled && (agent == null || agent.skillIds.isEmpty() || sk.id in agent.skillIds)
         }
-        val knowledge: List<KnowledgeItem> = st.knowledge.filter { it.enabled }
-        val date = SimpleDateFormat("EEEE, d 'de' MMMM 'de' yyyy HH:mm", Locale("pt", "BR")).format(Date())
+        val lastUser = session.llm.lastOrNull { it.role == "user" }?.content.orEmpty()
+        val query = lastUser + " " + session.summary.take(1500)
+        val memories = ctxMgr.relevantMemories(query, agent?.id)
+        val knowledge = ctxMgr.relevantKnowledge(query)
+        val notes = ctxMgr.readNotes(sessionId)
+        val date = SimpleDateFormat("EEEE, d 'de' MMMM 'de' yyyy", Locale("pt", "BR")).format(Date())
         return buildString {
+            // ---- parte estável (favorece cache de prompt) ----
             appendLine("Você é ${agent?.name ?: "Cue"}, um agente autônomo de uso geral rodando no app CueOpen (Android).")
-            appendLine("Data/hora: $date. Usuário: ${st.settings.userName.ifBlank { "não informado" }}.")
+            appendLine("Data: $date. Usuário: ${st.settings.userName.ifBlank { "não informado" }}.")
             appendLine()
             appendLine("Você tem um COMPUTADOR próprio:")
-            appendLine("- Terminal Linux (Alpine, via proot) — ferramenta `shell`. Workspace da tarefa: ${sandbox.guestPath(sessionId)} (diretório padrão). Instale pacotes com `apk add`, `pip install`, `npm i`.")
-            appendLine("- Browser real (WebView) — ferramentas browser_*. O usuário vê a tela ao vivo.")
-            appendLine("- Editor de arquivos — file_read / file_write / file_list.")
+            appendLine("- Terminal Linux (Alpine, via proot) — ferramenta `shell`. Workspace da tarefa: ${sandbox.guestPath(sessionId)}. Instale pacotes com `apk add`, `pip install`, `npm i`. O usuário vê cada comando ao vivo.")
+            appendLine("- Browser real (WebView) — ferramentas browser_* (inclui browser_network e browser_console para depurar).")
+            appendLine("- Arquivos — file_read / file_write / file_list.")
             appendLine()
             appendLine("Modo de trabalho:")
-            appendLine("1. Para tarefas com várias etapas, chame `update_plan` primeiro e atualize ao concluir fases.")
-            appendLine("2. Aja com as ferramentas em vez de descrever o que faria. Verifique resultados (rode o código, abra a página).")
-            appendLine("3. Entregáveis vão para arquivos no workspace; cite os caminhos na resposta final.")
-            appendLine("4. Use `ask_user` só quando algo for realmente ambíguo ou irreversível.")
-            appendLine("5. Termine com `finish` contendo um resumo curto do resultado. Responda no idioma do usuário.")
+            appendLine("1. Tarefas com várias etapas: chame `update_plan` e atualize ao concluir fases.")
+            appendLine("2. Aja com ferramentas em vez de descrever. Verifique resultados.")
+            appendLine("3. Economize contexto: leia só o necessário (head/grep), mande saídas longas para arquivo.")
+            appendLine("4. Anote em `notes_write` o que precisa lembrar durante a tarefa (achados, progresso, próximos passos).")
+            appendLine("5. Fatos duradouros sobre o usuário/projeto: `memory_save`. Para lembrar algo antigo: `memory_search`.")
+            appendLine("6. Para usar uma skill, chame `skill_load` com o nome e siga as instruções.")
+            appendLine("7. MODO CONTÍNUO: se o usuário pedir para monitorar, acompanhar, repetir ou rodar por horas/dias, NÃO finalize. Faça a verificação, registre em notes_write e chame `sleep` (minutos até a próxima verificação). Repita até o usuário pausar.")
+            appendLine("8. Fora do modo contínuo, termine com `finish` (resumo curto + arquivos). `ask_user` só se for ambíguo ou irreversível. Responda no idioma do usuário.")
             if (!agent?.instructions.isNullOrBlank()) { appendLine(); appendLine("## Instruções do Agent"); appendLine(agent!!.instructions) }
-            if (!agent?.memory.isNullOrEmpty()) { appendLine(); appendLine("## Memória do Agent"); agent!!.memory.forEach { appendLine("- $it") } }
             if (skills.isNotEmpty()) {
-                appendLine(); appendLine("## Skills disponíveis (siga as instruções quando o pedido se encaixar)")
-                skills.forEach { appendLine("### ${it.name}\n${it.description}\n${it.instructions}\n") }
+                appendLine(); appendLine("## Skills disponíveis (carregue com skill_load)")
+                skills.forEach { appendLine("- ${it.name}: ${it.description.take(160)}") }
+            }
+            // ---- parte dinâmica ----
+            val agentMem = agent?.memory.orEmpty()
+            if (agentMem.isNotEmpty() || memories.isNotEmpty()) {
+                appendLine(); appendLine("## Memória relevante")
+                agentMem.takeLast(10).forEach { appendLine("- $it") }
+                memories.forEach { appendLine("- ${it.text}") }
             }
             if (knowledge.isNotEmpty()) {
-                appendLine(); appendLine("## Knowledge do usuário (contexto confiável)")
-                knowledge.forEach { appendLine("### ${it.title}\n${it.content.take(2000)}\n") }
+                appendLine(); appendLine("## Knowledge do usuário (relevante)")
+                knowledge.forEach { appendLine("### ${it.title}\n${it.content.take(1500)}\n") }
             }
+            if (session.summary.isNotBlank()) {
+                appendLine(); appendLine("## Resumo da sessão até aqui (histórico antigo compactado)"); appendLine(session.summary.take(6000))
+            }
+            if (notes.isNotBlank()) {
+                appendLine(); appendLine("## Suas anotações da tarefa (NOTES.md)"); appendLine(notes.takeLast(4000))
+            }
+            if (session.continuous) { appendLine(); appendLine("## Estado: MODO CONTÍNUO ATIVO — continue o ciclo trabalho → notes_write → sleep.") }
         }
     }
 
@@ -232,7 +308,21 @@ class AgentRunner(
             add(tool("browser_back", "Volta uma página.", buildJsonObject {}))
             add(tool("browser_js", "Executa JavaScript na página e retorna o resultado.", buildJsonObject { put("code", str("Código JS (expressão)")) }, listOf("code")))
         }
-        add(tool("remember", "Salva um fato duradouro na memória deste Agent.", buildJsonObject { put("fact", str("Fato")) }, listOf("fact")))
+        if (web) {
+            add(tool("browser_network", "Lista as requisições de rede recentes da página (URL, método, tipo, status, tempo).", buildJsonObject { put("filter", str("Filtro opcional por texto na URL")) }))
+            add(tool("browser_console", "Mostra as mensagens recentes do console JavaScript da página.", buildJsonObject {}))
+        }
+        add(tool("notes_write", "Escreve no NOTES.md da tarefa (memória de trabalho que sempre volta ao seu contexto).", buildJsonObject {
+            put("content", str("Texto")); put("append", bool("true = acrescenta; false = substitui tudo"))
+        }, listOf("content")))
+        add(tool("memory_save", "Salva um fato duradouro na memória de longo prazo.", buildJsonObject {
+            put("fact", str("Fato")); put("scope", str("global ou agent")); put("tags", strArray("Palavras-chave"))
+        }, listOf("fact")))
+        add(tool("memory_search", "Busca na memória de longo prazo.", buildJsonObject { put("query", str("Busca")) }, listOf("query")))
+        add(tool("skill_load", "Carrega as instruções completas de uma skill.", buildJsonObject { put("name", str("Nome da skill")) }, listOf("name")))
+        add(tool("sleep", "Modo contínuo: pausa por N minutos e depois retoma automaticamente (monitoramento).", buildJsonObject {
+            put("minutes", int("Minutos até a próxima verificação (1-1440)")); put("reason", str("O que fazer ao acordar"))
+        }, listOf("minutes", "reason")))
         add(tool("create_skill", "Cria uma nova skill na biblioteca do usuário.", buildJsonObject {
             put("name", str("Nome")); put("description", str("Descrição curta")); put("instructions", str("Instruções detalhadas"))
         }, listOf("name", "description", "instructions")))
@@ -242,7 +332,7 @@ class AgentRunner(
         }, listOf("summary")))
     }
 
-    data class ToolResult(val output: String, val stop: SessionStatus? = null)
+    data class ToolResult(val output: String, val stop: SessionStatus? = null, val sleepMinutes: Int? = null)
 
     private suspend fun runTool(sessionId: String, call: ToolCall): ToolResult {
         val a: JsonObject = runCatching { json.parseToJsonElement(call.argsJson).jsonObject }.getOrDefault(JsonObject(emptyMap()))
@@ -260,6 +350,16 @@ class AgentRunner(
                 val existing = store.session(sessionId)?.items?.lastOrNull { it is ChatItem.Plan }
                 if (existing != null) store.replaceItem(sessionId, plan.copy(id = existing.id)) else store.addItem(sessionId, plan)
                 return ToolResult("Plano atualizado.")
+            }
+            "sleep" -> {
+                val m = (i("minutes") ?: 5).coerceIn(1, 1440)
+                store.addItem(sessionId, ChatItem.Step(tool = "sleep", title = "Aguardando $m min", args = s("reason"), result = "", status = StepStatus.OK))
+                return ToolResult(s("reason").ifBlank { "verificação" }, sleepMinutes = m)
+            }
+            "skill_load" -> {
+                val sk = store.state.value.skills.firstOrNull { it.name.equals(s("name"), true) }
+                    ?: store.state.value.skills.firstOrNull { it.name.contains(s("name"), true) }
+                return ToolResult(sk?.let { "# ${it.name}\n${it.instructions}" } ?: "Skill não encontrada. Disponíveis: " + store.state.value.skills.joinToString { it.name })
             }
             "ask_user" -> {
                 store.addItem(sessionId, ChatItem.Assistant(text = s("question"), final = true))
@@ -285,7 +385,11 @@ class AgentRunner(
             "browser_scroll" -> "Rolando página" to Activity.Kind.BROWSER
             "browser_back" -> "Voltando" to Activity.Kind.BROWSER
             "browser_js" -> "Executando script na página" to Activity.Kind.BROWSER
-            "remember" -> "Salvando na memória" to Activity.Kind.THINKING
+            "remember", "memory_save" -> "Salvando na memória" to Activity.Kind.THINKING
+            "memory_search" -> "Buscando na memória" to Activity.Kind.THINKING
+            "notes_write" -> "Anotando" to Activity.Kind.EDITOR
+            "browser_network" -> "Inspecionando rede" to Activity.Kind.BROWSER
+            "browser_console" -> "Lendo console" to Activity.Kind.BROWSER
             "create_skill" -> "Criando skill" to Activity.Kind.THINKING
             else -> call.name to Activity.Kind.THINKING
         }
@@ -295,7 +399,9 @@ class AgentRunner(
             "browser_navigate" -> s("url")
             "browser_type" -> s("text")
             "browser_click" -> "#${i("index")}"
-            "remember" -> s("fact")
+            "remember", "memory_save" -> s("fact")
+            "memory_search" -> s("query")
+            "notes_write" -> s("content").take(60)
             "create_skill" -> s("name")
             else -> ""
         }
@@ -339,7 +445,23 @@ class AgentRunner(
                 "browser_scroll" -> browser.scroll(s("direction") != "up")
                 "browser_back" -> { browser.back(); "ok" }
                 "browser_js" -> browser.runJs(s("code"))
-                "remember" -> {
+                "browser_network" -> browser.networkSummary(s("filter"))
+                "browser_console" -> browser.consoleSummary()
+                "notes_write" -> {
+                    val f = ctxMgr.notesFile(sessionId)
+                    if (a["append"]?.jsonPrimitive?.booleanOrNull != false && f.exists()) f.appendText("\n" + s("content")) else f.writeText(s("content"))
+                    "NOTES.md atualizado (${f.length()} bytes)."
+                }
+                "memory_save", "remember" -> {
+                    val sess = store.session(sessionId)
+                    val agentScoped = s("scope") == "agent" && sess?.agentId != null
+                    val tags = a["tags"]?.jsonArray?.map { it.jsonPrimitive.content }.orEmpty()
+                    store.upsertMemory(dev.cueopen.app.data.MemoryItem(text = s("fact"), agentId = if (agentScoped) sess?.agentId else null, tags = tags))
+                    "Memória salva."
+                }
+                "memory_search" -> ctxMgr.searchMemories(s("query"), store.session(sessionId)?.agentId)
+                    .joinToString("\n") { "- ${it.text}" }.ifBlank { "Nada encontrado." }
+                "remember_legacy" -> {
                     val sess = store.session(sessionId)
                     val ag = store.agent(sess?.agentId)
                     if (ag != null) { store.upsertAgent(ag.copy(memory = ag.memory + s("fact"))); "Memória salva." }

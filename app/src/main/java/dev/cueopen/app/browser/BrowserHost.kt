@@ -27,7 +27,70 @@ import org.json.JSONTokener
 class BrowserHost(private val appCtx: Context) {
 
     data class Ui(val url: String = "", val title: String = "", val loading: Boolean = false, val progress: Int = 0,
-                  val canBack: Boolean = false, val canForward: Boolean = false, val agentControl: Boolean = false)
+                  val canBack: Boolean = false, val canForward: Boolean = false, val agentControl: Boolean = false,
+                  val desktop: Boolean = false, val online: Boolean = true, val netType: String = "")
+
+    /** Uma requisição vista pelo WebView (painel Rede + ferramenta browser_network). */
+    data class NetEntry(val id: Long, val url: String, val method: String, val type: String, val mainFrame: Boolean,
+                        val time: Long, val status: Int? = null, val durationMs: Long? = null, val sizeBytes: Long? = null,
+                        val error: String? = null)
+    data class ConsoleEntry(val time: Long, val level: String, val message: String, val source: String)
+
+    private val _net = MutableStateFlow<List<NetEntry>>(emptyList())
+    val net: StateFlow<List<NetEntry>> = _net
+    private val _console = MutableStateFlow<List<ConsoleEntry>>(emptyList())
+    val console: StateFlow<List<ConsoleEntry>> = _console
+    private val netSeq = java.util.concurrent.atomic.AtomicLong()
+    private var defaultUa: String = ""
+
+    fun clearNet() { _net.value = emptyList(); _console.value = emptyList() }
+
+    private fun addNet(e: NetEntry) { _net.value = (_net.value + e).takeLast(500) }
+    private fun patchNet(url: String, fn: (NetEntry) -> NetEntry) {
+        val l = _net.value; val i = l.indexOfLast { it.url == url }
+        if (i >= 0) _net.value = l.toMutableList().also { it[i] = fn(it[i]) }
+    }
+
+    private fun guessType(url: String, accept: String?, main: Boolean): String {
+        val u = url.substringBefore('?').lowercase()
+        return when {
+            main -> "doc"
+            u.endsWith(".js") || u.endsWith(".mjs") -> "js"
+            u.endsWith(".css") -> "css"
+            Regex("\\.(png|jpe?g|gif|webp|svg|ico|avif)$").containsMatchIn(u) || accept?.startsWith("image") == true -> "img"
+            Regex("\\.(woff2?|ttf|otf)$").containsMatchIn(u) -> "font"
+            Regex("\\.(mp4|webm|m3u8|mp3)$").containsMatchIn(u) -> "media"
+            accept?.contains("json") == true || u.contains("/api/") -> "xhr"
+            else -> "other"
+        }
+    }
+
+    /** Monitor de conectividade (online/offline, Wi-Fi/dados). */
+    private fun watchNetwork() {
+        val cm = appCtx.getSystemService(android.net.ConnectivityManager::class.java) ?: return
+        fun update() {
+            val caps = cm.getNetworkCapabilities(cm.activeNetwork)
+            val online = caps?.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_INTERNET) == true
+            val type = when {
+                caps == null -> "offline"
+                caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_WIFI) -> "Wi-Fi"
+                caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_CELLULAR) -> "Dados móveis"
+                caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_VPN) -> "VPN"
+                else -> "Rede"
+            }
+            _ui.value = _ui.value.copy(online = online, netType = type)
+        }
+        update()
+        runCatching {
+            cm.registerDefaultNetworkCallback(object : android.net.ConnectivityManager.NetworkCallback() {
+                override fun onAvailable(network: android.net.Network) = update()
+                override fun onLost(network: android.net.Network) = update()
+                override fun onCapabilitiesChanged(network: android.net.Network, c: android.net.NetworkCapabilities) = update()
+            })
+        }
+    }
+
+    init { watchNetwork() }
 
     private val _ui = MutableStateFlow(Ui())
     val ui: StateFlow<Ui> = _ui
@@ -51,11 +114,34 @@ class BrowserHost(private val appCtx: Context) {
             @Suppress("DEPRECATION") allowUniversalAccessFromFileURLs = true
             mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
             userAgentString = userAgentString.replace("; wv", "")
+            cacheMode = WebSettings.LOAD_DEFAULT
+            mediaPlaybackRequiresUserGesture = false
+            setSupportMultipleWindows(false)
+            if (android.os.Build.VERSION.SDK_INT >= 26) safeBrowsingEnabled = false
         }
+        defaultUa = v.settings.userAgentString
+        v.setLayerType(android.view.View.LAYER_TYPE_HARDWARE, null)
+        if (android.os.Build.VERSION.SDK_INT >= 26) v.setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_IMPORTANT, false)
+        if (android.os.Build.VERSION.SDK_INT >= 23) v.settings.offscreenPreRaster = true
         v.webViewClient = object : WebViewClient() {
             override fun onPageStarted(view: WebView, url: String, favicon: Bitmap?) { sync(view, loading = true) }
             override fun onPageFinished(view: WebView, url: String) {
                 sync(view, loading = false); pageDone?.complete(Unit)
+                collectTimings(view)
+            }
+            override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): android.webkit.WebResourceResponse? {
+                // só observa (não intercepta): alimenta o painel de rede
+                val url = request.url.toString()
+                if (!url.startsWith("data:")) addNet(NetEntry(netSeq.incrementAndGet(), url, request.method ?: "GET",
+                    guessType(url, request.requestHeaders["Accept"], request.isForMainFrame), request.isForMainFrame, System.currentTimeMillis()))
+                return null
+            }
+            override fun onReceivedHttpError(view: WebView, request: WebResourceRequest, errorResponse: android.webkit.WebResourceResponse) {
+                patchNet(request.url.toString()) { it.copy(status = errorResponse.statusCode) }
+            }
+            override fun onReceivedError(view: WebView, request: WebResourceRequest, error: android.webkit.WebResourceError) {
+                patchNet(request.url.toString()) { it.copy(error = error.description?.toString()) }
+                if (request.isForMainFrame) pageDone?.complete(Unit)
             }
             override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
                 val s = request.url.scheme ?: return true
@@ -65,6 +151,11 @@ class BrowserHost(private val appCtx: Context) {
         v.webChromeClient = object : WebChromeClient() {
             override fun onProgressChanged(view: WebView, newProgress: Int) { _ui.value = _ui.value.copy(progress = newProgress) }
             override fun onReceivedTitle(view: WebView, title: String?) { sync(view) }
+            override fun onConsoleMessage(m: android.webkit.ConsoleMessage): Boolean {
+                _console.value = (_console.value + ConsoleEntry(System.currentTimeMillis(), m.messageLevel().name.lowercase(),
+                    m.message(), "${m.sourceId().substringAfterLast('/')}:${m.lineNumber()}")).takeLast(300)
+                return true
+            }
         }
         _view = v
         v.loadUrl(HOME)
@@ -77,6 +168,43 @@ class BrowserHost(private val appCtx: Context) {
     }
 
     fun home() { _view?.loadUrl(HOME) }
+
+    /** Alterna entre versão mobile e desktop dos sites. */
+    fun setDesktop(on: Boolean) {
+        val v = _view ?: return
+        v.settings.userAgentString = if (on) "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36" else defaultUa
+        v.settings.useWideViewPort = true; v.settings.loadWithOverviewMode = true
+        _ui.value = _ui.value.copy(desktop = on); v.reload()
+    }
+
+    /** Completa duração/tamanho das requisições com a Resource Timing API da página. */
+    private fun collectTimings(v: WebView) {
+        v.evaluateJavascript("""(function(){try{var n=performance.getEntriesByType('navigation')[0];var r=performance.getEntriesByType('resource');
+            var o=r.map(function(e){return [e.name,Math.round(e.duration),e.transferSize||e.encodedBodySize||0,e.responseStatus||0]});
+            if(n)o.push([location.href,Math.round(n.duration),n.transferSize||0,n.responseStatus||0]);return JSON.stringify(o.slice(-400));}catch(e){return '[]'}})()""") { raw ->
+            runCatching {
+                val arr = org.json.JSONArray(org.json.JSONTokener(raw).nextValue() as String)
+                val map = HashMap<String, org.json.JSONArray>()
+                for (i in 0 until arr.length()) arr.getJSONArray(i).let { map[it.getString(0)] = it }
+                _net.value = _net.value.map { e ->
+                    map[e.url]?.let { t -> e.copy(durationMs = t.getLong(1), sizeBytes = t.getLong(2).takeIf { it > 0 },
+                        status = e.status ?: t.getInt(3).takeIf { it > 0 }) } ?: e
+                }
+            }
+        }
+    }
+
+    fun networkSummary(filter: String): String {
+        val l = _net.value.filter { filter.isBlank() || it.url.contains(filter, true) }.takeLast(60)
+        if (l.isEmpty()) return "Nenhuma requisição registrada (rede: ${_ui.value.netType}, online=${_ui.value.online})."
+        val fails = l.count { (it.status ?: 0) >= 400 || it.error != null }
+        return "Rede: ${_ui.value.netType} · ${l.size} requisições · $fails com erro\n" + l.joinToString("\n") { e ->
+            "${e.method} ${e.status ?: e.error ?: "-"} ${e.type} ${e.durationMs?.let { "${it}ms" } ?: ""} ${e.sizeBytes?.let { "${it / 1024}KB" } ?: ""} ${e.url.take(160)}"
+        }
+    }
+
+    fun consoleSummary(): String = _console.value.takeLast(60).joinToString("\n") { "[${it.level}] ${it.message.take(300)} (${it.source})" }
+        .ifBlank { "Console vazio." }
 
     companion object { const val HOME = "file:///android_asset/start/index.html" }
 

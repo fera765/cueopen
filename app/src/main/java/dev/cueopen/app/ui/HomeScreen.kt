@@ -265,6 +265,7 @@ private fun SessionDrawer(nav: NavController, sessions: List<Session>, agents: L
         DrawerItem(Icons.Rounded.AutoAwesome, "Skills") { go("skills") }
         DrawerItem(Icons.Rounded.Schedule, "Tarefas agendadas") { go("scheduled") }
         DrawerItem(Icons.Rounded.LibraryBooks, "Knowledge") { go("knowledge") }
+        DrawerItem(Icons.Rounded.Psychology, "Memória") { go("memory") }
         DrawerItem(Icons.Rounded.FolderOpen, "Arquivos") { go("files") }
         DrawerItem(Icons.Rounded.Computer, "Computador (sandbox)") { go("sandbox") }
         Divider()

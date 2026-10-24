@@ -62,6 +62,7 @@ fun ChatScreen(nav: NavController, sessionId: String) {
     var draft by remember { mutableStateOf("") }
     var menu by remember { mutableStateOf(false) }
     var rename by remember { mutableStateOf(false) }
+    var usage by remember { mutableStateOf(false) }
     val ctx = LocalContext.current
     val c = Cue.c
 
@@ -95,6 +96,7 @@ fun ChatScreen(nav: NavController, sessionId: String) {
                         val t = dev.cueopen.app.data.ScheduledTask(title = session.title, prompt = first?.text ?: "", agentId = session.agentId)
                         app.store.upsertScheduled(t); nav.navigate("scheduled/${t.id}")
                     }, leadingIcon = { Icon(Icons.Rounded.Schedule, null) })
+                    DropdownMenuItem({ Text("Uso e contexto") }, { menu = false; usage = true }, leadingIcon = { Icon(Icons.Rounded.DataUsage, null) })
                     DropdownMenuItem({ Text("Renomear") }, { menu = false; rename = true }, leadingIcon = { Icon(Icons.Rounded.Edit, null) })
                     DropdownMenuItem({ Text("Excluir", color = c.err) }, {
                         menu = false; app.agent.stop(sessionId); app.store.deleteSession(sessionId); nav.popBackStack()
@@ -104,9 +106,13 @@ fun ChatScreen(nav: NavController, sessionId: String) {
         )
     }) { pad ->
         Column(Modifier.fillMaxSize().padding(pad).imePadding()) {
-            LazyColumn(Modifier.weight(1f).fillMaxWidth(), state = list, contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            LazyColumn(Modifier.weight(1f).fillMaxWidth(), state = list, contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 items(session.items, key = { it.id }) { item -> TimelineItem(item, onOpenComputer = { tab -> nav.navigate("computer/$sessionId?tab=$tab") }) }
                 if (running) item { ThinkingRow(act) }
+                if (session.status == SessionStatus.SLEEPING) item {
+                    val t = session.wakeAt?.let { java.text.SimpleDateFormat("HH:mm", java.util.Locale.getDefault()).format(java.util.Date(it)) } ?: "—"
+                    InfoRow(Icons.Rounded.Bedtime, "Modo contínuo: próxima verificação às $t. Toque em ■ ou envie uma mensagem para interromper.")
+                }
                 if (session.status == SessionStatus.STOPPED) item { InfoRow(Icons.Rounded.StopCircle, "Tarefa interrompida. Envie uma mensagem para continuar.") }
                 if (session.status == SessionStatus.DONE) item { DoneRow(onCopy = { copyText(ctx, lastAnswer(session)) }, onShare = { shareSession(ctx, session) }) }
             }
@@ -116,7 +122,7 @@ fun ChatScreen(nav: NavController, sessionId: String) {
             Composer(
                 value = draft, onChange = { draft = it },
                 placeholder = if (session.status == SessionStatus.WAITING_USER) "Responda ao agente…" else "Envie uma mensagem",
-                running = running, onStop = { app.agent.stop(sessionId) },
+                running = running || session.status == SessionStatus.SLEEPING, onStop = { app.agent.stop(sessionId) },
                 onSend = { text, files ->
                     val ws = app.sandbox.workspaceFor(sessionId)
                     val names = files.mapNotNull { u -> runCatching {
@@ -126,6 +132,19 @@ fun ChatScreen(nav: NavController, sessionId: String) {
                 },
             )
         }
+    }
+    if (usage) {
+        AlertDialog(onDismissRequest = { usage = false }, title = { Text("Uso e contexto") }, text = {
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Text("Chamadas ao modelo: ${session.llmCalls}")
+                Text("Tokens de entrada: ${session.tokensIn}  (em cache: ${session.tokensCached})")
+                Text("Tokens de saída: ${session.tokensOut}")
+                Text("Mensagens no contexto ativo: ${session.llm.size}")
+                Text("Compactações de contexto: ${session.compactions}")
+                Text("Modo contínuo: ${if (session.continuous) "ativo" else "desligado"}")
+                if (session.summary.isNotBlank()) { Text("Resumo da sessão:", fontWeight = FontWeight.SemiBold); Text(session.summary.take(1500), fontSize = 12.sp, color = c.ink2) }
+            }
+        }, confirmButton = { TextButton({ usage = false }) { Text("Fechar") } })
     }
     if (rename) {
         var t by remember { mutableStateOf(session.title) }
@@ -149,7 +168,7 @@ fun TimelineItem(item: ChatItem, onOpenComputer: (String) -> Unit) {
 @Composable
 private fun UserBubble(i: ChatItem.User) {
     val c = Cue.c
-    Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.End) {
+    Column(Modifier.fillMaxWidth().padding(top = 12.dp, bottom = 10.dp), horizontalAlignment = Alignment.End) {
         if (i.attachments.isNotEmpty()) {
             Row(Modifier.padding(bottom = 6.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 i.attachments.forEach { a ->

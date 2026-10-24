@@ -30,6 +30,11 @@ import java.util.Stack;
  */
 public final class TerminalEmulator {
 
+    /** CueOpen: recebe sequências OSC 777 (invisíveis) emitidas pelo shell. */
+    public interface OscListener { void onOsc(TerminalEmulator emulator, String text); }
+    public static volatile OscListener OSC_LISTENER;
+
+
     /** Log unknown or unimplemented escape sequences received from the shell process. */
     private static final boolean LOG_ESCAPE_SEQUENCES = false;
 
@@ -2847,6 +2852,12 @@ public final class TerminalEmulator {
                     }
                 }
                 break;
+            case 777: // CueOpen: sinal invisível do shell (fim de comando), repassado ao app.
+            {
+                OscListener cueListener = OSC_LISTENER;
+                if (cueListener != null) cueListener.onOsc(this, textParameter);
+                break;
+            }
             case 52: // Manipulate Selection Data. Skip the optional first selection parameter(s).
                 int startIndex = textParameter.indexOf(";") + 1;
                 try {

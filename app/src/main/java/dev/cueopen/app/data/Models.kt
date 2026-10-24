@@ -7,7 +7,7 @@ fun newId(): String = UUID.randomUUID().toString().take(12)
 fun now(): Long = System.currentTimeMillis()
 
 @Serializable
-enum class SessionStatus { IDLE, RUNNING, WAITING_USER, DONE, ERROR, STOPPED }
+enum class SessionStatus { IDLE, RUNNING, WAITING_USER, DONE, ERROR, STOPPED, SLEEPING }
 
 @Serializable
 enum class StepStatus { RUNNING, OK, ERROR }
@@ -87,6 +87,29 @@ data class Session(
     val pinned: Boolean = false,
     val scheduledTaskId: String? = null,
     val favorite: Boolean = false,
+    /** Resumo estruturado de tudo que já saiu da janela de contexto (compactação). */
+    val summary: String = "",
+    val compactions: Int = 0,
+    /** Modo contínuo/monitoramento: o agente alterna trabalho e `sleep` até o usuário pausar. */
+    val continuous: Boolean = false,
+    val wakeAt: Long? = null,
+    val wakeReason: String = "",
+    val tokensIn: Long = 0,
+    val tokensOut: Long = 0,
+    val tokensCached: Long = 0,
+    val llmCalls: Int = 0,
+)
+
+/** Memória de longo prazo (global ou de um Agent), recuperada por relevância — não toda de uma vez. */
+@Serializable
+data class MemoryItem(
+    val id: String = newId(),
+    val text: String,
+    val agentId: String? = null,
+    val tags: List<String> = emptyList(),
+    val createdAt: Long = now(),
+    val lastUsedAt: Long = now(),
+    val uses: Int = 0,
 )
 
 @Serializable
@@ -156,6 +179,9 @@ data class Settings(
     val sandboxPackages: String = "bash curl wget git python3 py3-pip nodejs npm",
     val userName: String = "",
     val notifyOnDone: Boolean = true,
+    /** Orçamento de contexto (tokens estimados) antes de compactar. */
+    val contextBudget: Int = 24_000,
+    val keepRecentMessages: Int = 10,
 )
 
 @Serializable
@@ -165,6 +191,7 @@ data class AppState(
     val skills: List<Skill> = BuiltInSkills.all,
     val scheduled: List<ScheduledTask> = emptyList(),
     val knowledge: List<KnowledgeItem> = emptyList(),
+    val memories: List<MemoryItem> = emptyList(),
     val settings: Settings = Settings(),
     val onboarded: Boolean = false,
 )

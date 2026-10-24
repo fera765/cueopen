@@ -43,7 +43,7 @@ class Store(context: Context) {
                 )
             },
             sessions = s.sessions.map {
-                if (it.status == SessionStatus.RUNNING) it.copy(status = SessionStatus.STOPPED) else it
+                if (it.status == SessionStatus.RUNNING) { if (it.continuous) it.copy(status = SessionStatus.SLEEPING, wakeAt = now()) else it.copy(status = SessionStatus.STOPPED) } else it
             },
         )
     }.getOrElse { AppState() }
@@ -102,6 +102,11 @@ class Store(context: Context) {
         st.copy(knowledge = if (st.knowledge.any { it.id == k.id }) st.knowledge.map { if (it.id == k.id) k else it } else st.knowledge + k)
     }
     fun deleteKnowledge(id: String) = update { it.copy(knowledge = it.knowledge.filterNot { k -> k.id == id }) }
+
+    fun upsertMemory(m: MemoryItem) = update { st ->
+        st.copy(memories = if (st.memories.any { it.id == m.id }) st.memories.map { if (it.id == m.id) m else it } else st.memories + m)
+    }
+    fun deleteMemory(id: String) = update { it.copy(memories = it.memories.filterNot { m -> m.id == id }) }
 
     fun updateSettings(fn: (Settings) -> Settings) = update { it.copy(settings = fn(it.settings)) }
 }

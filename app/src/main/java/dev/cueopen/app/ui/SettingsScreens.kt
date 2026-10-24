@@ -44,13 +44,17 @@ fun SettingsScreen(nav: NavController) {
             CueField(s.userName, { v -> app.store.updateSettings { it.copy(userName = v) } }, "Seu nome")
             SectionLabel("Modelo (OpenRouter)")
             CueField(s.apiKey, { v -> app.store.updateSettings { it.copy(apiKey = v.trim()) } }, "Chave da API", password = true)
-            CueField(s.model, { v -> app.store.updateSettings { it.copy(model = v.trim()) } }, "Modelo do agente")
-            CueField(s.fastModel, { v -> app.store.updateSettings { it.copy(fastModel = v.trim()) } }, "Modelo rápido (títulos)")
+            ModelPicker(s.model, { v -> app.store.updateSettings { it.copy(model = v) } }, "Modelo do agente")
+            ModelPicker(s.fastModel, { v -> app.store.updateSettings { it.copy(fastModel = v) } }, "Modelo rápido (títulos e resumos de contexto)")
             CueField(s.baseUrl, { v -> app.store.updateSettings { it.copy(baseUrl = v.trim()) } }, "Base URL (compatível OpenAI)")
             ToggleRow("Desativar thinking", "Zero raciocínio estendido — respostas mais rápidas", s.disableThinking) { v -> app.store.updateSettings { it.copy(disableThinking = v) } }
             Text("Passos máximos por execução: ${s.maxSteps}", fontSize = 14.sp)
             Slider(s.maxSteps.toFloat(), { v -> app.store.updateSettings { it.copy(maxSteps = v.toInt()) } }, valueRange = 10f..120f,
                 colors = SliderDefaults.colors(thumbColor = c.ink, activeTrackColor = c.ink))
+            Text("Orçamento de contexto antes de compactar: ${s.contextBudget / 1000}k tokens", fontSize = 14.sp)
+            Slider(s.contextBudget.toFloat(), { v -> app.store.updateSettings { it.copy(contextBudget = (v / 1000).toInt() * 1000) } }, valueRange = 8000f..120000f,
+                colors = SliderDefaults.colors(thumbColor = c.ink, activeTrackColor = c.ink))
+            SettingsLink(Icons.Rounded.Psychology, "Memória de longo prazo", "${st.memories.size} itens") { nav.navigate("memory") }
             SectionLabel("Aparência")
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 listOf(ThemeMode.SYSTEM to "Sistema", ThemeMode.LIGHT to "Claro", ThemeMode.DARK to "Escuro").forEach { (m, l) ->
@@ -178,7 +182,7 @@ fun OnboardingScreen(onDone: () -> Unit) {
                     Spacer(Modifier.height(20.dp))
                     CueField(st.settings.apiKey, { v -> app.store.updateSettings { it.copy(apiKey = v.trim()) } }, "sk-or-…", password = true)
                     Spacer(Modifier.height(8.dp))
-                    CueField(st.settings.model, { v -> app.store.updateSettings { it.copy(model = v.trim()) } }, "Modelo")
+                    ModelPicker(st.settings.model, { v -> app.store.updateSettings { it.copy(model = v) } }, "Modelo")
                 }
                 else -> {
                     val state by app.sandbox.state.collectAsStateWithLifecycle()

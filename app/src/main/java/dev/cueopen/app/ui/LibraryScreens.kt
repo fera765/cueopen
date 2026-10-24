@@ -30,6 +30,7 @@ import androidx.navigation.NavController
 import dev.cueopen.app.CueApp
 import dev.cueopen.app.data.*
 import dev.cueopen.app.scheduler.Scheduler
+import kotlinx.coroutines.launch
 import dev.cueopen.app.ui.theme.Cue
 import java.text.SimpleDateFormat
 import java.util.Calendar
@@ -107,7 +108,7 @@ fun AgentEditScreen(nav: NavController, id: String) {
             }
             CueField(a.name, { a = a.copy(name = it) }, "Nome do Agent")
             CueField(a.instructions, { a = a.copy(instructions = it) }, "Instruções (como deve agir, tom, objetivos)", minLines = 5)
-            CueField(a.model ?: "", { a = a.copy(model = it.ifBlank { null }) }, "Modelo (opcional, ex.: openai/gpt-4.1)")
+            ModelPicker(a.model ?: "", { a = a.copy(model = it.ifBlank { null }) }, "Modelo (vazio = padrão do app)", allowEmpty = true)
             SectionLabel("Ferramentas")
             ToggleRow("Terminal Linux", "Executar comandos no sandbox", a.useTerminal) { a = a.copy(useTerminal = it) }
             ToggleRow("Browser", "Navegar e interagir com sites", a.useBrowser) { a = a.copy(useBrowser = it) }
@@ -181,6 +182,7 @@ fun SkillsScreen(nav: NavController) {
                     }
                 }
             }
+            item { SkillMarketplace() }
             item { SectionLabel("Minhas skills") }
             items(st.skills, key = { it.id }) { s ->
                 CueCard(onClick = { nav.navigate("skill/${s.id}") }) {
@@ -356,6 +358,111 @@ fun KnowledgeEditScreen(nav: NavController, id: String) {
             CueField(k.title, { k = k.copy(title = it) }, "Título")
             CueField(k.content, { k = k.copy(content = it) }, "Conteúdo", minLines = 8)
             PillButton("Salvar", Icons.Rounded.Check, modifier = Modifier.fillMaxWidth(), enabled = k.title.isNotBlank()) { app.store.upsertKnowledge(k); nav.popBackStack() }
+        }
+    }
+}
+
+
+/** Busca no catálogo público de skills (Skyll, milhares de SKILL.md do GitHub) e instala com um toque. */
+@Composable
+private fun SkillMarketplace() {
+    val app = CueApp.instance
+    val st by app.store.state.collectAsStateWithLifecycle()
+    val c = Cue.c
+    val scope = rememberCoroutineScope()
+    var q by remember { mutableStateOf("") }
+    var loading by remember { mutableStateOf(false) }
+    var error by remember { mutableStateOf<String?>(null) }
+    var results by remember { mutableStateOf<List<SkillHub.Remote>>(emptyList()) }
+    var preview by remember { mutableStateOf<SkillHub.Remote?>(null) }
+    fun go() {
+        if (q.isBlank()) return
+        loading = true; error = null
+        scope.launch {
+            runCatching { SkillHub.search(q.trim()) }
+                .onSuccess { results = it; if (it.isEmpty()) error = "Nenhuma skill encontrada para \"$q\"." }
+                .onFailure { error = "Falha ao buscar: ${it.message}" }
+            loading = false
+        }
+    }
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        SectionLabel("Marketplace de skills")
+        OutlinedTextField(q, { q = it }, Modifier.fillMaxWidth(), singleLine = true, shape = RoundedCornerShape(16.dp),
+            placeholder = { Text("Buscar skills (ex.: pdf, excel, seo, react…)") },
+            leadingIcon = { Icon(Icons.Rounded.Search, null) },
+            trailingIcon = { if (loading) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp, color = c.accent) else IconButton({ go() }) { Icon(Icons.Rounded.ArrowForward, "Buscar") } },
+            keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(imeAction = androidx.compose.ui.text.input.ImeAction.Search),
+            keyboardActions = androidx.compose.foundation.text.KeyboardActions(onSearch = { go() }),
+            colors = OutlinedTextFieldDefaults.colors(focusedBorderColor = c.ink, unfocusedBorderColor = c.line, focusedContainerColor = c.surface, unfocusedContainerColor = c.surface))
+        error?.let { Text(it, color = c.ink2, fontSize = 13.sp) }
+        results.forEach { r ->
+            val installed = st.skills.any { it.name.equals(r.title.take(60), true) }
+            CueCard(onClick = { preview = r }) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text(r.title, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Text(r.description, fontSize = 13.sp, color = c.ink2, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                        val meta = listOfNotNull(r.source.takeIf { it.isNotBlank() }?.take(50), r.installs.takeIf { it > 0 }?.let { "$it instalações" }).joinToString(" · ")
+                        if (meta.isNotBlank()) Text(meta, fontSize = 11.sp, color = c.ink3, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    }
+                    Spacer(Modifier.width(8.dp))
+                    if (installed) Icon(Icons.Rounded.CheckCircle, "Instalada", tint = c.ok)
+                    else Box(Modifier.clip(CircleShape).background(c.ink).clickable { app.store.upsertSkill(SkillHub.toSkill(r)) }.padding(horizontal = 14.dp, vertical = 8.dp)) {
+                        Text("Adicionar", color = c.bg, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                    }
+                }
+            }
+        }
+    }
+    preview?.let { r ->
+        AlertDialog(onDismissRequest = { preview = null }, title = { Text(r.title) },
+            text = { Column(Modifier.heightIn(max = 420.dp).verticalScroll(rememberScrollState())) {
+                Text(r.description, color = c.ink2, fontSize = 13.sp); Spacer(Modifier.height(8.dp))
+                Text(r.content.ifBlank { "(sem conteúdo)" }.take(6000), fontSize = 12.sp, fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace)
+            } },
+            confirmButton = { TextButton({ app.store.upsertSkill(SkillHub.toSkill(r)); preview = null }) { Text("Adicionar") } },
+            dismissButton = { TextButton({ preview = null }) { Text("Fechar") } })
+    }
+}
+
+
+// ============================ MEMÓRIA ============================
+
+/** Memória de longo prazo (global e por Agent): o agente recupera só o que é relevante a cada passo. */
+@Composable
+fun MemoryScreen(nav: NavController) {
+    val app = CueApp.instance
+    val st by app.store.state.collectAsStateWithLifecycle()
+    val c = Cue.c
+    var q by remember { mutableStateOf("") }
+    var new by remember { mutableStateOf("") }
+    val list = st.memories.filter { q.isBlank() || it.text.contains(q, true) || it.tags.any { t -> t.contains(q, true) } }.sortedByDescending { it.createdAt }
+    Scaffold(containerColor = c.bg, topBar = { CueTopBar("Memória", { nav.popBackStack() }) }) { pad ->
+        LazyColumn(Modifier.padding(pad), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            item {
+                Text("Fatos duradouros que o agente salva (memory_save) ou que você adiciona. A cada passo, só as memórias relevantes entram no contexto — economiza tokens.",
+                    fontSize = 13.sp, color = c.ink2)
+            }
+            item {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    CueField(new, { new = it }, "Adicionar memória", Modifier.weight(1f))
+                    IconButton({ if (new.isNotBlank()) { app.store.upsertMemory(MemoryItem(text = new.trim())); new = "" } }) { Icon(Icons.Rounded.Add, "Adicionar") }
+                }
+            }
+            item { CueField(q, { q = it }, "Buscar") }
+            if (list.isEmpty()) item { EmptyState(Icons.Rounded.Psychology, "Sem memórias", "Elas aparecem aqui conforme o agente aprende sobre você e seus projetos.") }
+            items(list, key = { it.id }) { m ->
+                CueCard {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) {
+                            Text(m.text, fontSize = 14.sp)
+                            val owner = m.agentId?.let { id -> st.agents.firstOrNull { it.id == id }?.name?.let { "Agent: $it" } } ?: "Global"
+                            Text(owner + (if (m.tags.isNotEmpty()) " · " + m.tags.joinToString() else ""), fontSize = 11.sp, color = c.ink3)
+                        }
+                        IconButton({ app.store.deleteMemory(m.id) }) { Icon(Icons.Rounded.Delete, "Excluir", tint = c.ink3) }
+                    }
+                }
+            }
         }
     }
 }

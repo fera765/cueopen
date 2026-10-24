@@ -29,7 +29,8 @@ import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 
 data class ToolCall(val id: String, val name: String, val argsJson: String)
-data class LlmReply(val content: String?, val toolCalls: List<ToolCall>, val rawToolCallsJson: String?)
+data class Usage(val prompt: Long = 0, val completion: Long = 0, val cached: Long = 0)
+data class LlmReply(val content: String?, val toolCalls: List<ToolCall>, val rawToolCallsJson: String?, val usage: Usage = Usage())
 
 /** Cliente OpenAI-compatível (OpenRouter por padrão). Raciocínio/thinking desligado por padrão. */
 class OpenRouter(private val settings: () -> Settings) {
@@ -87,12 +88,15 @@ class OpenRouter(private val settings: () -> Settings) {
                 argsJson = f["arguments"]?.jsonPrimitive?.contentOrNull ?: "{}",
             )
         }.orEmpty()
-        LlmReply(content, calls, tcs?.toString())
+        val u = root["usage"]?.let { runCatching { it.jsonObject }.getOrNull() }
+        fun num(o: kotlinx.serialization.json.JsonObject?, k: String) = o?.get(k)?.let { runCatching { it.jsonPrimitive.content.toDouble().toLong() }.getOrNull() } ?: 0L
+        val cachedTok = u?.get("prompt_tokens_details")?.let { runCatching { it.jsonObject }.getOrNull() }?.let { num(it, "cached_tokens") } ?: 0L
+        LlmReply(content, calls, tcs?.toString(), Usage(num(u, "prompt_tokens"), num(u, "completion_tokens"), cachedTok))
     }
 
     /** Pedido simples sem ferramentas (títulos, resumos), no modelo rápido. */
-    suspend fun quick(prompt: String): String =
-        chat(listOf(LlmMessage("user", prompt)), model = settings().fastModel, maxTokens = 200).content.orEmpty().trim()
+    suspend fun quick(prompt: String, maxTokens: Int = 200): String =
+        chat(listOf(LlmMessage("user", prompt)), model = settings().fastModel, maxTokens = maxTokens).content.orEmpty().trim()
 
     private fun LlmMessage.toJson(): JsonElement = buildJsonObject {
         put("role", role)
