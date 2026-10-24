@@ -69,11 +69,7 @@ fun AgentsScreen(nav: NavController) {
                         Column(Modifier.weight(1f)) {
                             Text(a.name, style = MaterialTheme.typography.titleMedium)
                             Text(a.instructions.ifBlank { a.mission.ifBlank { "Sem instruções" } }, fontSize = 13.sp, color = c.ink2, maxLines = 2, overflow = TextOverflow.Ellipsis)
-                            if (a.autonomous) {
-                                val next = (a.lastBeatAt ?: System.currentTimeMillis()) + a.heartbeatMinutes * 60_000L
-                                Text("● Autônomo · próximo ciclo ${java.text.SimpleDateFormat("HH:mm", java.util.Locale.getDefault()).format(java.util.Date(next))} · ${a.actions} ações",
-                                    fontSize = 11.sp, color = c.ok)
-                            }
+                            if (a.autonomous) Text("● Autônomo · ${a.actions} ações", fontSize = 11.sp, color = c.ok)
                         }
                         IconButton({ nav.navigate("home?agent=${a.id}") }) { Icon(Icons.Rounded.ChatBubbleOutline, "Nova tarefa") }
                     }
@@ -114,37 +110,19 @@ fun AgentEditScreen(nav: NavController, id: String) {
             CueField(a.name, { a = a.copy(name = it) }, "Nome do Agent")
             CueField(a.instructions, { a = a.copy(instructions = it) }, "Instruções (como deve agir, tom, objetivos)", minLines = 5)
             ModelPicker(a.model ?: "", { a = a.copy(model = it.ifBlank { null }) }, "Modelo (vazio = padrão do app)", allowEmpty = true)
-            SectionLabel("Autonomia 24/7")
-            ToggleRow("Agente autônomo", "Trabalha sozinho em ciclos (heartbeat), mesmo com o app fechado", a.autonomous) { a = a.copy(autonomous = it) }
+            SectionLabel("Autonomia")
+            ToggleRow("Pode trabalhar de forma autônoma", "Quando ligado, o próprio agente decide, pela conversa, se e de quanto em quanto tempo deve acordar para seguir uma tarefa contínua. Sem um pedido assim, ele fica dormindo.", a.autonomous) { a = a.copy(autonomous = it) }
             if (a.autonomous) {
-                CueField(a.mission, { a = a.copy(mission = it) }, "Missão permanente (o que ele deve buscar/acompanhar/entregar)", minLines = 3)
-                Text("Acordar a cada", fontSize = 13.sp, color = c.ink2)
-                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    listOf(5 to "5 min", 15 to "15 min", 30 to "30 min", 60 to "1 h", 180 to "3 h", 720 to "12 h", 1440 to "24 h").forEach { (m, l) ->
-                        Chip(l, a.heartbeatMinutes == m) { a = a.copy(heartbeatMinutes = m) }
-                    }
-                }
-                Text("Horário ativo: ${a.activeStartHour}h – ${a.activeEndHour}h", fontSize = 13.sp, color = c.ink2)
-                RangeSlider(value = a.activeStartHour.toFloat()..a.activeEndHour.toFloat(), onValueChange = { r ->
-                    a = a.copy(activeStartHour = r.start.toInt(), activeEndHour = r.endInclusive.toInt().coerceAtLeast(r.start.toInt() + 1)) },
-                    valueRange = 0f..24f, steps = 23, colors = SliderDefaults.colors(thumbColor = c.ink, activeTrackColor = c.ink))
+                Text("Não precisa configurar intervalo: diga no chat o que acompanhar (ex.: \"a cada 20 min verifique o mercado\") e ele se agenda sozinho. Deixe o orçamento de tokens por dia como limite de segurança.", fontSize = 12.sp, color = c.ink3)
                 Text("Orçamento diário de tokens", fontSize = 13.sp, color = c.ink2)
                 FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     listOf(100_000L to "100k", 300_000L to "300k", 1_000_000L to "1M", 3_000_000L to "3M").forEach { (v, l) ->
                         Chip(l, a.dailyTokenBudget == v) { a = a.copy(dailyTokenBudget = v) }
                     }
                 }
-                ToggleRow("Notificar quando agir", "Avisa quando o heartbeat fizer algo (silencioso quando nada muda)", a.notifyOnAction) { a = a.copy(notifyOnAction = it) }
-                if (existing != null) {
-                    val today = java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.US).format(java.util.Date())
-                    Text("Heartbeats: ${existing.beats} · ações: ${existing.actions} · tokens hoje: ${if (existing.tokensDay == today) existing.tokensToday else 0}",
-                        fontSize = 12.sp, color = c.ink3)
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Chip("Rodar agora", icon = Icons.Rounded.PlayArrow) { app.store.upsertAgent(a); app.agent.heartbeat(a) }
-                        existing.homeSessionId?.let { sid -> Chip("Ver atividade", icon = Icons.Rounded.History) { nav.navigate("chat/$sid") } }
-                    }
-                }
+                ToggleRow("Notificar quando agir", "Avisa quando um ciclo fizer algo (silencioso quando nada muda)", a.notifyOnAction) { a = a.copy(notifyOnAction = it) }
             }
+            DevicePermissionsCard(a) { a = it }
             SectionLabel("Ferramentas")
             ToggleRow("Terminal Linux", "Executar comandos no sandbox", a.useTerminal) { a = a.copy(useTerminal = it) }
             ToggleRow("Browser", "Navegar e interagir com sites", a.useBrowser) { a = a.copy(useBrowser = it) }
@@ -499,6 +477,54 @@ fun MemoryScreen(nav: NavController) {
                     }
                 }
             }
+        }
+    }
+}
+
+/** Card expansível "Permissões do dispositivo" na criação do Agent. */
+@Composable
+fun DevicePermissionsCard(a: dev.cueopen.app.data.AgentProfile, onChange: (dev.cueopen.app.data.AgentProfile) -> Unit) {
+    val c = Cue.c
+    val ctx = LocalContext.current
+    var open by remember { mutableStateOf(a.deviceCaps.isNotEmpty()) }
+    var tick by remember { mutableIntStateOf(0) }
+    val lifecycle = androidx.lifecycle.compose.LocalLifecycleOwner.current
+    androidx.compose.runtime.DisposableEffect(lifecycle) {
+        val obs = androidx.lifecycle.LifecycleEventObserver { _, e -> if (e == androidx.lifecycle.Lifecycle.Event.ON_RESUME) tick++ }
+        lifecycle.lifecycle.addObserver(obs); onDispose { lifecycle.lifecycle.removeObserver(obs) }
+    }
+    SectionLabel("Permissões do dispositivo")
+    Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).border(1.dp, c.line, RoundedCornerShape(16.dp)).background(c.surface)) {
+        Row(Modifier.fillMaxWidth().clickable { open = !open }.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
+            Icon(Icons.Rounded.PhoneAndroid, null, tint = c.accent); Spacer(Modifier.width(10.dp))
+            Column(Modifier.weight(1f)) {
+                Text("Acesso ao Android", fontWeight = FontWeight.SemiBold)
+                Text(if (a.deviceCaps.isEmpty()) "Nenhuma permissão" else a.deviceCaps.size.toString() + " ativa(s)", fontSize = 12.sp, color = c.ink2)
+            }
+            Icon(if (open) Icons.Rounded.ExpandLess else Icons.Rounded.ExpandMore, null, tint = c.ink3)
+        }
+        if (open) {
+            HorizontalDivider(color = c.line)
+            dev.cueopen.app.device.DeviceCaps.all.forEach { cap ->
+                tick.let {}
+                val on = cap.id in a.deviceCaps
+                val granted = dev.cueopen.app.device.DeviceCaps.granted(ctx, cap.id)
+                Row(Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text(cap.title, fontWeight = FontWeight.Medium)
+                        Text(cap.desc, fontSize = 12.sp, color = c.ink2)
+                        if (on && !granted) Text("Toque para conceder no Android →", fontSize = 11.sp, color = c.warn,
+                            modifier = Modifier.clickable { dev.cueopen.app.device.DeviceCaps.request(ctx, cap.id) })
+                        else if (on && granted) Text("Concedida", fontSize = 11.sp, color = c.ok)
+                    }
+                    Switch(on, { v ->
+                        onChange(a.copy(deviceCaps = if (v) a.deviceCaps + cap.id else a.deviceCaps - cap.id))
+                        if (v && !granted) dev.cueopen.app.device.DeviceCaps.request(ctx, cap.id)
+                    }, colors = SwitchDefaults.colors(checkedTrackColor = c.ink, checkedThumbColor = c.bg))
+                }
+            }
+            Text("As permissões são concedidas por você nas telas do Android. O agente só usa o que estiver ligado aqui e concedido.",
+                fontSize = 11.sp, color = c.ink3, modifier = Modifier.padding(14.dp))
         }
     }
 }

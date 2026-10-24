@@ -149,6 +149,8 @@ data class AgentProfile(
     val tokensDay: String = "",
     val tokensToday: Long = 0,
     val notifyOnAction: Boolean = true,
+    /** Permissões do dispositivo liberadas PARA ESTE agente (ids em DeviceCaps). */
+    val deviceCaps: List<String> = emptyList(),
 )
 
 /** Conector MCP remoto (OAuth público com registro dinâmico de cliente, sem API key). */
@@ -161,6 +163,7 @@ data class Connector(
     val needsAuth: Boolean = true,
     val enabled: Boolean = true,
     val clientId: String? = null,
+    val clientSecret: String? = null,
     val accessToken: String? = null,
     val refreshToken: String? = null,
     val expiresAt: Long? = null,

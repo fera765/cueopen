@@ -39,6 +39,20 @@ fun ConnectorsScreen(nav: NavController) {
     val c = Cue.c
     var busy by remember { mutableStateOf<String?>(null) }
     var custom by remember { mutableStateOf(false) }
+    var query by remember { mutableStateOf("") }
+    var searching by remember { mutableStateOf(false) }
+    var found by remember { mutableStateOf<List<Connectors.Catalog>>(emptyList()) }
+    var searchErr by remember { mutableStateOf<String?>(null) }
+    fun doSearch() {
+        if (query.isBlank()) { found = emptyList(); return }
+        searching = true; searchErr = null
+        scope.launch {
+            runCatching { Connectors.searchRegistry(query.trim()) }
+                .onSuccess { found = it; if (it.isEmpty()) searchErr = "Nenhum servidor remoto encontrado." }
+                .onFailure { searchErr = "Falha na busca: ${it.message}" }
+            searching = false
+        }
+    }
 
     fun connect(conn: Connector) {
         busy = conn.id
@@ -61,6 +75,36 @@ fun ConnectorsScreen(nav: NavController) {
             item {
                 Text("Conecte serviços via MCP com login OAuth do próprio serviço. As ferramentas ficam disponíveis para o agente e para os seus Agents autônomos.",
                     fontSize = 13.sp, color = c.ink2)
+            }
+            item {
+                OutlinedTextField(query, { query = it }, Modifier.fillMaxWidth(), singleLine = true, shape = RoundedCornerShape(16.dp),
+                    placeholder = { Text("Buscar servidores MCP (registro oficial)") },
+                    leadingIcon = { Icon(Icons.Rounded.Search, null) },
+                    trailingIcon = { if (searching) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp, color = c.accent) else if (query.isNotBlank()) IconButton({ doSearch() }) { Icon(Icons.Rounded.ArrowForward, "Buscar") } },
+                    keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(imeAction = androidx.compose.ui.text.input.ImeAction.Search),
+                    keyboardActions = androidx.compose.foundation.text.KeyboardActions(onSearch = { doSearch() }),
+                    colors = OutlinedTextFieldDefaults.colors(focusedBorderColor = c.ink, unfocusedBorderColor = c.line, focusedContainerColor = c.surface, unfocusedContainerColor = c.surface))
+            }
+            searchErr?.let { item { Text(it, color = c.ink2, fontSize = 13.sp) } }
+            if (found.isNotEmpty()) {
+                item { SectionLabel("Resultados da busca") }
+                items(found, key = { "reg_" + it.id }) { cat ->
+                    val already = st.connectors.any { it.id == cat.id }
+                    CueCard {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Column(Modifier.weight(1f)) {
+                                Text(cat.name, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                Text(cat.description.ifBlank { cat.url }, fontSize = 12.sp, color = c.ink2, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                            }
+                            Spacer(Modifier.width(8.dp))
+                            if (already) Icon(Icons.Rounded.CheckCircle, null, tint = c.ok)
+                            else Box(Modifier.clip(CircleShape).background(c.ink).clickable { connect(Connector(cat.id, cat.name, cat.url, cat.description, cat.needsAuth, enabled = true)) }.padding(horizontal = 14.dp, vertical = 8.dp)) {
+                                Text(if (cat.needsAuth) "Conectar" else "Instalar", color = c.bg, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                            }
+                        }
+                    }
+                }
+                item { SectionLabel("Destaques") }
             }
             val installed = st.connectors
             val all = Connectors.catalog.map { cat -> installed.firstOrNull { it.id == cat.id } ?: Connector(cat.id, cat.name, cat.url, cat.description, cat.needsAuth, enabled = false) } +

@@ -44,6 +44,7 @@ object Connectors {
     data class Catalog(val id: String, val name: String, val url: String, val description: String, val needsAuth: Boolean = true)
 
     val catalog = listOf(
+        Catalog("github", "GitHub", "https://api.githubcopilot.com/mcp/", "Repositórios, issues, pull requests, code search e Actions"),
         Catalog("supabase", "Supabase", "https://mcp.supabase.com/mcp", "Projetos, banco Postgres, SQL, migrations, edge functions, logs"),
         Catalog("cloudflare", "Cloudflare", "https://mcp.cloudflare.com/mcp", "Workers, KV, R2, D1, DNS e a API da Cloudflare"),
         Catalog("notion", "Notion", "https://mcp.notion.com/mcp", "Páginas, bancos de dados e busca no seu workspace"),
@@ -54,7 +55,30 @@ object Connectors {
         Catalog("stripe", "Stripe", "https://mcp.stripe.com", "Clientes, pagamentos, produtos e faturas"),
         Catalog("context7", "Context7", "https://mcp.context7.com/mcp", "Documentação atualizada de bibliotecas (sem login)", needsAuth = false),
         Catalog("deepwiki", "DeepWiki", "https://mcp.deepwiki.com/mcp", "Pergunte sobre qualquer repositório do GitHub (sem login)", needsAuth = false),
+        Catalog("microsoftlearn", "Microsoft Learn", "https://learn.microsoft.com/api/mcp", "Documentação oficial da Microsoft/Azure (sem login)", needsAuth = false),
     )
+
+    /** Busca servidores MCP remotos no registro OFICIAL (grátis, sem API key). */
+    suspend fun searchRegistry(query: String, limit: Int = 30): List<Catalog> = withContext(Dispatchers.IO) {
+        val url = "https://registry.modelcontextprotocol.io/v0/servers?limit=$limit" + if (query.isBlank()) "" else "&search=" + Uri.encode(query)
+        val body = http.newCall(Request.Builder().url(url).header("Accept", "application/json").build()).execute().use { r ->
+            if (!r.isSuccessful) error("Registro respondeu HTTP ${r.code}"); r.body!!.string()
+        }
+        val servers = JSONObject(body).optJSONArray("servers") ?: JSONArray()
+        val out = mutableListOf<Catalog>()
+        for (i in 0 until servers.length()) {
+            val srv = servers.getJSONObject(i).optJSONObject("server") ?: continue
+            val name = srv.optString("name"); val desc = srv.optString("description")
+            // só servidores REMOTOS (streamable-http/sse têm url); stdio/npx não roda aqui
+            var remoteUrl: String? = null; var auth = true
+            srv.optJSONArray("remotes")?.let { rem -> for (j in 0 until rem.length()) { val o = rem.getJSONObject(j); if (o.has("url")) { remoteUrl = o.getString("url") } } }
+            if (remoteUrl == null) srv.optJSONArray("packages")?.let { pk -> for (j in 0 until pk.length()) { val tr = pk.getJSONObject(j).optJSONObject("transport"); val u = tr?.optString("url"); if (!u.isNullOrBlank()) remoteUrl = u } }
+            val u = remoteUrl ?: continue
+            val id = name.substringAfterLast('/').ifBlank { name }.lowercase().replace(Regex("[^a-z0-9]+"), "_").trim('_')
+            out += Catalog(id, name.substringAfterLast('/').ifBlank { name }, u, desc.take(200), auth)
+        }
+        out
+    }
 
     private val http = OkHttpClient.Builder().connectTimeout(20, TimeUnit.SECONDS).readTimeout(120, TimeUnit.SECONDS).build()
     private val sessions = java.util.concurrent.ConcurrentHashMap<String, String>() // connectorId -> Mcp-Session-Id
@@ -104,12 +128,14 @@ object Connectors {
         // 3) registro dinâmico de cliente
         val reg = JSONObject().put("client_name", "CueOpen").put("redirect_uris", JSONArray().put(redirect))
             .put("grant_types", JSONArray().put("authorization_code").put("refresh_token"))
-            .put("response_types", JSONArray().put("code")).put("token_endpoint_auth_method", "none")
-            .put("application_type", "native")
+            .put("response_types", JSONArray().put("code")).put("application_type", "native")
+            .put("token_endpoint_auth_method", "client_secret_post")
+            .put("scope", prm?.optJSONArray("scopes_supported")?.let { a -> (0 until a.length()).joinToString(" ") { a.getString(it) } } ?: "")
+        var clientSecret: String? = null
         val clientId = http.newCall(Request.Builder().url(regEp).post(reg.toString().toRequestBody(jsonType)).build()).execute().use { r ->
             val body = r.body?.string().orEmpty()
             if (!r.isSuccessful) error("Registro de cliente falhou (HTTP ${r.code}): ${body.take(200)}")
-            JSONObject(body).getString("client_id")
+            val o = JSONObject(body); clientSecret = o.optString("client_secret").ifBlank { null }; o.getString("client_id")
         }
 
         // 4) PKCE + autorização no navegador
@@ -132,14 +158,15 @@ object Connectors {
 
         // 5) troca do código por tokens
         val form = FormBody.Builder().add("grant_type", "authorization_code").add("code", code)
-            .add("redirect_uri", redirect).add("client_id", clientId).add("code_verifier", verifier).add("resource", c.url).build()
+            .add("redirect_uri", redirect).add("client_id", clientId).add("code_verifier", verifier).add("resource", c.url)
+            .apply { clientSecret?.let { add("client_secret", it) } }.build()
         val tok = http.newCall(Request.Builder().url(tokenEp).post(form).header("Accept", "application/json").build()).execute().use { r ->
             val body = r.body?.string().orEmpty()
             if (!r.isSuccessful) error("Troca de token falhou (HTTP ${r.code}): ${body.take(200)}")
             JSONObject(body)
         }
         val connected = c.copy(
-            clientId = clientId, tokenEndpoint = tokenEp,
+            clientId = clientId, clientSecret = clientSecret, tokenEndpoint = tokenEp,
             accessToken = tok.getString("access_token"), refreshToken = tok.optString("refresh_token").ifBlank { null },
             expiresAt = tok.optLong("expires_in", 0).takeIf { it > 0 }?.let { System.currentTimeMillis() + it * 1000 },
             connectedAt = System.currentTimeMillis(), lastError = null,
@@ -173,7 +200,8 @@ object Connectors {
     private fun refreshToken(store: Store, c: Connector): Connector? {
         val rt = c.refreshToken ?: return null
         val ep = c.tokenEndpoint ?: return null
-        val form = FormBody.Builder().add("grant_type", "refresh_token").add("refresh_token", rt).add("client_id", c.clientId ?: "").add("resource", c.url).build()
+        val form = FormBody.Builder().add("grant_type", "refresh_token").add("refresh_token", rt).add("client_id", c.clientId ?: "").add("resource", c.url)
+            .apply { c.clientSecret?.let { add("client_secret", it) } }.build()
         return runCatching {
             http.newCall(Request.Builder().url(ep).post(form).header("Accept", "application/json").build()).execute().use { r ->
                 if (!r.isSuccessful) return null

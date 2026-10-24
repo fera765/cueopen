@@ -293,6 +293,13 @@ class AgentRunner(
         return job
     }
 
+    private fun notifyRaw(title: String, text: String) = runCatching {
+        val nm = ctx.getSystemService(android.app.NotificationManager::class.java)
+        nm.notify((System.nanoTime() and 0xffffff).toInt(), android.app.Notification.Builder(ctx, dev.cueopen.app.CueApp.CH_TASKS)
+            .setSmallIcon(android.R.drawable.ic_dialog_info).setContentTitle(title).setContentText(text)
+            .setStyle(android.app.Notification.BigTextStyle().bigText(text)).setAutoCancel(true).build())
+    }
+
     private fun notifyAgent(a: AgentProfile, text: String) = runCatching {
         val nm = ctx.getSystemService(android.app.NotificationManager::class.java)
         val pi = android.app.PendingIntent.getActivity(ctx, a.id.hashCode(),
@@ -365,6 +372,9 @@ class AgentRunner(
             appendLine("4. Anote em `notes_write` o que precisa lembrar durante a tarefa (achados, progresso, próximos passos).")
             appendLine("5. Fatos duradouros sobre o usuário/projeto: `memory_save`. Para lembrar algo antigo: `memory_search`.")
             appendLine("6. Para usar uma skill, chame `skill_load` com o nome e siga as instruções.")
+            appendLine("6b. AUTONOMIA: se o usuário pedir para monitorar/acompanhar/repetir algo ao longo do tempo (ex.: \"a cada 20 min verifique o mercado\"), chame set_schedule com o intervalo em minutos. Se ele não der intervalo mas a tarefa for contínua, escolha um intervalo razoável e econômico. Para parar, set_schedule minutes=0.")
+            val caps = agent?.deviceCaps.orEmpty()
+            if (caps.isNotEmpty()) appendLine("6c. Você tem acesso ao aparelho: " + caps.joinToString(", ") { dev.cueopen.app.device.DeviceCaps.all.firstOrNull { d -> d.id == it }?.title ?: it } + ". Use as ferramentas device_* quando fizer sentido.")
             appendLine("7. MODO CONTÍNUO: se o usuário pedir para monitorar, acompanhar, repetir ou rodar por horas/dias, NÃO finalize. Faça a verificação, registre em notes_write e chame `sleep` (minutos até a próxima verificação). Repita até o usuário pausar.")
             appendLine("8. Fora do modo contínuo, termine com `finish` (resumo curto + arquivos). `ask_user` só se for ambíguo ou irreversível. Responda no idioma do usuário.")
             if (!agent?.instructions.isNullOrBlank()) { appendLine(); appendLine("## Instruções do Agent"); appendLine(agent!!.instructions) }
@@ -459,6 +469,23 @@ class AgentRunner(
         add(tool("create_skill", "Cria uma nova skill na biblioteca do usuário.", buildJsonObject {
             put("name", str("Nome")); put("description", str("Descrição curta")); put("instructions", str("Instruções detalhadas"))
         }, listOf("name", "description", "instructions")))
+        add(tool("set_schedule", "Faça o AGENTE trabalhar de forma autônoma e recorrente. Chame quando o usuário pedir para monitorar/acompanhar/repetir algo ao longo do tempo. Defina minutes = intervalo entre verificações (ex.: 20). Use minutes=0 para parar a autonomia.", buildJsonObject {
+            put("minutes", int("Minutos entre verificações; 0 para parar")); put("mission", str("O que verificar/fazer a cada ciclo"))
+        }, listOf("minutes")))
+        // Capacidades do dispositivo liberadas para este agente
+        val caps = agent?.deviceCaps.orEmpty()
+        if (dev.cueopen.app.device.DeviceCaps.NOTIF_READ in caps)
+            add(tool("device_notifications", "Lê as notificações recentes do aparelho (apps como WhatsApp, Gmail…).", buildJsonObject {
+                put("filter", str("Filtrar por app ou texto (opcional)")); put("limit", int("Máximo (padrão 30)"))
+            }))
+        if (dev.cueopen.app.device.DeviceCaps.NOTIF_POST in caps)
+            add(tool("device_notify", "Mostra uma notificação na barra de status do aparelho.", buildJsonObject {
+                put("title", str("Título")); put("text", str("Mensagem"))
+            }, listOf("text")))
+        if (dev.cueopen.app.device.DeviceCaps.SCREEN in caps)
+            add(tool("device_screenshot", "Captura a tela atual do aparelho e mostra no chat.", buildJsonObject {}))
+        if (dev.cueopen.app.device.DeviceCaps.OVERLAY in caps)
+            add(tool("device_overlay", "Mostra um balão flutuante sobre os outros apps.", buildJsonObject { put("text", str("Texto")) }, listOf("text")))
         connectorTools().forEach { add(it) }
         add(tool("ask_user", "Faz uma pergunta ao usuário e pausa a tarefa até ele responder.", buildJsonObject { put("question", str("Pergunta")) }, listOf("question")))
         add(tool("finish", "Conclui a tarefa com um resumo e a lista de entregáveis.", buildJsonObject {
@@ -492,6 +519,21 @@ class AgentRunner(
                 val existing = store.session(sessionId)?.items?.lastOrNull { it is ChatItem.Plan }
                 if (existing != null) store.replaceItem(sessionId, plan.copy(id = existing.id)) else store.addItem(sessionId, plan)
                 return ToolResult("Plano atualizado.")
+            }
+            "set_schedule" -> {
+                val m = i("minutes") ?: 0
+                val sess = store.session(sessionId); val ag = store.agent(sess?.agentId)
+                if (ag == null) return ToolResult("Esta tarefa não tem um Agent. Peça ao usuário para criar/usar um Agent para rodar de forma autônoma.")
+                if (m <= 0) {
+                    store.upsertAgent(ag.copy(autonomous = false))
+                    store.addItem(sessionId, ChatItem.Step(tool = "set_schedule", title = "Autonomia desligada", args = "", result = "", status = StepStatus.OK))
+                    return ToolResult("Autonomia desligada para ${ag.name}.")
+                }
+                store.upsertAgent(ag.copy(autonomous = true, heartbeatMinutes = m.coerceIn(1, 1440),
+                    mission = s("mission").ifBlank { ag.mission }, homeSessionId = sessionId, lastBeatAt = System.currentTimeMillis()))
+                startAutonomy()
+                store.addItem(sessionId, ChatItem.Step(tool = "set_schedule", title = "Agendado: a cada ${m} min", args = s("mission"), result = "", status = StepStatus.OK))
+                return ToolResult("Pronto: vou verificar a cada ${m} min de forma autônoma, mesmo com o app fechado. O usuário pode parar enviando /stop ou desligando a autonomia no Agent.")
             }
             "sleep" -> {
                 val m = (i("minutes") ?: 5).coerceIn(1, 1440)
@@ -550,6 +592,10 @@ class AgentRunner(
             "notes_write" -> "Anotando" to Activity.Kind.EDITOR
             "browser_network" -> "Inspecionando rede" to Activity.Kind.BROWSER
             "complete_step" -> "Concluindo fase" to Activity.Kind.THINKING
+            "set_schedule" -> "Agendando autonomia" to Activity.Kind.THINKING
+            "device_notifications" -> "Lendo notificações" to Activity.Kind.THINKING
+            "device_screenshot" -> "Capturando tela" to Activity.Kind.THINKING
+            "device_notify", "device_overlay" -> "Avisando no aparelho" to Activity.Kind.THINKING
             "browser_console" -> "Lendo console" to Activity.Kind.BROWSER
             "create_skill" -> "Criando skill" to Activity.Kind.THINKING
             else -> (if (call.name.startsWith("mcp_")) "Conector · " + call.name.substringAfter("__") else call.name) to Activity.Kind.THINKING
@@ -621,6 +667,16 @@ class AgentRunner(
                 "browser_scroll" -> browser.scroll(s("direction") != "up")
                 "browser_back" -> { browser.back(); "ok" }
                 "browser_js" -> browser.runJs(s("code"))
+                "device_notifications" -> dev.cueopen.app.device.NotifStore.recent(s("filter"), (i("limit") ?: 30).coerceIn(1, 100))
+                    .joinToString("\n") { "[${java.text.SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(it.time))}] ${it.app}: ${it.title} — ${it.text}".take(300) }
+                    .ifBlank { "Nenhuma notificação capturada ainda." }
+                "device_notify" -> { notifyRaw(s("title").ifBlank { "CueOpen" }, s("text")); "Notificação enviada." }
+                "device_overlay" -> { dev.cueopen.app.device.Overlay.show(ctx, s("text")); "Balão exibido." }
+                "device_screenshot" -> {
+                    val f = java.io.File(sandbox.workspaceFor(sessionId), "screenshot_${System.currentTimeMillis()}.png")
+                    if (dev.cueopen.app.device.ScreenCapture.capture(ctx, f)) { store.addItem(sessionId, ChatItem.Media(path = f.absolutePath, caption = "Captura de tela")); "Captura salva e exibida: ${f.name}" }
+                    else "Não foi possível capturar (permissão de captura não concedida)."
+                }
                 "browser_network" -> browser.networkSummary(s("filter"))
                 "browser_console" -> browser.consoleSummary()
                 "notes_write" -> {
