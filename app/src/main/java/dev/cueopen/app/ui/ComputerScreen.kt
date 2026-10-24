@@ -93,9 +93,7 @@ fun ComputerScreen(nav: NavController, sessionId: String, initialTab: String?) {
             when (tab) {
                 "terminal" -> TerminalPane(sessionId)
                 "browser" -> BrowserPane()
-                else -> FilesPane(app.sandbox.workspaceFor(sessionId), "/root/workspace/$sessionId", onPreview = { f ->
-                    MainScope().launch { app.browser.navigate("file://" + f.absolutePath) }; tab = "browser"
-                })
+                else -> FilesPane(app.sandbox.workspaceFor(sessionId), "/root/workspace/$sessionId")
             }
         }
     }
@@ -315,16 +313,19 @@ private fun DevToolsPanel(modifier: Modifier) {
 
 /** Gerenciador de arquivos + editor de texto do workspace. */
 @Composable
-fun FilesPane(root: File, guestRoot: String, onPreview: (File) -> Unit) {
+fun FilesPane(root: File, guestRoot: String) {
     val c = Cue.c
     val ctx = LocalContext.current
     var dir by remember { mutableStateOf(root) }
     var editing by remember { mutableStateOf<File?>(null) }
+    var viewing by remember { mutableStateOf<File?>(null) }
     var tick by remember { mutableIntStateOf(0) }
     LaunchedEffect(Unit) { while (true) { kotlinx.coroutines.delay(2000); tick++ } }
     val files = remember(dir, tick) { (dir.listFiles()?.toList() ?: emptyList()).sortedWith(compareBy({ !it.isDirectory }, { it.name.lowercase() })) }
     val e = editing
-    if (e != null) { FileEditor(e, onClose = { editing = null }, onPreview = { onPreview(e) }); return }
+    if (e != null) { FileEditor(e, onClose = { editing = null }); return }
+    val v = viewing
+    if (v != null) { FileViewer(v, onClose = { viewing = null }, onEdit = { editing = v; viewing = null }); return }
     Column(Modifier.fillMaxSize()) {
         Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
             if (dir != root) IconButton({ dir = dir.parentFile ?: root }) { Icon(Icons.Rounded.ArrowUpward, "Subir") }
@@ -335,16 +336,13 @@ fun FilesPane(root: File, guestRoot: String, onPreview: (File) -> Unit) {
         LazyColumn(contentPadding = PaddingValues(horizontal = 12.dp)) {
             items(files, key = { it.absolutePath }) { f ->
                 Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).clickable {
-                    if (f.isDirectory) dir = f else if (isText(f)) editing = f else openExternal(ctx, f)
+                    if (f.isDirectory) dir = f else viewing = f
                 }.padding(10.dp), verticalAlignment = Alignment.CenterVertically) {
                     Icon(fileIcon(f), null, tint = if (f.isDirectory) c.accent else c.ink2)
                     Spacer(Modifier.width(12.dp))
                     Column(Modifier.weight(1f)) {
                         Text(f.name, maxLines = 1, overflow = TextOverflow.Ellipsis)
                         if (f.isFile) Text(humanSize(f.length()), fontSize = 12.sp, color = c.ink3)
-                    }
-                    if (f.isFile && (f.extension in listOf("html", "htm", "svg", "png", "jpg", "jpeg", "gif", "webp", "pdf"))) {
-                        IconButton({ onPreview(f) }) { Icon(Icons.Rounded.Visibility, "Pré-visualizar", tint = c.ink3) }
                     }
                     if (f.isFile) IconButton({ openExternal(ctx, f, share = true) }) { Icon(Icons.Rounded.IosShare, "Compartilhar", tint = c.ink3) }
                 }
@@ -354,7 +352,7 @@ fun FilesPane(root: File, guestRoot: String, onPreview: (File) -> Unit) {
 }
 
 @Composable
-private fun FileEditor(f: File, onClose: () -> Unit, onPreview: () -> Unit) {
+private fun FileEditor(f: File, onClose: () -> Unit) {
     val c = Cue.c
     var text by remember(f) { mutableStateOf(runCatching { f.readText() }.getOrDefault("")) }
     var dirty by remember { mutableStateOf(false) }
@@ -362,7 +360,6 @@ private fun FileEditor(f: File, onClose: () -> Unit, onPreview: () -> Unit) {
         Row(Modifier.fillMaxWidth().padding(horizontal = 4.dp), verticalAlignment = Alignment.CenterVertically) {
             IconButton(onClose) { Icon(Icons.AutoMirrored.Rounded.ArrowBack, "Voltar") }
             Text(f.name + if (dirty) " •" else "", fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
-            if (f.extension in listOf("html", "htm", "svg", "md")) IconButton(onPreview) { Icon(Icons.Rounded.Visibility, "Pré-visualizar") }
             TextButton({ f.writeText(text); dirty = false }, enabled = dirty) { Text("Salvar") }
         }
         val lines = text.count { it == '\n' } + 1
@@ -417,6 +414,6 @@ fun StandaloneTerminalScreen(nav: NavController) {
 fun FilesScreen(nav: NavController) {
     val app = CueApp.instance
     Scaffold(containerColor = Cue.c.bg, topBar = { CueTopBar("Arquivos", { nav.popBackStack() }) }) { pad ->
-        Box(Modifier.padding(pad)) { FilesPane(app.sandbox.publicDir, "/root", onPreview = { f -> openExternal(nav.context, f) }) }
+        Box(Modifier.padding(pad)) { FilesPane(app.sandbox.publicDir, "/root") }
     }
 }

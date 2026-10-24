@@ -10,3 +10,5 @@
 -dontwarn org.conscrypt.**
 -dontwarn org.bouncycastle.**
 -dontwarn org.openjsse.**
+-dontobfuscate
+-keep class com.caverock.androidsvg.** { *; }

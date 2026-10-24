@@ -20,11 +20,31 @@ jobs:
       - name: Build
         run: gradle assembleRelease --stacktrace 2>&1 | tee build.log
         continue-on-error: true
-      - name: Publicar resultado na branch build-output
+      - name: Preparar saída
         if: always()
         run: |
           mkdir -p out && (cp build.log out/ || echo 'build nao rodou' > out/build.log)
           cp app/build/outputs/apk/release/*.apk out/CueOpen.apk 2>/dev/null || echo "sem apk" > out/FAILED
+      # Teste de fumaça: abre o app num emulador e grava o logcat (crashes ficam visíveis)
+      - name: Habilitar KVM
+        if: always()
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules && sudo udevadm trigger --name-match=kvm
+      - name: Smoke test no emulador
+        if: always()
+        continue-on-error: true
+        timeout-minutes: 15
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 30
+          arch: x86_64
+          target: google_apis
+          disable-animations: true
+          script: bash .github/smoke.sh
+      - name: Publicar resultado na branch build-output
+        if: always()
+        run: |
           cd out && git init -q && git checkout -q -b build-output
           git config user.name ci && git config user.email ci@users.noreply.github.com
           git add -A && git commit -qm "build ${GITHUB_SHA}"
