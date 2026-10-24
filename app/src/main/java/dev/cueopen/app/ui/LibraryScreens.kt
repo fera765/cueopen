@@ -26,6 +26,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.compose.foundation.text.BasicTextField
 import androidx.navigation.NavController
 import dev.cueopen.app.CueApp
 import dev.cueopen.app.data.*
@@ -243,7 +244,7 @@ fun SkillEditScreen(nav: NavController, id: String) {
 // ============================ AGENDADAS ============================
 
 private val dateFmt = SimpleDateFormat("dd/MM HH:mm", Locale("pt", "BR"))
-fun repeatLabel(r: Repeat) = when (r) { Repeat.ONCE -> "Uma vez"; Repeat.HOURLY -> "A cada hora"; Repeat.DAILY -> "Diariamente"; Repeat.WEEKLY -> "Semanalmente" }
+fun repeatLabel(r: Repeat) = when (r) { Repeat.ONCE -> "Uma vez"; Repeat.HALF_HOUR -> "30 min"; Repeat.HOURLY -> "1 hora"; Repeat.DAILY -> "Diário"; Repeat.WEEKLY -> "Semanal" }
 
 @Composable
 fun ScheduledScreen(nav: NavController) {
@@ -280,6 +281,7 @@ fun ScheduledScreen(nav: NavController) {
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun ScheduledEditScreen(nav: NavController, id: String) {
     val app = CueApp.instance
@@ -297,7 +299,7 @@ fun ScheduledEditScreen(nav: NavController, id: String) {
             CueField(t.title, { t = t.copy(title = it) }, "Nome")
             CueField(t.prompt, { t = t.copy(prompt = it) }, "O que o agente deve fazer", minLines = 5)
             SectionLabel("Repetição")
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) { Repeat.entries.forEach { r -> Chip(repeatLabel(r), t.repeat == r) { t = t.copy(repeat = r) } } }
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) { Repeat.entries.forEach { r -> Chip(repeatLabel(r), t.repeat == r) { t = t.copy(repeat = r) } } }
             SectionLabel("Início")
             Chip(dateFmt.format(Date(t.startAt)), icon = Icons.Rounded.Event) {
                 val cal = Calendar.getInstance().apply { timeInMillis = t.startAt }
@@ -450,33 +452,54 @@ fun MemoryScreen(nav: NavController) {
     val c = Cue.c
     var q by remember { mutableStateOf("") }
     var new by remember { mutableStateOf("") }
-    val list = st.memories.filter { q.isBlank() || it.text.contains(q, true) || it.tags.any { t -> t.contains(q, true) } }.sortedByDescending { it.createdAt }
+    val list = st.memories.filter { q.isBlank() || it.text.contains(q, true) || it.tags.any { t -> t.contains(q, true) } }.sortedByDescending { it.lastUsedAt }
     Scaffold(containerColor = c.bg, topBar = { CueTopBar("Memória", { nav.popBackStack() }) }) { pad ->
-        LazyColumn(Modifier.padding(pad), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        LazyColumn(Modifier.padding(pad), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             item {
-                Text("Fatos duradouros que o agente salva (memory_save) ou que você adiciona. A cada passo, só as memórias relevantes entram no contexto — economiza tokens.",
-                    fontSize = 13.sp, color = c.ink2)
-            }
-            item {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    CueField(new, { new = it }, "Adicionar memória", Modifier.weight(1f))
-                    IconButton({ if (new.isNotBlank()) { app.store.upsertMemory(MemoryItem(text = new.trim())); new = "" } }) { Icon(Icons.Rounded.Add, "Adicionar") }
-                }
-            }
-            item { CueField(q, { q = it }, "Buscar") }
-            if (list.isEmpty()) item { EmptyState(Icons.Rounded.Psychology, "Sem memórias", "Elas aparecem aqui conforme o agente aprende sobre você e seus projetos.") }
-            items(list, key = { it.id }) { m ->
-                CueCard {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Column(Modifier.weight(1f)) {
-                            Text(m.text, fontSize = 14.sp)
-                            val owner = m.agentId?.let { id -> st.agents.firstOrNull { it.id == id }?.name?.let { "Agent: $it" } } ?: "Global"
-                            Text(owner + (if (m.tags.isNotEmpty()) " · " + m.tags.joinToString() else ""), fontSize = 11.sp, color = c.ink3)
-                        }
-                        IconButton({ app.store.deleteMemory(m.id) }) { Icon(Icons.Rounded.Delete, "Excluir", tint = c.ink3) }
+                // card de destaque
+                Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(20.dp)).background(c.accentSoft).padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Box(Modifier.size(46.dp).clip(RoundedCornerShape(14.dp)).background(c.accent), contentAlignment = Alignment.Center) {
+                        Icon(Icons.Rounded.Psychology, null, tint = Color.White)
+                    }
+                    Spacer(Modifier.width(14.dp))
+                    Column(Modifier.weight(1f)) {
+                        Text("${st.memories.size} memórias", fontWeight = FontWeight.Bold, fontSize = 18.sp, color = c.ink)
+                        Text("Só as relevantes entram no contexto a cada passo — economiza tokens.", fontSize = 12.sp, color = c.ink2)
                     }
                 }
             }
+            item {
+                Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).background(c.surface).border(1.dp, c.line, RoundedCornerShape(16.dp)).padding(start = 14.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Rounded.Add, null, tint = c.ink3, modifier = Modifier.size(20.dp))
+                    BasicTextField(new, { new = it }, Modifier.weight(1f).padding(14.dp), singleLine = true,
+                        textStyle = MaterialTheme.typography.bodyLarge.copy(color = c.ink), cursorBrush = androidx.compose.ui.graphics.SolidColor(c.accent),
+                        decorationBox = { inner -> if (new.isEmpty()) Text("Adicionar uma memória…", color = c.ink3); inner() })
+                    if (new.isNotBlank()) TextButton({ app.store.upsertMemory(MemoryItem(text = new.trim())); new = "" }) { Text("Salvar", color = c.accent) }
+                }
+            }
+            item {
+                OutlinedTextField(q, { q = it }, Modifier.fillMaxWidth(), singleLine = true, shape = RoundedCornerShape(16.dp),
+                    placeholder = { Text("Buscar memórias") }, leadingIcon = { Icon(Icons.Rounded.Search, null) },
+                    colors = OutlinedTextFieldDefaults.colors(focusedBorderColor = c.ink, unfocusedBorderColor = c.line, focusedContainerColor = c.surface, unfocusedContainerColor = c.surface))
+            }
+            if (list.isEmpty()) item { EmptyState(Icons.Rounded.Psychology, "Sem memórias", "Elas aparecem aqui conforme o agente aprende sobre você e seus projetos.") }
+            items(list, key = { it.id }) { m ->
+                val agentName = m.agentId?.let { id -> st.agents.firstOrNull { it.id == id }?.name }
+                CueCard {
+                    Text(m.text, fontSize = 14.sp, lineHeight = 20.sp)
+                    Spacer(Modifier.height(8.dp))
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Box(Modifier.clip(CircleShape).background(if (agentName != null) c.accentSoft else c.surface2).padding(horizontal = 10.dp, vertical = 4.dp)) {
+                            Text(agentName?.let { "⬡ $it" } ?: "Global", fontSize = 11.sp, color = if (agentName != null) c.accent else c.ink2, fontWeight = FontWeight.Medium)
+                        }
+                        if (m.tags.isNotEmpty()) { Spacer(Modifier.width(8.dp)); Text(m.tags.joinToString(" · "), fontSize = 11.sp, color = c.ink3, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f)) }
+                        else Spacer(Modifier.weight(1f))
+                        if (m.uses > 0) Text("${m.uses}×", fontSize = 11.sp, color = c.ink3)
+                        IconButton({ app.store.deleteMemory(m.id) }, Modifier.size(32.dp)) { Icon(Icons.Rounded.Close, "Excluir", Modifier.size(16.dp), tint = c.ink3) }
+                    }
+                }
+            }
+            item { Spacer(Modifier.height(40.dp)) }
         }
     }
 }

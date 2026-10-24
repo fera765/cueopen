@@ -40,6 +40,9 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.Text
 import dev.cueopen.app.ui.theme.Cue
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -85,6 +88,7 @@ fun FileViewer(f: File, onClose: () -> Unit, onEdit: () -> Unit) {
                 ext in imageExt -> ImageView(f)
                 ext == "svg" -> SvgView(f)
                 ext == "pdf" -> PdfView(f)
+                ext in listOf("zip","jar","apk") -> ZipView(f)
                 (ext == "html" || ext == "htm") && rendered -> HtmlPreview(f)
                 ext == "md" && rendered -> MarkdownDocView(remember(f) { runCatching { f.readText() }.getOrDefault("") }, Modifier.fillMaxSize())
                 isText(f) || f.length() < 512_000 && looksText(f) -> CodeView(f)
@@ -295,4 +299,40 @@ private fun HtmlPreview(f: File) {
             loadUrl("file://" + f.absolutePath)
         }
     }, update = { it.tag ?: run { it.tag = f.absolutePath } })
+}
+
+
+/** Lista o conteúdo de um .zip/.jar/.apk com ícone por tipo de arquivo. */
+@Composable
+private fun ZipView(f: File) {
+    val c = Cue.c
+    data class Entry(val name: String, val size: Long, val dir: Boolean)
+    val entries by produceState<List<Entry>?>(null, f) {
+        value = withContext(Dispatchers.IO) {
+            runCatching {
+                java.util.zip.ZipFile(f).use { z -> z.entries().toList().map { Entry(it.name, it.size, it.isDirectory) } }
+                    .sortedWith(compareBy({ !it.dir }, { it.name.lowercase() }))
+            }.getOrNull()
+        }
+    }
+    val l = entries
+    when {
+        l == null -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { CircularProgressIndicator(color = c.accent) }
+        l.isEmpty() -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { Text("Arquivo vazio ou ilegível", color = c.ink2) }
+        else -> LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(10.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            item { Text("${l.count { !it.dir }} arquivos · ${l.count { it.dir }} pastas", fontSize = 12.sp, color = c.ink3, modifier = Modifier.padding(6.dp)) }
+            items(l.size) { i ->
+                val e = l[i]
+                val ff = File(e.name)
+                val (icon, tint) = if (e.dir) Icons.Rounded.Folder to c.accent else fileIconTint(ff, c)
+                Row(Modifier.fillMaxWidth().padding(horizontal = 6.dp, vertical = 7.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Icon(icon, null, Modifier.size(20.dp), tint = tint)
+                    Spacer(Modifier.width(10.dp))
+                    Text(e.name, Modifier.weight(1f), fontSize = 13.sp, fontFamily = FontFamily.Monospace, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    if (!e.dir) Text(humanSize(e.size), fontSize = 11.sp, color = c.ink3)
+                }
+                HorizontalDivider(color = c.line.copy(alpha = .5f))
+            }
+        }
+    }
 }

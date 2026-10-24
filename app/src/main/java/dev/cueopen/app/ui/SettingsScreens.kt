@@ -40,6 +40,22 @@ fun SettingsScreen(nav: NavController) {
     var confirmClear by remember { mutableStateOf(false) }
     Scaffold(containerColor = c.bg, topBar = { CueTopBar("Configurações", { nav.popBackStack() }) }) { pad ->
         Column(Modifier.padding(pad).verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            // Hero
+            Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(22.dp)).background(c.ink).padding(18.dp), verticalAlignment = Alignment.CenterVertically) {
+                AgentFace(c.accent, "wink", 44.dp)
+                Spacer(Modifier.width(14.dp))
+                Column(Modifier.weight(1f)) {
+                    Text("CueOpen", color = c.bg, fontWeight = FontWeight.Bold, fontSize = 20.sp)
+                    Text("Agente local · sem login · v3", color = c.bg.copy(alpha = .7f), fontSize = 12.sp)
+                }
+            }
+            SectionLabel("Autonomia e energia")
+            SettingsLink(Icons.Rounded.Alarm, "Alarmes e lembretes", "Permita para os ciclos autônomos dispararem no horário certo") {
+                runCatching { if (android.os.Build.VERSION.SDK_INT >= 31) nav.context.startActivity(android.content.Intent(android.provider.Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM, android.net.Uri.parse("package:" + nav.context.packageName))) }
+            }
+            SettingsLink(Icons.Rounded.BatteryChargingFull, "Ignorar otimização de bateria", "Evita que o Android pause o app em segundo plano") {
+                runCatching { nav.context.startActivity(android.content.Intent(android.provider.Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)) }
+            }
             SectionLabel("Você")
             CueField(s.userName, { v -> app.store.updateSettings { it.copy(userName = v) } }, "Seu nome")
             SectionLabel("Modelo (OpenRouter)")

@@ -185,7 +185,7 @@ data class Skill(
 )
 
 @Serializable
-enum class Repeat { ONCE, HOURLY, DAILY, WEEKLY }
+enum class Repeat { ONCE, HALF_HOUR, HOURLY, DAILY, WEEKLY }
 
 @Serializable
 data class ScheduledTask(

@@ -34,12 +34,12 @@ class ContextManager(private val store: Store, private val sandbox: Sandbox, pri
     /** Salva a saída completa da ferramenta e devolve a versão que entra no contexto. */
     fun storeToolOutput(sessionId: String, callId: String, output: String, limit: Int = 8_000): String {
         if (output.length <= limit) return output
-        val dir = File(sandbox.publicDir, ".cue/out").apply { mkdirs() }
-        val f = File(dir, "${sessionId}_${callId.takeLast(12)}.txt")
+        val dir = File(sandbox.workspaceFor(sessionId), ".cue/out").apply { mkdirs() }
+        val f = File(dir, "${callId.takeLast(12)}.txt")
         f.writeText(output)
         val head = output.take(limit / 2)
         val tail = output.takeLast(limit / 2)
-        return "$head\n…[${output.length - limit} caracteres omitidos — saída completa em /root/.cue/out/${f.name}; use file_read]…\n$tail"
+        return "$head\n…[${output.length - limit} caracteres omitidos — saída completa em .cue/out/${f.name} no seu workspace; use file_read]…\n$tail"
     }
 
     /** Antes de cada chamada: limpa resultados de ferramentas antigos (mantém os mais recentes). */

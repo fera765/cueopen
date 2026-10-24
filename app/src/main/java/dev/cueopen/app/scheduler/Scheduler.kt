@@ -36,7 +36,7 @@ object Scheduler {
             Repeat.ONCE -> wm.enqueueUniqueWork(name(t.id), ExistingWorkPolicy.REPLACE,
                 OneTimeWorkRequestBuilder<ScheduledWorker>().setInitialDelay(delayMs, TimeUnit.MILLISECONDS).setInputData(data).build())
             else -> {
-                val (n, unit) = when (t.repeat) { Repeat.HOURLY -> 1L to TimeUnit.HOURS; Repeat.DAILY -> 1L to TimeUnit.DAYS; else -> 7L to TimeUnit.DAYS }
+                val (n, unit) = when (t.repeat) { Repeat.HALF_HOUR -> 30L to TimeUnit.MINUTES; Repeat.HOURLY -> 1L to TimeUnit.HOURS; Repeat.DAILY -> 1L to TimeUnit.DAYS; else -> 7L to TimeUnit.DAYS }
                 wm.enqueueUniquePeriodicWork(name(t.id), ExistingPeriodicWorkPolicy.UPDATE,
                     PeriodicWorkRequestBuilder<ScheduledWorker>(n, unit).setInitialDelay(delayMs, TimeUnit.MILLISECONDS).setInputData(data).build())
             }

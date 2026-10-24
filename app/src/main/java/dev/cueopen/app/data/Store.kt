@@ -80,13 +80,17 @@ class Store(context: Context) {
         s.copy(items = s.items.map { if (it.id == item.id) item else it })
     }
 
-    fun deleteSession(id: String) = update { st -> st.copy(sessions = st.sessions.filterNot { it.id == id }) }
+    var onDeleteWorkspace: ((String) -> Unit)? = null
+    fun deleteSession(id: String) { runCatching { onDeleteWorkspace?.invoke(id) }; update { st -> st.copy(sessions = st.sessions.filterNot { it.id == id }) } }
 
     // ---- Agents / Skills / Agendadas / Knowledge ----
     fun upsertAgent(a: AgentProfile) = update { st ->
         st.copy(agents = if (st.agents.any { it.id == a.id }) st.agents.map { if (it.id == a.id) a else it } else st.agents + a)
     }
-    fun deleteAgent(id: String) = update { it.copy(agents = it.agents.filterNot { a -> a.id == id }) }
+    fun deleteAgent(id: String) {
+        _state.value.agents.firstOrNull { it.id == id }?.homeSessionId?.let { sid -> runCatching { onDeleteWorkspace?.invoke(sid) }; update { st -> st.copy(sessions = st.sessions.filterNot { it.id == sid }) } }
+        update { it.copy(agents = it.agents.filterNot { a -> a.id == id }) }
+    }
     fun agent(id: String?) = id?.let { i -> _state.value.agents.firstOrNull { it.id == i } }
 
     fun upsertSkill(s: Skill) = update { st ->

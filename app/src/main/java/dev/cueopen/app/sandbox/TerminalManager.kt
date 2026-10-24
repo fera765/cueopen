@@ -113,14 +113,15 @@ class TerminalManager(private val ctx: Context, private val sandbox: Sandbox) {
                 withContext(Dispatchers.Main) { if (!_alive.value) start() }
                 delay(400)
                 val id = System.nanoTime().toString(36)
-                val dir = File(sandbox.publicDir, ".cue").apply { mkdirs() }
+                val dir = File(sandbox.workspaceFor(key), ".cue").apply { mkdirs() }
+                val gcue = "$cwd/.cue"
                 val cmd = command.trim()
                 val simple = !cmd.contains('\n') && cmd.length <= 300 && !cmd.contains("<<") && cmd.count { it == '"' } % 2 == 0 && cmd.count { it == '\'' } % 2 == 0
                 val typed = when {
-                    background && simple -> "( $cmd ) > /root/.cue/bg_$id.log 2>&1 &"
-                    background -> { File(dir, "run_$id.sh").writeText(cmd + "\n"); "nohup bash /root/.cue/run_$id.sh > /root/.cue/bg_$id.log 2>&1 &" }
+                    background && simple -> "( $cmd ) > $gcue/bg_$id.log 2>&1 &"
+                    background -> { File(dir, "run_$id.sh").writeText(cmd + "\n"); "nohup bash $gcue/run_$id.sh > $gcue/bg_$id.log 2>&1 &" }
                     simple -> cmd
-                    else -> { File(dir, "run_$id.sh").writeText(cmd + "\n"); "bash /root/.cue/run_$id.sh" }
+                    else -> { File(dir, "run_$id.sh").writeText(cmd + "\n"); "bash $gcue/run_$id.sh" }
                 }
                 val before = transcript()
                 val waiter = kotlinx.coroutines.CompletableDeferred<Int>()
@@ -137,7 +138,7 @@ class TerminalManager(private val ctx: Context, private val sandbox: Sandbox) {
                     .joinToString("\n").trim()
                 File(dir, "run_$id.sh").delete()
                 Sandbox.ExecResult(exit ?: -1,
-                    if (background) "Iniciado em segundo plano (log: /root/.cue/bg_$id.log)" else out, exit == null)
+                    if (background) "Iniciado em segundo plano (log: $gcue/bg_$id.log)" else out, exit == null)
             }
     }
 

@@ -364,6 +364,7 @@ class AgentRunner(
             appendLine("1. Tarefas com várias etapas: chame `update_plan` e atualize ao concluir fases.")
             appendLine("2. Aja com ferramentas em vez de descrever. Verifique resultados.")
             appendLine("3. Economize contexto: leia só o necessário (head/grep), mande saídas longas para arquivo.")
+            appendLine("3a. Trabalhe APENAS no seu workspace (${sandbox.guestPath(sessionId)}); não leia /root/workspace de outras tarefas.")
             appendLine("3b. Arquivos: use file_write (nunca heredoc gigante no shell). Arquivos grandes em partes com append=true. Depois confira com `ls -la` ou file_read.")
             appendLine("3c. Ao gerar imagem/SVG/HTML/PDF, mostre ao usuário com `show_file`.")
             appendLine("3d. Com plano ativo, chame `complete_step` ao concluir CADA fase, antes de seguir para a próxima.")

@@ -333,21 +333,32 @@ fun FilesPane(root: File, guestRoot: String) {
                 maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
         }
         if (files.isEmpty()) EmptyState(Icons.Rounded.FolderOpen, "Pasta vazia", "Os arquivos criados pelo agente aparecem aqui.")
-        LazyColumn(contentPadding = PaddingValues(horizontal = 12.dp)) {
+        LazyColumn(contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
             items(files, key = { it.absolutePath }) { f ->
-                Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).clickable {
-                    if (f.isDirectory) dir = f else viewing = f
-                }.padding(10.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Icon(fileIcon(f), null, tint = if (f.isDirectory) c.accent else c.ink2)
-                    Spacer(Modifier.width(12.dp))
-                    Column(Modifier.weight(1f)) {
-                        Text(f.name, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        if (f.isFile) Text(humanSize(f.length()), fontSize = 12.sp, color = c.ink3)
-                    }
-                    if (f.isFile) IconButton({ openExternal(ctx, f, share = true) }) { Icon(Icons.Rounded.IosShare, "Compartilhar", tint = c.ink3) }
-                }
+                FileRow(f, onClick = { if (f.isDirectory) dir = f else viewing = f }, onShare = { openExternal(ctx, f, share = true) })
             }
         }
+    }
+}
+
+/** Linha elegante do gerenciador: ícone colorido por tipo, nome, tamanho e extensão. */
+@Composable
+private fun FileRow(f: File, onClick: () -> Unit, onShare: () -> Unit) {
+    val c = Cue.c
+    val (icon, tint) = fileIconTint(f, c)
+    Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(c.surface).border(1.dp, c.line, RoundedCornerShape(14.dp))
+        .clickable(onClick = onClick).padding(10.dp), verticalAlignment = Alignment.CenterVertically) {
+        Box(Modifier.size(40.dp).clip(RoundedCornerShape(11.dp)).background(tint.copy(alpha = 0.14f)), contentAlignment = Alignment.Center) {
+            Icon(icon, null, Modifier.size(22.dp), tint = tint)
+        }
+        Spacer(Modifier.width(12.dp))
+        Column(Modifier.weight(1f)) {
+            Text(f.name, maxLines = 1, overflow = TextOverflow.Ellipsis, fontWeight = FontWeight.Medium)
+            Text(if (f.isDirectory) "pasta · ${(f.listFiles()?.size ?: 0)} itens" else "${f.extension.uppercase().ifBlank { "arquivo" }} · ${humanSize(f.length())}",
+                fontSize = 12.sp, color = c.ink3)
+        }
+        if (f.isFile) IconButton(onShare) { Icon(Icons.Rounded.IosShare, "Compartilhar", Modifier.size(18.dp), tint = c.ink3) }
+        else Icon(Icons.Rounded.ChevronRight, null, tint = c.ink3)
     }
 }
 
@@ -377,13 +388,34 @@ private fun FileEditor(f: File, onClose: () -> Unit) {
 fun isText(f: File) = f.extension.lowercase() in setOf("txt", "md", "py", "js", "ts", "json", "html", "htm", "css", "sh", "kt", "java", "c", "cpp", "h",
     "yml", "yaml", "toml", "xml", "csv", "svg", "ini", "env", "log", "sql", "rs", "go", "rb", "php", "jsx", "tsx", "") && f.length() < 2_000_000
 
-fun fileIcon(f: File) = when {
-    f.isDirectory -> Icons.Rounded.Folder
-    f.extension in listOf("png", "jpg", "jpeg", "gif", "webp", "svg") -> Icons.Rounded.Image
-    f.extension in listOf("html", "htm") -> Icons.Rounded.Language
-    f.extension == "pdf" -> Icons.Rounded.PictureAsPdf
-    f.extension in listOf("py", "js", "ts", "sh", "kt", "json", "css") -> Icons.Rounded.Code
-    else -> Icons.Rounded.Description
+fun fileIcon(f: File): androidx.compose.ui.graphics.vector.ImageVector = when (f.extension.lowercase()) {
+    in listOf("png","jpg","jpeg","gif","webp","bmp","svg") -> Icons.Rounded.Image
+    "html","htm" -> Icons.Rounded.Language
+    "pdf" -> Icons.Rounded.PictureAsPdf
+    "zip","tar","gz","tgz","rar","7z","apk","jar" -> Icons.Rounded.FolderZip
+    "md" -> Icons.Rounded.Article
+    "json","yml","yaml","toml","xml","csv","ini","env","sql" -> Icons.Rounded.DataObject
+    "py","js","ts","tsx","jsx","sh","kt","java","c","cpp","h","go","rs","rb","php","css" -> Icons.Rounded.Code
+    "mp3","wav","ogg","m4a","flac" -> Icons.Rounded.Audiotrack
+    "mp4","webm","mkv","mov","avi" -> Icons.Rounded.Movie
+    else -> if (f.isDirectory) Icons.Rounded.Folder else Icons.Rounded.InsertDriveFile
+}
+
+fun fileIconTint(f: File, c: dev.cueopen.app.ui.theme.CueColors): Pair<androidx.compose.ui.graphics.vector.ImageVector, androidx.compose.ui.graphics.Color> {
+    if (f.isDirectory) return Icons.Rounded.Folder to c.accent
+    val col = when (f.extension.lowercase()) {
+        in listOf("png","jpg","jpeg","gif","webp","bmp","svg") -> Color(0xFF2FBF71)
+        "html","htm" -> Color(0xFFE8622C)
+        "pdf" -> Color(0xFFD93A3A)
+        "zip","tar","gz","tgz","rar","7z","apk","jar" -> Color(0xFFB57BFF)
+        "md" -> Color(0xFF4D8DFF)
+        "json","yml","yaml","toml","xml","csv","sql" -> Color(0xFFFFB02E)
+        "py","js","ts","tsx","jsx","sh","kt","java","c","cpp","h","go","rs","rb","php","css" -> Color(0xFF2EC4C4)
+        "mp3","wav","ogg","m4a","flac" -> Color(0xFFFF5C8A)
+        "mp4","webm","mkv","mov","avi" -> Color(0xFFFF8A3D)
+        else -> c.ink2
+    }
+    return fileIcon(f) to col
 }
 
 fun humanSize(b: Long) = when { b < 1024 -> "$b B"; b < 1024 * 1024 -> "${b / 1024} KB"; else -> "%.1f MB".format(b / 1048576.0) }
