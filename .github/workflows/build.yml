@@ -34,12 +34,15 @@ jobs:
       - name: Smoke test no emulador
         if: always()
         continue-on-error: true
-        timeout-minutes: 15
+        timeout-minutes: 25
         uses: reactivecircus/android-emulator-runner@v2
         with:
-          api-level: 30
+          api-level: 29
           arch: x86_64
-          target: google_apis
+          target: default
+          force-avd-creation: false
+          emulator-boot-timeout: 900
+          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none -no-snapshot
           disable-animations: true
           script: bash .github/smoke.sh
       - name: Publicar resultado na branch build-output

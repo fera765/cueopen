@@ -90,10 +90,13 @@ class BrowserHost(private val appCtx: Context) {
         }
     }
 
-    init { watchNetwork() }
+
 
     private val _ui = MutableStateFlow(Ui())
     val ui: StateFlow<Ui> = _ui
+
+    // precisa vir DEPOIS de _ui (ordem de inicialização das propriedades)
+    init { runCatching { watchNetwork() } }
     private var pageDone: CompletableDeferred<Unit>? = null
     private var _view: WebView? = null
 
