@@ -55,9 +55,10 @@ class ContextManager(private val store: Store, private val sandbox: Sandbox, pri
 
     // ---------- Camada 2 ----------
     /** Compacta se o histórico estimado passar do orçamento. Retorna a sessão atualizada (ou a mesma). */
-    suspend fun compactIfNeeded(s: Session): Session {
+    suspend fun compactIfNeeded(s: Session, force: Boolean = false): Session {
         val budget = store.settings.contextBudget
-        if (estimateTokens(s.llm) + estimateTokens(s.summary) < budget) return s
+        if (!force && (!s.autoCompact || estimateTokens(s.llm) + estimateTokens(s.summary) < budget)) return s
+        if (s.llm.size < 4) return s
         val keep = store.settings.keepRecentMessages.coerceAtLeast(4)
         // ponto de corte seguro: uma mensagem user/assistant (nunca no meio das respostas de ferramentas)
         var cut = (s.llm.size - keep).coerceAtLeast(1)
@@ -131,4 +132,60 @@ class ContextManager(private val store: Store, private val sandbox: Sandbox, pri
     }
 
     fun searchMemories(query: String, agentId: String?): List<MemoryItem> = relevantMemories(query, agentId, 15)
+
+    private fun jaccard(a: String, b: String): Double {
+        val x = words(a); val y = words(b)
+        if (x.isEmpty() || y.isEmpty()) return 0.0
+        return x.intersect(y).size.toDouble() / x.union(y).size
+    }
+
+    /** Salva com deduplicação: fatos quase iguais atualizam o existente em vez de duplicar. */
+    fun saveMemory(text: String, agentId: String?, tags: List<String> = emptyList()): String {
+        val t = text.trim().take(500)
+        if (t.isBlank()) return "Nada a salvar."
+        val dup = store.state.value.memories.firstOrNull { (it.agentId == agentId) && jaccard(it.text, t) >= 0.7 }
+        return if (dup != null) {
+            store.upsertMemory(dup.copy(text = if (t.length >= dup.text.length) t else dup.text, tags = (dup.tags + tags).distinct(), lastUsedAt = System.currentTimeMillis()))
+            "Memória existente atualizada."
+        } else {
+            store.upsertMemory(MemoryItem(text = t, agentId = agentId, tags = tags))
+            // poda: mantém no máximo 400 memórias (remove as menos usadas e mais antigas)
+            val all = store.state.value.memories
+            if (all.size > 400) all.sortedWith(compareBy({ it.uses }, { it.lastUsedAt })).take(all.size - 400).forEach { store.deleteMemory(it.id) }
+            "Memória salva."
+        }
+    }
+
+    /** Marca memórias injetadas como usadas (ranking por uso/recência). */
+    fun touch(items: List<MemoryItem>) {
+        val now = System.currentTimeMillis()
+        items.forEach { m -> store.upsertMemory(m.copy(uses = m.uses + 1, lastUsedAt = now)) }
+    }
+
+    /**
+     * Extração em segundo plano ao concluir uma tarefa (modelo rápido): fatos duradouros sobre o
+     * usuário, preferências e projetos viram memória de longo prazo. Barato e não bloqueia o chat.
+     */
+    suspend fun extractMemories(s: Session) {
+        val convo = s.llm.filter { it.role == "user" || (it.role == "assistant" && !it.content.isNullOrBlank()) }
+            .takeLast(16).joinToString("\n") { "${it.role}: ${(it.content ?: "").take(800)}" }
+        if (convo.length < 200) return
+        val existing = store.state.value.memories.takeLast(40).joinToString("\n") { "- ${it.text}" }
+        val out = runCatching {
+            llm.quick("""
+                Extraia da conversa abaixo de 0 a 5 FATOS DURADOUROS úteis em conversas futuras: preferências do usuário,
+                dados de projetos, decisões, contas/ferramentas que ele usa. NÃO inclua detalhes da tarefa pontual,
+                dados sensíveis (senhas, documentos, saúde) nem o que já está nas memórias existentes.
+                Responda só com uma lista, um fato por linha começando com "- ". Se não houver nada, responda NADA.
+
+                Memórias existentes:
+                $existing
+
+                Conversa:
+                $convo
+            """.trimIndent(), maxTokens = 400)
+        }.getOrNull() ?: return
+        out.lines().map { it.trim() }.filter { it.startsWith("- ") }.map { it.removePrefix("- ").trim() }
+            .filter { it.length in 8..400 }.take(5).forEach { saveMemory(it, null) }
+    }
 }

@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
@@ -195,6 +196,35 @@ fun Composer(
     val voice = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { r ->
         r.data?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)?.firstOrNull()?.let { onChange((value + " " + it).trim()) }
     }
+    // Sugestões de comandos (/) e menções (@ skills e agents)
+    val token = value.substringAfterLast(' ').substringAfterLast('\n')
+    val stAll = CueApp.instance.store.state.collectAsStateWithLifecycle().value
+    val suggestions: List<Triple<String, String, String>> = remember(token, stAll.skills, stAll.agents) {
+        when {
+            value.startsWith("/") && !value.contains(' ') -> slashCommands.filter { it.first.startsWith(value, true) }.map { Triple(it.first, it.second, it.first + " ") }
+            token.startsWith("@") -> (stAll.agents.map { Triple("@" + it.name, "Agent", "@" + it.name + " ") } +
+                stAll.skills.filter { it.enabled }.map { Triple("@" + it.name, "Skill · " + it.description.take(60), "@" + it.name + " ") })
+                .filter { it.first.contains(token.drop(1), true) }.take(12)
+            else -> emptyList()
+        }
+    }
+    if (suggestions.isNotEmpty()) {
+        Column(Modifier.fillMaxWidth().padding(horizontal = 12.dp).clip(RoundedCornerShape(18.dp)).background(c.surface).border(1.dp, c.line, RoundedCornerShape(18.dp))
+            .heightIn(max = 240.dp).verticalScroll(rememberScrollState())) {
+            suggestions.forEach { (label, desc, insert) ->
+                Row(Modifier.fillMaxWidth().clickable {
+                    onChange(if (label.startsWith("/")) insert else value.dropLast(token.length) + insert)
+                }.padding(horizontal = 14.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Icon(when { label.startsWith("/") -> Icons.Rounded.Terminal; desc == "Agent" -> Icons.Rounded.SmartToy; else -> Icons.Rounded.AutoAwesome },
+                        null, Modifier.size(18.dp), tint = c.accent)
+                    Spacer(Modifier.width(10.dp))
+                    Text(label, fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
+                    Spacer(Modifier.width(8.dp))
+                    Text(desc, fontSize = 12.sp, color = c.ink3, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
+            }
+        }
+    }
     Column(Modifier.fillMaxWidth().padding(12.dp)
         .clip(RoundedCornerShape(26.dp)).background(c.surface).border(1.dp, c.line, RoundedCornerShape(26.dp)).padding(12.dp)) {
         if (files.isNotEmpty()) {
@@ -248,6 +278,7 @@ fun RoundIcon(icon: ImageVector, desc: String, onClick: () -> Unit) {
 @Composable
 private fun SessionDrawer(nav: NavController, sessions: List<Session>, agents: List<AgentProfile>, onClose: () -> Unit, onNew: () -> Unit) {
     val c = Cue.c
+    val st0 = CueApp.instance.store.state.value
     var query by remember { mutableStateOf("") }
     val filtered = sessions.filter { query.isBlank() || it.title.contains(query, true) }.sortedByDescending { it.updatedAt }
     fun go(r: String) { onClose(); nav.navigate(r) }
@@ -263,6 +294,7 @@ private fun SessionDrawer(nav: NavController, sessions: List<Session>, agents: L
         Spacer(Modifier.height(4.dp))
         DrawerItem(Icons.Rounded.Groups, "Agents", "${agents.size}") { go("agents") }
         DrawerItem(Icons.Rounded.AutoAwesome, "Skills") { go("skills") }
+        DrawerItem(Icons.Rounded.Cable, "Conectores", "${st0.connectors.count { it.connectedAt != null }}".takeIf { it != "0" }) { go("connectors") }
         DrawerItem(Icons.Rounded.Schedule, "Tarefas agendadas") { go("scheduled") }
         DrawerItem(Icons.Rounded.LibraryBooks, "Knowledge") { go("knowledge") }
         DrawerItem(Icons.Rounded.Psychology, "Memória") { go("memory") }
@@ -339,3 +371,17 @@ fun dayGroup(t: Long): String {
         else -> SimpleDateFormat("MMMM yyyy", Locale("pt", "BR")).format(Date(t))
     }
 }
+
+
+/** Comandos da caixa de mensagem. */
+val slashCommands = listOf(
+    "/compact" to "Compacta o contexto da conversa agora",
+    "/autocompact" to "Liga/desliga a compactação automática ao atingir o limite",
+    "/clear" to "Limpa o contexto do modelo (mantém o histórico na tela)",
+    "/stop" to "Para o agente",
+    "/usage" to "Mostra uso de tokens e contexto",
+    "/memory" to "Abre a memória de longo prazo",
+    "/skills" to "Abre as skills",
+    "/connectors" to "Abre os conectores",
+    "/help" to "Lista os comandos",
+)

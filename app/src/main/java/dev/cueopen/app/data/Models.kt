@@ -107,6 +107,7 @@ data class Session(
     val tokensOut: Long = 0,
     val tokensCached: Long = 0,
     val llmCalls: Int = 0,
+    val autoCompact: Boolean = true,
 )
 
 /** Memória de longo prazo (global ou de um Agent), recuperada por relevância — não toda de uma vez. */
@@ -134,6 +135,39 @@ data class AgentProfile(
     val useBrowser: Boolean = true,
     val useTerminal: Boolean = true,
     val createdAt: Long = now(),
+    // ---- Autonomia 24/7 (heartbeat) ----
+    val autonomous: Boolean = false,
+    val mission: String = "",
+    val heartbeatMinutes: Int = 30,
+    val activeStartHour: Int = 0,
+    val activeEndHour: Int = 24,
+    val dailyTokenBudget: Long = 300_000,
+    val homeSessionId: String? = null,
+    val lastBeatAt: Long? = null,
+    val beats: Int = 0,
+    val actions: Int = 0,
+    val tokensDay: String = "",
+    val tokensToday: Long = 0,
+    val notifyOnAction: Boolean = true,
+)
+
+/** Conector MCP remoto (OAuth público com registro dinâmico de cliente, sem API key). */
+@Serializable
+data class Connector(
+    val id: String,
+    val name: String,
+    val url: String,
+    val description: String = "",
+    val needsAuth: Boolean = true,
+    val enabled: Boolean = true,
+    val clientId: String? = null,
+    val accessToken: String? = null,
+    val refreshToken: String? = null,
+    val expiresAt: Long? = null,
+    val tokenEndpoint: String? = null,
+    val toolsJson: String? = null,
+    val connectedAt: Long? = null,
+    val lastError: String? = null,
 )
 
 @Serializable
@@ -182,7 +216,7 @@ data class Settings(
     val model: String = "deepseek/deepseek-v4-flash",
     val fastModel: String = "deepseek/deepseek-v4-flash",
     val disableThinking: Boolean = true,
-    val maxSteps: Int = 40,
+    val maxSteps: Int = 1000,
     val theme: ThemeMode = ThemeMode.SYSTEM,
     val autoApproveCommands: Boolean = true,
     val sandboxPackages: String = "bash curl wget git python3 py3-pip nodejs npm",
@@ -201,6 +235,7 @@ data class AppState(
     val scheduled: List<ScheduledTask> = emptyList(),
     val knowledge: List<KnowledgeItem> = emptyList(),
     val memories: List<MemoryItem> = emptyList(),
+    val connectors: List<Connector> = emptyList(),
     val settings: Settings = Settings(),
     val onboarded: Boolean = false,
 )

@@ -16,8 +16,8 @@ android {
         // targetSdk 28 (igual ao build F-Droid do Acode) permite executar binários
         // do sandbox a partir de filesDir. Os .so do proot também vêm em jniLibs.
         targetSdk = 28
-        versionCode = 2
-        versionName = "2.0.0"
+        versionCode = 3
+        versionName = "3.0.0"
         ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64") }
     }
     buildTypes {
@@ -50,6 +50,10 @@ dependencies {
     implementation("androidx.core:core-ktx:1.15.0")
     implementation(project(":terminal-view"))
     implementation("com.caverock:androidsvg-aar:1.4")
+    // Markdown estilo GitHub no chat (tabelas, listas, citações) + highlight de código
+    implementation("com.mikepenz:multiplatform-markdown-renderer-m3:0.27.0")
+    implementation("com.mikepenz:multiplatform-markdown-renderer-code:0.27.0")
+    implementation("androidx.browser:browser:1.8.0")
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.7")
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.8.7")
     implementation("androidx.navigation:navigation-compose:2.8.5")
@@ -60,19 +64,26 @@ dependencies {
     debugImplementation("androidx.compose.ui:ui-tooling")
 }
 
-// Baixa o xterm.js (frontend do terminal, mesmo do Acode) para assets/terminal.
-val xtermFiles = mapOf(
-    "xterm.js" to "@xterm/xterm@5.5.0/lib/xterm.js",
-    "xterm.css" to "@xterm/xterm@5.5.0/css/xterm.css",
-    "addon-fit.js" to "@xterm/addon-fit@0.10.0/lib/addon-fit.js",
-    "addon-web-links.js" to "@xterm/addon-web-links@0.11.0/lib/addon-web-links.js",
+// Assets web baixados na build (CDN jsDelivr): xterm.js (terminal legado) e o kit de Markdown
+// estilo GitHub (github-markdown-css + marked + highlight.js + mermaid) para previews e diagramas.
+val webAssets = mapOf(
+    "terminal/xterm.js" to "@xterm/xterm@5.5.0/lib/xterm.js",
+    "terminal/xterm.css" to "@xterm/xterm@5.5.0/css/xterm.css",
+    "terminal/addon-fit.js" to "@xterm/addon-fit@0.10.0/lib/addon-fit.js",
+    "terminal/addon-web-links.js" to "@xterm/addon-web-links@0.11.0/lib/addon-web-links.js",
+    "md/github-markdown.css" to "github-markdown-css@5.5.1/github-markdown.css",
+    "md/marked.min.js" to "marked@12.0.2/marked.min.js",
+    "md/highlight.min.js" to "@highlightjs/cdn-assets@11.9.0/highlight.min.js",
+    "md/hl-github.css" to "@highlightjs/cdn-assets@11.9.0/styles/github.min.css",
+    "md/hl-github-dark.css" to "@highlightjs/cdn-assets@11.9.0/styles/github-dark.min.css",
+    "md/mermaid.min.js" to "mermaid@10.9.1/dist/mermaid.min.js",
 )
-val downloadXterm by tasks.registering {
-    val dir = file("src/main/assets/terminal")
-    outputs.files(xtermFiles.keys.map { File(dir, it) })
+val downloadWebAssets by tasks.registering {
+    val dir = file("src/main/assets")
+    outputs.files(webAssets.keys.map { File(dir, it) })
     doLast {
-        xtermFiles.forEach { (name, path) ->
-            val out = File(dir, name)
+        webAssets.forEach { (name, path) ->
+            val out = File(dir, name).apply { parentFile.mkdirs() }
             if (!out.exists() || out.length() == 0L) {
                 logger.lifecycle("Baixando $name")
                 URI("https://cdn.jsdelivr.net/npm/$path").toURL().openStream().use { i -> out.outputStream().use { i.copyTo(it) } }
@@ -80,4 +91,4 @@ val downloadXterm by tasks.registering {
         }
     }
 }
-tasks.named("preBuild") { dependsOn(downloadXterm) }
+tasks.named("preBuild") { dependsOn(downloadWebAssets) }

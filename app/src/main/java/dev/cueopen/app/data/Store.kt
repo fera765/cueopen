@@ -38,6 +38,7 @@ class Store(context: Context) {
             skills = s.skills + missing,
             settings = s.settings.let { st ->
                 st.copy(
+                    maxSteps = if (st.maxSteps <= 120) 1000 else st.maxSteps,
                     model = if (st.model == "anthropic/claude-sonnet-4.5") "deepseek/deepseek-v4-flash" else st.model,
                     fastModel = if (st.fastModel == "google/gemini-2.5-flash") "deepseek/deepseek-v4-flash" else st.fastModel,
                 )
@@ -102,6 +103,12 @@ class Store(context: Context) {
         st.copy(knowledge = if (st.knowledge.any { it.id == k.id }) st.knowledge.map { if (it.id == k.id) k else it } else st.knowledge + k)
     }
     fun deleteKnowledge(id: String) = update { it.copy(knowledge = it.knowledge.filterNot { k -> k.id == id }) }
+
+    fun upsertConnector(c: Connector) = update { st ->
+        st.copy(connectors = if (st.connectors.any { it.id == c.id }) st.connectors.map { if (it.id == c.id) c else it } else st.connectors + c)
+    }
+    fun connector(id: String) = _state.value.connectors.firstOrNull { it.id == id }
+    fun deleteConnector(id: String) = update { it.copy(connectors = it.connectors.filterNot { c -> c.id == id }) }
 
     fun upsertMemory(m: MemoryItem) = update { st ->
         st.copy(memories = if (st.memories.any { it.id == m.id }) st.memories.map { if (it.id == m.id) m else it } else st.memories + m)

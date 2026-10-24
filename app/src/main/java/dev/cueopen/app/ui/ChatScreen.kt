@@ -48,6 +48,7 @@ import dev.cueopen.app.data.SessionStatus
 import dev.cueopen.app.data.StepStatus
 import dev.cueopen.app.ui.theme.Cue
 import java.io.File
+import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -65,6 +66,7 @@ fun ChatScreen(nav: NavController, sessionId: String) {
     var rename by remember { mutableStateOf(false) }
     var usage by remember { mutableStateOf(false) }
     var mediaOpen by remember { mutableStateOf<String?>(null) }
+    val cmdScope = rememberCoroutineScope()
     val ctx = LocalContext.current
     val c = Cue.c
 
@@ -156,6 +158,33 @@ fun ChatScreen(nav: NavController, sessionId: String) {
                 placeholder = if (session.status == SessionStatus.WAITING_USER) "Responda ao agente…" else "Envie uma mensagem",
                 running = running || session.status == SessionStatus.SLEEPING, onStop = { app.agent.stop(sessionId) },
                 onSend = { text, files ->
+                    val cmd = text.trim().lowercase()
+                    if (cmd.startsWith("/") && !cmd.contains(' ')) {
+                        draft = ""
+                        when (cmd) {
+                            "/compact" -> cmdScope.launch {
+                                val msg = app.agent.compactNow(sessionId)
+                                app.store.addItem(sessionId, ChatItem.Assistant(text = "🗜️ $msg", final = false))
+                            }
+                            "/autocompact" -> {
+                                val on = !(app.store.session(sessionId)?.autoCompact ?: true)
+                                app.store.editSession(sessionId) { it.copy(autoCompact = on) }
+                                app.store.addItem(sessionId, ChatItem.Assistant(text = "Compactação automática ${if (on) "ligada" else "desligada"}.", final = false))
+                            }
+                            "/clear" -> {
+                                app.store.editSession(sessionId) { it.copy(llm = emptyList(), summary = "") }
+                                app.store.addItem(sessionId, ChatItem.Assistant(text = "Contexto do modelo limpo. O histórico continua visível.", final = false))
+                            }
+                            "/stop" -> app.agent.stop(sessionId)
+                            "/usage" -> usage = true
+                            "/memory" -> nav.navigate("memory")
+                            "/skills" -> nav.navigate("skills")
+                            "/connectors" -> nav.navigate("connectors")
+                            else -> app.store.addItem(sessionId, ChatItem.Assistant(text = "**Comandos**\n" + slashCommands.joinToString("\n") { "- `${it.first}` — ${it.second}" } +
+                                "\n\nUse `@` para mencionar uma skill (carrega as instruções dela) ou um Agent (passa a tarefa para ele).", final = false))
+                        }
+                        return@Composer
+                    }
                     val ws = app.sandbox.workspaceFor(sessionId)
                     val names = files.mapNotNull { u -> runCatching {
                         val n = queryName(ctx, u); ctx.contentResolver.openInputStream(u)!!.use { i -> File(ws, n).outputStream().use { i.copyTo(it) } }; n
@@ -232,7 +261,10 @@ private fun AssistantText(i: ChatItem.Assistant) {
 
 /** Markdown leve: títulos, listas, **negrito**, `código` e blocos ``` . */
 @Composable
-fun Markdown(text: String) {
+fun Markdown(text: String) = CueMarkdown(text)
+
+@Composable
+private fun LegacyMarkdown(text: String) {
     val c = Cue.c
     val blocks = remember(text) { text.split("```") }
     SelectionContainer {

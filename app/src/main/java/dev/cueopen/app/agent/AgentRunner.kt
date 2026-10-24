@@ -82,8 +82,16 @@ class AgentRunner(
     fun send(sessionId: String, text: String, attachments: List<String> = emptyList(), onDone: (() -> Unit)? = null): Job {
         jobs[sessionId]?.cancel()
         store.addItem(sessionId, ChatItem.User(text = text, attachments = attachments))
-        val content = if (attachments.isEmpty()) text
+        var content = if (attachments.isEmpty()) text
         else text + "\n\n[Arquivos anexados no workspace: ${attachments.joinToString()}]"
+        // @Skill → injeta as instruções só desta skill (divulgação progressiva); @Agent → troca o agente da tarefa
+        val st0 = store.state.value
+        st0.skills.filter { sk -> text.contains("@" + sk.name, ignoreCase = true) }.forEach { sk ->
+            content += "\n\n[Skill solicitada pelo usuário: ${sk.name}]\n${sk.instructions}"
+        }
+        st0.agents.firstOrNull { a -> text.contains("@" + a.name, ignoreCase = true) }?.let { a ->
+            store.editSession(sessionId) { it.copy(agentId = a.id) }
+        }
         store.editSession(sessionId) { it.copy(llm = it.llm + LlmMessage("user", content), status = SessionStatus.RUNNING) }
         dev.cueopen.app.sandbox.SandboxService.start(ctx, "Executando tarefa…")
         val job = scope.launch {
@@ -129,7 +137,7 @@ class AgentRunner(
             val agent = store.agent(s.agentId)
             setActivity(sessionId, Activity(Activity.Kind.THINKING, "Pensando"))
             // Camada 2: compacta o histórico se passou do orçamento
-            if (ctxMgr.estimateTokens(s.llm) + ctxMgr.estimateTokens(s.summary) >= store.settings.contextBudget) {
+            if (s.autoCompact && ctxMgr.estimateTokens(s.llm) + ctxMgr.estimateTokens(s.summary) >= store.settings.contextBudget) {
                 setActivity(sessionId, Activity(Activity.Kind.THINKING, "Compactando contexto"))
                 s = ctxMgr.compactIfNeeded(s)
             }
@@ -153,6 +161,7 @@ class AgentRunner(
                     continue
                 }
                 store.editSession(sessionId) { it.copy(status = SessionStatus.DONE) }
+                store.session(sessionId)?.let { done -> scope.launch { ctxMgr.extractMemories(done) } }
                 return
             }
             var stopLoop: SessionStatus? = null
@@ -169,6 +178,7 @@ class AgentRunner(
             val finalStatus = stopLoop
             if (finalStatus != null) {
                 store.editSession(sessionId) { it.copy(status = finalStatus, continuous = if (finalStatus == SessionStatus.DONE) false else it.continuous) }
+                if (finalStatus == SessionStatus.DONE) store.session(sessionId)?.let { done -> scope.launch { ctxMgr.extractMemories(done) } }
                 return
             }
             val sl = sleepReq
@@ -202,6 +212,109 @@ class AgentRunner(
         }
     }
 
+    // ===================== AUTONOMIA 24/7 (heartbeat) =====================
+    private var autonomyJob: Job? = null
+
+    /** Agenda o loop de heartbeats (um tick por minuto). Mantido vivo pelo SandboxService + AutonomyWorker. */
+    fun startAutonomy() {
+        if (autonomyJob?.isActive == true) return
+        if (store.state.value.agents.any { it.autonomous }) dev.cueopen.app.sandbox.SandboxService.start(ctx, "Agentes autônomos ativos")
+        autonomyJob = scope.launch {
+            while (isActive) {
+                runCatching { autonomyTick() }
+                kotlinx.coroutines.delay(60_000)
+            }
+        }
+    }
+
+    private fun today() = SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date())
+
+    private fun autonomyTick() {
+        val now = System.currentTimeMillis()
+        val hour = java.util.Calendar.getInstance().get(java.util.Calendar.HOUR_OF_DAY)
+        store.state.value.agents.filter { it.autonomous }.forEach { a ->
+            val inHours = if (a.activeStartHour <= a.activeEndHour) hour in a.activeStartHour until a.activeEndHour
+                          else hour >= a.activeStartHour || hour < a.activeEndHour
+            val spent = if (a.tokensDay == today()) a.tokensToday else 0
+            val due = now >= (a.lastBeatAt ?: 0) + a.heartbeatMinutes * 60_000L
+            val home = a.homeSessionId
+            if (inHours && due && spent < a.dailyTokenBudget && (home == null || jobs[home]?.isActive != true)) heartbeat(a)
+        }
+    }
+
+    /** Dispara um heartbeat agora (também usado pelo botão "Rodar agora"). */
+    fun heartbeat(agent: AgentProfile): Job {
+        var a = agent
+        val home = a.homeSessionId?.let { store.session(it) } ?: Session(title = "🤖 ${a.name} · autônomo", agentId = a.id).also {
+            store.upsertSession(it); a = a.copy(homeSessionId = it.id); store.upsertAgent(a)
+        }
+        store.upsertAgent(a.copy(lastBeatAt = System.currentTimeMillis()))
+        val sid = home.id
+        val before = store.session(sid)!!
+        val llmMark = before.llm.size; val itemsMark = before.items.size
+        val tokMark = before.tokensIn + before.tokensOut
+        val stamp = SimpleDateFormat("dd/MM HH:mm", Locale.getDefault()).format(Date())
+        store.editSession(sid) {
+            it.copy(status = SessionStatus.RUNNING, continuous = false,
+                llm = it.llm + LlmMessage("user", "[Heartbeat $stamp] Verifique sua missão e faça o que for necessário agora. Se nada precisar ser feito, responda NO_REPLY."))
+        }
+        dev.cueopen.app.sandbox.SandboxService.start(ctx, "${a.name}: heartbeat")
+        val job = scope.launch {
+            try {
+                loop(sid)
+            } catch (c: kotlinx.coroutines.CancellationException) { throw c
+            } catch (t: Throwable) {
+                store.addItem(sid, ChatItem.Error(text = "Heartbeat falhou: ${t.message}"))
+            } finally {
+                val after = store.session(sid)
+                if (after != null) {
+                    val last = (after.items.lastOrNull { it is ChatItem.Assistant } as? ChatItem.Assistant)?.text?.trim().orEmpty()
+                    val quiet = last.equals("NO_REPLY", true) || last.endsWith("NO_REPLY") && after.items.size - itemsMark <= 2
+                    val used = (after.tokensIn + after.tokensOut) - tokMark
+                    if (quiet) {
+                        // nada mudou: descarta o turno inteiro (contexto não cresce)
+                        store.editSession(sid) { it.copy(llm = it.llm.take(llmMark), items = it.items.take(itemsMark), status = SessionStatus.IDLE) }
+                    } else {
+                        store.editSession(sid) { it.copy(status = SessionStatus.IDLE) }
+                        if (a.notifyOnAction) notifyAgent(a, last.take(200))
+                    }
+                    store.agent(a.id)?.let { cur ->
+                        val day = today()
+                        store.upsertAgent(cur.copy(beats = cur.beats + 1, actions = cur.actions + if (quiet) 0 else 1,
+                            tokensDay = day, tokensToday = (if (cur.tokensDay == day) cur.tokensToday else 0) + used))
+                    }
+                }
+                setActivity(sid, Activity())
+                jobs.remove(sid, coroutineContext[Job])
+                store.flush()
+            }
+        }
+        jobs[sid] = job
+        return job
+    }
+
+    private fun notifyAgent(a: AgentProfile, text: String) = runCatching {
+        val nm = ctx.getSystemService(android.app.NotificationManager::class.java)
+        val pi = android.app.PendingIntent.getActivity(ctx, a.id.hashCode(),
+            android.content.Intent(ctx, dev.cueopen.app.MainActivity::class.java).putExtra("session", a.homeSessionId),
+            android.app.PendingIntent.FLAG_IMMUTABLE or android.app.PendingIntent.FLAG_UPDATE_CURRENT)
+        nm.notify(a.id.hashCode(), android.app.Notification.Builder(ctx, dev.cueopen.app.CueApp.CH_TASKS)
+            .setSmallIcon(android.R.drawable.ic_dialog_info).setContentTitle(a.name).setContentText(text.ifBlank { "Concluiu uma ação" })
+            .setStyle(android.app.Notification.BigTextStyle().bigText(text)).setContentIntent(pi).setAutoCancel(true).build())
+    }
+
+    // ===================== COMANDOS DO COMPOSER =====================
+    /** Compacta o contexto da sessão agora (/compact). */
+    suspend fun compactNow(sessionId: String): String {
+        val s = store.session(sessionId) ?: return "Sessão não encontrada"
+        val before = ctxMgr.estimateTokens(s.llm)
+        val after = ctxMgr.compactIfNeeded(s, force = true)
+        val now = ctxMgr.estimateTokens(after.llm) + ctxMgr.estimateTokens(after.summary)
+        return "Contexto compactado: ~$before → ~$now tokens."
+    }
+
+    fun connectorTools(): List<JsonObject> = dev.cueopen.app.connectors.Connectors.toolDefinitions(store)
+
     /** Ao reabrir o app (ou o serviço reiniciar o processo), retoma agentes contínuos. */
     fun resumeSleeping() {
         store.state.value.sessions.filter { it.status == SessionStatus.SLEEPING || (it.continuous && it.status == SessionStatus.STOPPED && it.wakeAt != null) }.forEach { s ->
@@ -228,7 +341,7 @@ class AgentRunner(
         }
         val lastUser = session.llm.lastOrNull { it.role == "user" }?.content.orEmpty()
         val query = lastUser + " " + session.summary.take(1500)
-        val memories = ctxMgr.relevantMemories(query, agent?.id)
+        val memories = ctxMgr.relevantMemories(query, agent?.id).also { ctxMgr.touch(it) }
         val knowledge = ctxMgr.relevantKnowledge(query)
         val notes = ctxMgr.readNotes(sessionId)
         val date = SimpleDateFormat("EEEE, d 'de' MMMM 'de' yyyy", Locale("pt", "BR")).format(Date())
@@ -279,6 +392,15 @@ class AgentRunner(
             (session.items.lastOrNull { it is ChatItem.Plan } as? ChatItem.Plan)?.let { p ->
                 appendLine(); appendLine("## Plano atual (marque cada fase com complete_step ao terminá-la)")
                 p.phases.forEachIndexed { i, ph -> appendLine("${i + 1}. [${if (ph.done) "x" else " "}] ${ph.title}") }
+            }
+            if (agent != null && agent.autonomous && session.id == agent.homeSessionId) {
+                appendLine(); appendLine("## MODO AUTÔNOMO 24/7")
+                appendLine("Missão permanente: ${agent.mission.ifBlank { agent.instructions.take(400) }}")
+                appendLine("Você é acordado a cada ${agent.heartbeatMinutes} min (heartbeat). Em cada heartbeat:")
+                appendLine("1) leia suas anotações (NOTES.md acima) para saber o estado; 2) faça só o que for necessário AGORA;")
+                appendLine("3) registre progresso/estado com notes_write (curto); 4) fatos duradouros com memory_save;")
+                appendLine("5) se nada mudou ou nada precisa ser feito, responda exatamente NO_REPLY (sem ferramentas) — isso economiza tokens.")
+                appendLine("Seja econômico: evite repetir pesquisas já anotadas. Nunca chame sleep nem finish no modo autônomo; apenas responda ao terminar.")
             }
             if (session.continuous) { appendLine(); appendLine("## Estado: MODO CONTÍNUO ATIVO — continue o ciclo trabalho → notes_write → sleep.") }
         }
@@ -337,6 +459,7 @@ class AgentRunner(
         add(tool("create_skill", "Cria uma nova skill na biblioteca do usuário.", buildJsonObject {
             put("name", str("Nome")); put("description", str("Descrição curta")); put("instructions", str("Instruções detalhadas"))
         }, listOf("name", "description", "instructions")))
+        connectorTools().forEach { add(it) }
         add(tool("ask_user", "Faz uma pergunta ao usuário e pausa a tarefa até ele responder.", buildJsonObject { put("question", str("Pergunta")) }, listOf("question")))
         add(tool("finish", "Conclui a tarefa com um resumo e a lista de entregáveis.", buildJsonObject {
             put("summary", str("Resumo do resultado")); put("files", strArray("Caminhos dos arquivos entregues"))
@@ -429,7 +552,7 @@ class AgentRunner(
             "complete_step" -> "Concluindo fase" to Activity.Kind.THINKING
             "browser_console" -> "Lendo console" to Activity.Kind.BROWSER
             "create_skill" -> "Criando skill" to Activity.Kind.THINKING
-            else -> call.name to Activity.Kind.THINKING
+            else -> (if (call.name.startsWith("mcp_")) "Conector · " + call.name.substringAfter("__") else call.name) to Activity.Kind.THINKING
         }
         val argPreview = when (call.name) {
             "shell" -> s("command")
@@ -509,8 +632,7 @@ class AgentRunner(
                     val sess = store.session(sessionId)
                     val agentScoped = s("scope") == "agent" && sess?.agentId != null
                     val tags = a["tags"]?.jsonArray?.map { it.jsonPrimitive.content }.orEmpty()
-                    store.upsertMemory(dev.cueopen.app.data.MemoryItem(text = s("fact"), agentId = if (agentScoped) sess?.agentId else null, tags = tags))
-                    "Memória salva."
+                    ctxMgr.saveMemory(s("fact"), if (agentScoped) sess?.agentId else null, tags)
                 }
                 "memory_search" -> ctxMgr.searchMemories(s("query"), store.session(sessionId)?.agentId)
                     .joinToString("\n") { "- ${it.text}" }.ifBlank { "Nada encontrado." }
@@ -524,7 +646,8 @@ class AgentRunner(
                     store.upsertSkill(Skill(name = s("name"), description = s("description"), instructions = s("instructions")))
                     "Skill \"${s("name")}\" criada e ativada."
                 }
-                else -> "Ferramenta desconhecida: ${call.name}"
+                else -> if (call.name.startsWith("mcp_")) dev.cueopen.app.connectors.Connectors.callTool(store, call.name, a)
+                        else "Ferramenta desconhecida: ${call.name}"
             }
         } catch (c: kotlinx.coroutines.CancellationException) {
             throw c

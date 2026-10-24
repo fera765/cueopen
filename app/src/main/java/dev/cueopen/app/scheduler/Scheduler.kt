@@ -73,3 +73,30 @@ class ScheduledWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(
         app.getSystemService(NotificationManager::class.java).notify(sessionId.hashCode(), n)
     }
 }
+
+
+/**
+ * Garantia de vida dos agentes autônomos: a cada 15 min o WorkManager acorda o app (se o Android
+ * tiver matado o processo), o que reinicia o loop de heartbeats e o serviço em foreground.
+ */
+class AutonomyWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, params) {
+    override suspend fun doWork(): Result {
+        val app = applicationContext as CueApp
+        app.agent.startAutonomy()
+        return Result.success()
+    }
+    companion object {
+        fun ensure(ctx: Context) {
+            WorkManager.getInstance(ctx).enqueueUniquePeriodicWork("autonomy", ExistingPeriodicWorkPolicy.KEEP,
+                PeriodicWorkRequestBuilder<AutonomyWorker>(15, TimeUnit.MINUTES).build())
+        }
+    }
+}
+
+/** Após reiniciar o celular, religa os agentes autônomos. */
+class BootReceiver : android.content.BroadcastReceiver() {
+    override fun onReceive(context: Context, intent: android.content.Intent) {
+        // criar a Application já chama startAutonomy(); aqui só garantimos o worker
+        AutonomyWorker.ensure(context)
+    }
+}

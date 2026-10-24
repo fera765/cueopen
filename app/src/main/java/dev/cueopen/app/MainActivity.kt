@@ -118,6 +118,7 @@ fun CueNav(nav: NavHostController, startOnboarding: Boolean) {
         composable("knowledge/{id}") { e -> KnowledgeEditScreen(nav, e.arguments!!.getString("id")!!) }
         composable("files") { FilesScreen(nav) }
         composable("memory") { MemoryScreen(nav) }
+        composable("connectors") { ConnectorsScreen(nav) }
         composable("settings") { SettingsScreen(nav) }
         composable("sandbox") { SandboxScreen(nav) }
         composable("terminal") { StandaloneTerminalScreen(nav) }

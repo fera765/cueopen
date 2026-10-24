@@ -68,7 +68,12 @@ fun AgentsScreen(nav: NavController) {
                         AgentFace(Color(a.color), a.face, 44.dp); Spacer(Modifier.width(12.dp))
                         Column(Modifier.weight(1f)) {
                             Text(a.name, style = MaterialTheme.typography.titleMedium)
-                            Text(a.instructions.ifBlank { "Sem instruções" }, fontSize = 13.sp, color = c.ink2, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                            Text(a.instructions.ifBlank { a.mission.ifBlank { "Sem instruções" } }, fontSize = 13.sp, color = c.ink2, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                            if (a.autonomous) {
+                                val next = (a.lastBeatAt ?: System.currentTimeMillis()) + a.heartbeatMinutes * 60_000L
+                                Text("● Autônomo · próximo ciclo ${java.text.SimpleDateFormat("HH:mm", java.util.Locale.getDefault()).format(java.util.Date(next))} · ${a.actions} ações",
+                                    fontSize = 11.sp, color = c.ok)
+                            }
                         }
                         IconButton({ nav.navigate("home?agent=${a.id}") }) { Icon(Icons.Rounded.ChatBubbleOutline, "Nova tarefa") }
                     }
@@ -79,7 +84,7 @@ fun AgentsScreen(nav: NavController) {
     }
 }
 
-@OptIn(ExperimentalLayoutApi::class)
+@OptIn(ExperimentalLayoutApi::class, ExperimentalMaterial3Api::class)
 @Composable
 fun AgentEditScreen(nav: NavController, id: String) {
     val app = CueApp.instance
@@ -109,6 +114,37 @@ fun AgentEditScreen(nav: NavController, id: String) {
             CueField(a.name, { a = a.copy(name = it) }, "Nome do Agent")
             CueField(a.instructions, { a = a.copy(instructions = it) }, "Instruções (como deve agir, tom, objetivos)", minLines = 5)
             ModelPicker(a.model ?: "", { a = a.copy(model = it.ifBlank { null }) }, "Modelo (vazio = padrão do app)", allowEmpty = true)
+            SectionLabel("Autonomia 24/7")
+            ToggleRow("Agente autônomo", "Trabalha sozinho em ciclos (heartbeat), mesmo com o app fechado", a.autonomous) { a = a.copy(autonomous = it) }
+            if (a.autonomous) {
+                CueField(a.mission, { a = a.copy(mission = it) }, "Missão permanente (o que ele deve buscar/acompanhar/entregar)", minLines = 3)
+                Text("Acordar a cada", fontSize = 13.sp, color = c.ink2)
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    listOf(5 to "5 min", 15 to "15 min", 30 to "30 min", 60 to "1 h", 180 to "3 h", 720 to "12 h", 1440 to "24 h").forEach { (m, l) ->
+                        Chip(l, a.heartbeatMinutes == m) { a = a.copy(heartbeatMinutes = m) }
+                    }
+                }
+                Text("Horário ativo: ${a.activeStartHour}h – ${a.activeEndHour}h", fontSize = 13.sp, color = c.ink2)
+                RangeSlider(value = a.activeStartHour.toFloat()..a.activeEndHour.toFloat(), onValueChange = { r ->
+                    a = a.copy(activeStartHour = r.start.toInt(), activeEndHour = r.endInclusive.toInt().coerceAtLeast(r.start.toInt() + 1)) },
+                    valueRange = 0f..24f, steps = 23, colors = SliderDefaults.colors(thumbColor = c.ink, activeTrackColor = c.ink))
+                Text("Orçamento diário de tokens", fontSize = 13.sp, color = c.ink2)
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    listOf(100_000L to "100k", 300_000L to "300k", 1_000_000L to "1M", 3_000_000L to "3M").forEach { (v, l) ->
+                        Chip(l, a.dailyTokenBudget == v) { a = a.copy(dailyTokenBudget = v) }
+                    }
+                }
+                ToggleRow("Notificar quando agir", "Avisa quando o heartbeat fizer algo (silencioso quando nada muda)", a.notifyOnAction) { a = a.copy(notifyOnAction = it) }
+                if (existing != null) {
+                    val today = java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.US).format(java.util.Date())
+                    Text("Heartbeats: ${existing.beats} · ações: ${existing.actions} · tokens hoje: ${if (existing.tokensDay == today) existing.tokensToday else 0}",
+                        fontSize = 12.sp, color = c.ink3)
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Chip("Rodar agora", icon = Icons.Rounded.PlayArrow) { app.store.upsertAgent(a); app.agent.heartbeat(a) }
+                        existing.homeSessionId?.let { sid -> Chip("Ver atividade", icon = Icons.Rounded.History) { nav.navigate("chat/$sid") } }
+                    }
+                }
+            }
             SectionLabel("Ferramentas")
             ToggleRow("Terminal Linux", "Executar comandos no sandbox", a.useTerminal) { a = a.copy(useTerminal = it) }
             ToggleRow("Browser", "Navegar e interagir com sites", a.useBrowser) { a = a.copy(useBrowser = it) }
@@ -134,7 +170,7 @@ fun AgentEditScreen(nav: NavController, id: String) {
             }
             Spacer(Modifier.height(8.dp))
             PillButton("Salvar", Icons.Rounded.Check, modifier = Modifier.fillMaxWidth(), enabled = a.name.isNotBlank()) {
-                app.store.upsertAgent(a); nav.popBackStack()
+                app.store.upsertAgent(a); if (a.autonomous) app.agent.startAutonomy(); nav.popBackStack()
             }
             Spacer(Modifier.height(24.dp))
         }

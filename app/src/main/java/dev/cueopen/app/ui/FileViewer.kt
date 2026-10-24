@@ -86,7 +86,7 @@ fun FileViewer(f: File, onClose: () -> Unit, onEdit: () -> Unit) {
                 ext == "svg" -> SvgView(f)
                 ext == "pdf" -> PdfView(f)
                 (ext == "html" || ext == "htm") && rendered -> HtmlPreview(f)
-                ext == "md" && rendered -> Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp)) { Markdown(runCatching { f.readText() }.getOrDefault("")) }
+                ext == "md" && rendered -> MarkdownDocView(remember(f) { runCatching { f.readText() }.getOrDefault("") }, Modifier.fillMaxSize())
                 isText(f) || f.length() < 512_000 && looksText(f) -> CodeView(f)
                 else -> Column(Modifier.fillMaxSize(), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
                     Icon(fileIcon(f), null, Modifier.size(48.dp), tint = c.ink3)

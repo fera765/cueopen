@@ -34,6 +34,8 @@ class CueApp : Application() {
         terminals = dev.cueopen.app.sandbox.TerminalManager(this, sandbox)
         agent = AgentRunner(store, sandbox, browser, llm, terminals, this)
         agent.resumeSleeping()
+        agent.startAutonomy()
+        dev.cueopen.app.scheduler.AutonomyWorker.ensure(this)
         getSystemService(NotificationManager::class.java).createNotificationChannel(
             NotificationChannel(CH_TASKS, "Tarefas", NotificationManager.IMPORTANCE_DEFAULT)
         )

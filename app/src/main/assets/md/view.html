@@ -1,0 +1,33 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<link rel="stylesheet" href="github-markdown.css">
+<link id="hl" rel="stylesheet" href="hl-github.css">
+<style>
+ body{margin:0;background:var(--bg,#fff)} .markdown-body{box-sizing:border-box;padding:18px 16px 40px;font-size:15px}
+ .markdown-body table{display:block;overflow-x:auto} .markdown-body pre{border-radius:10px}
+ .mermaid{background:transparent;text-align:center;overflow-x:auto}
+</style>
+<script src="marked.min.js"></script><script src="highlight.min.js"></script><script src="mermaid.min.js"></script>
+</head><body><article id="c" class="markdown-body"></article>
+<script>
+// Renderizador estilo GitHub: marked (GFM: tabelas, task lists, strikethrough), highlight.js e mermaid.
+function render(src, dark){
+  document.documentElement.style.setProperty('--bg', dark?'#0d1117':'#ffffff');
+  document.getElementById('c').setAttribute('data-theme', dark?'dark':'light');
+  document.body.className = dark ? 'dark' : '';
+  document.getElementById('hl').href = dark ? 'hl-github-dark.css' : 'hl-github.css';
+  var r = new marked.Renderer();
+  r.code = function(code, lang){
+    if((lang||'').trim()==='mermaid') return '<pre class="mermaid">'+code.replace(/</g,'&lt;')+'</pre>';
+    var html = (lang && hljs.getLanguage(lang)) ? hljs.highlight(code,{language:lang}).value : hljs.highlightAuto(code).value;
+    return '<pre><code class="hljs language-'+(lang||'')+'">'+html+'</code></pre>';
+  };
+  document.getElementById('c').innerHTML = marked.parse(src, {gfm:true, breaks:false, renderer:r});
+  try { mermaid.initialize({startOnLoad:false, theme: dark?'dark':'default', securityLevel:'loose'}); mermaid.run({querySelector:'.mermaid'}); } catch(e){}
+}
+if (window.CueMd) render(CueMd.source(), CueMd.dark());
+</script>
+<style>
+ .dark .markdown-body{color-scheme:dark;--color-canvas-default:#0d1117;--color-fg-default:#e6edf3;--color-border-default:#30363d;--color-canvas-subtle:#161b22;--color-neutral-muted:rgba(110,118,129,.4);--color-accent-fg:#4493f8;--color-fg-muted:#9198a1;--color-border-muted:#3d444db3;--bgColor-default:#0d1117;--fgColor-default:#e6edf3;--borderColor-default:#3d444d;--bgColor-muted:#151b23;--fgColor-accent:#4493f8;--fgColor-muted:#9198a1;background:#0d1117;color:#e6edf3}
+</style>
+</body></html>
