@@ -40,6 +40,9 @@ class OpenRouter(private val settings: () -> Settings) {
         .readTimeout(5, TimeUnit.MINUTES)
         .build()
 
+    // modelos que recusam reasoning desligado (lembrado em runtime para não repetir o erro)
+    private val forceReasoning = java.util.Collections.synchronizedSet(mutableSetOf<String>())
+
     suspend fun chat(
         messages: List<LlmMessage>,
         tools: JsonArray? = null,
@@ -48,31 +51,37 @@ class OpenRouter(private val settings: () -> Settings) {
     ): LlmReply = withContext(Dispatchers.IO) {
         val s = settings()
         require(s.apiKey.isNotBlank()) { "Configure sua chave da OpenRouter em Configurações." }
-        val body = buildJsonObject {
-            put("model", model ?: s.model)
+        val mdl = model ?: s.model
+        fun buildBody(disableReasoning: Boolean) = buildJsonObject {
+            put("model", mdl)
             put("max_tokens", maxTokens)
-            put("temperature", 0.3)
+            put("temperature", 0.2)
             put("messages", buildJsonArray { messages.forEach { add(it.toJson()) } })
             if (tools != null && tools.isNotEmpty()) {
                 put("tools", tools)
                 put("tool_choice", "auto")
             }
-            if (s.disableThinking) {
-                // zero thinking: mais rápido. OpenRouter normaliza para cada provedor.
-                put("reasoning", buildJsonObject { put("enabled", false); put("exclude", true) })
-            }
+            if (disableReasoning) put("reasoning", buildJsonObject { put("enabled", false); put("exclude", true) })
         }
-        val req = Request.Builder()
-            .url(s.baseUrl.trimEnd('/') + "/chat/completions")
-            .header("Authorization", "Bearer ${s.apiKey}")
-            .header("HTTP-Referer", "https://github.com/cueopen")
-            .header("X-Title", "CueOpen")
-            .post(body.toString().toRequestBody("application/json".toMediaType()))
-            .build()
-        val text = http.newCall(req).await().use { r ->
-            val t = r.body?.string().orEmpty()
-            if (!r.isSuccessful) throw IOException("LLM HTTP ${r.code}: ${t.take(500)}")
-            t
+        fun once(disableReasoning: Boolean): Pair<Int, String> {
+            val req = Request.Builder()
+                .url(s.baseUrl.trimEnd('/') + "/chat/completions")
+                .header("Authorization", "Bearer ${s.apiKey}")
+                .header("HTTP-Referer", "https://github.com/cueopen").header("X-Title", "CueOpen")
+                .post(buildBody(disableReasoning).toString().toRequestBody("application/json".toMediaType()))
+                .build()
+            http.newCall(req).execute().use { r -> return r.code to r.body?.string().orEmpty() }
+        }
+        // 1ª tentativa respeita a config; se 400 por "reasoning mandatory", refaz sem desligar.
+        var disable = s.disableThinking && mdl !in forceReasoning
+        var (code, text) = once(disable)
+        if (code == 400 && text.contains("reasoning", true) && disable) {
+            forceReasoning.add(mdl); disable = false
+            val retry = once(false); code = retry.first; text = retry.second
+        }
+        if (code !in 200..299) {
+            val msg = runCatching { json.parseToJsonElement(text).jsonObject["error"]?.jsonObject?.get("message")?.jsonPrimitive?.content }.getOrNull()
+            throw IOException("HTTP $code — ${msg ?: text.take(160)}")
         }
         val root = json.parseToJsonElement(text).jsonObject
         root["error"]?.let { throw IOException("LLM: ${it}") }

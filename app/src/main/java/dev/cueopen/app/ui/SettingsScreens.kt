@@ -58,7 +58,14 @@ fun SettingsScreen(nav: NavController) {
             }
             SectionLabel("Você")
             CueField(s.userName, { v -> app.store.updateSettings { it.copy(userName = v) } }, "Seu nome")
-            SectionLabel("Modelo (OpenRouter)")
+            SectionLabel("Provedor de modelos")
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                val isOR = s.baseUrl.contains("openrouter")
+                Chip("OpenRouter", isOR) { app.store.updateSettings { it.copy(baseUrl = "https://openrouter.ai/api/v1") } }
+                Chip("Personalizado", !isOR) { app.store.updateSettings { it.copy(baseUrl = if (it.baseUrl.contains("openrouter")) "https://" else it.baseUrl) } }
+            }
+            Text("OpenRouter: cole sua chave abaixo. Personalizado: qualquer endpoint compatível com a API da OpenAI (base URL + chave), inclusive provedores gratuitos.", fontSize = 12.sp, color = Cue.c.ink2)
+            SectionLabel("Credenciais")
             CueField(s.apiKey, { v -> app.store.updateSettings { it.copy(apiKey = v.trim()) } }, "Chave da API", password = true)
             ModelPicker(s.model, { v -> app.store.updateSettings { it.copy(model = v) } }, "Modelo do agente")
             ModelPicker(s.fastModel, { v -> app.store.updateSettings { it.copy(fastModel = v) } }, "Modelo rápido (títulos e resumos de contexto)")

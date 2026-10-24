@@ -268,6 +268,14 @@ object Connectors {
         }
     }
 
+    /** Conecta usando um token colado pelo usuário (para servidores sem OAuth público). */
+    suspend fun connectWithToken(store: Store, c: Connector, token: String): Connector = withContext(Dispatchers.IO) {
+        sessions.remove(c.id)
+        val cc = c.copy(accessToken = token.trim(), connectedAt = System.currentTimeMillis(), lastError = null)
+        store.upsertConnector(cc)
+        refreshTools(store, cc)
+    }
+
     suspend fun refreshTools(store: Store, c: Connector): Connector = withContext(Dispatchers.IO) {
         try {
             val tools = JSONArray()

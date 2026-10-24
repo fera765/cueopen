@@ -135,11 +135,12 @@ class AgentRunner(
     private suspend fun loop(sessionId: String) {
         val maxSteps = store.settings.maxSteps
         var steps = 0
+        var repeats = 0
+        var lastContent = ""
         while (scope.isActive) {
             var s = store.session(sessionId) ?: return
             val agent = store.agent(s.agentId)
             setActivity(sessionId, Activity(Activity.Kind.THINKING, "Pensando"))
-            // Camada 2: compacta o histórico se passou do orçamento
             if (s.autoCompact && ctxMgr.estimateTokens(s.llm) + ctxMgr.estimateTokens(s.summary) >= store.settings.contextBudget) {
                 setActivity(sessionId, Activity(Activity.Kind.THINKING, "Compactando contexto"))
                 s = ctxMgr.compactIfNeeded(s)
@@ -147,12 +148,42 @@ class AgentRunner(
             val sys = LlmMessage("system", systemPrompt(sessionId, agent, s))
             var history = ctxMgr.microCompact(s.llm)
             if (history.firstOrNull()?.role != "user") history = listOf(LlmMessage("user", "[Contexto anterior compactado no resumo da sessão. Continue de onde parou.]")) + history
-            val reply = llm.chat(listOf(sys) + history, tools = tools(agent), model = agent?.model)
+            // Resiliência: tenta a chamada; em erro, reenvia (backoff) e só desiste após 3 falhas.
+            val reply = run {
+                var attempt = 0
+                while (true) {
+                    try {
+                        return@run llm.chat(listOf(sys) + history, tools = tools(agent), model = agent?.model)
+                    } catch (c: kotlinx.coroutines.CancellationException) {
+                        throw c
+                    } catch (t: Throwable) {
+                        attempt++
+                        if (attempt >= 3) {
+                            store.addItem(sessionId, ChatItem.Error(text = "O modelo falhou (${t.message?.take(120)}). Tentei 3 vezes. Toque em enviar para continuar, ou troque de modelo em Configurações."))
+                            store.editSession(sessionId) { it.copy(status = SessionStatus.WAITING_USER) }
+                            return
+                        }
+                        setActivity(sessionId, Activity(Activity.Kind.THINKING, "Erro no modelo — tentando de novo ($attempt/3)"))
+                        kotlinx.coroutines.delay(1500L * attempt)
+                    }
+                }
+                @Suppress("UNREACHABLE_CODE") return
+            }
             store.editSession(sessionId) {
                 it.copy(llm = it.llm + LlmMessage("assistant", reply.content, toolCallsJson = reply.rawToolCallsJson),
                     tokensIn = it.tokensIn + reply.usage.prompt, tokensOut = it.tokensOut + reply.usage.completion,
                     tokensCached = it.tokensCached + reply.usage.cached, llmCalls = it.llmCalls + 1)
             }
+            // Anti-repetição: se o modelo repetir quase o mesmo texto várias vezes, interrompe.
+            val cNow = reply.content?.trim().orEmpty()
+            if (cNow.length > 40 && similar(cNow, lastContent)) {
+                if (++repeats >= 2) {
+                    store.addItem(sessionId, ChatItem.Error(text = "O modelo entrou em repetição. Interrompi para não gastar tokens à toa. Reformule o pedido ou troque de modelo."))
+                    store.editSession(sessionId) { it.copy(status = SessionStatus.WAITING_USER) }
+                    return
+                }
+            } else repeats = 0
+            lastContent = cNow
             if (!reply.content.isNullOrBlank()) {
                 store.addItem(sessionId, ChatItem.Assistant(text = reply.content.trim(), final = reply.toolCalls.isEmpty()))
             }
@@ -237,6 +268,17 @@ class AgentRunner(
     }
 
     private fun today() = SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date())
+
+    /** Semelhança grosseira entre dois textos (para detectar repetição/degeneração do modelo). */
+    private fun similar(a: String, b: String): Boolean {
+        if (b.isEmpty()) return false
+        if (a == b) return true
+        val wa = a.lowercase().split(Regex("\\s+")).toSet()
+        val wb = b.lowercase().split(Regex("\\s+")).toSet()
+        if (wa.isEmpty() || wb.isEmpty()) return false
+        val inter = wa.intersect(wb).size.toDouble()
+        return inter / maxOf(wa.size, wb.size) > 0.8
+    }
 
     private fun autonomyTick() {
         val now = System.currentTimeMillis()

@@ -40,6 +40,7 @@ fun ConnectorsScreen(nav: NavController) {
     val c = Cue.c
     var busy by remember { mutableStateOf<String?>(null) }
     var custom by remember { mutableStateOf(false) }
+    var tokenFor by remember { mutableStateOf<Connector?>(null) }
     var query by remember { mutableStateOf("") }
     var searching by remember { mutableStateOf(false) }
     var found by remember { mutableStateOf<List<Connectors.Catalog>>(emptyList()) }
@@ -130,6 +131,8 @@ fun ConnectorsScreen(nav: NavController) {
                                 conn.lastError != null -> Text(conn.lastError, fontSize = 11.sp, color = c.err, maxLines = 2, overflow = TextOverflow.Ellipsis)
                                 connected -> Text("Conectado · $toolsCount ferramentas", fontSize = 11.sp, color = c.ok)
                             }
+                            if (!connected && conn.lastError != null) Text("Tenho um token →", fontSize = 11.sp, color = c.accent,
+                                modifier = Modifier.clickable { tokenFor = conn })
                         }
                         Spacer(Modifier.width(8.dp))
                         if (busy == conn.id) CircularProgressIndicator(Modifier.size(22.dp), strokeWidth = 2.dp, color = c.accent)
@@ -154,6 +157,18 @@ fun ConnectorsScreen(nav: NavController) {
                 }
             }
         }
+    }
+    tokenFor?.let { conn ->
+        var tk by remember { mutableStateOf("") }
+        AlertDialog(onDismissRequest = { tokenFor = null }, title = { Text("Conectar ${conn.name} com token") }, text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("Este servidor não oferece login OAuth público. Cole um token de acesso (ex.: token pessoal do serviço) para conectar.", fontSize = 13.sp, color = c.ink2)
+                CueField(tk, { tk = it }, "Token", password = true)
+            }
+        }, confirmButton = { TextButton({
+            val co = conn; tokenFor = null; busy = co.id
+            scope.launch { runCatching { Connectors.connectWithToken(app.store, co, tk) }; busy = null }
+        }, enabled = tk.isNotBlank()) { Text("Conectar") } }, dismissButton = { TextButton({ tokenFor = null }) { Text("Cancelar") } })
     }
     if (custom) {
         var name by remember { mutableStateOf("") }
