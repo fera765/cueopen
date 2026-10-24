@@ -71,10 +71,10 @@ private fun hasTable(md: String): Boolean {
 @Composable
 private fun GithubMarkdown(src: String) {
     val dark = Cue.c.dark
-    var height by remember(src) { androidx.compose.runtime.mutableStateOf(80.dp) }
+    val height = remember(src) { androidx.compose.runtime.mutableStateOf(80.dp) }
     val density = androidx.compose.ui.platform.LocalDensity.current
     AndroidView(
-        modifier = Modifier.fillMaxWidth().height(height),
+        modifier = Modifier.fillMaxWidth().height(height.value),
         factory = { ctx ->
             WebView(ctx).apply {
                 settings.javaScriptEnabled = true
@@ -84,7 +84,7 @@ private fun GithubMarkdown(src: String) {
                     @android.webkit.JavascriptInterface fun source() = src
                     @android.webkit.JavascriptInterface fun dark() = dark
                     @android.webkit.JavascriptInterface fun setHeight(px: Int) {
-                        post { height = with(density) { (px + 8).toDp() } }
+                        post { height.value = with(density) { (px + 8).toDp() } }
                     }
                 }, "CueMd")
                 loadUrl("file:///android_asset/md/view.html")
