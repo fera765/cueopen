@@ -59,7 +59,7 @@ private fun MdBlock(src: String) {
         com.mikepenz.markdown.m3.Markdown(
             content = src.trim(),
             colors = markdownColor(text = c.ink, codeText = c.ink, linkText = c.accent, codeBackground = c.surface2,
-                inlineCodeBackground = c.surface2, dividerColor = c.line, tableText = c.ink, tableBackground = c.surface),
+                inlineCodeBackground = c.surface2, dividerColor = c.line),
             typography = markdownTypography(
                 h1 = t.headlineSmall.copy(fontSize = 22.sp), h2 = t.titleLarge.copy(fontSize = 19.sp), h3 = t.titleMedium,
                 h4 = t.titleMedium.copy(fontSize = 15.sp), h5 = t.bodyLarge.copy(fontWeight = FontWeight.SemiBold), h6 = t.bodyMedium.copy(fontWeight = FontWeight.SemiBold),
