@@ -60,7 +60,7 @@ private fun hasTable(md: String): Boolean {
     val lines = md.lines()
     for (i in 1 until lines.size) {
         val sep = lines[i].trim()
-        if (sep.contains('|') && sep.replace(Regex("[^|:\- ]"), "").contains("-") && sep.matches(Regex("\|?[ :\-|]+\|?")) && lines[i-1].contains('|'))
+        if (sep.contains('|') && sep.contains('-') && sep.all { it == '|' || it == '-' || it == ':' || it == ' ' } && lines[i - 1].contains('|'))
             return true
     }
     return false
