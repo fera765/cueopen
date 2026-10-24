@@ -3,7 +3,7 @@
 <link rel="stylesheet" href="github-markdown.css">
 <link id="hl" rel="stylesheet" href="hl-github.css">
 <style>
- body{margin:0;background:var(--bg,#fff)} .markdown-body{box-sizing:border-box;padding:18px 16px 40px;font-size:15px}
+ body{margin:0;background:transparent} .markdown-body{box-sizing:border-box;padding:4px 2px 8px;font-size:15px;background:transparent}
  .markdown-body table{display:block;overflow-x:auto} .markdown-body pre{border-radius:10px}
  .mermaid{background:transparent;text-align:center;overflow-x:auto}
 </style>
@@ -24,7 +24,11 @@ function render(src, dark){
   };
   document.getElementById('c').innerHTML = marked.parse(src, {gfm:true, breaks:false, renderer:r});
   try { mermaid.initialize({startOnLoad:false, theme: dark?'dark':'default', securityLevel:'loose'}); mermaid.run({querySelector:'.mermaid'}); } catch(e){}
+  reportHeight();
 }
+function reportHeight(){ try { if(window.CueMd && CueMd.setHeight){ var h=Math.ceil(document.body.getBoundingClientRect().height); CueMd.setHeight(h); } } catch(e){} }
+window.addEventListener('load', reportHeight);
+setTimeout(reportHeight, 300); setTimeout(reportHeight, 900);
 if (window.CueMd) render(CueMd.source(), CueMd.dark());
 </script>
 <style>

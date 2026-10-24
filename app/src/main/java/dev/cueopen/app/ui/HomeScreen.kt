@@ -202,7 +202,8 @@ fun Composer(
     val suggestions: List<Triple<String, String, String>> = remember(token, stAll.skills, stAll.agents) {
         when {
             value.startsWith("/") && !value.contains(' ') -> slashCommands.filter { it.first.startsWith(value, true) }.map { Triple(it.first, it.second, it.first + " ") }
-            token.startsWith("@") -> (stAll.agents.map { Triple("@" + it.name, "Agent", "@" + it.name + " ") } +
+            token.startsWith("@") -> (listOf(Triple("@create-agent", "Criar um novo agente a partir de uma descrição", "@create-agent ")) +
+                stAll.agents.map { Triple("@" + it.name, "Agent", "@" + it.name + " ") } +
                 stAll.skills.filter { it.enabled }.map { Triple("@" + it.name, "Skill · " + it.description.take(60), "@" + it.name + " ") })
                 .filter { it.first.contains(token.drop(1), true) }.take(12)
             else -> emptyList()

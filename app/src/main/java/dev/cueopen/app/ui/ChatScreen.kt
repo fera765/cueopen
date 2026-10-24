@@ -158,6 +158,23 @@ fun ChatScreen(nav: NavController, sessionId: String) {
                 placeholder = if (session.status == SessionStatus.WAITING_USER) "Responda ao agente…" else "Envie uma mensagem",
                 running = running || session.status == SessionStatus.SLEEPING, onStop = { app.agent.stop(sessionId) },
                 onSend = { text, files ->
+                    if (text.trim().startsWith("@create-agent", true)) {
+                        val desc = text.trim().removePrefix("@create-agent").removePrefix("@Create-Agent").trim()
+                        draft = ""
+                        if (desc.isBlank()) app.store.addItem(sessionId, ChatItem.Assistant(text = "Descreva o agente após @create-agent. Ex.: `@create-agent um analista de ações que todo dia de manhã resume o mercado`", final = false))
+                        else {
+                            app.store.addItem(sessionId, ChatItem.Assistant(text = "Criando agente…", final = false))
+                            cmdScope.launch {
+                                val a = runCatching { app.agent.createAgentFromPrompt(desc) }.getOrNull()
+                                app.store.addItem(sessionId, if (a != null)
+                                    ChatItem.Assistant(text = "✅ Agente **${a.name}** criado e salvo em Agents" + (if (a.autonomous) " · autônomo a cada ${a.heartbeatMinutes} min" else "") + ".
+
+${a.instructions}", final = true)
+                                    else ChatItem.Assistant(text = "Não consegui gerar o agente. Tente descrever de outro jeito.", final = true))
+                            }
+                        }
+                        return@Composer
+                    }
                     val cmd = text.trim().lowercase()
                     if (cmd.startsWith("/") && !cmd.contains(' ')) {
                         draft = ""

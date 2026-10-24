@@ -218,11 +218,22 @@ class AgentRunner(
     // ===================== AUTONOMIA 24/7 (heartbeat) =====================
     private var autonomyJob: Job? = null
 
-    /** Agenda o loop de heartbeats (um tick por minuto). Mantido vivo pelo SandboxService + AutonomyWorker. */
+    /**
+     * Autonomia com DOIS mecanismos para nunca falhar:
+     *  (1) ticker em processo a cada 20s — dispara no horário certo enquanto o app/serviço vive
+     *      (precisão de segundos, ideal para intervalos curtos como 2 min);
+     *  (2) AlarmManager — backup que reacorda o app mesmo depois de morto/boot.
+     */
     fun startAutonomy() {
-        // os ciclos são disparados por AlarmManager (Heartbeat), que funciona com o app fechado.
         dev.cueopen.app.scheduler.Heartbeat.rescheduleAll(ctx)
         if (store.state.value.agents.any { it.autonomous }) dev.cueopen.app.sandbox.SandboxService.start(ctx, "Agentes autônomos ativos")
+        if (autonomyJob?.isActive == true) return
+        autonomyJob = scope.launch {
+            while (isActive) {
+                runCatching { autonomyTick() }
+                kotlinx.coroutines.delay(20_000)
+            }
+        }
     }
 
     private fun today() = SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date())
@@ -267,12 +278,18 @@ class AgentRunner(
                 val after = store.session(sid)
                 if (after != null) {
                     val last = (after.items.lastOrNull { it is ChatItem.Assistant } as? ChatItem.Assistant)?.text?.trim().orEmpty()
-                    val quiet = last.equals("NO_REPLY", true) || last.endsWith("NO_REPLY") && after.items.size - itemsMark <= 2
+                    val quiet = last.equals("NO_REPLY", true) || (last.endsWith("NO_REPLY") && after.items.size - itemsMark <= 2)
                     val used = (after.tokensIn + after.tokensOut) - tokMark
                     if (quiet) {
-                        // nada mudou: descarta o turno inteiro (contexto não cresce)
-                        store.editSession(sid) { it.copy(llm = it.llm.take(llmMark), items = it.items.take(itemsMark), status = SessionStatus.IDLE) }
+                        // nada a fazer: NÃO gasta contexto (recupera o llm), mas deixa um marcador VISÍVEL
+                        // na linha do tempo para o usuário ver que o ciclo rodou.
+                        store.editSession(sid) {
+                            it.copy(llm = it.llm.take(llmMark),
+                                items = it.items.take(itemsMark) + ChatItem.Step(tool = "sleep", title = "Ciclo $stamp — nada novo", args = "", result = "", status = StepStatus.OK),
+                                status = SessionStatus.IDLE)
+                        }
                     } else {
+                        // trabalhou: mantém tudo visível; o auto-compact cuida do contexto no próximo loop
                         store.editSession(sid) { it.copy(status = SessionStatus.IDLE) }
                         if (a.notifyOnAction) notifyAgent(a, last.take(200))
                     }
@@ -319,6 +336,47 @@ class AgentRunner(
     }
 
     fun connectorTools(): List<JsonObject> = dev.cueopen.app.connectors.Connectors.toolDefinitions(store)
+
+    /**
+     * Cria e configura um Agent completo a partir de uma descrição em linguagem natural (@create-agent).
+     * Usa o modelo rápido para gerar nome, personalidade, instruções, missão, autonomia e skills sugeridas.
+     */
+    suspend fun createAgentFromPrompt(desc: String): AgentProfile {
+        val skillNames = store.state.value.skills.filter { it.enabled }.joinToString(", ") { it.name }
+        val raw = runCatching {
+            llm.quick("""
+                Gere a configuração de um agente de IA a partir do pedido do usuário. Responda SOMENTE com JSON válido:
+                {"name":"curto, 2-3 palavras","face":"wink|smile|side|dot","color":0-7,
+                 "instructions":"instruções detalhadas de como o agente age, tom, objetivos (2-5 frases)",
+                 "mission":"missão permanente se for para rodar continuamente, senão vazio",
+                 "autonomous":true|false, "heartbeatMinutes":0,
+                 "useTerminal":true|false, "useBrowser":true|false,
+                 "skills":["nomes exatos entre: $skillNames"]}
+                Se o usuário pedir monitoramento/execução recorrente, defina autonomous=true e heartbeatMinutes com o intervalo pedido (em minutos).
+                Pedido: $desc
+            """.trimIndent(), maxTokens = 600)
+        }.getOrDefault("")
+        val js = raw.substringAfter('{', "").let { if (it.isNotEmpty()) "{$it".substringBeforeLast('}') + "}" else "" }
+        val o = runCatching { json.parseToJsonElement(js).jsonObject }.getOrNull()
+        fun str(k: String, d: String = "") = o?.get(k)?.let { runCatching { it.jsonPrimitive.contentOrNull }.getOrNull() } ?: d
+        fun bool(k: String, d: Boolean) = o?.get(k)?.let { runCatching { it.jsonPrimitive.booleanOrNull }.getOrNull() } ?: d
+        fun intf(k: String, d: Int) = o?.get(k)?.let { runCatching { it.jsonPrimitive.content.toDouble().toInt() }.getOrNull() } ?: d
+        val colors = listOf(0xFFFF6B3DL, 0xFF4D8DFFL, 0xFF2FBF71L, 0xFFFFC53DL, 0xFFB57BFFL, 0xFFFF5C8AL, 0xFF2EC4C4L, 0xFF9C978EL)
+        val wantSkills = o?.get("skills")?.let { runCatching { it.jsonArray.map { e -> e.jsonPrimitive.content } }.getOrNull() }.orEmpty()
+        val skillIds = store.state.value.skills.filter { sk -> wantSkills.any { it.equals(sk.name, true) } }.map { it.id }
+        val name = str("name", desc.take(24)).ifBlank { "Novo Agente" }
+        val hb = intf("heartbeatMinutes", 0)
+        val agent = AgentProfile(
+            name = name, face = str("face", "wink").ifBlank { "wink" },
+            color = colors.getOrElse(intf("color", 0).coerceIn(0, 7)) { 0xFFFF6B3DL },
+            instructions = str("instructions", desc), mission = str("mission"),
+            autonomous = bool("autonomous", false), heartbeatMinutes = if (hb in 1..1440) hb else 30,
+            useTerminal = bool("useTerminal", true), useBrowser = bool("useBrowser", true),
+            skillIds = skillIds,
+        )
+        store.upsertAgent(agent)
+        return agent
+    }
 
     /** Ao reabrir o app (ou o serviço reiniciar o processo), retoma agentes contínuos. */
     fun resumeSleeping() {
@@ -409,6 +467,8 @@ class AgentRunner(
                 appendLine("1) leia suas anotações (NOTES.md acima) para saber o estado; 2) faça só o que for necessário AGORA;")
                 appendLine("3) registre progresso/estado com notes_write (curto); 4) fatos duradouros com memory_save;")
                 appendLine("5) se nada mudou ou nada precisa ser feito, responda exatamente NO_REPLY (sem ferramentas) — isso economiza tokens.")
+                appendLine("6) SEMPRE avance a partir do que já existe (leia o workspace/NOTES) e melhore a entrega; NÃO refaça o que já está pronto.")
+                appendLine("7) RESILIÊNCIA: se uma ferramenta falhar, leia o erro, ajuste a abordagem e tente outro caminho; nunca pare por causa de um erro — contorne e continue.")
                 appendLine("Seja econômico: evite repetir pesquisas já anotadas. Nunca chame sleep nem finish no modo autônomo; apenas responda ao terminar.")
             }
             if (session.continuous) { appendLine(); appendLine("## Estado: MODO CONTÍNUO ATIVO — continue o ciclo trabalho → notes_write → sleep.") }

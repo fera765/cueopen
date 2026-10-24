@@ -46,9 +46,51 @@ fun CueMarkdown(text: String, modifier: Modifier = Modifier) {
     }
     Column(modifier, verticalArrangement = Arrangement.spacedBy(8.dp)) {
         parts.forEach { (mermaid, content) ->
-            if (mermaid) MermaidCard(content) else MdBlock(content)
+            when {
+                mermaid -> MermaidCard(content)
+                hasTable(content) -> GithubMarkdown(content)  // tabelas GFM: renderizador GitHub (WebView)
+                else -> MdBlock(content)
+            }
         }
     }
+}
+
+/** Detecta uma tabela GFM (linha com | e linha separadora ---|---). */
+private fun hasTable(md: String): Boolean {
+    val lines = md.lines()
+    for (i in 1 until lines.size) {
+        val sep = lines[i].trim()
+        if (sep.contains('|') && sep.replace(Regex("[^|:\- ]"), "").contains("-") && sep.matches(Regex("\|?[ :\-|]+\|?")) && lines[i-1].contains('|'))
+            return true
+    }
+    return false
+}
+
+/** Markdown estilo GitHub via WebView (tabelas, checklists, highlight), com altura automática. */
+@SuppressLint("SetJavaScriptEnabled")
+@Composable
+private fun GithubMarkdown(src: String) {
+    val dark = Cue.c.dark
+    var height by remember(src) { androidx.compose.runtime.mutableStateOf(80.dp) }
+    val density = androidx.compose.ui.platform.LocalDensity.current
+    AndroidView(
+        modifier = Modifier.fillMaxWidth().height(height),
+        factory = { ctx ->
+            WebView(ctx).apply {
+                settings.javaScriptEnabled = true
+                settings.allowFileAccess = true
+                setBackgroundColor(android.graphics.Color.TRANSPARENT)
+                addJavascriptInterface(object {
+                    @android.webkit.JavascriptInterface fun source() = src
+                    @android.webkit.JavascriptInterface fun dark() = dark
+                    @android.webkit.JavascriptInterface fun setHeight(px: Int) {
+                        post { height = with(density) { (px + 8).toDp() } }
+                    }
+                }, "CueMd")
+                loadUrl("file:///android_asset/md/view.html")
+            }
+        },
+    )
 }
 
 @Composable
