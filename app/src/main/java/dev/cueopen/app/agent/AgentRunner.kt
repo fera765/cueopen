@@ -927,7 +927,7 @@ class AgentRunner(
             if (setupErrors.isNotEmpty()) {
                 workers.forEach { child ->
                     terminal.runAgentCommand("git -C " + shQuote(gitRoot) + " worktree remove --force " + shQuote(sandbox.guestPath(child.id)) + " >/dev/null 2>&1 || true; git -C " + shQuote(gitRoot) + " branch -D " + shQuote("cue/agents/" + child.id) + " >/dev/null 2>&1 || true", 20L, false)
-                    store.editSession(child.id) { it.copy(status = SessionStatus.ERROR) }
+                    store.deleteSession(child.id)
                 }
                 return "Não iniciei workers porque a criação de branches isoladas falhou:\n" + setupErrors.joinToString("\n")
             }
