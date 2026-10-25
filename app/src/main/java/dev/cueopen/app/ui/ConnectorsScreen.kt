@@ -51,7 +51,7 @@ fun ConnectorsScreen(nav: NavController) {
         scope.launch {
             runCatching { Connectors.searchRegistry(query.trim()) }
                 .onSuccess { r -> found = r.distinctBy { it.id }; if (r.isEmpty()) searchErr = "Nenhum servidor remoto encontrado." }
-                .onFailure { searchErr = "Falha na busca: ${it.message}" }
+                .onFailure { searchErr = "Falha na busca do registro MCP: ${it.message ?: it::class.java.simpleName}. Verifique a conexão e tente novamente." }
             searching = false
         }
     }
@@ -79,13 +79,20 @@ fun ConnectorsScreen(nav: NavController) {
                     fontSize = 13.sp, color = c.ink2)
             }
             item {
-                OutlinedTextField(query, { query = it }, Modifier.fillMaxWidth(), singleLine = true, shape = RoundedCornerShape(16.dp),
-                    placeholder = { Text("Buscar servidores MCP (registro oficial)") },
-                    leadingIcon = { Icon(Icons.Rounded.Search, null) },
-                    trailingIcon = { if (searching) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp, color = c.accent) else if (query.isNotBlank()) IconButton({ doSearch() }) { Icon(Icons.Rounded.ArrowForward, "Buscar") } },
+                OutlinedTextField(
+                    value = query, onValueChange = { query = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true, shape = RoundedCornerShape(20.dp),
+                    placeholder = { Text("Buscar servidores MCP", maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                    leadingIcon = { Icon(Icons.Rounded.Search, null, tint = c.ink2) },
+                    trailingIcon = {
+                        if (searching) CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp, color = c.accent)
+                        else IconButton(onClick = { doSearch() }, enabled = query.isNotBlank()) { Icon(Icons.Rounded.ArrowForward, "Buscar", tint = if (query.isNotBlank()) c.ink else c.ink3) }
+                    },
                     keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(imeAction = androidx.compose.ui.text.input.ImeAction.Search),
                     keyboardActions = androidx.compose.foundation.text.KeyboardActions(onSearch = { doSearch() }),
-                    colors = OutlinedTextFieldDefaults.colors(focusedBorderColor = c.ink, unfocusedBorderColor = c.line, focusedContainerColor = c.surface, unfocusedContainerColor = c.surface))
+                    colors = OutlinedTextFieldDefaults.colors(focusedBorderColor = c.accent, unfocusedBorderColor = c.line, focusedContainerColor = c.surface, unfocusedContainerColor = c.surface)
+                )
             }
             searchErr?.let { item { Text(it, color = c.ink2, fontSize = 13.sp) } }
             if (found.isNotEmpty()) {
@@ -135,22 +142,28 @@ fun ConnectorsScreen(nav: NavController) {
                                 modifier = Modifier.clickable { tokenFor = conn })
                         }
                         Spacer(Modifier.width(8.dp))
+                        var menu by remember(conn.id) { mutableStateOf(false) }
                         if (busy == conn.id) CircularProgressIndicator(Modifier.size(22.dp), strokeWidth = 2.dp, color = c.accent)
-                        else if (connected) {
-                            var menu by remember { mutableStateOf(false) }
-                            Box {
+                        else {
+                            if (connected) {
                                 Switch(conn.enabled, { v -> app.store.upsertConnector(conn.copy(enabled = v)) },
                                     colors = SwitchDefaults.colors(checkedTrackColor = c.ink, checkedThumbColor = c.bg))
-                                DropdownMenu(menu, { menu = false }) {
-                                    DropdownMenuItem({ Text("Atualizar ferramentas") }, { menu = false; scope.launch { Connectors.refreshTools(app.store, conn) } })
-                                    DropdownMenuItem({ Text("Reconectar") }, { menu = false; connect(conn.copy(accessToken = null)) })
-                                    DropdownMenuItem({ Text("Desconectar", color = c.err) }, { menu = false; app.store.deleteConnector(conn.id) })
+                            } else {
+                                Box(Modifier.clip(CircleShape).background(c.ink).clickable { connect(conn.copy(enabled = true)) }.padding(horizontal = 14.dp, vertical = 8.dp)) {
+                                    Text(if (conn.lastError != null) "Tentar novamente" else "Conectar", color = c.bg, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
                                 }
                             }
-                            IconButton({ menu = true }) { Icon(Icons.Rounded.MoreVert, "Opções") }
-                        } else {
-                            Box(Modifier.clip(CircleShape).background(c.ink).clickable { connect(conn.copy(enabled = true)) }.padding(horizontal = 14.dp, vertical = 8.dp)) {
-                                Text("Conectar", color = c.bg, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                            Box {
+                                IconButton(onClick = { menu = true }) { Icon(Icons.Rounded.MoreVert, "Opções") }
+                                DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                                    if (connected) {
+                                        DropdownMenuItem(text = { Text("Atualizar ferramentas") }, onClick = { menu = false; scope.launch { Connectors.refreshTools(app.store, conn) } })
+                                        DropdownMenuItem(text = { Text("Reconectar") }, onClick = { menu = false; connect(conn.copy(accessToken = null)) })
+                                    }
+                                    DropdownMenuItem(text = { Text(if (connected) "Desconectar e remover" else "Desinstalar conector", color = c.err) },
+                                        leadingIcon = { Icon(Icons.Rounded.DeleteOutline, null, tint = c.err) },
+                                        onClick = { menu = false; app.store.deleteConnector(conn.id) })
+                                }
                             }
                         }
                     }
