@@ -208,7 +208,7 @@ class AgentRunner(
                     continue
                 }
                 store.editSession(sessionId) { it.copy(status = SessionStatus.DONE) }
-                store.session(sessionId)?.let { done -> scope.launch { ctxMgr.extractMemories(done) } }
+                if (tokenBudgetOverride == null) store.session(sessionId)?.let { done -> scope.launch { ctxMgr.extractMemories(done) } }
                 return
             }
             var stopLoop: SessionStatus? = null
@@ -225,7 +225,7 @@ class AgentRunner(
             val finalStatus = stopLoop
             if (finalStatus != null) {
                 store.editSession(sessionId) { it.copy(status = finalStatus, continuous = if (finalStatus == SessionStatus.DONE) false else it.continuous) }
-                if (finalStatus == SessionStatus.DONE) store.session(sessionId)?.let { done -> scope.launch { ctxMgr.extractMemories(done) } }
+                if (finalStatus == SessionStatus.DONE && tokenBudgetOverride == null) store.session(sessionId)?.let { done -> scope.launch { ctxMgr.extractMemories(done) } }
                 return
             }
             val sl = sleepReq
