@@ -68,25 +68,28 @@ class Sandbox(private val ctx: Context) {
             target.deleteRecursively()
             if (!staging.renameTo(target)) error("Não foi possível ativar o ambiente do chat")
             true
-        } catch (_: Throwable) {
+        } catch (t: Throwable) {
+            android.util.Log.e("CueOpenSandbox", "Falha ao criar ambiente Linux para chat ${safeId(sessionId)}", t)
+            appendLog("❌ Ambiente do chat: ${t.javaClass.simpleName}: ${t.message ?: "erro sem detalhes"}")
             staging.deleteRecursively()
             false
         }
     }
 
     private fun copyTree(source: File, target: File) {
+        // Preserve links simbólicos do Alpine, inclusive os relativos e quebrados.
+        val linkTarget = runCatching { android.system.Os.readlink(source.absolutePath) }.getOrNull()
+        if (linkTarget != null) {
+            android.system.Os.symlink(linkTarget, target.absolutePath)
+            return
+        }
         if (source.isDirectory) {
-            if (!target.exists() && !target.mkdirs()) error("Falha ao criar ${target.name}")
+            if (!target.exists() && !target.mkdirs()) error("Falha ao criar diretório ${target.absolutePath}")
             source.listFiles()?.forEach { child -> copyTree(child, File(target, child.name)) }
         } else {
             source.inputStream().use { input -> target.outputStream().use { out -> input.copyTo(out) } }
             if (source.canExecute()) target.setExecutable(true, false)
         }
-    }
-
-    fun deleteEnvironment(sessionId: String) {
-        runCatching { dev.cueopen.app.CueApp.instance.terminals.close(sessionId) }
-        environmentRoot(sessionId).deleteRecursively()
     }
 
     private val _state = MutableStateFlow(if (isInstalled()) State.READY else State.NOT_INSTALLED)
