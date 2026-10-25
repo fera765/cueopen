@@ -104,7 +104,7 @@ object Connectors {
         else {
             val q = query.trim()
             val matching = out.filter { it.name.contains(q, true) || it.description.contains(q, true) || it.url.contains(q, true) }
-            if (matching.isNotEmpty()) matching else out
+            matching
         }
     }
 
