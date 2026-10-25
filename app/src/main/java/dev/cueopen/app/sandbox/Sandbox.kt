@@ -77,7 +77,6 @@ class Sandbox(private val ctx: Context) {
     }
 
     private fun copyTree(source: File, target: File) {
-        // Preserve links simbólicos do Alpine, inclusive os relativos e quebrados.
         val linkTarget = runCatching { android.system.Os.readlink(source.absolutePath) }.getOrNull()
         if (linkTarget != null) {
             android.system.Os.symlink(linkTarget, target.absolutePath)
@@ -90,6 +89,11 @@ class Sandbox(private val ctx: Context) {
             source.inputStream().use { input -> target.outputStream().use { out -> input.copyTo(out) } }
             if (source.canExecute()) target.setExecutable(true, false)
         }
+    }
+
+    fun deleteEnvironment(sessionId: String) {
+        runCatching { dev.cueopen.app.CueApp.instance.terminals.close(sessionId) }
+        environmentRoot(sessionId).deleteRecursively()
     }
 
     private val _state = MutableStateFlow(if (isInstalled()) State.READY else State.NOT_INSTALLED)
