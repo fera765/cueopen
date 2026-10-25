@@ -340,7 +340,8 @@ class BrowserHost(private val appCtx: Context) {
                 var tag=e.tagName.toLowerCase(); if(tag=='input') tag+='['+(e.type||'text')+']';
                 var href=e.href?(' -> '+String(e.href).slice(0,120)):'';
                 var role=e.getAttribute("role")||({A:"link",BUTTON:"button",INPUT:"textbox",TEXTAREA:"textbox",SELECT:"combobox"}[e.tagName]||tag);
-                var extra=e.disabled?" [disabled]":""; if(e.getAttribute("aria-expanded"))extra+=" [expanded="+e.getAttribute("aria-expanded")+"]";\n                out.push("["+i+"] "+role+" \""+label+"\""+extra+href); i++;
+                var extra=e.disabled?" [disabled]":""; if(e.getAttribute("aria-expanded"))extra+=" [expanded="+e.getAttribute("aria-expanded")+"]";
+                out.push("["+i+"] "+role+" \""+label+"\""+extra+href); i++;
               });
               var text=(document.body?document.body.innerText:'').replace(/\n{3,}/g,'\n\n');
               var main=document.querySelector("main,[role=main],article")||document.body;
@@ -349,6 +350,9 @@ class BrowserHost(private val appCtx: Context) {
             })()
         """.trimIndent()
         val raw = eval(js)
+        if (raw == "null" || raw == "undefined" || raw.isBlank()) {
+            return "Falha ao ler página: o JavaScript de snapshot não retornou dados. Verifique o console do WebView e se o DOM já foi criado."
+        }
         return runCatching {
             val o = JSONObject(raw)
             val els = o.getJSONArray("elements")
@@ -398,8 +402,10 @@ class BrowserHost(private val appCtx: Context) {
     private suspend fun eval(js: String): String {
         val d = CompletableDeferred<String>()
         onMain { agentView().evaluateJavascript(js) { d.complete(it ?: "null") } }
-        val raw = withTimeoutOrNull(15_000) { d.await() } ?: return "timeout"
-        // evaluateJavascript devolve um literal JSON (string entre aspas)
+        val raw = withTimeoutOrNull(15_000) { d.await() } ?: return "timeout: evaluateJavascript não respondeu em 15s"
+        // evaluateJavascript devolve um literal JSON (string entre aspas); null/undefined
+        // geralmente indica que o script não retornou valor. Preserve esse estado explicitamente.
+        if (raw == "null") return "null"
         return runCatching {
             when (val v = JSONTokener(raw).nextValue()) {
                 is String -> v
