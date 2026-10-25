@@ -75,7 +75,7 @@ class AgentRunner(
 
     fun stop(sessionId: String) {
         jobs.remove(sessionId)?.cancel()
-        childJobsByParent.remove(sessionId)?.forEach { it.cancel() }
+        synchronized(childJobsByParent) { childJobsByParent.remove(sessionId)?.forEach { it.cancel() } }
         store.state.value.agents.filter { it.homeSessionId == sessionId && it.autonomous }.forEach {
             store.upsertAgent(it.copy(autonomous = false)); dev.cueopen.app.scheduler.Heartbeat.cancel(ctx, it.id)
         }
