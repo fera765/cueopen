@@ -108,11 +108,11 @@ class BrowserHost(private val appCtx: Context) {
         return createView(ctx, false).also { _view = it; it.loadUrl(HOME) }
     }
 
-    /** WebView isolado para ferramentas do agente. Nunca é o mesmo widget exibido ao usuário. */
-    private fun agentView(): WebView {
-        _agentView?.let { return it }
-        return createView(appCtx, true).also { _agentView = it; it.loadUrl("about:blank") }
-    }
+    /**
+     * O agente e a aba Browser precisam operar no MESMO WebView.
+     * Um WebView separado fazia o chat navegar em segundo plano enquanto a UI ficava na HOME.
+     */
+    private fun agentView(): WebView = _view ?: view(appCtx)
 
     @SuppressLint("SetJavaScriptEnabled")
     private fun createView(ctx: Context, agentMode: Boolean): WebView {
@@ -142,10 +142,11 @@ class BrowserHost(private val appCtx: Context) {
         v.webViewClient = object : WebViewClient() {
             override fun onPageStarted(view: WebView, url: String, favicon: Bitmap?) { if (!agentMode) sync(view, loading = true) }
             override fun onPageFinished(view: WebView, url: String) {
-                if (!agentMode) sync(view, loading = false) else pageDone?.complete(Unit)
+                sync(view, loading = false)
+                pageDone?.complete(Unit)
                 collectTimings(view)
                 installSnapshotInstrumentation(view)
-                if (agentMode) installNetworkInstrumentation(view)
+                installNetworkInstrumentation(view)
             }
             override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): android.webkit.WebResourceResponse? {
                 // só observa (não intercepta): alimenta o painel de rede
@@ -159,7 +160,10 @@ class BrowserHost(private val appCtx: Context) {
             }
             override fun onReceivedError(view: WebView, request: WebResourceRequest, error: android.webkit.WebResourceError) {
                 patchNet(request.url.toString()) { it.copy(error = error.description?.toString()) }
-                if (request.isForMainFrame) pageDone?.complete(Unit)
+                if (request.isForMainFrame) {
+                    if (!agentMode) sync(view, loading = false)
+                    pageDone?.complete(Unit)
+                }
             }
             override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
                 val s = request.url.scheme ?: return true
