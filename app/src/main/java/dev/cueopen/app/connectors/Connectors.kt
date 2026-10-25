@@ -129,13 +129,12 @@ object Connectors {
         val reg = JSONObject().put("client_name", "CueOpen").put("redirect_uris", JSONArray().put(redirect))
             .put("grant_types", JSONArray().put("authorization_code").put("refresh_token"))
             .put("response_types", JSONArray().put("code")).put("application_type", "native")
-            .put("token_endpoint_auth_method", "client_secret_post")
+            .put("token_endpoint_auth_method", "none")
             .put("scope", prm?.optJSONArray("scopes_supported")?.let { a -> (0 until a.length()).joinToString(" ") { a.getString(it) } } ?: "")
-        var clientSecret: String? = null
         val clientId = http.newCall(Request.Builder().url(regEp).post(reg.toString().toRequestBody(jsonType)).build()).execute().use { r ->
             val body = r.body?.string().orEmpty()
-            if (!r.isSuccessful) error("Registro de cliente falhou (HTTP ${r.code}): ${body.take(200)}")
-            val o = JSONObject(body); clientSecret = o.optString("client_secret").ifBlank { null }; o.getString("client_id")
+            if (!r.isSuccessful) error("Registro dinâmico de cliente falhou (HTTP ${r.code}): ${body.take(200)}. O servidor pode exigir cadastro prévio ou não aceitar clientes públicos.")
+            JSONObject(body).getString("client_id")
         }
 
         // 4) PKCE + autorização no navegador
@@ -159,14 +158,14 @@ object Connectors {
         // 5) troca do código por tokens
         val form = FormBody.Builder().add("grant_type", "authorization_code").add("code", code)
             .add("redirect_uri", redirect).add("client_id", clientId).add("code_verifier", verifier).add("resource", c.url)
-            .apply { clientSecret?.let { add("client_secret", it) } }.build()
+            .build()
         val tok = http.newCall(Request.Builder().url(tokenEp).post(form).header("Accept", "application/json").build()).execute().use { r ->
             val body = r.body?.string().orEmpty()
             if (!r.isSuccessful) error("Troca de token falhou (HTTP ${r.code}): ${body.take(200)}")
             JSONObject(body)
         }
         val connected = c.copy(
-            clientId = clientId, clientSecret = clientSecret, tokenEndpoint = tokenEp,
+            clientId = clientId, clientSecret = null, tokenEndpoint = tokenEp,
             accessToken = tok.getString("access_token"), refreshToken = tok.optString("refresh_token").ifBlank { null },
             expiresAt = tok.optLong("expires_in", 0).takeIf { it > 0 }?.let { System.currentTimeMillis() + it * 1000 },
             connectedAt = System.currentTimeMillis(), lastError = null,
