@@ -137,7 +137,7 @@ class TerminalManager(private val ctx: Context, private val sandbox: Sandbox) {
                 val before = transcript()
                 val waiter = kotlinx.coroutines.CompletableDeferred<Int>()
                 pending = waiter
-                write("\u0015$typed\r") // Ctrl-U limpa algo digitado pela metade
+                write("\u0015\n$typed\r") // limpa a linha anterior e começa o comando em uma linha nova
                 val exit = try {
                     withTimeoutOrNull(timeoutSec * 1000) { waiter.await() }
                 } finally {
