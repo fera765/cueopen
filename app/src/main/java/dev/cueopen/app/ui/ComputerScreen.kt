@@ -111,7 +111,7 @@ fun ComputerScreen(nav: NavController, sessionId: String, initialTab: String?) {
 @Composable
 private fun TerminalPane(sessionId: String) {
     Box(Modifier.fillMaxSize().padding(8.dp).clip(RoundedCornerShape(16.dp))) {
-        TerminalView(key = sessionId, cwd = "/root/workspace/$sessionId", modifier = Modifier.fillMaxSize())
+        TerminalView(key = sessionId, cwd = "/root/workspace", modifier = Modifier.fillMaxSize())
     }
 }
 
