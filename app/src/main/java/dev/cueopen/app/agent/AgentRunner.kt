@@ -62,7 +62,7 @@ class AgentRunner(
     private val ctx: android.content.Context,
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    private val jobs = mutableMapOf<String, Job>()
+    private val jobs = java.util.concurrent.ConcurrentHashMap<String, Job>()
     private val childJobsByParent = mutableMapOf<String, MutableList<Job>>()
     private val _activity = MutableStateFlow<Map<String, Activity>>(emptyMap())
     val activity: StateFlow<Map<String, Activity>> = _activity
@@ -300,8 +300,12 @@ class AgentRunner(
         if (autonomyJob?.isActive == true) return
         autonomyJob = scope.launch {
             while (isActive) {
-                runCatching { autonomyTick() }
-                kotlinx.coroutines.delay(20_000)
+                runCatching { autonomyTick() }.onFailure { t ->
+                    android.util.Log.e("CueOpen.Autonomy", "Falha no scheduler local", t)
+                }
+                // Intervalos de 1 minuto precisam de margem; verificar a cada 5 s evita atraso
+                // adicional causado pelo ticker de 20 s.
+                kotlinx.coroutines.delay(5_000)
             }
         }
     }
@@ -337,8 +341,11 @@ class AgentRunner(
      * usuário via set_schedule numa conversa — nunca cria sessão sozinho (evita auto-início ao criar).
      */
     fun heartbeat(agent: AgentProfile): Job {
-        var a = agent
-        if (a.homeSessionId == null) return scope.launch { }
+        var a = store.agent(agent.id) ?: agent
+        if (!a.autonomous || a.homeSessionId == null) return scope.launch { }
+        val requestedHome = a.homeSessionId!!
+        // AlarmManager e ticker podem disparar juntos. Uma sessão só pode ter um ciclo ativo.
+        jobs[requestedHome]?.takeIf { it.isActive }?.let { return it }
         val home = a.homeSessionId?.let { store.session(it) } ?: Session(title = "🤖 ${a.name} · autônomo", agentId = a.id).also {
             store.upsertSession(it); a = a.copy(homeSessionId = it.id); store.upsertAgent(a)
         }
@@ -388,6 +395,9 @@ class AgentRunner(
                         store.upsertAgent(cur.copy(beats = cur.beats + 1, actions = cur.actions + if (quiet) 0 else 1,
                             tokensDay = day, tokensToday = (if (cur.tokensDay == day) cur.tokensToday else 0) + used))
                     }
+                }
+                store.agent(a.id)?.takeIf { it.autonomous }?.let { current ->
+                    store.upsertAgent(current.copy(lastBeatAt = System.currentTimeMillis()))
                 }
                 setActivity(sid, Activity())
                 jobs.remove(sid, coroutineContext[Job])
