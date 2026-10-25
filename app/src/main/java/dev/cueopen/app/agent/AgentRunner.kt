@@ -87,7 +87,7 @@ class AgentRunner(
     /** Envia uma mensagem do usuário e (re)inicia o loop. */
     fun send(sessionId: String, text: String, attachments: List<String> = emptyList(), onDone: (() -> Unit)? = null): Job {
         jobs[sessionId]?.cancel()
-        childJobsByParent.remove(sessionId)?.forEach { it.cancel() }
+        synchronized(childJobsByParent) { childJobsByParent.remove(sessionId)?.forEach { it.cancel() } }
         store.addItem(sessionId, ChatItem.User(text = text, attachments = attachments))
         var content = if (attachments.isEmpty()) text
         else text + "\n\n[Arquivos anexados no workspace: ${attachments.joinToString()}]"
@@ -514,7 +514,7 @@ class AgentRunner(
             appendLine("5. Fatos duradouros sobre o usuário/projeto: `memory_save`. Para lembrar algo antigo: `memory_search`.")
             appendLine("6. Para usar uma skill, chame `skill_load` com o nome e siga as instruções.")
             appendLine("6b. AUTONOMIA: se o usuário pedir para monitorar/acompanhar/repetir algo ao longo do tempo (ex.: \"a cada 20 min verifique o mercado\"), chame set_schedule com o intervalo em minutos. Se ele não der intervalo mas a tarefa for contínua, escolha um intervalo razoável e econômico. Para parar, set_schedule minutes=0.")
-            val caps = if (allowMultiAgent) agent?.deviceCaps.orEmpty() else emptyList()
+            val caps = agent?.deviceCaps.orEmpty()
             if (caps.isNotEmpty()) appendLine("6c. Você tem acesso ao aparelho: " + caps.joinToString(", ") { dev.cueopen.app.device.DeviceCaps.all.firstOrNull { d -> d.id == it }?.title ?: it } + ". Use as ferramentas device_* quando fizer sentido.")
             appendLine("7. MODO CONTÍNUO: se o usuário pedir para monitorar, acompanhar, repetir ou rodar por horas/dias, NÃO finalize. Faça a verificação, registre em notes_write e chame `sleep` (minutos até a próxima verificação). Repita até o usuário pausar.")
             appendLine("8. Fora do modo contínuo, termine com `finish` (resumo curto + arquivos). `ask_user` só se for ambíguo ou irreversível. Responda no idioma do usuário.")
@@ -623,7 +623,7 @@ class AgentRunner(
             put("minutes", int("Minutos entre verificações; 0 para parar")); put("mission", str("O que verificar/fazer a cada ciclo"))
         }, listOf("minutes")))
         // Capacidades do dispositivo liberadas para este agente
-        val caps = agent?.deviceCaps.orEmpty()
+        val caps = if (allowMultiAgent) agent?.deviceCaps.orEmpty() else emptyList()
         if (dev.cueopen.app.device.DeviceCaps.NOTIF_READ in caps)
             add(tool("device_notifications", "Lê as notificações recentes do aparelho (apps como WhatsApp, Gmail…).", buildJsonObject {
                 put("filter", str("Filtrar por app ou texto (opcional)")); put("limit", int("Máximo (padrão 30)"))
