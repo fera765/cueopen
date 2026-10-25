@@ -574,7 +574,7 @@ class AgentRunner(
     }
 
     private fun tools(agent: AgentProfile?, allowMultiAgent: Boolean = true) = buildJsonArray {
-        if (allowMultiAgent) add(tool("multi_agents", "Executa todas as subtarefas em ondas com no máximo cinco workers simultâneos. Cada worker usa workspace isolado; resultados parciais não são integrados automaticamente e conflitos são preservados. tasks_json é um array JSON de strings independentes; budget_tokens é por worker.", buildJsonObject {
+        if (allowMultiAgent) add(tool("multi_agents", "Executa todas as subtarefas em ondas com no máximo cinco workers simultâneos. Cada worker usa workspace isolado; resultados parciais não são integrados automaticamente e conflitos são preservados. tasks_json aceita strings independentes ou objetos {id, task, depends_on}; dependências são executadas em ondas. budget_tokens é por worker.", buildJsonObject {
             put("tasks_json", str("Array JSON de tarefas independentes"))
             put("repo_path", str("Caminho opcional do repositório Git dentro do sandbox; padrão workspace atual"))
             put("max_workers", int("Quantidade de workers (1-5; padrão 3)"))
@@ -891,39 +891,104 @@ class AgentRunner(
      * and only then participates in integration. Model completion alone does not mean task success.
      */
     /**
-     * Runs every independent task in bounded waves. max_workers limits concurrency, not task count.
-     * Later waves can build on earlier uncommitted integration results without touching main.
+     * Dependency-aware scheduler. Strings remain supported as independent tasks; object entries can
+     * declare id, task/title and depends_on. Each ready wave is bounded by max_workers.
      */
     private suspend fun runMultiAgents(sessionId: String, tasksJson: String, repoPathArg: String, requestedWorkers: Int, requestedBudget: Int): String {
         val tasks = runCatching {
             val arr = org.json.JSONArray(tasksJson)
-            (0 until arr.length()).mapNotNull { arr.optString(it).trim().takeIf { task -> task.isNotBlank() } }
-        }.getOrElse { return "ERRO: tasks_json deve ser um array JSON de strings." }
+            (0 until arr.length()).mapNotNull { index ->
+                when (val item = arr.opt(index)) {
+                    is String -> item.trim().takeIf { it.isNotBlank() }?.let {
+                        AgentTask("task-" + (index + 1), it, emptyList())
+                    }
+                    is org.json.JSONObject -> {
+                        val id = item.optString("id").trim().ifBlank { "task-" + (index + 1) }
+                        val task = item.optString("task").trim().ifBlank { item.optString("title").trim() }
+                        val depsJson = item.optJSONArray("depends_on")
+                        val deps = if (depsJson == null) emptyList() else
+                            (0 until depsJson.length()).map { depsJson.optString(it).trim() }.filter { it.isNotBlank() }
+                        if (task.isBlank()) null else AgentTask(id, task, deps)
+                    }
+                    else -> null
+                }
+            }
+        }.getOrElse { return "ERRO: tasks_json deve ser um array JSON de strings ou objetos {id, task, depends_on}." }
         if (tasks.isEmpty()) return "ERRO: informe pelo menos uma subtarefa."
+        if (tasks.map { it.id }.toSet().size != tasks.size) return "ERRO: cada subtarefa precisa ter um id único."
+        val ids = tasks.map { it.id }.toSet()
+        val invalid = tasks.firstOrNull { task -> task.dependsOn.any { it !in ids || it == task.id } }
+        if (invalid != null) return "ERRO: dependência inválida na tarefa '" + invalid.id + "'. Confira depends_on e evite autorreferência."
+        if (hasDependencyCycle(tasks)) return "ERRO: o plano contém um ciclo de dependências; nenhuma tarefa foi iniciada."
 
         val workerLimit = requestedWorkers.coerceIn(1, 5)
+        val pending = tasks.toMutableList()
+        val completed = linkedSetOf<String>()
+        val failed = linkedSetOf<String>()
         val report = StringBuilder()
-        val batches = tasks.chunked(workerLimit)
-        appendReportLine(report, "Plano: " + tasks.size + " subtarefa(s), até " + workerLimit + " worker(s) simultâneos, " + batches.size + " onda(s).")
-        batches.forEachIndexed { index, batch ->
-            appendReportLine(report, "")
-            appendReportLine(report, "## Onda " + (index + 1) + "/" + batches.size)
-            val payload = org.json.JSONArray().apply { batch.forEach { put(it) } }.toString()
-            val result = runMultiAgentsBatch(
-                sessionId = sessionId,
-                tasksJson = payload,
-                repoPathArg = repoPathArg,
-                requestedWorkers = workerLimit,
-                requestedBudget = requestedBudget,
-                allowDirtyWorkspace = index > 0
-            )
-            appendReportLine(report, result)
-            if (result.startsWith("ERRO:") || result.startsWith("Multi Agents pausado:") || result.contains("ATENÇÃO:")) {
-                appendReportLine(report, "Execução interrompida após a onda " + (index + 1) + " para evitar propagar falhas ou conflitos para tarefas posteriores.")
-                break
+        appendReportLine(report, "Plano: " + tasks.size + " subtarefa(s), até " + workerLimit + " worker(s) simultâneos.")
+        var hasRunBatch = false
+        while (pending.isNotEmpty()) {
+            val blocked = pending.filter { task -> task.dependsOn.any { it in failed } }
+            if (blocked.isNotEmpty()) {
+                blocked.forEach { task ->
+                    pending.remove(task)
+                    failed += task.id
+                    appendReportLine(report, "Tarefa '" + task.id + "' bloqueada: uma dependência falhou.")
+                }
+            }
+            val ready = pending.filter { task -> task.dependsOn.all { it in completed } }
+            if (ready.isEmpty()) {
+                if (pending.isNotEmpty()) {
+                    appendReportLine(report, "ERRO: não há tarefas executáveis; dependências pendentes: " +
+                        pending.joinToString { it.id + " <- " + it.dependsOn.joinToString(",") } + ".")
+                    break
+                }
+                continue
+            }
+            ready.chunked(workerLimit).forEachIndexed { batchIndex, batch ->
+                appendReportLine(report, "")
+                appendReportLine(report, "## Onda · lote " + (batchIndex + 1) + " · " + batch.joinToString { it.id })
+                val payload = org.json.JSONArray().apply { batch.forEach { put(it.task) } }.toString()
+                val result = runMultiAgentsBatch(
+                    sessionId = sessionId,
+                    tasksJson = payload,
+                    repoPathArg = repoPathArg,
+                    requestedWorkers = workerLimit,
+                    requestedBudget = requestedBudget,
+                    allowDirtyWorkspace = hasRunBatch
+                )
+                hasRunBatch = true
+                appendReportLine(report, result)
+                val success = !result.startsWith("ERRO:") &&
+                    !result.startsWith("Multi Agents pausado:") &&
+                    !result.contains("ATENÇÃO:")
+                batch.forEach { task ->
+                    pending.remove(task)
+                    if (success) completed += task.id else failed += task.id
+                }
             }
         }
+        appendReportLine(report, "")
+        appendReportLine(report, "Resumo do plano: " + completed.size + " concluída(s), " + failed.size + " falha(s)/bloqueada(s).")
+        if (failed.isNotEmpty()) appendReportLine(report, "Revisar tarefas: " + failed.joinToString(", ") + ".")
         return report.toString()
+    }
+
+    private fun hasDependencyCycle(tasks: List<AgentTask>): Boolean {
+        val byId = tasks.associateBy { it.id }
+        val visiting = mutableSetOf<String>()
+        val visited = mutableSetOf<String>()
+        fun visit(id: String): Boolean {
+            if (id in visiting) return true
+            if (id in visited) return false
+            visiting += id
+            val cycle = byId[id]?.dependsOn.orEmpty().any { visit(it) }
+            visiting -= id
+            visited += id
+            return cycle
+        }
+        return tasks.any { visit(it.id) }
     }
 
     private suspend fun runMultiAgentsBatch(sessionId: String, tasksJson: String, repoPathArg: String, requestedWorkers: Int, requestedBudget: Int, allowDirtyWorkspace: Boolean = false): String {
@@ -1180,6 +1245,12 @@ class AgentRunner(
         }
         return report.toString()
     }
+
+    private data class AgentTask(
+        val id: String,
+        val task: String,
+        val dependsOn: List<String>
+    )
 
     /**
      * Compact worker-output contract, used by the orchestrator when summarizing parallel work.
