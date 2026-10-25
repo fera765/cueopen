@@ -1,6 +1,6 @@
 package dev.cueopen.app.agent
 
-import dev.cueopen.app.browser.BrowserHost
+import dev.cueopen.app.browserFor(sessionId).BrowserHost
 import dev.cueopen.app.data.AgentProfile
 import dev.cueopen.app.data.ChatItem
 import dev.cueopen.app.data.KnowledgeItem
@@ -56,7 +56,7 @@ data class Activity(val kind: Kind = Kind.IDLE, val detail: String = "") {
 class AgentRunner(
     private val store: Store,
     private val sandbox: Sandbox,
-    private val browser: BrowserHost,
+    private val browserFor: (String) -> BrowserHost,
     private val llm: OpenRouter,
     private val terminals: dev.cueopen.app.sandbox.TerminalManager,
     private val ctx: android.content.Context,
@@ -84,7 +84,7 @@ class AgentRunner(
         finalizeRunningSteps(sessionId, "Execução interrompida pelo usuário.")
         store.editSession(sessionId) { it.copy(status = SessionStatus.STOPPED, wakeAt = null) }
         setActivity(sessionId, Activity())
-        browser.setAgentControl(false)
+        browserFor(sessionId).setAgentControl(false)
     }
 
     /** Envia uma mensagem do usuário e (re)inicia o loop. */
@@ -120,7 +120,7 @@ class AgentRunner(
                     finalizeRunningSteps(sessionId, "Execução encerrada sem retorno da ferramenta.")
                     setActivity(sessionId, Activity())
                 }
-                browser.setAgentControl(false)
+                browserFor(sessionId).setAgentControl(false)
                 jobs.remove(sessionId, coroutineContext[Job])
                 if (jobs.values.none { it.isActive }) dev.cueopen.app.sandbox.SandboxService.start(ctx, "Terminal ativo")
                 onDone?.invoke()
@@ -622,7 +622,7 @@ class AgentRunner(
         add(tool("file_read", "Lê um arquivo de texto.", buildJsonObject { put("path", str("Caminho")) }, listOf("path")))
         add(tool("file_list", "Lista arquivos de um diretório.", buildJsonObject { put("path", str("Diretório (padrão: workspace)")) }))
         if (web) {
-            add(tool("browser_navigate", "Abre uma URL (ou termos de busca) no browser.", buildJsonObject { put("url", str("URL ou busca")) }, listOf("url")))
+            add(tool("browser_navigate", "Abre uma URL (ou termos de busca) no browserFor(sessionId).", buildJsonObject { put("url", str("URL ou busca")) }, listOf("url")))
             add(tool("browser_snapshot", "Gera snapshot semântico da página atual com headings, conteúdo, links e controles nomeados; refs/índices expiram após navegação.", buildJsonObject { put("max_chars", int("Limite de caracteres (padrão 9000)")) }))
             add(tool("browser_read", "Compatibilidade: lê o snapshot e o texto da página atual.", buildJsonObject {}))
             add(tool("browser_click", "Clica no elemento [índice] de browser_read.", buildJsonObject { put("index", int("Índice")) }, listOf("index")))
@@ -800,7 +800,7 @@ class AgentRunner(
         val step = ChatItem.Step(tool = call.name, title = title, args = argPreview)
         store.addItem(sessionId, step)
         setActivity(sessionId, Activity(kind, argPreview.take(80)))
-        if (kind == Activity.Kind.BROWSER) browser.setAgentControl(true)
+        if (kind == Activity.Kind.BROWSER) browserFor(sessionId).setAgentControl(true)
 
         val out: String = try {
             when (call.name) {
@@ -846,14 +846,14 @@ class AgentRunner(
                 }
                 "browser_navigate" -> {
                     val url = s("url").let { u -> if (u.startsWith("/root")) "file://" + sandbox.hostFile(u, sessionId).absolutePath else u }
-                    browser.navigate(url); browser.read(4000)
+                    browserFor(sessionId).navigate(url); browserFor(sessionId).read(4000)
                 }
-                "browser_read", "browser_snapshot" -> browser.read((i("max_chars") ?: 9000).coerceIn(1000, 20000))
-                "browser_click" -> browser.click(i("index") ?: -1)
-                "browser_type" -> browser.type(i("index") ?: -1, s("text"), b("submit"))
-                "browser_scroll" -> browser.scroll(s("direction") != "up")
-                "browser_back" -> { browser.back(); "ok" }
-                "browser_js" -> browser.runJs(s("code"))
+                "browser_read", "browser_snapshot" -> browserFor(sessionId).read((i("max_chars") ?: 9000).coerceIn(1000, 20000))
+                "browser_click" -> browserFor(sessionId).click(i("index") ?: -1)
+                "browser_type" -> browserFor(sessionId).type(i("index") ?: -1, s("text"), b("submit"))
+                "browser_scroll" -> browserFor(sessionId).scroll(s("direction") != "up")
+                "browser_back" -> { browserFor(sessionId).back(); "ok" }
+                "browser_js" -> browserFor(sessionId).runJs(s("code"))
                 "device_notifications" -> dev.cueopen.app.device.NotifStore.recent(s("filter"), (i("limit") ?: 30).coerceIn(1, 100))
                     .joinToString("\n") { "[${java.text.SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(it.time))}] ${it.app}: ${it.title} — ${it.text}".take(300) }
                     .ifBlank { "Nenhuma notificação capturada ainda." }
@@ -864,8 +864,8 @@ class AgentRunner(
                     if (dev.cueopen.app.device.ScreenCapture.capture(ctx, f)) { store.addItem(sessionId, ChatItem.Media(path = f.absolutePath, caption = "Captura de tela")); "Captura salva e exibida: ${f.name}" }
                     else "Não foi possível capturar (permissão de captura não concedida)."
                 }
-                "browser_network" -> browser.networkSummary(s("filter"))
-                "browser_console" -> browser.consoleSummary()
+                "browser_network" -> browserFor(sessionId).networkSummary(s("filter"))
+                "browser_console" -> browserFor(sessionId).consoleSummary()
                 "notes_write" -> {
                     val f = ctxMgr.notesFile(sessionId)
                     if (a["append"]?.jsonPrimitive?.booleanOrNull != false && f.exists()) f.appendText("\n" + s("content")) else f.writeText(s("content"))
