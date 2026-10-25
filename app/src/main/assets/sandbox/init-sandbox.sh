@@ -1,8 +1,10 @@
 export LD_LIBRARY_PATH=$PREFIX
 
 mkdir -p "$PREFIX/tmp"
-mkdir -p "$PREFIX/alpine/tmp"
-mkdir -p "$PREFIX/public"
+ALPINE_ROOT="${ALPINE_ROOT:-$PREFIX/alpine}"
+SESSION_PUBLIC_ROOT="${SESSION_PUBLIC_ROOT:-$PREFIX/public}"
+mkdir -p "$ALPINE_ROOT/tmp"
+mkdir -p "$SESSION_PUBLIC_ROOT"
 
 export PROOT_TMP_DIR=$PREFIX/tmp
 
@@ -63,10 +65,10 @@ ARGS="$ARGS -b /proc"
 ARGS="$ARGS -b /sys"
 ARGS="$ARGS -b $PREFIX"
 ARGS="$ARGS -b $NATIVE_DIR"
-ARGS="$ARGS -b $PREFIX/public:/public"
-ARGS="$ARGS -b $PREFIX/public:/home"
-ARGS="$ARGS -b $PREFIX/public:/root"
-ARGS="$ARGS -b $PREFIX/alpine/tmp:/dev/shm"
+ARGS="$ARGS -b $SESSION_PUBLIC_ROOT:/public"
+ARGS="$ARGS -b $SESSION_PUBLIC_ROOT:/home"
+ARGS="$ARGS -b $SESSION_PUBLIC_ROOT:/root"
+ARGS="$ARGS -b $ALPINE_ROOT/tmp:/dev/shm"
 
 
 # PRoot canonicalizes every -b host path with realpath(3).  The magic links
@@ -118,7 +120,7 @@ if can_bind "/proc/$SELF_PID/fd/2"; then
 fi
 
 
-ARGS="$ARGS -r $PREFIX/alpine"
+ARGS="$ARGS -r $ALPINE_ROOT"
 ARGS="$ARGS -0"
 ARGS="$ARGS --link2symlink"
 ARGS="$ARGS --sysvipc"
