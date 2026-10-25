@@ -101,11 +101,24 @@ class BrowserHost(private val appCtx: Context) {
     private var pageDone: CompletableDeferred<Unit>? = null
     private var _view: WebView? = null
     private var _agentView: WebView? = null
+    @Volatile private var viewUsesApplicationContext = false
 
     @SuppressLint("SetJavaScriptEnabled")
+    @Synchronized
     fun view(ctx: Context = appCtx): WebView {
-        _view?.let { return it }
-        return createView(ctx, false).also { _view = it; it.loadUrl(HOME) }
+        val current = _view
+        if (current != null && !(viewUsesApplicationContext && ctx !== appCtx)) return current
+
+        // Se o agente iniciou o browser antes da tela ser aberta, o WebView foi criado com
+        // applicationContext. Recrie-o com o contexto da Activity para garantir renderização na UI,
+        // preservando a URL atual e mantendo agente e tela apontando para a mesma instância.
+        val target = current?.url?.takeIf { it.isNotBlank() } ?: HOME
+        if (current != null) runCatching { current.stopLoading(); current.destroy() }
+        return createView(ctx, false).also {
+            _view = it
+            viewUsesApplicationContext = ctx === appCtx
+            it.loadUrl(target)
+        }
     }
 
     /**
@@ -116,7 +129,7 @@ class BrowserHost(private val appCtx: Context) {
 
     @SuppressLint("SetJavaScriptEnabled")
     private fun createView(ctx: Context, agentMode: Boolean): WebView {
-        val v = WebView(ctx.applicationContext)
+        val v = WebView(ctx)
         with(v.settings) {
             javaScriptEnabled = true
             domStorageEnabled = true
