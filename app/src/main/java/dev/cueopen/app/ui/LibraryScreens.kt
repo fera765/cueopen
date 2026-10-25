@@ -200,20 +200,29 @@ fun SkillsScreen(nav: NavController) {
             item { SkillMarketplace() }
             item { SectionLabel("Minhas skills") }
             items(st.skills, key = { it.id }) { s ->
+                var confirmDelete by remember(s.id) { mutableStateOf(false) }
                 CueCard(onClick = { nav.navigate("skill/${s.id}") }) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Box(Modifier.size(40.dp).clip(RoundedCornerShape(12.dp)).background(c.surface2), contentAlignment = Alignment.Center) { Icon(skillIcon(s.icon), null) }
                         Spacer(Modifier.width(12.dp))
                         Column(Modifier.weight(1f)) {
                             Row(verticalAlignment = Alignment.CenterVertically) {
-                                Text(s.name, fontWeight = FontWeight.SemiBold)
+                                Text(s.name, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
                                 if (s.builtIn) { Spacer(Modifier.width(6.dp)); Text("nativa", fontSize = 11.sp, color = c.ink3) }
                             }
                             Text(s.description, fontSize = 13.sp, color = c.ink2, maxLines = 2, overflow = TextOverflow.Ellipsis)
                         }
                         Switch(s.enabled, { app.store.upsertSkill(s.copy(enabled = it)) }, colors = SwitchDefaults.colors(checkedTrackColor = c.ink, checkedThumbColor = c.bg))
+                        if (!s.builtIn) IconButton(onClick = { confirmDelete = true }) { Icon(Icons.Rounded.DeleteOutline, "Excluir skill", tint = c.err) }
                     }
                 }
+                if (confirmDelete) AlertDialog(
+                    onDismissRequest = { confirmDelete = false },
+                    title = { Text("Excluir skill?") },
+                    text = { Text("A skill “${s.name}” será removida da sua biblioteca.") },
+                    confirmButton = { TextButton(onClick = { app.store.deleteSkill(s.id); confirmDelete = false }) { Text("Excluir", color = c.err) } },
+                    dismissButton = { TextButton(onClick = { confirmDelete = false }) { Text("Cancelar") } }
+                )
             }
             item { Spacer(Modifier.height(80.dp)) }
         }
@@ -403,13 +412,19 @@ private fun SkillMarketplace() {
     }
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         SectionLabel("Marketplace de skills")
-        OutlinedTextField(q, { q = it }, Modifier.fillMaxWidth(), singleLine = true, shape = RoundedCornerShape(16.dp),
-            placeholder = { Text("Buscar skills (ex.: pdf, excel, seo, react…)") },
-            leadingIcon = { Icon(Icons.Rounded.Search, null) },
-            trailingIcon = { if (loading) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp, color = c.accent) else IconButton({ go() }) { Icon(Icons.Rounded.ArrowForward, "Buscar") } },
+        OutlinedTextField(
+            value = q, onValueChange = { q = it }, modifier = Modifier.fillMaxWidth(),
+            singleLine = true, shape = RoundedCornerShape(20.dp),
+            placeholder = { Text("Buscar skills (ex.: pdf, excel, seo…)", maxLines = 1, overflow = TextOverflow.Ellipsis) },
+            leadingIcon = { Icon(Icons.Rounded.Search, null, tint = c.ink2) },
+            trailingIcon = {
+                if (loading) CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp, color = c.accent)
+                else IconButton(onClick = { go() }, enabled = q.isNotBlank()) { Icon(Icons.Rounded.ArrowForward, "Buscar", tint = if (q.isNotBlank()) c.ink else c.ink3) }
+            },
             keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(imeAction = androidx.compose.ui.text.input.ImeAction.Search),
             keyboardActions = androidx.compose.foundation.text.KeyboardActions(onSearch = { go() }),
-            colors = OutlinedTextFieldDefaults.colors(focusedBorderColor = c.ink, unfocusedBorderColor = c.line, focusedContainerColor = c.surface, unfocusedContainerColor = c.surface))
+            colors = OutlinedTextFieldDefaults.colors(focusedBorderColor = c.accent, unfocusedBorderColor = c.line, focusedContainerColor = c.surface, unfocusedContainerColor = c.surface)
+        )
         error?.let { Text(it, color = c.ink2, fontSize = 13.sp) }
         results.forEach { r ->
             val installed = st.skills.any { it.name.equals(r.title.take(60), true) }
