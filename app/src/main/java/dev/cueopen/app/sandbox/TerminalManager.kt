@@ -174,7 +174,7 @@ class TerminalManager(private val ctx: Context, private val sandbox: Sandbox) {
         if (!cur.contains(line)) rc.writeText(cur.trimEnd() + "\n" + line + "\n")
     }
 
-    fun get(key: String, cwd: String = "/root/workspace/$key"): Session =
+    fun get(key: String, cwd: String = "/root/workspace"): Session =
         sessions.getOrPut(key) { Session(key, cwd).also { _count.value = sessions.size + 1 } }
 
     fun close(key: String) { main.post { sessions.remove(key)?.kill(); _count.value = sessions.size } }
