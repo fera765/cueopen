@@ -510,7 +510,7 @@ class AgentRunner(
             appendLine("5. Fatos duradouros sobre o usuário/projeto: `memory_save`. Para lembrar algo antigo: `memory_search`.")
             appendLine("6. Para usar uma skill, chame `skill_load` com o nome e siga as instruções.")
             appendLine("6b. AUTONOMIA: se o usuário pedir para monitorar/acompanhar/repetir algo ao longo do tempo (ex.: \"a cada 20 min verifique o mercado\"), chame set_schedule com o intervalo em minutos. Se ele não der intervalo mas a tarefa for contínua, escolha um intervalo razoável e econômico. Para parar, set_schedule minutes=0.")
-            val caps = agent?.deviceCaps.orEmpty()
+            val caps = if (allowMultiAgent) agent?.deviceCaps.orEmpty() else emptyList()
             if (caps.isNotEmpty()) appendLine("6c. Você tem acesso ao aparelho: " + caps.joinToString(", ") { dev.cueopen.app.device.DeviceCaps.all.firstOrNull { d -> d.id == it }?.title ?: it } + ". Use as ferramentas device_* quando fizer sentido.")
             appendLine("7. MODO CONTÍNUO: se o usuário pedir para monitorar, acompanhar, repetir ou rodar por horas/dias, NÃO finalize. Faça a verificação, registre em notes_write e chame `sleep` (minutos até a próxima verificação). Repita até o usuário pausar.")
             appendLine("8. Fora do modo contínuo, termine com `finish` (resumo curto + arquivos). `ask_user` só se for ambíguo ou irreversível. Responda no idioma do usuário.")
@@ -563,7 +563,7 @@ class AgentRunner(
             put("budget_tokens", int("Orçamento por worker (2000-12000; padrão 6000)"))
         }, listOf("tasks_json")))
         val term = agent?.useTerminal != false
-        val web = agent?.useBrowser != false
+        val web = agent?.useBrowser != false && allowMultiAgent
         add(tool("update_plan", "Cria/atualiza o plano da tarefa (fases).", buildJsonObject {
             put("goal", str("Objetivo em uma frase"))
             put("phases", strArray("Fases em ordem"))
@@ -604,18 +604,18 @@ class AgentRunner(
         add(tool("notes_write", "Escreve no NOTES.md da tarefa (memória de trabalho que sempre volta ao seu contexto).", buildJsonObject {
             put("content", str("Texto")); put("append", bool("true = acrescenta; false = substitui tudo"))
         }, listOf("content")))
-        add(tool("memory_save", "Salva um fato duradouro na memória de longo prazo.", buildJsonObject {
+        if (allowMultiAgent) add(tool("memory_save", "Salva um fato duradouro na memória de longo prazo.", buildJsonObject {
             put("fact", str("Fato")); put("scope", str("global ou agent")); put("tags", strArray("Palavras-chave"))
         }, listOf("fact")))
         add(tool("memory_search", "Busca na memória de longo prazo.", buildJsonObject { put("query", str("Busca")) }, listOf("query")))
         add(tool("skill_load", "Carrega as instruções completas de uma skill.", buildJsonObject { put("name", str("Nome da skill")) }, listOf("name")))
-        add(tool("sleep", "Modo contínuo: pausa por N minutos e depois retoma automaticamente (monitoramento).", buildJsonObject {
+        if (allowMultiAgent) add(tool("sleep", "Modo contínuo: pausa por N minutos e depois retoma automaticamente (monitoramento).", buildJsonObject {
             put("minutes", int("Minutos até a próxima verificação (1-1440)")); put("reason", str("O que fazer ao acordar"))
         }, listOf("minutes", "reason")))
-        add(tool("create_skill", "Cria uma nova skill na biblioteca do usuário.", buildJsonObject {
+        if (allowMultiAgent) add(tool("create_skill", "Cria uma nova skill na biblioteca do usuário.", buildJsonObject {
             put("name", str("Nome")); put("description", str("Descrição curta")); put("instructions", str("Instruções detalhadas"))
         }, listOf("name", "description", "instructions")))
-        add(tool("set_schedule", "Faça o AGENTE trabalhar de forma autônoma e recorrente. Chame quando o usuário pedir para monitorar/acompanhar/repetir algo ao longo do tempo. Defina minutes = intervalo entre verificações (ex.: 20). Use minutes=0 para parar a autonomia.", buildJsonObject {
+        if (allowMultiAgent) add(tool("set_schedule", "Faça o AGENTE trabalhar de forma autônoma e recorrente. Chame quando o usuário pedir para monitorar/acompanhar/repetir algo ao longo do tempo. Defina minutes = intervalo entre verificações (ex.: 20). Use minutes=0 para parar a autonomia.", buildJsonObject {
             put("minutes", int("Minutos entre verificações; 0 para parar")); put("mission", str("O que verificar/fazer a cada ciclo"))
         }, listOf("minutes")))
         // Capacidades do dispositivo liberadas para este agente
@@ -632,7 +632,7 @@ class AgentRunner(
             add(tool("device_screenshot", "Captura a tela atual do aparelho e mostra no chat.", buildJsonObject {}))
         if (dev.cueopen.app.device.DeviceCaps.OVERLAY in caps)
             add(tool("device_overlay", "Mostra um balão flutuante sobre os outros apps.", buildJsonObject { put("text", str("Texto")) }, listOf("text")))
-        connectorTools().forEach { add(it) }
+        if (allowMultiAgent) connectorTools().forEach { add(it) }
         add(tool("ask_user", "Faz uma pergunta ao usuário e pausa a tarefa até ele responder.", buildJsonObject { put("question", str("Pergunta")) }, listOf("question")))
         add(tool("finish", "Conclui a tarefa com um resumo e a lista de entregáveis.", buildJsonObject {
             put("summary", str("Resumo do resultado")); put("files", strArray("Caminhos dos arquivos entregues"))
