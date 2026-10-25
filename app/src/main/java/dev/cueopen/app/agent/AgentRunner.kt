@@ -27,6 +27,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.joinAll
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
@@ -62,6 +63,7 @@ class AgentRunner(
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val jobs = mutableMapOf<String, Job>()
+    private val childJobsByParent = mutableMapOf<String, MutableList<Job>>()
     private val _activity = MutableStateFlow<Map<String, Activity>>(emptyMap())
     val activity: StateFlow<Map<String, Activity>> = _activity
     /** Saída bruta dos comandos do agente por sessão (aba "Terminal do agente"). */
@@ -73,6 +75,7 @@ class AgentRunner(
 
     fun stop(sessionId: String) {
         jobs.remove(sessionId)?.cancel()
+        childJobsByParent.remove(sessionId)?.forEach { it.cancel() }
         store.state.value.agents.filter { it.homeSessionId == sessionId && it.autonomous }.forEach {
             store.upsertAgent(it.copy(autonomous = false)); dev.cueopen.app.scheduler.Heartbeat.cancel(ctx, it.id)
         }
@@ -84,6 +87,7 @@ class AgentRunner(
     /** Envia uma mensagem do usuário e (re)inicia o loop. */
     fun send(sessionId: String, text: String, attachments: List<String> = emptyList(), onDone: (() -> Unit)? = null): Job {
         jobs[sessionId]?.cancel()
+        childJobsByParent.remove(sessionId)?.forEach { it.cancel() }
         store.addItem(sessionId, ChatItem.User(text = text, attachments = attachments))
         var content = if (attachments.isEmpty()) text
         else text + "\n\n[Arquivos anexados no workspace: ${attachments.joinToString()}]"
@@ -132,12 +136,21 @@ class AgentRunner(
 
     private val ctxMgr = ContextManager(store, sandbox, llm)
 
-    private suspend fun loop(sessionId: String) {
-        val maxSteps = store.settings.maxSteps
+    private suspend fun loop(sessionId: String, maxStepsOverride: Int? = null, tokenBudgetOverride: Long? = null) {
+        val maxSteps = (maxStepsOverride ?: store.settings.maxSteps).coerceIn(1, store.settings.maxSteps.coerceAtLeast(1))
+        val startingTokens = store.session(sessionId)?.let { it.tokensIn + it.tokensOut } ?: 0L
         var steps = 0
         var repeats = 0
         var lastContent = ""
         while (scope.isActive) {
+            if (tokenBudgetOverride != null) {
+                val used = (store.session(sessionId)?.let { it.tokensIn + it.tokensOut } ?: startingTokens) - startingTokens
+                if (used >= tokenBudgetOverride) {
+                    store.addItem(sessionId, ChatItem.Error(text = "Limite de tokens do subagente atingido (" + used + "/" + tokenBudgetOverride + "). Entregue o progresso parcial."))
+                    store.editSession(sessionId) { it.copy(status = SessionStatus.WAITING_USER) }
+                    return
+                }
+            }
             var s = store.session(sessionId) ?: return
             val agent = store.agent(s.agentId)
             setActivity(sessionId, Activity(Activity.Kind.THINKING, "Pensando"))
@@ -153,7 +166,7 @@ class AgentRunner(
                 var attempt = 0
                 while (true) {
                     try {
-                        return@run llm.chat(listOf(sys) + history, tools = tools(agent), model = agent?.model)
+                        return@run llm.chat(listOf(sys) + history, tools = tools(agent, allowMultiAgent = tokenBudgetOverride == null), model = agent?.model, maxTokens = if (tokenBudgetOverride != null) 2048 else 16000)
                     } catch (c: kotlinx.coroutines.CancellationException) {
                         throw c
                     } catch (t: Throwable) {
@@ -542,7 +555,12 @@ class AgentRunner(
         }
     }
 
-    private fun tools(agent: AgentProfile?) = buildJsonArray {
+    private fun tools(agent: AgentProfile?, allowMultiAgent: Boolean = true) = buildJsonArray {
+        if (allowMultiAgent) add(tool("multi_agents", "Executa até cinco subtarefas em paralelo com orçamento limitado. Em repositório Git limpo, cada worker recebe branch/worktree isolada; o agente principal revisa e integra após testes. tasks_json é um array JSON de strings.", buildJsonObject {
+            put("tasks_json", str("Array JSON de tarefas independentes"))
+            put("max_workers", int("Quantidade de workers (1-5; padrão 3)"))
+            put("budget_tokens", int("Orçamento por worker (2000-12000; padrão 6000)"))
+        }, listOf("tasks_json")))
         val term = agent?.useTerminal != false
         val web = agent?.useBrowser != false
         add(tool("update_plan", "Cria/atualiza o plano da tarefa (fases).", buildJsonObject {
@@ -709,6 +727,7 @@ class AgentRunner(
             "file_write" -> "Editando arquivo" to Activity.Kind.EDITOR
             "file_read" -> "Lendo arquivo" to Activity.Kind.EDITOR
             "file_list" -> "Listando arquivos" to Activity.Kind.EDITOR
+            "multi_agents" -> "Delegando subtarefas em paralelo" to Activity.Kind.THINKING
             "browser_navigate" -> "Navegando" to Activity.Kind.BROWSER
             "browser_read", "browser_snapshot" -> "Lendo snapshot da página" to Activity.Kind.BROWSER
             "browser_click" -> "Clicando" to Activity.Kind.BROWSER
@@ -748,6 +767,7 @@ class AgentRunner(
 
         val out: String = try {
             when (call.name) {
+                "multi_agents" -> runMultiAgents(sessionId, s("tasks_json"), i("max_workers") ?: 3, i("budget_tokens") ?: 6000)
                 "shell" -> {
                     // tudo roda DENTRO do terminal da tarefa (visível ao vivo no Computador)
                     val r = terminals.get(sessionId, cwd).runAgentCommand(s("command"), (i("timeout") ?: 180).toLong(), b("background"))
@@ -842,6 +862,86 @@ class AgentRunner(
         }
         store.replaceItem(sessionId, step.copy(result = out.take(4000), status = StepStatus.OK))
         return ToolResult(out)
+    }
+
+
+    /** Executa workers temporários em workspaces isolados e branches independentes; nunca mescla automaticamente. */
+    private suspend fun runMultiAgents(sessionId: String, tasksJson: String, requestedWorkers: Int, requestedBudget: Int): String {
+        val tasks = runCatching {
+            val arr = org.json.JSONArray(tasksJson)
+            (0 until arr.length()).mapNotNull { arr.optString(it).trim().takeIf { task -> task.isNotBlank() } }
+        }.getOrElse { return "ERRO: tasks_json deve ser um array JSON de strings." }
+        if (tasks.isEmpty()) return "ERRO: informe pelo menos uma subtarefa."
+        val count = minOf(tasks.size, requestedWorkers.coerceIn(1, 5))
+        val budget = requestedBudget.coerceIn(2000, 12000).toLong()
+        val parentPath = sandbox.guestPath(sessionId)
+        val terminal = terminals.get(sessionId, parentPath)
+        val probe = terminal.runAgentCommand("git -C " + shQuote(parentPath) + " rev-parse --show-toplevel && git -C " + shQuote(parentPath) + " rev-parse HEAD && git -C " + shQuote(parentPath) + " status --porcelain", 20, false)
+        val lines = probe.output.lines().map { it.trim() }.filter { it.isNotBlank() }
+        val gitRoot = lines.firstOrNull()?.takeIf { probe.exitCode == 0 && it.startsWith("/") }
+        val baseSha = lines.getOrNull(1)?.takeIf { it.matches(Regex("[0-9a-fA-F]{40}")) }
+        val dirty = gitRoot != null && baseSha != null && lines.drop(2).isNotEmpty()
+        if (dirty) return "Multi Agents pausado: o repositório tem alterações não commitadas. Faça commit/stash para garantir uma base reproduzível antes de criar branches."
+        val workers = tasks.take(count).mapIndexed { index, task ->
+            val child = Session(
+                title = "[Worker " + (index + 1) + "] " + task.take(42),
+                agentId = store.session(sessionId)?.agentId,
+                status = SessionStatus.RUNNING,
+                llm = listOf(LlmMessage("user",
+                    "Você é um subagente temporário do CueOpen. Tarefa: " + task +
+                    "\n\nTrabalhe somente no seu workspace/branch. Não faça merge nem push. Não use multi_agents. Evite browser para não competir com outros workers. Economize tokens. Ao concluir, reporte resumo, arquivos alterados, testes e riscos."))
+            )
+            store.upsertSession(child)
+            child
+        }
+        if (gitRoot != null && baseSha != null) {
+            val setupErrors = mutableListOf<String>()
+            workers.forEach { child ->
+                val branch = "cue/agents/" + child.id
+                val target = sandbox.guestPath(child.id)
+                val cmd = "git -C " + shQuote(gitRoot) + " worktree add -b " + shQuote(branch) + " " + shQuote(target) + " " + shQuote(baseSha)
+                val result = terminal.runAgentCommand(cmd, 45, false)
+                if (result.exitCode != 0) setupErrors += child.id + ": " + result.output.takeLast(350)
+            }
+            if (setupErrors.isNotEmpty()) {
+                workers.forEach { child ->
+                    terminal.runAgentCommand("git -C " + shQuote(gitRoot) + " worktree remove --force " + shQuote(sandbox.guestPath(child.id)) + " >/dev/null 2>&1 || true; git -C " + shQuote(gitRoot) + " branch -D " + shQuote("cue/agents/" + child.id) + " >/dev/null 2>&1 || true", 20, false)
+                    store.editSession(child.id) { it.copy(status = SessionStatus.ERROR) }
+                }
+                return "Não iniciei workers porque a criação de branches isoladas falhou:\n" + setupErrors.joinToString("\n")
+            }
+        } else {
+            workers.forEach { child ->
+                val target = sandbox.guestPath(child.id)
+                terminal.runAgentCommand("mkdir -p " + shQuote(target) + " && cp -a " + shQuote(parentPath) + "/. " + shQuote(target) + "/ 2>/dev/null || true", 45, false)
+            }
+        }
+        val workerJobs = workers.map { child ->
+            scope.launch { loop(child.id, maxStepsOverride = 6, tokenBudgetOverride = budget) }
+        }
+        synchronized(childJobsByParent) { childJobsByParent[sessionId] = workerJobs.toMutableList() }
+        try {
+            workerJobs.joinAll()
+        } finally {
+            synchronized(childJobsByParent) { childJobsByParent.remove(sessionId) }
+        }
+        return buildString {
+            appendLine("Multi Agents concluiu " + workers.size + " worker(s); orçamento estimado: " + budget + " tokens por worker; máximo 6 passos.")
+            if (gitRoot != null && baseSha != null) appendLine("Base Git: " + gitRoot + " @ " + baseSha + ". Branches criadas como cue/agents/<id>; nenhum merge automático.")
+            else appendLine("Sem Git: workers usaram cópias de workspace isoladas.")
+            workers.forEachIndexed { index, child ->
+                val finished = store.session(child.id)
+                val last = finished?.items?.lastOrNull { it is ChatItem.Assistant } as? ChatItem.Assistant
+                val error = finished?.items?.lastOrNull { it is ChatItem.Error } as? ChatItem.Error
+                appendLine()
+                appendLine("### Worker " + (index + 1) + " · " + child.id + " · " + (finished?.status ?: "desconhecido"))
+                appendLine("Tarefa: " + tasks[index])
+                appendLine((last?.text ?: error?.text ?: "Sem resumo final.").take(1400))
+                if (gitRoot != null && baseSha != null) appendLine("Branch: cue/agents/" + child.id + " — revise o diff, rode testes e só então faça merge.")
+                appendLine("Workspace: " + sandbox.guestPath(child.id))
+            }
+            append("Integração segura: revise cada diff, resolva conflitos e execute testes antes de mesclar. Workers não podem fazer merge/push.")
+        }
     }
 
     private fun shQuote(s: String) = "'" + s.replace("'", "'\\''") + "'"
