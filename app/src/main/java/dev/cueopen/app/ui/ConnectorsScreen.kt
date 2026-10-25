@@ -39,6 +39,7 @@ fun ConnectorsScreen(nav: NavController) {
     val scope = rememberCoroutineScope()
     val c = Cue.c
     var busy by remember { mutableStateOf<String?>(null) }
+    var installing by remember { mutableStateOf<String?>(null) }
     var custom by remember { mutableStateOf(false) }
     var tokenFor by remember { mutableStateOf<Connector?>(null) }
     var query by remember { mutableStateOf("") }
@@ -61,12 +62,32 @@ fun ConnectorsScreen(nav: NavController) {
         app.store.upsertConnector(conn)
         scope.launch {
             runCatching {
-                Connectors.connect(ctx, app.store, conn) { url ->
+                val result = Connectors.connect(ctx, app.store, conn) { url ->
                     runCatching { CustomTabsIntent.Builder().setShowTitle(true).build().launchUrl(ctx, Uri.parse(url)) }
                         .onFailure { ctx.startActivity(android.content.Intent(android.content.Intent.ACTION_VIEW, Uri.parse(url))) }
                 }
+                if (result.lastError != null) app.store.upsertConnector(result)
             }.onFailure { e -> app.store.upsertConnector((app.store.connector(conn.id) ?: conn).copy(lastError = e.message)) }
             busy = null
+        }
+    }
+
+    fun install(cat: Connectors.Catalog) {
+        val conn = Connector(cat.id, cat.name, cat.url, cat.description, cat.needsAuth, enabled = true)
+        app.store.upsertConnector(conn.copy(lastError = null))
+        if (cat.needsAuth) return
+        installing = cat.id
+        busy = cat.id
+        scope.launch {
+            runCatching {
+                val result = Connectors.connect(ctx, app.store, conn) { url ->
+                    runCatching { CustomTabsIntent.Builder().setShowTitle(true).build().launchUrl(ctx, Uri.parse(url)) }
+                        .onFailure { ctx.startActivity(android.content.Intent(android.content.Intent.ACTION_VIEW, Uri.parse(url))) }
+                }
+                app.store.upsertConnector(result)
+            }.onFailure { e -> app.store.upsertConnector((app.store.connector(cat.id) ?: conn).copy(lastError = e.message)) }
+            busy = null
+            installing = null
         }
     }
 
@@ -98,17 +119,31 @@ fun ConnectorsScreen(nav: NavController) {
             if (found.isNotEmpty()) {
                 item { SectionLabel("Resultados da busca") }
                 itemsIndexed(found) { idx, cat ->
-                    val already = st.connectors.any { it.id == cat.id }
+                    val installedConn = st.connectors.firstOrNull { it.id == cat.id }
+                    val connected = installedConn?.connectedAt != null
                     CueCard {
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Column(Modifier.weight(1f)) {
                                 Text(cat.name, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
                                 Text(cat.description.ifBlank { cat.url }, fontSize = 12.sp, color = c.ink2, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                                when {
+                                    installing == cat.id -> Text("Instalando e verificando ferramentas…", fontSize = 12.sp, color = c.accent)
+                                    busy == cat.id -> Text("Conectando…", fontSize = 12.sp, color = c.accent)
+                                    installedConn?.lastError != null -> Text("Falha: ${installedConn.lastError}", fontSize = 12.sp, color = c.err, maxLines = 3, overflow = TextOverflow.Ellipsis)
+                                    connected -> Text("Instalado · ${runCatching { org.json.JSONArray(installedConn.toolsJson ?: "[]").length() }.getOrDefault(0)} ferramentas", fontSize = 12.sp, color = c.ok)
+                                    installedConn != null -> Text("Instalado · pronto para conectar", fontSize = 12.sp, color = c.ink2)
+                                }
                             }
                             Spacer(Modifier.width(8.dp))
-                            if (already) Icon(Icons.Rounded.CheckCircle, null, tint = c.ok)
-                            else Box(Modifier.clip(CircleShape).background(c.ink).clickable { connect(Connector(cat.id, cat.name, cat.url, cat.description, cat.needsAuth, enabled = true)) }.padding(horizontal = 14.dp, vertical = 8.dp)) {
-                                Text(if (cat.needsAuth) "Conectar" else "Instalar", color = c.bg, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                            when {
+                                busy == cat.id || installing == cat.id -> CircularProgressIndicator(Modifier.size(22.dp), strokeWidth = 2.dp, color = c.accent)
+                                connected -> Icon(Icons.Rounded.CheckCircle, null, tint = c.ok)
+                                else -> Box(Modifier.clip(CircleShape).background(c.ink).clickable {
+                                    if (installedConn == null) install(cat)
+                                    else connect(installedConn.copy(enabled = true, lastError = null))
+                                }.padding(horizontal = 14.dp, vertical = 8.dp)) {
+                                    Text(if (installedConn == null) "Instalar" else "Conectar", color = c.bg, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                                }
                             }
                         }
                     }
@@ -116,8 +151,11 @@ fun ConnectorsScreen(nav: NavController) {
                 item { SectionLabel("Destaques") }
             }
             val installed = st.connectors
-            val all = Connectors.catalog.map { cat -> installed.firstOrNull { it.id == cat.id } ?: Connector(cat.id, cat.name, cat.url, cat.description, cat.needsAuth, enabled = false) } +
-                installed.filter { i -> Connectors.catalog.none { it.id == i.id } }
+            // Conectores instalados aparecem primeiro para o usuário ver o resultado sem rolar até o fim.
+            val all = installed.map { i ->
+                Connectors.catalog.firstOrNull { it.id == i.id }?.let { cat -> i.copy(name = cat.name, description = cat.description, url = cat.url, needsAuth = cat.needsAuth) } ?: i
+            } + Connectors.catalog.filter { cat -> installed.none { it.id == cat.id } }
+                .map { cat -> Connector(cat.id, cat.name, cat.url, cat.description, cat.needsAuth, enabled = false) }
             items(all, key = { it.id }) { conn ->
                 val connected = conn.connectedAt != null
                 val toolsCount = runCatching { org.json.JSONArray(conn.toolsJson ?: "[]").length() }.getOrDefault(0)
@@ -130,11 +168,10 @@ fun ConnectorsScreen(nav: NavController) {
                         Column(Modifier.weight(1f)) {
                             Row(verticalAlignment = Alignment.CenterVertically) {
                                 Text(conn.name, fontWeight = FontWeight.SemiBold)
-                                if (!conn.needsAuth) { Spacer(Modifier.width(6.dp)); Text("sem login", fontSize = 11.sp, color = c.ink3) }
                             }
                             Text(conn.description.ifBlank { conn.url }, fontSize = 12.sp, color = c.ink2, maxLines = 2, overflow = TextOverflow.Ellipsis)
                             when {
-                                busy == conn.id -> Text("Conectando… conclua o login no navegador", fontSize = 11.sp, color = c.accent)
+                                busy == conn.id -> Text(if (conn.connectedAt == null && !conn.needsAuth) "Instalando e verificando ferramentas…" else "Conectando… conclua o login no navegador", fontSize = 11.sp, color = c.accent)
                                 conn.lastError != null -> Text(conn.lastError, fontSize = 11.sp, color = c.err, maxLines = 2, overflow = TextOverflow.Ellipsis)
                                 connected -> Text("Conectado · $toolsCount ferramentas", fontSize = 11.sp, color = c.ok)
                             }
@@ -150,7 +187,7 @@ fun ConnectorsScreen(nav: NavController) {
                                     colors = SwitchDefaults.colors(checkedTrackColor = c.ink, checkedThumbColor = c.bg))
                             } else {
                                 Box(Modifier.clip(CircleShape).background(c.ink).clickable { connect(conn.copy(enabled = true)) }.padding(horizontal = 14.dp, vertical = 8.dp)) {
-                                    Text(if (conn.lastError != null) "Tentar novamente" else "Conectar", color = c.bg, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                                    Text(if (conn.lastError != null) "Tentar novamente" else if (conn.connectedAt == null) "Conectar" else "Conectar", color = c.bg, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
                                 }
                             }
                             Box {
