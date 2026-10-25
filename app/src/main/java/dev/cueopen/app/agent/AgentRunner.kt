@@ -114,9 +114,12 @@ class AgentRunner(
                 store.addItem(sessionId, ChatItem.Error(text = t.message ?: t.toString()))
                 store.editSession(sessionId) { it.copy(status = SessionStatus.ERROR) }
             } finally {
-                // Nunca deixe pílulas RUNNING órfãs quando um job termina, falha ou é substituído.
-                finalizeRunningSteps(sessionId, "Execução encerrada sem retorno da ferramenta.")
-                setActivity(sessionId, Activity())
+                // Só o job que ainda pertence a esta sessão pode reconciliar os passos dela.
+                // Um job antigo cancelado não deve encerrar as pílulas de uma nova mensagem.
+                if (jobs[sessionId] === coroutineContext[Job]) {
+                    finalizeRunningSteps(sessionId, "Execução encerrada sem retorno da ferramenta.")
+                    setActivity(sessionId, Activity())
+                }
                 browser.setAgentControl(false)
                 jobs.remove(sessionId, coroutineContext[Job])
                 if (jobs.values.none { it.isActive }) dev.cueopen.app.sandbox.SandboxService.start(ctx, "Terminal ativo")
