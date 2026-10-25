@@ -72,7 +72,8 @@ class TerminalManager(private val ctx: Context, private val sandbox: Sandbox) {
             check(Looper.myLooper() == Looper.getMainLooper())
             if (_alive.value) return
             sandbox.prepareScripts()
-            // First launch clones the installed base; it never downloads Alpine per chat.
+            promptReady = kotlinx.coroutines.CompletableDeferred()
+            // First launch reuses the installed Alpine base; it never downloads Alpine per chat.
             if (!runBlocking { sandbox.ensureEnvironment(key) }) {
                 android.util.Log.e("CueOpenTerminal", "Ambiente Linux do chat não foi criado; consulte o log do Sandbox nas Configurações.")
                 return
@@ -112,7 +113,11 @@ class TerminalManager(private val ctx: Context, private val sandbox: Sandbox) {
         }
 
         @Volatile private var pending: kotlinx.coroutines.CompletableDeferred<Int>? = null
-        internal fun onPromptReturned(exit: Int) { pending?.complete(exit) }
+        @Volatile private var promptReady = kotlinx.coroutines.CompletableDeferred<Unit>()
+        internal fun onPromptReturned(exit: Int) {
+            promptReady.complete(Unit)
+            pending?.complete(exit)
+        }
 
         /**
          * Executa um comando do agente no terminal visível, como uma pessoa digitando:
@@ -122,7 +127,12 @@ class TerminalManager(private val ctx: Context, private val sandbox: Sandbox) {
         suspend fun runAgentCommand(command: String, timeoutSec: Long, background: Boolean): Sandbox.ExecResult =
             agentLock.withLock {
                 withContext(Dispatchers.Main) { if (!_alive.value) start() }
-                delay(400)
+                // Aguarde o primeiro prompt confirmado pelo OSC do bash; iniciar o processo não
+                // significa que o shell já está pronto para receber comandos.
+                val ready = withTimeoutOrNull(12_000) { promptReady.await(); true } ?: false
+                if (!ready || !_alive.value) {
+                    return@withLock Sandbox.ExecResult(-1, "Shell não ficou pronto: prompt do bash não foi detectado.", true)
+                }
                 val id = System.nanoTime().toString(36)
                 val dir = File(sandbox.workspaceFor(key), ".cue").apply { mkdirs() }
                 val gcue = "$cwd/.cue"
