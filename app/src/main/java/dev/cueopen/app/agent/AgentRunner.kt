@@ -814,7 +814,7 @@ class AgentRunner(
                                 if (append && f.exists()) f.appendText(s("content")) else f.writeText(s("content"))
                                 val lines = f.useLines { it.count() }
                                 val preview = runCatching { f.useLines { seq -> seq.take(10).joinToString("\n") } }.getOrDefault("")
-                                "OK: ${if (append) "acrescentado em" else "salvo"} $path — total ${f.length()} bytes, $lines linhas.\n[Prévia das primeiras 10 linhas]\n$preview"
+                                "OK: ${if (append) "conteúdo acrescentado" else "arquivo salvo"} (${f.name}) — ${f.length()} bytes, $lines linhas.\n[Prévia das primeiras 10 linhas]\n$preview"
                             }
                         }
                     }
