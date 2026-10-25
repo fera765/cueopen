@@ -1,8 +1,13 @@
 package dev.cueopen.app.ui
 
+import android.Manifest
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
+import android.os.Bundle
+import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
+import android.speech.SpeechRecognizer
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.ExperimentalFoundationApi
@@ -30,6 +35,8 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
+import androidx.core.content.ContextCompat
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -195,8 +202,85 @@ fun Composer(
     var files by remember { mutableStateOf(listOf<Uri>()) }
     val ctx = LocalContext.current
     val pick = rememberLauncherForActivityResult(ActivityResultContracts.GetMultipleContents()) { files = files + it }
-    val voice = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { r ->
-        r.data?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)?.firstOrNull()?.let { onChange((value + " " + it).trim()) }
+    var recording by remember { mutableStateOf(false) }
+    var voiceText by remember { mutableStateOf("") }
+    var voiceError by remember { mutableStateOf<String?>(null) }
+    var pauseRequested by remember { mutableStateOf(false) }
+    var pendingVoiceStart by remember { mutableStateOf(false) }
+    var hasAudioPermission by remember {
+        mutableStateOf(ContextCompat.checkSelfPermission(ctx, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED)
+    }
+    val recognizer = remember(ctx) {
+        if (SpeechRecognizer.isRecognitionAvailable(ctx)) SpeechRecognizer.createSpeechRecognizer(ctx) else null
+    }
+    DisposableEffect(recognizer) {
+        onDispose { runCatching { recognizer?.destroy() } }
+    }
+    val voicePermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        hasAudioPermission = granted
+        if (granted) pendingVoiceStart = true else voiceError = "Permissão de microfone negada."
+    }
+
+    fun beginVoiceRecording() {
+        val speech = recognizer
+        if (speech == null) {
+            voiceError = "O reconhecimento de voz não está disponível neste aparelho."
+            return
+        }
+        voiceError = null
+        voiceText = ""
+        pauseRequested = false
+        speech.setRecognitionListener(object : RecognitionListener {
+            override fun onReadyForSpeech(params: Bundle?) { recording = true }
+            override fun onBeginningOfSpeech() { recording = true }
+            override fun onRmsChanged(rmsdB: Float) {}
+            override fun onBufferReceived(buffer: ByteArray?) {}
+            override fun onEndOfSpeech() {}
+            override fun onError(error: Int) {
+                recording = false
+                if (pauseRequested) {
+                    val spoken = voiceText.trim()
+                    if (spoken.isNotEmpty()) onChange(listOf(value.trim(), spoken).filter { it.isNotEmpty() }.joinToString(" "))
+                    voiceText = ""
+                    pauseRequested = false
+                } else if (error != SpeechRecognizer.ERROR_CLIENT && error != SpeechRecognizer.ERROR_RECOGNIZER_BUSY) {
+                    voiceError = when (error) {
+                        SpeechRecognizer.ERROR_NO_MATCH -> "Não consegui reconhecer a fala. Tente novamente."
+                        SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> "Não detectei fala. Toque no microfone para tentar novamente."
+                        SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> "Permita o acesso ao microfone nas configurações."
+                        else -> "Falha no reconhecimento de voz (código $error)."
+                    }
+                }
+            }
+            override fun onResults(results: Bundle?) {
+                val spoken = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull().orEmpty().ifBlank { voiceText }.trim()
+                voiceText = spoken
+                recording = false
+                if (pauseRequested) {
+                    if (spoken.isNotEmpty()) onChange(listOf(value.trim(), spoken).filter { it.isNotEmpty() }.joinToString(" "))
+                    voiceText = ""
+                    pauseRequested = false
+                }
+            }
+            override fun onPartialResults(partialResults: Bundle?) {
+                partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull()?.let { voiceText = it }
+            }
+            override fun onEvent(eventType: Int, params: Bundle?) {}
+        })
+        val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
+            .putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+            .putExtra(RecognizerIntent.EXTRA_LANGUAGE, "pt-BR")
+            .putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, "pt-BR")
+            .putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
+            .putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
+        runCatching { speech.startListening(intent); recording = true }
+            .onFailure { recording = false; voiceError = "Não foi possível iniciar o microfone: ${it.message ?: "erro desconhecido"}" }
+    }
+    LaunchedEffect(pendingVoiceStart) {
+        if (pendingVoiceStart) {
+            pendingVoiceStart = false
+            beginVoiceRecording()
+        }
     }
     // Sugestões de comandos (/) e menções (@ skills e agents)
     val token = value.substringAfterLast(' ').substringAfterLast('\n')
@@ -228,7 +312,8 @@ fun Composer(
             }
         }
     }
-    Column(Modifier.fillMaxWidth().padding(12.dp)
+    val imeVisible = WindowInsets.ime.getBottom(LocalDensity.current) > 0
+    Column(Modifier.fillMaxWidth().padding(start = 12.dp, end = 12.dp, top = 12.dp, bottom = if (imeVisible) 0.dp else 12.dp)
         .clip(RoundedCornerShape(26.dp)).background(c.surface).border(1.dp, c.line, RoundedCornerShape(26.dp)).padding(12.dp)) {
         if (files.isNotEmpty()) {
             Row(Modifier.horizontalScroll(rememberScrollState()).padding(bottom = 8.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -242,6 +327,42 @@ fun Composer(
                 }
             }
         }
+        if (recording || voiceText.isNotBlank() || voiceError != null) {
+            Row(
+                Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).background(c.surface2).padding(horizontal = 10.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Icon(Icons.Rounded.Mic, null, tint = if (recording) c.accent else c.ink2, modifier = Modifier.size(20.dp))
+                Spacer(Modifier.width(8.dp))
+                Column(Modifier.weight(1f)) {
+                    Text(if (recording) "Gravando áudio… fale naturalmente" else if (voiceError != null) "Gravação de voz" else "Transcrição pronta",
+                        fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = if (voiceError != null) c.err else c.ink2)
+                    Text(voiceError ?: voiceText.ifBlank { "O texto aparecerá aqui enquanto você fala." },
+                        fontSize = 12.sp, color = if (voiceError != null) c.err else c.ink, maxLines = 3, overflow = TextOverflow.Ellipsis)
+                }
+                if (recording) {
+                    IconButton(onClick = {
+                        pauseRequested = true
+                        runCatching { recognizer?.stopListening() }.onFailure {
+                            recording = false
+                            val spoken = voiceText.trim()
+                            if (spoken.isNotEmpty()) onChange(listOf(value.trim(), spoken).filter { it.isNotEmpty() }.joinToString(" "))
+                            voiceText = ""; pauseRequested = false
+                        }
+                    }) { Icon(Icons.Rounded.Pause, "Pausar e inserir texto") }
+                } else if (voiceText.isNotBlank()) {
+                    IconButton(onClick = {
+                        onChange(listOf(value.trim(), voiceText.trim()).filter { it.isNotEmpty() }.joinToString(" "))
+                        voiceText = ""; voiceError = null
+                    }) { Icon(Icons.Rounded.Check, "Inserir transcrição") }
+                }
+                IconButton(onClick = {
+                    runCatching { recognizer?.cancel() }
+                    recording = false; pauseRequested = false; voiceText = ""; voiceError = null
+                }) { Icon(Icons.Rounded.Close, "Cancelar gravação") }
+            }
+            Spacer(Modifier.height(8.dp))
+        }
         Box(Modifier.fillMaxWidth().heightIn(min = 28.dp, max = 160.dp).padding(horizontal = 4.dp)) {
             if (value.isEmpty()) Text(placeholder, color = c.ink3, fontSize = 16.sp)
             BasicTextField(value, onChange, textStyle = MaterialTheme.typography.bodyLarge.copy(color = c.ink),
@@ -251,8 +372,16 @@ fun Composer(
         Row(verticalAlignment = Alignment.CenterVertically) {
             RoundIcon(Icons.Rounded.Add, "Anexar") { pick.launch("*/*") }
             Spacer(Modifier.width(6.dp))
-            RoundIcon(Icons.Rounded.Mic, "Voz") {
-                runCatching { voice.launch(Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)) }
+            RoundIcon(if (recording) Icons.Rounded.MicOff else Icons.Rounded.Mic, if (recording) "Gravando voz" else "Gravar voz") {
+                if (recording) {
+                    pauseRequested = true
+                    runCatching { recognizer?.stopListening() }.onFailure {
+                        recording = false
+                        val spoken = voiceText.trim()
+                        if (spoken.isNotEmpty()) onChange(listOf(value.trim(), spoken).filter { it.isNotEmpty() }.joinToString(" "))
+                        voiceText = ""; pauseRequested = false
+                    }
+                } else if (hasAudioPermission) beginVoiceRecording() else voicePermission.launch(Manifest.permission.RECORD_AUDIO)
             }
             Spacer(Modifier.weight(1f))
             // Com o agente ativo e sem texto digitado → botão PARAR. Ao digitar → botão ENVIAR.
