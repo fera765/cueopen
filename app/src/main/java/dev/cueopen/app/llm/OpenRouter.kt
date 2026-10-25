@@ -43,6 +43,51 @@ class OpenRouter(private val settings: () -> Settings) {
     // modelos que recusam reasoning desligado (lembrado em runtime para não repetir o erro)
     private val forceReasoning = java.util.Collections.synchronizedSet(mutableSetOf<String>())
 
+    private data class ModelPrice(val prompt: Double, val completion: Double, val cacheRead: Double?)
+    @Volatile private var priceCacheAt = 0L
+    @Volatile private var priceCache: Map<String, ModelPrice> = emptyMap()
+
+    /** Estima o custo em USD com os preços publicados pelo endpoint /models da OpenRouter.
+     * Retorna null se o modelo/preço não estiver disponível; não inventa nem presume preço.
+     */
+    suspend fun estimateCostUsd(modelId: String, usage: Usage): Double? = withContext(Dispatchers.IO) {
+        val s = settings()
+        if (!s.baseUrl.contains("openrouter.ai", ignoreCase = true)) return@withContext null
+        if (System.currentTimeMillis() - priceCacheAt > 6 * 60 * 60 * 1000L || !priceCache.containsKey(modelId)) {
+            runCatching {
+                val request = Request.Builder()
+                    .url(s.baseUrl.trimEnd('/') + "/models")
+                    .get().build()
+                http.newCall(request).execute().use { response ->
+                    if (!response.isSuccessful) return@use
+                    val root = json.parseToJsonElement(response.body?.string().orEmpty()).jsonObject
+                    val entries = root["data"]?.jsonArray ?: return@use
+                    val next = entries.mapNotNull { element ->
+                        runCatching {
+                            val item = element.jsonObject
+                            val id = item["id"]?.jsonPrimitive?.contentOrNull ?: return@runCatching null
+                            val p = item["pricing"]?.jsonObject ?: return@runCatching null
+                            val input = p["prompt"]?.jsonPrimitive?.contentOrNull?.toDoubleOrNull() ?: return@runCatching null
+                            val output = p["completion"]?.jsonPrimitive?.contentOrNull?.toDoubleOrNull() ?: return@runCatching null
+                            val cache = p["input_cache_read"]?.jsonPrimitive?.contentOrNull?.toDoubleOrNull()
+                            id to ModelPrice(input, output, cache)
+                        }.getOrNull()
+                    }.filterNotNull().toMap()
+                    if (next.isNotEmpty()) {
+                        priceCache = next
+                        priceCacheAt = System.currentTimeMillis()
+                    }
+                }
+            }
+        }
+        val p = priceCache[modelId] ?: return@withContext null
+        val cached = usage.cached.coerceIn(0L, usage.prompt)
+        val uncached = usage.prompt - cached
+        val inputCost = uncached * p.prompt + cached * (p.cacheRead ?: p.prompt)
+        val cost = inputCost + usage.completion * p.completion
+        if (!cost.isFinite() || cost < 0.0) null else cost
+    }
+
     suspend fun chat(
         messages: List<LlmMessage>,
         tools: JsonArray? = null,
