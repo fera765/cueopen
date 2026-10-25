@@ -288,6 +288,16 @@ private fun DevToolsPanel(modifier: Modifier) {
                     Text("Método: ${sel.method} · Tipo: ${sel.type} · Status: ${sel.status ?: "—"}", fontSize = 12.sp)
                     Text("Tempo: ${sel.durationMs?.let { "$it ms" } ?: "—"} · Tamanho: ${sel.sizeBytes?.let { humanSize(it) } ?: "—"}", fontSize = 12.sp)
                     sel.error?.let { Text("Erro: $it", color = c.err, fontSize = 12.sp) }
+                    if (sel.requestHeaders.isNotEmpty()) {
+                        Text("HEADERS DA REQUISIÇÃO", fontSize = 10.sp, color = c.accent, fontWeight = FontWeight.Bold)
+                        Text(sel.requestHeaders.entries.joinToString("\n") { "${it.key}: ${it.value}" }.take(5000), fontFamily = FontFamily.Monospace, fontSize = 10.sp)
+                    }
+                    sel.requestBody?.let { Text("PAYLOAD DE ENVIO\n" + it.take(6000), fontFamily = FontFamily.Monospace, fontSize = 10.sp) }
+                    if (sel.responseHeaders.isNotEmpty()) {
+                        Text("HEADERS DA RESPOSTA", fontSize = 10.sp, color = c.accent, fontWeight = FontWeight.Bold)
+                        Text(sel.responseHeaders.entries.joinToString("\n") { "${it.key}: ${it.value}" }.take(5000), fontFamily = FontFamily.Monospace, fontSize = 10.sp)
+                    }
+                    sel.responseBody?.let { Text("CORPO DA RESPOSTA\n" + it.take(6000), fontFamily = FontFamily.Monospace, fontSize = 10.sp) }
                 }
             } else LazyColumn(Modifier.fillMaxSize()) {
                 items(list, key = { it.id }) { e ->
