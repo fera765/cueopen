@@ -413,7 +413,10 @@ private fun SessionDrawer(nav: NavController, sessions: List<Session>, agents: L
     val c = Cue.c
     val st0 = CueApp.instance.store.state.value
     var query by remember { mutableStateOf("") }
-    val filtered = sessions.filter { query.isBlank() || it.title.contains(query, true) }.sortedByDescending { it.updatedAt }
+    // Sessões de subagentes são detalhes internos da tarefa pai, nunca chats independentes na navegação.
+    val filtered = sessions.filterNot { it.title.startsWith("[Worker ", ignoreCase = true) }
+        .filter { query.isBlank() || it.title.contains(query, true) }
+        .sortedByDescending { it.updatedAt }
     fun go(r: String) { onClose(); nav.navigate(r) }
     Column(Modifier.fillMaxSize().statusBarsPadding().padding(12.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
