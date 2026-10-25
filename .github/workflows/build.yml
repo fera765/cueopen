@@ -22,6 +22,12 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.9'
+      - name: Validate Kotlin changes
+        shell: bash
+        run: |
+          set -euo pipefail
+          gradle testDebugUnitTest --stacktrace
+
       - name: Build release APK
         shell: bash
         run: |

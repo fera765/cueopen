@@ -125,6 +125,7 @@ fun TerminalView(key: String, cwd: String, modifier: Modifier = Modifier) {
     val session = remember(key) { app.terminals.get(key, cwd) }
     val sandboxState by app.sandbox.state.collectAsStateWithLifecycle()
     var ctrl by remember { mutableStateOf(false) }
+    var alt by remember { mutableStateOf(false) }
     var viewRef by remember { mutableStateOf<com.termux.view.TerminalView?>(null) }
     val density = androidx.compose.ui.platform.LocalDensity.current
 
@@ -162,7 +163,7 @@ fun TerminalView(key: String, cwd: String, modifier: Modifier = Modifier) {
                     override fun onKeyUp(keyCode: Int, e: android.view.KeyEvent?) = false
                     override fun onLongPress(event: android.view.MotionEvent?) = false
                     override fun readControlKey(): Boolean { val c = ctrl; if (c) ctrl = false; return c }
-                    override fun readAltKey() = false
+                    override fun readAltKey(): Boolean { val a = alt; if (a) alt = false; return a }
                     override fun readShiftKey() = false
                     override fun readFnKey() = false
                     override fun onCodePoint(codePoint: Int, ctrlDown: Boolean, session: com.termux.terminal.TerminalSession?) = false
@@ -180,7 +181,7 @@ fun TerminalView(key: String, cwd: String, modifier: Modifier = Modifier) {
                 post { requestFocus() }
             }
         })
-        ExtraKeys(ctrl = ctrl, onCtrl = { ctrl = !ctrl }) { seq -> session.write(seq); viewRef?.requestFocus() }
+        ExtraKeys(ctrl = ctrl, alt = alt, onCtrl = { ctrl = !ctrl }, onAlt = { alt = !alt }) { seq -> session.write(seq); viewRef?.requestFocus() }
     }
 }
 
@@ -191,18 +192,45 @@ private fun showIme(v: android.view.View) {
 
 /** Linha de teclas extras (como no Termux/Acode), fica logo acima do teclado. */
 @Composable
-private fun ExtraKeys(ctrl: Boolean, onCtrl: () -> Unit, send: (String) -> Unit) {
-    val keys = listOf("ESC" to "\u001b", "TAB" to "\t", "^C" to "\u0003", "^D" to "\u0004", "^L" to "\u000c",
-        "↑" to "\u001b[A", "↓" to "\u001b[B", "←" to "\u001b[D", "→" to "\u001b[C", "HOME" to "\u001b[H", "END" to "\u001b[F",
-        "|" to "|", "/" to "/", "-" to "-", "~" to "~")
-    Row(Modifier.fillMaxWidth().background(Color(0xFF16181D)).horizontalScroll(rememberScrollState()).padding(4.dp)) {
-        Box(Modifier.padding(2.dp).clip(RoundedCornerShape(8.dp)).background(if (ctrl) Color(0xFFFF6B3D) else Color(0xFF23262D))
-            .clickable(onClick = onCtrl).padding(horizontal = 12.dp, vertical = 8.dp)) {
-            Text("CTRL", color = Color(0xFFE6E6E6), fontFamily = FontFamily.Monospace, fontSize = 13.sp)
-        }
-        keys.forEach { (l, s) ->
-            Box(Modifier.padding(2.dp).clip(RoundedCornerShape(8.dp)).background(Color(0xFF23262D)).clickable { send(s) }.padding(horizontal = 12.dp, vertical = 8.dp)) {
-                Text(l, color = Color(0xFFE6E6E6), fontFamily = FontFamily.Monospace, fontSize = 13.sp)
+private fun ExtraKeys(
+    ctrl: Boolean,
+    alt: Boolean,
+    onCtrl: () -> Unit,
+    onAlt: () -> Unit,
+    send: (String) -> Unit
+) {
+    val rows = listOf(
+        listOf("ESC" to "\u001b", "../" to "../", "/" to "/", "HOME" to "\u001b[H", "↑" to "\u001b[A", "END" to "\u001b[F"),
+        listOf("TAB" to "\t", "CTRL" to "", "ALT" to "", "←" to "\u001b[D", "↓" to "\u001b[B", "→" to "\u001b[C")
+    )
+    Column(Modifier.fillMaxWidth().background(Color(0xFF16181D)).padding(horizontal = 3.dp, vertical = 2.dp)) {
+        rows.forEachIndexed { rowIndex, keys ->
+            Row(Modifier.fillMaxWidth()) {
+                keys.forEach { (label, sequence) ->
+                    val modifierKey = label == "CTRL" || label == "ALT"
+                    val selected = (label == "CTRL" && ctrl) || (label == "ALT" && alt)
+                    Box(
+                        Modifier.weight(1f).padding(2.dp).clip(RoundedCornerShape(7.dp))
+                            .background(if (selected) Color(0xFFFF6B3D) else Color(0xFF23262D))
+                            .clickable {
+                                when (label) {
+                                    "CTRL" -> onCtrl()
+                                    "ALT" -> onAlt()
+                                    else -> send(sequence)
+                                }
+                            }
+                            .padding(horizontal = 2.dp, vertical = 9.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            label,
+                            color = Color(0xFFE6E6E6),
+                            fontFamily = FontFamily.Monospace,
+                            fontSize = if (modifierKey) 12.sp else 13.sp,
+                            maxLines = 1
+                        )
+                    }
+                }
             }
         }
     }
