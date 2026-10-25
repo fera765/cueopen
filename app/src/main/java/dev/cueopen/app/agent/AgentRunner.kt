@@ -1020,6 +1020,7 @@ class AgentRunner(
         val count = minOf(tasks.size, requestedWorkers.coerceIn(1, 5))
         val budget = requestedBudget.coerceIn(2000, 12000).toLong()
         val parentPath = sandbox.guestPath(sessionId)
+        val terminal = terminals.get(sessionId, parentPath)
         // Não use git worktree dentro de /root/workspace: cada sessão é montada num rootfs
         // público diferente, e a pasta de destino já existe. A cópia é feita no filesystem host.
         val gitRoot: String? = null
