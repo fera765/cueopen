@@ -992,11 +992,46 @@ class AgentRunner(
                 appendLine("### Agente " + (index + 1) + " · " + (finished?.status ?: "desconhecido"))
                 appendLine("Tarefa: " + tasks[index])
                 appendLine((last?.text ?: error?.text ?: "Progresso parcial preservado.").take(1400))
-                if (gitRoot != null && baseSha != null) appendLine("As alterações ficaram isoladas na branch temporária; revise antes de integrar.")
             }
-            append("Os agentes temporários e seus workspaces serão removidos; somente este relatório permanece na conversa principal.")
         }
-        // Os workers são efêmeros: remove worktree/branch temporária e sessão para não poluir a lista de chats.
+        // Integra artefatos antes de apagar os workers. Git: aplica cada diff sobre a base principal;
+        // conflitos são preservados como patch dentro do workspace principal para recuperação.
+        if (gitRoot != null && baseSha != null) {
+            workers.forEachIndexed { index, child ->
+                val branch = "cue/agents/" + child.id
+                val patchName = ".cueopen-worker-" + (index + 1) + ".patch"
+                val patchPath = gitRoot.trimEnd('/') + "/" + patchName
+                val createPatch = terminal.runAgentCommand(
+                    "git -C " + shQuote(gitRoot) + " diff --binary " + shQuote(baseSha) + " " + shQuote(branch) +
+                    " -- > " + shQuote(patchPath) + " && test -s " + shQuote(patchPath),
+                    30L, false
+                )
+                if (createPatch.exitCode == 0) {
+                    val apply = terminal.runAgentCommand("git -C " + shQuote(gitRoot) + " apply --3way " + shQuote(patchPath), 45L, false)
+                    if (apply.exitCode == 0) {
+                        terminal.runAgentCommand("rm -f " + shQuote(patchPath), 10L, false)
+                        appendReportLine(report, "Agente " + (index + 1) + ": alterações integradas ao workspace principal.")
+                    } else {
+                        appendReportLine(report, "Agente " + (index + 1) + ": conflito de integração. Patch preservado no workspace principal para resolução.")
+                    }
+                } else {
+                    appendReportLine(report, "Agente " + (index + 1) + ": não produziu diff de arquivos; resultado textual preservado.")
+                }
+            }
+        } else {
+            // Sem Git, copia arquivos novos/modificados do workspace do worker para o principal;
+            // não sobrescreve arquivos diferentes já existentes sem sinalizar conflito.
+            workers.forEachIndexed { index, child ->
+                val source = sandbox.workspaceFor(child.id).absolutePath
+                val dest = sandbox.workspaceFor(sessionId).absolutePath
+                val sync = terminal.runAgentCommand(
+                    "cd " + shQuote(source) + " && find . -type f ! -path './.git/*' -print0 | while IFS= read -r -d '' f; do mkdir -p " + shQuote(dest) + "/\"\$(dirname \"\$f\")\"; if [ ! -e " + shQuote(dest) + "/\"\$f\" ]; then cp -p \"\$f\" " + shQuote(dest) + "/\"\$f\"; elif ! cmp -s \"\$f\" " + shQuote(dest) + "/\"\$f\"; then cp -p \"\$f\" " + shQuote(dest) + "/\"\$f.worker-" + (index + 1) + "\"; fi; done",
+                    45L, false
+                )
+                appendReportLine(report, "Agente " + (index + 1) + ": " + if (sync.exitCode == 0) "arquivos sincronizados ao workspace principal." else "sincronização parcial; veja o resultado textual do agente.")
+            }
+        }
+        // Limpa workers só depois de tentar integrar os artefatos.
         workers.forEach { child ->
             if (gitRoot != null && baseSha != null) {
                 val target = sandbox.guestPath(child.id)
@@ -1009,8 +1044,10 @@ class AgentRunner(
             }
             store.deleteSession(child.id)
         }
-        return report
+        return report.toString()
     }
+
+    private fun appendReportLine(report: StringBuilder, line: String) { report.appendLine(line) }
 
     private fun shQuote(s: String) = "'" + s.replace("'", "'\\''") + "'"
 
