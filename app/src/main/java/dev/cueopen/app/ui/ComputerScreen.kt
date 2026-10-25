@@ -292,7 +292,7 @@ fun BrowserPane(sessionId: String) {
 
 /** Painel estilo DevTools: requisições de rede (com filtro por tipo) e console JS. */
 @Composable
-private fun DevToolsPanel(browser: dev.cueopen.browser.BrowserHost, modifier: Modifier) {
+private fun DevToolsPanel(browser: dev.cueopen.app.browser.BrowserHost, modifier: Modifier) {
     val net by browser.net.collectAsStateWithLifecycle()
     val console by browser.console.collectAsStateWithLifecycle()
     val ui by browser.ui.collectAsStateWithLifecycle()
