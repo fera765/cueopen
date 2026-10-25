@@ -46,8 +46,8 @@ class BrowserHost(private val appCtx: Context) {
 
     fun clearNet() { _net.value = emptyList(); _console.value = emptyList() }
 
-    private fun addNet(e: NetEntry) { _net.value = (_net.value + e).takeLast(500) }
-    private fun patchNet(url: String, fn: (NetEntry) -> NetEntry) {
+    @Synchronized private fun addNet(e: NetEntry) { _net.value = (_net.value + e).takeLast(500) }
+    @Synchronized private fun patchNet(url: String, fn: (NetEntry) -> NetEntry) {
         val l = _net.value; val i = l.indexOfLast { it.url == url }
         if (i >= 0) _net.value = l.toMutableList().also { it[i] = fn(it[i]) }
     }
@@ -151,7 +151,7 @@ class BrowserHost(private val appCtx: Context) {
                 // só observa (não intercepta): alimenta o painel de rede
                 val url = request.url.toString()
                 if (!url.startsWith("data:")) addNet(NetEntry(netSeq.incrementAndGet(), url, request.method ?: "GET",
-                    guessType(url, request.requestHeaders["Accept"], request.isForMainFrame), request.isForMainFrame, System.currentTimeMillis()))
+                    guessType(url, request.requestHeaders["Accept"], request.isForMainFrame), request.isForMainFrame, System.currentTimeMillis(), requestHeaders = request.requestHeaders.toMap()))
                 return null
             }
             override fun onReceivedHttpError(view: WebView, request: WebResourceRequest, errorResponse: android.webkit.WebResourceResponse) {
@@ -188,7 +188,7 @@ class BrowserHost(private val appCtx: Context) {
             return oldFetch.apply(this,arguments).then(function(r){var row={url:u,method:m,requestHeaders:rh,requestBody:rb,status:r.status,responseHeaders:headers(r.headers),durationMs:Date.now()-t};window.__cueNet.push(row);if(window.__cueNet.length>300)window.__cueNet.shift();r.clone().text().then(function(b){row.responseBody=trim(b)},function(){});return r},function(e){window.__cueNet.push({url:u,method:m,requestHeaders:rh,requestBody:rb,error:String(e),durationMs:Date.now()-t});throw e})};
           var X=window.XMLHttpRequest;if(X){var op=X.prototype.open,sp=X.prototype.send,sh=X.prototype.setRequestHeader;X.prototype.open=function(m,u){this.__cue={url:String(u),method:m,requestHeaders:{},requestBody:'',start:0};return op.apply(this,arguments)};
             X.prototype.setRequestHeader=function(k,v){if(this.__cue)this.__cue.requestHeaders[k]=v;return sh.apply(this,arguments)};
-            X.prototype.send=function(b){var x=this; if(this.__cue){this.__cue.requestBody=trim(b);this.__cue.start=Date.now();this.addEventListener('loadend',function(){var row={url:x.__cue.url,method:x.__cue.method,requestHeaders:x.__cue.requestHeaders,requestBody:x.__cue.requestBody,status:x.status,responseHeaders:{},responseBody:'',durationMs:Date.now()-x.__cue.start};try{x.getAllResponseHeaders().trim().split(/[\r\n]+/).forEach(function(s){var p=s.indexOf(':');if(p>0)row.responseHeaders[s.slice(0,p).trim()]=s.slice(p+1).trim()});row.responseBody=trim(x.responseType===''||x.responseType==='text'?x.responseText:'[non-text response]')}catch(e){}window.__cueNet.push(row);if(window.__cueNet.length>300)window.__cueNet.shift()})}return sp.apply(this,arguments)}}return 'ok'})()""")
+            X.prototype.send=function(b){var x=this; if(this.__cue){this.__cue.requestBody=trim(b);this.__cue.start=Date.now();this.addEventListener('loadend',function(){var row={url:x.__cue.url,method:x.__cue.method,requestHeaders:x.__cue.requestHeaders,requestBody:x.__cue.requestBody,status:x.status,responseHeaders:{},responseBody:'',durationMs:Date.now()-x.__cue.start};try{x.getAllResponseHeaders().trim().split(/[\r\n]+/).forEach(function(s){var p=s.indexOf(':');if(p>0)row.responseHeaders[s.slice(0,p).trim()]=s.slice(p+1).trim()});row.responseBody=trim(x.responseType===''||x.responseType==='text'?x.responseText:'[non-text response]')}catch(e){}window.__cueNet.push(row);if(window.__cueNet.length>300)window.__cueNet.shift()})}return sp.apply(this,arguments)}}return 'ok'})()""", null)
     }
 
     /** Snapshot com estrutura acessível, landmarks, headings, links e controles nomeados. */
@@ -260,7 +260,13 @@ class BrowserHost(private val appCtx: Context) {
         if (l.isEmpty()) return "Nenhuma requisição registrada (rede: ${_ui.value.netType}, online=${_ui.value.online})."
         val fails = l.count { (it.status ?: 0) >= 400 || it.error != null }
         return "Rede: ${_ui.value.netType} · ${l.size} requisições · $fails com erro\n" + l.joinToString("\n") { e ->
-            buildString { append("${e.method} ${e.status ?: e.error ?: "-"} ${e.type} ${e.durationMs?.let { "${it}ms" } ?: ""} ${e.sizeBytes?.let { "${it / 1024}KB" } ?: ""} ${e.url.take(160)}");\n                if(e.requestHeaders.isNotEmpty()) append("\\n  Request headers: ").append(e.requestHeaders.entries.joinToString { "${it.key}=${it.value}" }.take(1500));\n                e.requestBody?.let { append("\\n  Request payload: ").append(it.take(3000)) };\n                if(e.responseHeaders.isNotEmpty()) append("\\n  Response headers: ").append(e.responseHeaders.entries.joinToString { "${it.key}=${it.value}" }.take(1500));\n                e.responseBody?.let { append("\\n  Response body: ").append(it.take(3000)) }\n            }
+            buildString {
+                append("${e.method} ${e.status ?: e.error ?: "-"} ${e.type} ${e.durationMs?.let { "${it}ms" } ?: ""} ${e.sizeBytes?.let { "${it / 1024}KB" } ?: ""} ${e.url.take(160)}")
+                if (e.requestHeaders.isNotEmpty()) append("\n  Request headers: ").append(e.requestHeaders.entries.joinToString { "${it.key}=${it.value}" }.take(1500))
+                e.requestBody?.let { append("\n  Request payload: ").append(it.take(3000)) }
+                if (e.responseHeaders.isNotEmpty()) append("\n  Response headers: ").append(e.responseHeaders.entries.joinToString { "${it.key}=${it.value}" }.take(1500))
+                e.responseBody?.let { append("\n  Response body: ").append(it.take(3000)) }
+            }
         }
     }
 
