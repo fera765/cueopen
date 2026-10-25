@@ -339,9 +339,20 @@ fun toolIcon(tool: String): ImageVector = when {
 @Composable
 private fun StepRow(s: ChatItem.Step, onOpenComputer: (String) -> Unit) {
     val c = Cue.c
-    var open by remember { mutableStateOf(false) }
+    // Só há expansão quando existe conteúdo útil. Comandos sem saída (ex.: mkdir) não viram pílulas clicáveis.
+    val hasUsefulOutput = s.result.isNotBlank() && (
+        s.tool in setOf("file_write", "file_edit", "file_read") ||
+        s.status == StepStatus.ERROR ||
+        s.result.lineSequence().any { it.trim().isNotEmpty() && !it.trim().matches(Regex("\\[exit \\d+\\]")) }
+    )
+    val canExpand = hasUsefulOutput
+    var open by remember(s.id) { mutableStateOf(false) }
+    val filePreview = remember(s.result, s.tool) {
+        if (s.tool == "file_write" || s.tool == "file_edit") s.result.lineSequence().take(10).joinToString("\n")
+        else s.result.takeLast(2500)
+    }
     Column(Modifier.fillMaxWidth()) {
-        Row(Modifier.clip(RoundedCornerShape(14.dp)).clickable { open = !open }.padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+        Row(Modifier.clip(RoundedCornerShape(14.dp)).then(if (canExpand) Modifier.clickable { open = !open } else Modifier).padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
             Box(Modifier.size(26.dp).clip(CircleShape).background(c.surface2), contentAlignment = Alignment.Center) {
                 when (s.status) {
                     StepStatus.RUNNING -> CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp, color = c.accent)
@@ -357,9 +368,17 @@ private fun StepRow(s: ChatItem.Step, onOpenComputer: (String) -> Unit) {
                     fontFamily = FontFamily.Monospace, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
         }
-        AnimatedVisibility(open && s.result.isNotBlank()) {
+        AnimatedVisibility(canExpand && open) {
             Column(Modifier.padding(start = 34.dp, top = 4.dp).fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(if (s.tool == "shell") Color(0xFF0F1115) else c.surface2).padding(10.dp)) {
-                Text(s.result.takeLast(2500), fontFamily = FontFamily.Monospace, fontSize = 11.sp, color = if (s.tool == "shell") Color(0xFFE6E6E6) else c.ink2)
+                if (s.tool == "file_write" || s.tool == "file_edit") {
+                    val lang = s.args.substringAfterLast('.').substringBefore(' ').lowercase()
+                    val palette = if (c.dark) SyntaxPalette.dark else SyntaxPalette.light
+                    val preview = remember(filePreview, lang, c.dark) { Syntax.highlight(filePreview, lang, palette) }
+                    Text(preview, fontFamily = FontFamily.Monospace, fontSize = 11.sp, lineHeight = 15.sp, color = c.ink2)
+                    Text("Prévia: até 10 linhas", fontSize = 10.sp, color = c.ink3)
+                } else {
+                    Text(s.result.takeLast(2500), fontFamily = FontFamily.Monospace, fontSize = 11.sp, color = if (s.tool == "shell") Color(0xFFE6E6E6) else c.ink2)
+                }
                 TextButton({ onOpenComputer(if (s.tool.startsWith("browser")) "browser" else if (s.tool.startsWith("file")) "files" else "terminal") }) {
                     Text("Ver no computador", color = c.accent)
                 }
