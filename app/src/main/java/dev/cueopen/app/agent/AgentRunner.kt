@@ -558,6 +558,7 @@ class AgentRunner(
     private fun tools(agent: AgentProfile?, allowMultiAgent: Boolean = true) = buildJsonArray {
         if (allowMultiAgent) add(tool("multi_agents", "Executa até cinco subtarefas em paralelo com orçamento limitado. Em repositório Git limpo, cada worker recebe branch/worktree isolada; o agente principal revisa e integra após testes. tasks_json é um array JSON de strings.", buildJsonObject {
             put("tasks_json", str("Array JSON de tarefas independentes"))
+            put("repo_path", str("Caminho opcional do repositório Git dentro do sandbox; padrão workspace atual"))
             put("max_workers", int("Quantidade de workers (1-5; padrão 3)"))
             put("budget_tokens", int("Orçamento por worker (2000-12000; padrão 6000)"))
         }, listOf("tasks_json")))
@@ -767,7 +768,7 @@ class AgentRunner(
 
         val out: String = try {
             when (call.name) {
-                "multi_agents" -> runMultiAgents(sessionId, s("tasks_json"), i("max_workers") ?: 3, i("budget_tokens") ?: 6000)
+                "multi_agents" -> runMultiAgents(sessionId, s("tasks_json"), s("repo_path"), i("max_workers") ?: 3, i("budget_tokens") ?: 6000)
                 "shell" -> {
                     // tudo roda DENTRO do terminal da tarefa (visível ao vivo no Computador)
                     val r = terminals.get(sessionId, cwd).runAgentCommand(s("command"), (i("timeout") ?: 180).toLong(), b("background"))
@@ -866,7 +867,7 @@ class AgentRunner(
 
 
     /** Executa workers temporários em workspaces isolados e branches independentes; nunca mescla automaticamente. */
-    private suspend fun runMultiAgents(sessionId: String, tasksJson: String, requestedWorkers: Int, requestedBudget: Int): String {
+    private suspend fun runMultiAgents(sessionId: String, tasksJson: String, repoPathArg: String, requestedWorkers: Int, requestedBudget: Int): String {
         val tasks = runCatching {
             val arr = org.json.JSONArray(tasksJson)
             (0 until arr.length()).mapNotNull { arr.optString(it).trim().takeIf { task -> task.isNotBlank() } }
@@ -876,7 +877,8 @@ class AgentRunner(
         val budget = requestedBudget.coerceIn(2000, 12000).toLong()
         val parentPath = sandbox.guestPath(sessionId)
         val terminal = terminals.get(sessionId, parentPath)
-        val probe = terminal.runAgentCommand("git -C " + shQuote(parentPath) + " rev-parse --show-toplevel && git -C " + shQuote(parentPath) + " rev-parse HEAD && git -C " + shQuote(parentPath) + " status --porcelain", 20, false)
+        val requestedRepoPath = repoPathArg.trim().ifBlank { parentPath }
+        val probe = terminal.runAgentCommand("git -C " + shQuote(requestedRepoPath) + " rev-parse --show-toplevel && git -C " + shQuote(parentPath) + " rev-parse HEAD && git -C " + shQuote(parentPath) + " status --porcelain", 20, false)
         val lines = probe.output.lines().map { it.trim() }.filter { it.isNotBlank() }
         val gitRoot = lines.firstOrNull()?.takeIf { probe.exitCode == 0 && it.startsWith("/") }
         val baseSha = lines.getOrNull(1)?.takeIf { it.matches(Regex("[0-9a-fA-F]{40}")) }
