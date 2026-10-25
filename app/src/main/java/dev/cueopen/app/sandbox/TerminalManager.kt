@@ -138,13 +138,18 @@ class TerminalManager(private val ctx: Context, private val sandbox: Sandbox) {
                 val gcue = "$cwd/.cue"
                 val cmd = command.trim()
                 val simple = !cmd.contains('\n') && cmd.length <= 300 && !cmd.contains("<<") && cmd.count { it == '"' } % 2 == 0 && cmd.count { it == '\'' } % 2 == 0
+                val outputFile = File(dir, "out_$id.log")
                 val typed = when {
                     background && simple -> "( $cmd ) > $gcue/bg_$id.log 2>&1 &"
                     background -> { File(dir, "run_$id.sh").writeText(cmd + "\n"); "nohup bash $gcue/run_$id.sh > $gcue/bg_$id.log 2>&1 &" }
-                    simple -> cmd
-                    else -> { File(dir, "run_$id.sh").writeText(cmd + "\n"); "bash $gcue/run_$id.sh" }
+                    else -> {
+                        if (!simple) File(dir, "run_$id.sh").writeText(cmd + "\n")
+                        val invocation = if (simple) cmd else "bash $gcue/run_$id.sh"
+                        // Captura stdout/stderr num arquivo no filesystem do Android. A saída
+                        // não depende do tamanho da tela, do scrollback ou de parsing do transcript.
+                        "$invocation > $gcue/out_$id.log 2>&1; __cue_exit=\$?; printf '\\033]777;cue;done;%s\\007' \"\$__cue_exit\""
+                    }
                 }
-                val before = transcript()
                 val waiter = kotlinx.coroutines.CompletableDeferred<Int>()
                 pending = waiter
                 write("\u0015\n$typed\r") // limpa a linha anterior e começa o comando em uma linha nova
@@ -161,15 +166,15 @@ class TerminalManager(private val ctx: Context, private val sandbox: Sandbox) {
                     if (pending === waiter) pending = null
                 }
                 if (exit == null) { write("\u0003"); delay(500) }
-                val t = transcript()
-                val added = if (t.length >= before.length && t.startsWith(before.take(200))) t.substring(before.length) else t.takeLast(12_000)
-                val lines = added.lines()
-                // 1ª linha = eco do comando digitado; última = novo prompt
-                val out = lines.drop(1).let { if (it.isNotEmpty() && it.last().contains("@sandbox")) it.dropLast(1) else it }
-                    .joinToString("\n").trim()
+                val out = if (background) {
+                    "Iniciado em segundo plano (log: $gcue/bg_$id.log)"
+                } else {
+                    runCatching { outputFile.takeIf { it.isFile }?.readText()?.takeLast(12_000).orEmpty() }
+                        .getOrElse { "Erro ao ler a saída capturada: ${it.message}" }
+                }
                 File(dir, "run_$id.sh").delete()
-                Sandbox.ExecResult(exit ?: -1,
-                    if (background) "Iniciado em segundo plano (log: $gcue/bg_$id.log)" else out, exit == null)
+                outputFile.delete()
+                Sandbox.ExecResult(exit ?: -1, out, exit == null)
             }
     }
 
