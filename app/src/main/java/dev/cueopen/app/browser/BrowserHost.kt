@@ -33,7 +33,8 @@ class BrowserHost(private val appCtx: Context) {
     /** Uma requisição vista pelo WebView (painel Rede + ferramenta browser_network). */
     data class NetEntry(val id: Long, val url: String, val method: String, val type: String, val mainFrame: Boolean,
                         val time: Long, val status: Int? = null, val durationMs: Long? = null, val sizeBytes: Long? = null,
-                        val error: String? = null)
+                        val error: String? = null, val requestHeaders: Map<String, String> = emptyMap(),
+                        val requestBody: String? = null, val responseHeaders: Map<String, String> = emptyMap(), val responseBody: String? = null)
     data class ConsoleEntry(val time: Long, val level: String, val message: String, val source: String)
 
     private val _net = MutableStateFlow<List<NetEntry>>(emptyList())
@@ -144,6 +145,7 @@ class BrowserHost(private val appCtx: Context) {
                 if (!agentMode) sync(view, loading = false) else pageDone?.complete(Unit)
                 collectTimings(view)
                 installSnapshotInstrumentation(view)
+                if (agentMode) installNetworkInstrumentation(view)
             }
             override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): android.webkit.WebResourceResponse? {
                 // só observa (não intercepta): alimenta o painel de rede
@@ -174,6 +176,47 @@ class BrowserHost(private val appCtx: Context) {
             }
         }
         return v
+    }
+
+
+    /** Captura sem depender de proxy/VPN: instrumenta fetch/XHR da página após cada navegação. */
+    private fun installNetworkInstrumentation(v: WebView) {
+        v.evaluateJavascript("""(function(){if(window.__cueNetInstalled)return 'ok';window.__cueNetInstalled=true;window.__cueNet=[];
+          function trim(x){try{return String(x||'').slice(0,12000)}catch(e){return ''}}
+          function headers(h){var o={};try{if(h&&h.forEach)h.forEach(function(v,k){o[k]=v});else if(h)Object.keys(h).forEach(function(k){o[k]=h[k]})}catch(e){}return o}
+          var oldFetch=window.fetch;if(oldFetch)window.fetch=function(input,init){var u=typeof input==='string'?input:(input&&input.url)||'',m=(init&&init.method)||(input&&input.method)||'GET',rh=headers((init&&init.headers)||(input&&input.headers)),rb=trim(init&&init.body),t=Date.now();
+            return oldFetch.apply(this,arguments).then(function(r){var row={url:u,method:m,requestHeaders:rh,requestBody:rb,status:r.status,responseHeaders:headers(r.headers),durationMs:Date.now()-t};window.__cueNet.push(row);if(window.__cueNet.length>300)window.__cueNet.shift();return r.clone().text().then(function(b){row.responseBody=trim(b);return r},function(){return r})},function(e){window.__cueNet.push({url:u,method:m,requestHeaders:rh,requestBody:rb,error:String(e),durationMs:Date.now()-t});throw e})};
+          var X=window.XMLHttpRequest;if(X){var op=X.prototype.open,sp=X.prototype.send,sh=X.prototype.setRequestHeader;X.prototype.open=function(m,u){this.__cue={url:String(u),method:m,requestHeaders:{},requestBody:'',start:0};return op.apply(this,arguments)};
+            X.prototype.setRequestHeader=function(k,v){if(this.__cue)this.__cue.requestHeaders[k]=v;return sh.apply(this,arguments)};
+            X.prototype.send=function(b){var x=this; if(this.__cue){this.__cue.requestBody=trim(b);this.__cue.start=Date.now();this.addEventListener('loadend',function(){var row={url:x.__cue.url,method:x.__cue.method,requestHeaders:x.__cue.requestHeaders,requestBody:x.__cue.requestBody,status:x.status,responseHeaders:{},responseBody:'',durationMs:Date.now()-x.__cue.start};try{x.getAllResponseHeaders().trim().split(/[\\r\\n]+/).forEach(function(s){var p=s.indexOf(':');if(p>0)row.responseHeaders[s.slice(0,p).trim()]=s.slice(p+1).trim()});row.responseBody=trim(x.responseType===''||x.responseType==='text'?x.responseText:'[non-text response]')}catch(e){}window.__cueNet.push(row);if(window.__cueNet.length>300)window.__cueNet.shift()})}return sp.apply(this,arguments)}}return 'ok'})()""")
+    }
+
+    /** Snapshot com estrutura acessível, landmarks, headings, links e controles nomeados. */
+    private fun installSnapshotInstrumentation(v: WebView) {
+        v.evaluateJavascript("""(function(){try{document.documentElement.setAttribute('data-cue-snapshot-ready','1');return 'ok'}catch(e){return 'err'}})()""", null)
+    }
+
+    private suspend fun mergeCapturedNetwork() {
+        val raw = runCatching { eval("JSON.stringify((window.__cueNet||[]).slice(-200))") }.getOrNull() ?: return
+        runCatching {
+            val arr = JSONArray(raw)
+            val captured = (0 until arr.length()).mapNotNull { arr.optJSONObject(it) }
+            val entries = _net.value.toMutableList()
+            captured.forEach { o ->
+                val url=o.optString("url"); val method=o.optString("method","GET")
+                val idx=entries.indexOfLast { it.url == url && it.method.equals(method,true) }
+                if(idx>=0) {
+                    val old=entries[idx]
+                    fun objMap(key:String):Map<String,String> { val jo=o.optJSONObject(key)?:return emptyMap(); val m=linkedMapOf<String,String>(); jo.keys().forEach { k->m[k]=jo.optString(k).take(2000) }; return m }
+                    entries[idx]=old.copy(status=o.optInt("status",old.status?:0).takeIf{it>0}?:old.status,
+                        durationMs=o.optLong("durationMs",old.durationMs?:0).takeIf{it>0}?:old.durationMs,
+                        requestHeaders=objMap("requestHeaders"), requestBody=o.optString("requestBody").takeIf{it.isNotBlank()},
+                        responseHeaders=objMap("responseHeaders"), responseBody=o.optString("responseBody").takeIf{it.isNotBlank()},
+                        error=o.optString("error").takeIf{it.isNotBlank()}?:old.error)
+                }
+            }
+            _net.value=entries.takeLast(500)
+        }
     }
 
     private fun sync(v: WebView, loading: Boolean = _ui.value.loading) {
@@ -208,12 +251,13 @@ class BrowserHost(private val appCtx: Context) {
         }
     }
 
-    fun networkSummary(filter: String): String {
+    suspend fun networkSummary(filter: String): String {
+        mergeCapturedNetwork()
         val l = _net.value.filter { filter.isBlank() || it.url.contains(filter, true) }.takeLast(60)
         if (l.isEmpty()) return "Nenhuma requisição registrada (rede: ${_ui.value.netType}, online=${_ui.value.online})."
         val fails = l.count { (it.status ?: 0) >= 400 || it.error != null }
         return "Rede: ${_ui.value.netType} · ${l.size} requisições · $fails com erro\n" + l.joinToString("\n") { e ->
-            "${e.method} ${e.status ?: e.error ?: "-"} ${e.type} ${e.durationMs?.let { "${it}ms" } ?: ""} ${e.sizeBytes?.let { "${it / 1024}KB" } ?: ""} ${e.url.take(160)}"
+            buildString { append("${e.method} ${e.status ?: e.error ?: "-"} ${e.type} ${e.durationMs?.let { "${it}ms" } ?: ""} ${e.sizeBytes?.let { "${it / 1024}KB" } ?: ""} ${e.url.take(160)}");\n                if(e.requestHeaders.isNotEmpty()) append("\\n  Request headers: ").append(e.requestHeaders.entries.joinToString { "${it.key}=${it.value}" }.take(1500));\n                e.requestBody?.let { append("\\n  Request payload: ").append(it.take(3000)) };\n                if(e.responseHeaders.isNotEmpty()) append("\\n  Response headers: ").append(e.responseHeaders.entries.joinToString { "${it.key}=${it.value}" }.take(1500));\n                e.responseBody?.let { append("\\n  Response body: ").append(it.take(3000)) }\n            }
         }
     }
 
@@ -304,7 +348,7 @@ class BrowserHost(private val appCtx: Context) {
 
     private suspend fun awaitLoadIfNavigating() {
         kotlinx.coroutines.delay(800)
-        if (_ui.value.loading) { pageDone = CompletableDeferred(); awaitLoad() }
+        if (agentView().progress < 100) { pageDone = CompletableDeferred(); awaitLoad() }
     }
 
     private suspend fun eval(js: String): String {
