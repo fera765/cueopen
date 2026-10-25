@@ -606,7 +606,7 @@ class AgentRunner(
             put("done_count", int("Quantas fases já foram concluídas"))
         }, listOf("goal", "phases")))
         if (term) {
-            add(tool("shell", "Executa um comando bash no sandbox Linux (Alpine). Retorna stdout+stderr.", buildJsonObject {
+            add(tool("shell", "Executa um comando bash no sandbox Linux (Alpine). Retorna stdout+stderr. GUARDRAILS: antes de executar bash/python/node com caminho de script, confirme que o arquivo existe com file_list/file_read; nunca invente nomes .sh ou caminhos. Antes de cd, confirme que o diretório existe. Se uma execução anterior retornou ENOENT/No such file or directory, não repita o mesmo comando: inspecione o workspace e corrija o caminho.", buildJsonObject {
                 put("command", str("Comando a executar"))
                 put("timeout", int("Timeout em segundos (padrão 180)"))
                 put("background", bool("Rodar em segundo plano (servidores)"))
@@ -806,14 +806,34 @@ class AgentRunner(
             when (call.name) {
                 "multi_agents" -> runMultiAgents(sessionId, s("tasks_json"), s("repo_path"), i("max_workers") ?: 3, i("budget_tokens") ?: 6000)
                 "shell" -> {
+                    // Guardrail determinístico: recusa invocações diretas de scripts inexistentes,
+                    // em vez de mandar bash executar um caminho alucinado e produzir ENOENT.
+                    val command = s("command").trim()
+                    val directScript = Regex("""(?:^|[;&|]\\s*)(?:bash|sh|python3?|node)\\s+(['"]?)(/[^\\s'";&|]+)""")
+                        .find(command)?.groupValues?.get(2)
+                    val missingScript = directScript?.let { path ->
+                        val f = sandbox.hostFile(path, sessionId)
+                        if (!f.exists() || !f.isFile) path else null
+                    }
+                    val badCd = Regex("""(?:^|[;&|]\\s*)cd\\s+(['"]?)(/[^\\s'";&|]+)""")
+                        .find(command)?.groupValues?.get(2)?.let { path ->
+                            val f = sandbox.hostFile(path, sessionId)
+                            if (!f.exists() || !f.isDirectory) path else null
+                        }
+                    if (missingScript != null) {
+                        "GUARDRAIL: o script '$missingScript' não existe neste workspace. Não execute novamente. Use file_list/ls para descobrir o caminho real ou file_write para criar o arquivo antes de executá-lo."
+                    } else if (badCd != null) {
+                        "GUARDRAIL: o diretório '$badCd' não existe neste workspace. Liste o diretório pai e escolha um caminho existente."
+                    } else {
                     // tudo roda DENTRO do terminal da tarefa (visível ao vivo no Computador)
-                    val r = terminals.get(sessionId, cwd).runAgentCommand(s("command"), (i("timeout") ?: 180).toLong(), b("background"))
+                    val r = terminals.get(sessionId, cwd).runAgentCommand(command, (i("timeout") ?: 180).toLong(), b("background"))
                     run {
                         buildString {
                             append(r.output.takeLast(10_000))
                             if (r.timedOut) append("\n[timeout]")
                             append("\n[exit ${r.exitCode}]")
                         }
+                    }
                     }
                 }
                 "file_write" -> {
