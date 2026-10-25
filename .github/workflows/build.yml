@@ -11,44 +11,50 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v4
-        with: { distribution: temurin, java-version: '17' }
-      - uses: android-actions/setup-android@v3
-        continue-on-error: true
-      - uses: gradle/actions/setup-gradle@v4
-        continue-on-error: true
-        with: { gradle-version: '8.9' }
-      - name: Build
-        run: gradle assembleRelease --stacktrace 2>&1 | tee build.log
-        continue-on-error: true
-      - name: Preparar saída
-        if: always()
-        run: |
-          mkdir -p out && (cp build.log out/ || echo 'build nao rodou' > out/build.log)
-          cp app/build/outputs/apk/release/*.apk out/CueOpen.apk 2>/dev/null || echo "sem apk" > out/FAILED
-      # Teste de fumaça: abre o app num emulador e grava o logcat (crashes ficam visíveis)
-      - name: Habilitar KVM
-        if: false
-        run: |
-          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
-          sudo udevadm control --reload-rules && sudo udevadm trigger --name-match=kvm
-      - name: Smoke test no emulador
-        if: false
-        continue-on-error: true
-        timeout-minutes: 25
-        uses: reactivecircus/android-emulator-runner@v2
         with:
-          api-level: 29
-          arch: x86_64
-          target: default
-          force-avd-creation: false
-          emulator-boot-timeout: 900
-          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none -no-snapshot
-          disable-animations: true
-          script: bash .github/smoke.sh
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+      - name: Build release APK
+        shell: bash
+        run: |
+          set -o pipefail
+          gradle assembleRelease --stacktrace 2>&1 | tee build.log
+          apk="$(find app/build/outputs/apk/release -maxdepth 1 -type f -name '*.apk' -print -quit)"
+          test -n "$apk" && test -s "$apk"
+      - name: Preparar saída e logs
+        if: always()
+        shell: bash
+        run: |
+          mkdir -p out
+          if [ -f build.log ]; then cp build.log out/build.log; else echo 'build nao rodou' > out/build.log; fi
+          apk="$(find app/build/outputs/apk/release -maxdepth 1 -type f -name '*.apk' -print -quit 2>/dev/null || true)"
+          if [ -n "$apk" ] && [ -s "$apk" ]; then
+            cp "$apk" out/CueOpen.apk
+            sha256sum out/CueOpen.apk > out/SHA256SUMS.txt
+          else
+            echo "APK nao foi gerado; consulte build.log" > out/FAILED
+          fi
+      - name: Publicar logs e APK como artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cueopen-build-${{ github.run_number }}
+          path: out/
+          if-no-files-found: error
+          retention-days: 14
       - name: Publicar resultado na branch build-output
         if: always()
+        shell: bash
         run: |
-          cd out && git init -q && git checkout -q -b build-output
-          git config user.name ci && git config user.email ci@users.noreply.github.com
-          git add -A && git commit -qm "build ${GITHUB_SHA}"
+          cd out
+          git init -q
+          git checkout -q -b build-output
+          git config user.name ci
+          git config user.email ci@users.noreply.github.com
+          git add -A
+          git commit -qm "build ${GITHUB_SHA}"
           git push -f "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${GITHUB_REPOSITORY}.git" build-output
