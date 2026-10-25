@@ -46,8 +46,8 @@ class BrowserHost(private val appCtx: Context) {
 
     fun clearNet() { _net.value = emptyList(); _console.value = emptyList() }
 
-    private fun addNet(e: NetEntry) { _net.value = (_net.value + e).takeLast(500) }
-    private fun patchNet(url: String, fn: (NetEntry) -> NetEntry) {
+    @Synchronized private fun addNet(e: NetEntry) { _net.value = (_net.value + e).takeLast(500) }
+    @Synchronized private fun patchNet(url: String, fn: (NetEntry) -> NetEntry) {
         val l = _net.value; val i = l.indexOfLast { it.url == url }
         if (i >= 0) _net.value = l.toMutableList().also { it[i] = fn(it[i]) }
     }
@@ -151,7 +151,7 @@ class BrowserHost(private val appCtx: Context) {
                 // só observa (não intercepta): alimenta o painel de rede
                 val url = request.url.toString()
                 if (!url.startsWith("data:")) addNet(NetEntry(netSeq.incrementAndGet(), url, request.method ?: "GET",
-                    guessType(url, request.requestHeaders["Accept"], request.isForMainFrame), request.isForMainFrame, System.currentTimeMillis()))
+                    guessType(url, request.requestHeaders["Accept"], request.isForMainFrame), request.isForMainFrame, System.currentTimeMillis(), requestHeaders = request.requestHeaders.toMap()))
                 return null
             }
             override fun onReceivedHttpError(view: WebView, request: WebResourceRequest, errorResponse: android.webkit.WebResourceResponse) {
