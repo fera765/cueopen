@@ -74,6 +74,8 @@ class AgentRunner(
     fun isRunning(sessionId: String) = jobs[sessionId]?.isActive == true
 
     fun stop(sessionId: String) {
+        // Primeiro envia Ctrl+C ao PTY ativo; cancelar só a coroutine deixava o processo vivo.
+        terminals.get(sessionId).cancelAgentCommand()
         jobs.remove(sessionId)?.cancel()
         synchronized(childJobsByParent) { childJobsByParent.remove(sessionId)?.forEach { it.cancel() } }
         store.state.value.agents.filter { it.homeSessionId == sessionId && it.autonomous }.forEach {
@@ -875,6 +877,7 @@ class AgentRunner(
                         else "Ferramenta desconhecida: ${call.name}"
             }
         } catch (c: kotlinx.coroutines.CancellationException) {
+            store.replaceItem(sessionId, step.copy(result = "Execução interrompida.", status = StepStatus.ERROR))
             throw c
         } catch (t: Throwable) {
             store.replaceItem(sessionId, step.copy(result = t.message.orEmpty(), status = StepStatus.ERROR))
