@@ -208,10 +208,15 @@ class AgentRunner(
                 }
                 @Suppress("UNREACHABLE_CODE") return
             }
+            val modelId = agent?.model?.takeIf { it.isNotBlank() } ?: store.settings.model
+            val callCostUsd = runCatching { llm.estimateCostUsd(modelId, reply.usage) }.getOrNull()
             store.editSession(sessionId) {
                 it.copy(llm = it.llm + LlmMessage("assistant", reply.content, toolCallsJson = reply.rawToolCallsJson),
                     tokensIn = it.tokensIn + reply.usage.prompt, tokensOut = it.tokensOut + reply.usage.completion,
-                    tokensCached = it.tokensCached + reply.usage.cached, llmCalls = it.llmCalls + 1)
+                    tokensCached = it.tokensCached + reply.usage.cached, llmCalls = it.llmCalls + 1,
+                    modelUsed = modelId,
+                    costUsd = it.costUsd + (callCostUsd?.takeIf { cost -> cost > 0.0 } ?: 0.0),
+                    hasPricedUsage = it.hasPricedUsage || (callCostUsd != null && callCostUsd > 0.0))
             }
             // Anti-repetição: se o modelo repetir quase o mesmo texto várias vezes, interrompe.
             val cNow = reply.content?.trim().orEmpty()
