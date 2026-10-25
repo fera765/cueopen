@@ -889,6 +889,10 @@ class AgentRunner(
      * Orquestra subtarefas paralelas com workspaces isolados e estado explícito.
      * Concluir o loop do modelo não equivale a validar o código produzido.
      */
+    /**
+     * Parallel agent orchestration: each worker executes in isolation, reports structured outcomes,
+     * and only then participates in integration. Model completion alone does not mean task success.
+     */
     private suspend fun runMultiAgents(sessionId: String, tasksJson: String, repoPathArg: String, requestedWorkers: Int, requestedBudget: Int): String {
         val tasks = runCatching {
             val arr = org.json.JSONArray(tasksJson)
@@ -915,7 +919,7 @@ class AgentRunner(
 
         val workers = tasks.take(count).mapIndexed { index, task ->
             Session(
-                title = "[Worker ${index + 1}] ${task.take(42)}",
+                title = "[Worker " + (index + 1) + "] " + task.take(42),
                 agentId = store.session(sessionId)?.agentId,
                 status = SessionStatus.RUNNING,
                 llm = listOf(
@@ -974,8 +978,8 @@ class AgentRunner(
             val step = ChatItem.Step(
                 tool = "multi_agent_worker",
                 title = "Agente " + workerNumber + " · " + taskLabel,
-                args = "Executando",
-                result = "",
+                args = "Na fila",
+                result = "Workspace isolado preparado.",
                 status = StepStatus.RUNNING
             )
             store.addItem(sessionId, step)
@@ -989,62 +993,40 @@ class AgentRunner(
                 val initial = store.session(child.id)
                 val initialTokens = initial?.let { it.tokensIn + it.tokensOut } ?: 0L
                 try {
+                    store.replaceItem(sessionId, parentStep.copy(args = "Executando", result = "Agente em execução no workspace isolado."))
                     loop(child.id, maxStepsOverride = 6, tokenBudgetOverride = budget)
                     val finished = store.session(child.id)
                     val assistant = finished?.items?.lastOrNull { it is ChatItem.Assistant } as? ChatItem.Assistant
                     val errors = finished?.items?.filterIsInstance<ChatItem.Error>()?.map { it.text }.orEmpty()
                     val workerStatus = finished?.status
-                    val outcome = WorkerOutcome(
-                        sessionId = child.id,
-                        task = tasks[workerIndex],
-                        status = workerStatus,
-                        summary = assistant?.text.orEmpty(),
-                        errors = errors,
-                        tokenUsage = ((finished?.tokensIn ?: 0L) + (finished?.tokensOut ?: 0L) - initialTokens).coerceAtLeast(0L)
-                    )
+                    val usage = ((finished?.tokensIn ?: 0L) + (finished?.tokensOut ?: 0L) - initialTokens).coerceAtLeast(0L)
+                    val outcome = WorkerOutcome(child.id, tasks[workerIndex], workerStatus, assistant?.text.orEmpty(), errors, usage)
                     outcomes[child.id] = outcome
-                    val statusLabel = when {
+                    val label = when {
                         outcome.completed -> "Pronto para integração"
                         workerStatus == SessionStatus.STOPPED -> "Cancelado"
                         workerStatus == SessionStatus.WAITING_USER -> "Precisa de intervenção"
                         workerStatus == SessionStatus.ERROR || errors.isNotEmpty() -> "Falhou"
                         else -> "Parcial / não validado"
                     }
-                    val details = "Estado: " + statusLabel + " (" + (workerStatus ?: "desconhecido") + "). " +
-                        "Uso estimado informado pelo app: " + outcome.tokenUsage + " tokens. " +
-                        "A compilação/testes agregados ainda não foram executados.\\n" +
+                    val details = "Estado: " + label + " (" + (workerStatus ?: "desconhecido") + "). Uso registrado: " +
+                        usage + " tokens. Testes agregados ainda não executados.\n" +
                         (outcome.summary.ifBlank { errors.firstOrNull() ?: "Nenhum relatório final foi produzido." })
-                    store.replaceItem(
-                        sessionId,
-                        parentStep.copy(
-                            args = statusLabel,
-                            result = details.take(1800),
-                            status = if (outcome.completed) StepStatus.OK else StepStatus.ERROR
-                        )
-                    )
+                    store.replaceItem(sessionId, parentStep.copy(args = label, result = details.take(1800),
+                        status = if (outcome.completed) StepStatus.OK else StepStatus.ERROR))
                 } catch (cancel: kotlinx.coroutines.CancellationException) {
                     store.editSession(child.id) { it.copy(status = SessionStatus.STOPPED) }
-                    outcomes[child.id] = WorkerOutcome(
-                        sessionId = child.id, task = tasks[workerIndex], status = SessionStatus.STOPPED,
-                        summary = "", errors = listOf("Subtarefa cancelada."), tokenUsage = 0L
-                    )
-                    store.replaceItem(
-                        sessionId,
-                        parentStep.copy(args = "Cancelado", result = "Subtarefa cancelada.", status = StepStatus.ERROR)
-                    )
+                    outcomes[child.id] = WorkerOutcome(child.id, tasks[workerIndex], SessionStatus.STOPPED, "",
+                        listOf("Subtarefa cancelada."), 0L)
+                    store.replaceItem(sessionId, parentStep.copy(args = "Cancelado", result = "Subtarefa cancelada.",
+                        status = StepStatus.ERROR))
                     throw cancel
                 } catch (t: Throwable) {
                     val message = (t.message ?: t.toString()).take(300)
                     store.addItem(child.id, ChatItem.Error(text = "Worker falhou: " + message))
                     store.editSession(child.id) { it.copy(status = SessionStatus.ERROR) }
-                    outcomes[child.id] = WorkerOutcome(
-                        sessionId = child.id, task = tasks[workerIndex], status = SessionStatus.ERROR,
-                        summary = "", errors = listOf(message), tokenUsage = 0L
-                    )
-                    store.replaceItem(
-                        sessionId,
-                        parentStep.copy(args = "Falhou", result = message, status = StepStatus.ERROR)
-                    )
+                    outcomes[child.id] = WorkerOutcome(child.id, tasks[workerIndex], SessionStatus.ERROR, "", listOf(message), 0L)
+                    store.replaceItem(sessionId, parentStep.copy(args = "Falhou", result = message, status = StepStatus.ERROR))
                 }
             }
         }
@@ -1056,15 +1038,15 @@ class AgentRunner(
         }
 
         val report = StringBuilder().apply {
-            appendLine("Parallel Agent Engine: " + workers.size + " worker(s), orçamento máximo configurado de " + budget + " tokens por worker.")
-            appendLine("A conclusão textual não certifica compilação nem testes; esta etapa apenas registra e prepara a integração.")
+            appendLine("Parallel Agent Engine: " + workers.size + " worker(s), orçamento configurado de " + budget + " tokens por worker.")
+            appendLine("Conclusão textual não certifica compilação nem testes do projeto agregado.")
             workers.forEachIndexed { index, child ->
                 val outcome = outcomes[child.id]
                 appendLine()
                 appendLine("### Agente " + (index + 1) + " · " + (outcome?.status ?: "desconhecido"))
                 appendLine("Tarefa: " + tasks[index])
-                appendLine("Resultado: " + (outcome?.summary ?: "Nenhum relatório final foi produzido.").take(1400))
-                if (outcome?.errors?.isNotEmpty() == true) appendLine("Erros: " + outcome.errors.joinToString(" | ").take(500))
+                appendLine("Resultado: " + (outcome?.summary ?: "Nenhum relatório final foi produzido.").take(1200))
+                if (outcome?.errors?.isNotEmpty() == true) appendLine("Erros: " + outcome.errors.joinToString(" | ").take(400))
             }
         }
 
@@ -1072,6 +1054,12 @@ class AgentRunner(
         var integratedCount = 0
         if (gitRoot != null && baseSha != null) {
             workers.forEachIndexed { index, child ->
+                val outcome = outcomes[child.id]
+                if (outcome?.completed != true) {
+                    integrationFailures++
+                    appendReportLine(report, "Agente " + (index + 1) + ": não integrado automaticamente porque o resultado não terminou sem erros.")
+                    return@forEachIndexed
+                }
                 val patchPath = gitRoot.trimEnd('/') + "/.cueopen-worker-" + (index + 1) + ".patch"
                 val createPatch = terminal.runAgentCommand(
                     "git -C " + shQuote(sandbox.guestPath(child.id)) +
@@ -1099,14 +1087,17 @@ class AgentRunner(
             }
             if (integratedCount > 0) {
                 val status = terminal.runAgentCommand("git -C " + shQuote(gitRoot) + " status --short", 15L, false)
-                appendReportLine(
-                    report,
-                    "Workspace após integração: " + status.output.lines().count { it.isNotBlank() } +
-                        " caminho(s) alterado(s). Testes/build agregados não executados por este método."
-                )
+                appendReportLine(report, "Workspace após integração: " + status.output.lines().count { it.isNotBlank() } +
+                    " caminho(s) alterado(s). Testes/build agregados ainda não executados.")
             }
         } else {
             workers.forEachIndexed { index, child ->
+                val outcome = outcomes[child.id]
+                if (outcome?.completed != true) {
+                    integrationFailures++
+                    appendReportLine(report, "Agente " + (index + 1) + ": artefatos não integrados; resultado parcial preservado.")
+                    return@forEachIndexed
+                }
                 val source = sandbox.workspaceFor(child.id).absolutePath
                 val dest = sandbox.workspaceFor(sessionId).absolutePath
                 val sync = terminal.runAgentCommand(
@@ -1120,25 +1111,25 @@ class AgentRunner(
                     45L, false
                 )
                 if (sync.exitCode == 0) integratedCount++ else integrationFailures++
-                appendReportLine(
-                    report,
-                    "Agente " + (index + 1) + ": " +
-                        if (sync.exitCode == 0) "sincronização concluída; arquivos divergentes usam sufixo .worker-" + (index + 1) + "."
-                        else "sincronização parcial; revisar workspace."
-                )
+                appendReportLine(report, "Agente " + (index + 1) + ": " +
+                    if (sync.exitCode == 0) "sincronização concluída; divergências com sufixo .worker-" + (index + 1) + "."
+                    else "sincronização parcial; revisar workspace.")
             }
         }
 
+        if (gitRoot != null && baseSha != null && integratedCount > 0) {
+            val status = terminal.runAgentCommand("git -C " + shQuote(gitRoot) + " status --short", 15L, false)
+            appendReportLine(report, "Workspace agregado: " + status.output.lines().count { it.isNotBlank() } + " caminho(s) alterado(s).")
+            appendReportLine(report, "Build e testes agregados: ainda não executados por este orquestrador.")
+        }
         if (integrationFailures > 0) {
-            appendReportLine(report, "ATENÇÃO: " + integrationFailures + " worker(s) tiveram integração incompleta; artefatos de conflito foram preservados.")
-        } else {
-            appendReportLine(report, "Integração de arquivos: " + integratedCount + " worker(s) processados. Execute os testes antes de declarar a tarefa concluída.")
+            appendReportLine(report, "ATENÇÃO: " + integrationFailures + " worker(s) precisam de revisão.")
         }
 
         workers.forEachIndexed { index, child ->
-            val workerStatus = store.session(child.id)?.status
-            val completedCleanly = workerStatus == SessionStatus.DONE && integrationFailures == 0
-            if (completedCleanly) {
+            val outcome = outcomes[child.id]
+            val clean = outcome?.completed == true && integrationFailures == 0
+            if (clean) {
                 if (gitRoot != null && baseSha != null) {
                     terminal.runAgentCommand(
                         "git -C " + shQuote(gitRoot) + " worktree remove --force " +
@@ -1150,7 +1141,8 @@ class AgentRunner(
                 }
                 store.deleteSession(child.id)
             } else {
-                appendReportLine(report, "Worker " + (index + 1) + " preservado para inspeção: " + child.id + " (estado=" + (workerStatus ?: "desconhecido") + ").")
+                appendReportLine(report, "Worker " + (index + 1) + " preservado para inspeção: " + child.id +
+                    " (estado=" + (outcome?.status ?: "desconhecido") + ").")
             }
         }
         return report.toString()
