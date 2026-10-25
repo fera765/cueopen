@@ -1056,16 +1056,15 @@ class AgentRunner(
         }
 
         val report = StringBuilder().apply {
-            appendLine("Parallel Agent Engine: " + workers.size + " worker(s), orçamento máximo de " + budget + " tokens por worker.")
-            appendLine("Pronto para integração não significa que os testes do projeto agregado passaram.")
+            appendLine("Parallel Agent Engine: " + workers.size + " worker(s), orçamento máximo configurado de " + budget + " tokens por worker.")
+            appendLine("A conclusão textual não certifica compilação nem testes; esta etapa apenas registra e prepara a integração.")
             workers.forEachIndexed { index, child ->
-                val finished = store.session(child.id)
-                val last = finished?.items?.lastOrNull { it is ChatItem.Assistant } as? ChatItem.Assistant
-                val error = finished?.items?.lastOrNull { it is ChatItem.Error } as? ChatItem.Error
+                val outcome = outcomes[child.id]
                 appendLine()
-                appendLine("### Agente " + (index + 1) + " · " + (finished?.status ?: "desconhecido"))
+                appendLine("### Agente " + (index + 1) + " · " + (outcome?.status ?: "desconhecido"))
                 appendLine("Tarefa: " + tasks[index])
-                appendLine((last?.text ?: error?.text ?: "Progresso parcial preservado.").take(1400))
+                appendLine("Resultado: " + (outcome?.summary ?: "Nenhum relatório final foi produzido.").take(1400))
+                if (outcome?.errors?.isNotEmpty() == true) appendLine("Erros: " + outcome.errors.joinToString(" | ").take(500))
             }
         }
 
