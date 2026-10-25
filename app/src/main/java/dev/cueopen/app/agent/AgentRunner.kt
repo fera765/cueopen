@@ -924,10 +924,11 @@ class AgentRunner(
         }
         // Publica uma pílula por worker na conversa principal para que o usuário acompanhe o progresso real.
         val workerSteps = workers.associate { child ->
-            val title = child.title.removePrefix("[Worker ")
+            val workerNumber = child.title.removePrefix("[Worker ").substringBefore("]")
+            val taskLabel = child.title.substringAfter("] ", child.title).take(48)
             val step = ChatItem.Step(
                 tool = "multi_agent_worker",
-                title = "Agente $title",
+                title = "Agente $workerNumber · $taskLabel",
                 args = "Executando",
                 result = "",
                 status = StepStatus.RUNNING
