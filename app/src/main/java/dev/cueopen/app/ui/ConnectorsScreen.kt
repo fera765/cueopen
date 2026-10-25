@@ -39,6 +39,7 @@ fun ConnectorsScreen(nav: NavController) {
     val scope = rememberCoroutineScope()
     val c = Cue.c
     var busy by remember { mutableStateOf<String?>(null) }
+    var installing by remember { mutableStateOf<String?>(null) }
     var custom by remember { mutableStateOf(false) }
     var tokenFor by remember { mutableStateOf<Connector?>(null) }
     var query by remember { mutableStateOf("") }
@@ -74,8 +75,8 @@ fun ConnectorsScreen(nav: NavController) {
     fun install(cat: Connectors.Catalog) {
         val conn = Connector(cat.id, cat.name, cat.url, cat.description, cat.needsAuth, enabled = true)
         app.store.upsertConnector(conn.copy(lastError = null))
-        found = found // keep results visible while installation starts
         if (cat.needsAuth) return
+        installing = cat.id
         busy = cat.id
         scope.launch {
             runCatching {
@@ -86,6 +87,7 @@ fun ConnectorsScreen(nav: NavController) {
                 app.store.upsertConnector(result)
             }.onFailure { e -> app.store.upsertConnector((app.store.connector(cat.id) ?: conn).copy(lastError = e.message)) }
             busy = null
+            installing = null
         }
     }
 
@@ -125,7 +127,8 @@ fun ConnectorsScreen(nav: NavController) {
                                 Text(cat.name, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
                                 Text(cat.description.ifBlank { cat.url }, fontSize = 12.sp, color = c.ink2, maxLines = 2, overflow = TextOverflow.Ellipsis)
                                 when {
-                                    busy == cat.id -> Text(if (installedConn == null) "Instalando…" else "Conectando e verificando ferramentas…", fontSize = 12.sp, color = c.accent)
+                                    installing == cat.id -> Text("Instalando e verificando ferramentas…", fontSize = 12.sp, color = c.accent)
+                                    busy == cat.id -> Text("Conectando…", fontSize = 12.sp, color = c.accent)
                                     installedConn?.lastError != null -> Text("Falha: ${installedConn.lastError}", fontSize = 12.sp, color = c.err, maxLines = 3, overflow = TextOverflow.Ellipsis)
                                     connected -> Text("Instalado · ${runCatching { org.json.JSONArray(installedConn.toolsJson ?: "[]").length() }.getOrDefault(0)} ferramentas", fontSize = 12.sp, color = c.ok)
                                     installedConn != null -> Text("Instalado · pronto para conectar", fontSize = 12.sp, color = c.ink2)
@@ -133,7 +136,7 @@ fun ConnectorsScreen(nav: NavController) {
                             }
                             Spacer(Modifier.width(8.dp))
                             when {
-                                busy == cat.id -> CircularProgressIndicator(Modifier.size(22.dp), strokeWidth = 2.dp, color = c.accent)
+                                busy == cat.id || installing == cat.id -> CircularProgressIndicator(Modifier.size(22.dp), strokeWidth = 2.dp, color = c.accent)
                                 connected -> Icon(Icons.Rounded.CheckCircle, null, tint = c.ok)
                                 else -> Box(Modifier.clip(CircleShape).background(c.ink).clickable {
                                     if (installedConn == null) install(cat)
