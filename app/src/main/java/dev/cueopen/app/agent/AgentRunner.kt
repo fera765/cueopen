@@ -162,11 +162,15 @@ class AgentRunner(
             var history = ctxMgr.microCompact(s.llm)
             if (history.firstOrNull()?.role != "user") history = listOf(LlmMessage("user", "[Contexto anterior compactado no resumo da sessão. Continue de onde parou.]")) + history
             // Resiliência: tenta a chamada; em erro, reenvia (backoff) e só desiste após 3 falhas.
+            val replyTokenLimit = tokenBudgetOverride?.let { budget ->
+                val used = (store.session(sessionId)?.let { it.tokensIn + it.tokensOut } ?: startingTokens) - startingTokens
+                (budget - used).coerceIn(256L, 2048L).toInt()
+            } ?: 16000
             val reply = run {
                 var attempt = 0
                 while (true) {
                     try {
-                        return@run llm.chat(listOf(sys) + history, tools = tools(agent, allowMultiAgent = tokenBudgetOverride == null), model = agent?.model, maxTokens = if (tokenBudgetOverride != null) 2048 else 16000)
+                        return@run llm.chat(listOf(sys) + history, tools = tools(agent, allowMultiAgent = tokenBudgetOverride == null), model = agent?.model, maxTokens = replyTokenLimit)
                     } catch (c: kotlinx.coroutines.CancellationException) {
                         throw c
                     } catch (t: Throwable) {
