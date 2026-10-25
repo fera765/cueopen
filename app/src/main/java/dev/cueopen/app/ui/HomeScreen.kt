@@ -5,6 +5,7 @@ import android.net.Uri
 import android.speech.RecognizerIntent
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -326,6 +327,7 @@ private fun DrawerItem(icon: ImageVector, text: String, badge: String? = null, o
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun SessionRow(s: Session, agent: AgentProfile?, onClick: () -> Unit) {
     val c = Cue.c
