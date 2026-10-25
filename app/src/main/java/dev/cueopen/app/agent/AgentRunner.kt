@@ -575,7 +575,7 @@ class AgentRunner(
 
     private fun tools(agent: AgentProfile?, allowMultiAgent: Boolean = true) = buildJsonArray {
         if (allowMultiAgent) add(tool("multi_agents", "Executa todas as subtarefas em ondas com no máximo cinco workers simultâneos. Cada worker usa workspace isolado; resultados parciais não são integrados automaticamente e conflitos são preservados. tasks_json aceita strings independentes ou objetos {id, task, depends_on}; dependências são executadas em ondas. budget_tokens é por worker.", buildJsonObject {
-            put("tasks_json", str("Array JSON de tarefas independentes"))
+            put("tasks_json", str("JSON array de strings independentes ou objetos {id, task, depends_on:[ids]}; dependências rodam em ondas e ciclos são rejeitados"))
             put("repo_path", str("Caminho opcional do repositório Git dentro do sandbox; padrão workspace atual"))
             put("max_workers", int("Quantidade de workers (1-5; padrão 3)"))
             put("budget_tokens", int("Orçamento por worker (2000-12000; padrão 6000)"))
