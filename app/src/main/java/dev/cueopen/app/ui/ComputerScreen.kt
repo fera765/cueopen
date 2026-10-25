@@ -5,6 +5,7 @@ import android.content.Intent
 import android.webkit.JavascriptInterface
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -59,14 +60,22 @@ fun ComputerScreen(nav: NavController, sessionId: String, initialTab: String?) {
     val app = CueApp.instance
     val tabs = listOf("terminal" to "Terminal", "browser" to "Browser", "files" to "Arquivos")
     var tab by remember { mutableStateOf(initialTab ?: "terminal") }
+    val tabHistory = remember(sessionId) { mutableStateListOf<String>() }
+    fun changeTab(next: String) {
+        if (next != tab) { tabHistory.add(tab); tab = next }
+    }
+    BackHandler {
+        if (tabHistory.isNotEmpty()) tab = tabHistory.removeAt(tabHistory.lastIndex)
+        else nav.popBackStack()
+    }
     val activity by app.agent.activity.collectAsStateWithLifecycle()
     val act = activity[sessionId]
     // segue o agente automaticamente quando ele troca de ferramenta
     LaunchedEffect(act?.kind) {
         when (act?.kind) {
-            dev.cueopen.app.agent.Activity.Kind.TERMINAL -> tab = "terminal"
-            dev.cueopen.app.agent.Activity.Kind.BROWSER -> tab = "browser"
-            dev.cueopen.app.agent.Activity.Kind.EDITOR -> tab = "files"
+            dev.cueopen.app.agent.Activity.Kind.TERMINAL -> changeTab("terminal")
+            dev.cueopen.app.agent.Activity.Kind.BROWSER -> changeTab("browser")
+            dev.cueopen.app.agent.Activity.Kind.EDITOR -> changeTab("files")
             else -> {}
         }
     }
@@ -85,7 +94,7 @@ fun ComputerScreen(nav: NavController, sessionId: String, initialTab: String?) {
                 }
             }
             Row(Modifier.padding(horizontal = 16.dp, vertical = 6.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                tabs.forEach { (k, l) -> Chip(l, selected = tab == k, icon = when (k) { "terminal" -> Icons.Rounded.Terminal; "browser" -> Icons.Rounded.Language; else -> Icons.Rounded.FolderOpen }) { tab = k } }
+                tabs.forEach { (k, l) -> Chip(l, selected = tab == k, icon = when (k) { "terminal" -> Icons.Rounded.Terminal; "browser" -> Icons.Rounded.Language; else -> Icons.Rounded.FolderOpen }) { changeTab(k) } }
             }
         }
     }) { pad ->
@@ -326,9 +335,17 @@ private fun DevToolsPanel(modifier: Modifier) {
 fun FilesPane(root: File, guestRoot: String) {
     val c = Cue.c
     val ctx = LocalContext.current
-    var dir by remember { mutableStateOf(root) }
+    var dir by remember(root) { mutableStateOf(root) }
+    val dirHistory = remember(root) { mutableStateListOf<File>() }
     var editing by remember { mutableStateOf<File?>(null) }
     var viewing by remember { mutableStateOf<File?>(null) }
+    BackHandler(enabled = editing != null || viewing != null || dirHistory.isNotEmpty()) {
+        when {
+            editing != null -> editing = null
+            viewing != null -> viewing = null
+            dirHistory.isNotEmpty() -> dir = dirHistory.removeAt(dirHistory.lastIndex)
+        }
+    }
     var tick by remember { mutableIntStateOf(0) }
     LaunchedEffect(Unit) { while (true) { kotlinx.coroutines.delay(2000); tick++ } }
     val files = remember(dir, tick) { (dir.listFiles()?.toList() ?: emptyList()).sortedWith(compareBy({ !it.isDirectory }, { it.name.lowercase() })) }
@@ -338,14 +355,14 @@ fun FilesPane(root: File, guestRoot: String) {
     if (v != null) { FileViewer(v, onClose = { viewing = null }, onEdit = { editing = v; viewing = null }); return }
     Column(Modifier.fillMaxSize()) {
         Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-            if (dir != root) IconButton({ dir = dir.parentFile ?: root }) { Icon(Icons.Rounded.ArrowUpward, "Subir") }
+            if (dir != root) IconButton({ dirHistory.add(dir); dir = dir.parentFile ?: root }) { Icon(Icons.Rounded.ArrowUpward, "Subir") }
             Text(guestRoot + dir.absolutePath.removePrefix(root.absolutePath), fontFamily = FontFamily.Monospace, fontSize = 12.sp, color = c.ink3,
                 maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
         }
         if (files.isEmpty()) EmptyState(Icons.Rounded.FolderOpen, "Pasta vazia", "Os arquivos criados pelo agente aparecem aqui.")
         LazyColumn(contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
             items(files, key = { it.absolutePath }) { f ->
-                FileRow(f, onClick = { if (f.isDirectory) dir = f else viewing = f }, onShare = { openExternal(ctx, f, share = true) })
+                FileRow(f, onClick = { if (f.isDirectory) { dirHistory.add(dir); dir = f } else viewing = f }, onShare = { openExternal(ctx, f, share = true) })
             }
         }
     }
