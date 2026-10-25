@@ -226,6 +226,9 @@ class BrowserHost(private val appCtx: Context) {
 
     fun home() { _view?.loadUrl(HOME) }
 
+    suspend fun uiBack() = onMain { _view?.takeIf { it.canGoBack() }?.goBack() }
+    suspend fun uiReload() = onMain { _view?.reload() }
+
     /** Alterna entre versão mobile e desktop dos sites. */
     fun setDesktop(on: Boolean) {
         val v = _view ?: return
