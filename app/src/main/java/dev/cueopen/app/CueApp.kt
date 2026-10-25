@@ -13,7 +13,10 @@ import dev.cueopen.app.sandbox.Sandbox
 class CueApp : Application() {
     lateinit var store: Store; private set
     lateinit var sandbox: Sandbox; private set
-    lateinit var browser: BrowserHost; private set
+    private val browsers = java.util.concurrent.ConcurrentHashMap<String, BrowserHost>()
+    /** Cada chat mantém seu próprio WebView, cookies, URL, histórico e estado de rede. */
+    fun browserFor(sessionId: String): BrowserHost = browsers.computeIfAbsent(sessionId) { BrowserHost(this) }
+    val browser: BrowserHost get() = browserFor("__legacy__")
     lateinit var llm: OpenRouter; private set
     lateinit var agent: AgentRunner; private set
     lateinit var terminals: dev.cueopen.app.sandbox.TerminalManager; private set
@@ -33,7 +36,7 @@ class CueApp : Application() {
         browser = BrowserHost(this)
         llm = OpenRouter { store.settings }
         terminals = dev.cueopen.app.sandbox.TerminalManager(this, sandbox)
-        agent = AgentRunner(store, sandbox, browser, llm, terminals, this)
+        agent = AgentRunner(store, sandbox, ::browserFor, llm, terminals, this)
         agent.resumeSleeping()
         dev.cueopen.app.scheduler.Heartbeat.rescheduleAll(this)
         agent.startAutonomy()
