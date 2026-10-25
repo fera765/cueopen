@@ -982,47 +982,68 @@ class AgentRunner(
             child.id to step
         }
 
-        val workerJobs = workers.map { child ->
+        val outcomes = java.util.concurrent.ConcurrentHashMap<String, WorkerOutcome>()
+        val workerJobs = workers.mapIndexed { workerIndex, child ->
             scope.launch {
                 val parentStep = workerSteps.getValue(child.id)
+                val initial = store.session(child.id)
+                val initialTokens = initial?.let { it.tokensIn + it.tokensOut } ?: 0L
                 try {
                     loop(child.id, maxStepsOverride = 6, tokenBudgetOverride = budget)
                     val finished = store.session(child.id)
                     val assistant = finished?.items?.lastOrNull { it is ChatItem.Assistant } as? ChatItem.Assistant
-                    val error = finished?.items?.lastOrNull { it is ChatItem.Error } as? ChatItem.Error
+                    val errors = finished?.items?.filterIsInstance<ChatItem.Error>()?.map { it.text }.orEmpty()
                     val workerStatus = finished?.status
-                    val isSuccessful = workerStatus == SessionStatus.DONE && error == null
+                    val outcome = WorkerOutcome(
+                        sessionId = child.id,
+                        task = tasks[workerIndex],
+                        status = workerStatus,
+                        summary = assistant?.text.orEmpty(),
+                        errors = errors,
+                        tokenUsage = ((finished?.tokensIn ?: 0L) + (finished?.tokensOut ?: 0L) - initialTokens).coerceAtLeast(0L)
+                    )
+                    outcomes[child.id] = outcome
                     val statusLabel = when {
-                        isSuccessful -> "Pronto para integração"
+                        outcome.completed -> "Pronto para integração"
                         workerStatus == SessionStatus.STOPPED -> "Cancelado"
                         workerStatus == SessionStatus.WAITING_USER -> "Precisa de intervenção"
-                        workerStatus == SessionStatus.ERROR || error != null -> "Falhou"
+                        workerStatus == SessionStatus.ERROR || errors.isNotEmpty() -> "Falhou"
                         else -> "Parcial / não validado"
                     }
                     val details = "Estado: " + statusLabel + " (" + (workerStatus ?: "desconhecido") + "). " +
-                        "A compilação/testes agregados ainda não foram executados.\n" +
-                        (assistant?.text ?: error?.text ?: "Nenhum relatório final foi produzido.")
+                        "Uso estimado informado pelo app: " + outcome.tokenUsage + " tokens. " +
+                        "A compilação/testes agregados ainda não foram executados.\\n" +
+                        (outcome.summary.ifBlank { errors.firstOrNull() ?: "Nenhum relatório final foi produzido." })
                     store.replaceItem(
                         sessionId,
                         parentStep.copy(
                             args = statusLabel,
                             result = details.take(1800),
-                            status = if (isSuccessful) StepStatus.OK else StepStatus.ERROR
+                            status = if (outcome.completed) StepStatus.OK else StepStatus.ERROR
                         )
                     )
                 } catch (cancel: kotlinx.coroutines.CancellationException) {
                     store.editSession(child.id) { it.copy(status = SessionStatus.STOPPED) }
+                    outcomes[child.id] = WorkerOutcome(
+                        sessionId = child.id, task = tasks[workerIndex], status = SessionStatus.STOPPED,
+                        summary = "", errors = listOf("Subtarefa cancelada."), tokenUsage = 0L
+                    )
                     store.replaceItem(
                         sessionId,
                         parentStep.copy(args = "Cancelado", result = "Subtarefa cancelada.", status = StepStatus.ERROR)
                     )
                     throw cancel
                 } catch (t: Throwable) {
-                    store.addItem(child.id, ChatItem.Error(text = "Worker falhou: " + (t.message ?: t.toString()).take(300)))
+                    val message = (t.message ?: t.toString()).take(300)
+                    store.addItem(child.id, ChatItem.Error(text = "Worker falhou: " + message))
                     store.editSession(child.id) { it.copy(status = SessionStatus.ERROR) }
+                    outcomes[child.id] = WorkerOutcome(
+                        sessionId = child.id, task = tasks[workerIndex], status = SessionStatus.ERROR,
+                        summary = "", errors = listOf(message), tokenUsage = 0L
+                    )
                     store.replaceItem(
                         sessionId,
-                        parentStep.copy(args = "Falhou", result = (t.message ?: "Erro do worker").take(1800), status = StepStatus.ERROR)
+                        parentStep.copy(args = "Falhou", result = message, status = StepStatus.ERROR)
                     )
                 }
             }
