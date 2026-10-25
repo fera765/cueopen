@@ -35,9 +35,59 @@ class Sandbox(private val ctx: Context) {
     val prefix: File = ctx.filesDir
     val nativeDir: String = ctx.applicationInfo.nativeLibraryDir
     val alpineDir = File(prefix, "alpine")
-    /** Montado como /root e /home dentro do Alpine. */
+    /** Dados separados por chat; a base Alpine nunca deve receber escritas de sessões. */
+    private val environmentsDir = File(prefix, "chat-environments")
+    /** Compatibilidade para chamadas legadas sem sessionId. */
     val publicDir = File(prefix, "public").apply { mkdirs() }
     val workspaceRoot = File(publicDir, "workspace").apply { mkdirs() }
+
+    private fun safeId(sessionId: String): String = sessionId.filter { it.isLetterOrDigit() || it == '-' || it == '_' }.take(80).ifBlank { "default" }
+    fun environmentRoot(sessionId: String): File = File(environmentsDir, safeId(sessionId))
+    fun rootfsFor(sessionId: String): File = File(environmentRoot(sessionId), "rootfs")
+    fun publicFor(sessionId: String): File = File(environmentRoot(sessionId), "public").apply { mkdirs() }
+    fun environmentReady(sessionId: String): Boolean = File(environmentRoot(sessionId), ".ready").isFile && File(rootfsFor(sessionId), "bin/busybox").isFile
+
+    /** Cria um rootfs gravável por chat a partir da base já instalada; não baixa nem instala Alpine novamente. */
+    suspend fun ensureEnvironment(sessionId: String): Boolean = withContext(Dispatchers.IO) {
+        if (!isInstalled()) return@withContext false
+        if (environmentReady(sessionId)) return@withContext true
+        val staging = File(environmentsDir, ".${safeId(sessionId)}.creating")
+        runCatching { staging.deleteRecursively() }
+        val root = File(staging, "rootfs")
+        if (!root.mkdirs()) return@withContext false
+        try {
+            copyTree(alpineDir, root)
+            File(root, "tmp").mkdirs()
+            File(root, "etc/resolv.conf").writeText("nameserver 8.8.8.8\\nnameserver 1.1.1.1\\n")
+            val pub = File(staging, "public")
+            File(pub, "workspace").mkdirs()
+            File(pub, ".cue").mkdirs()
+            File(pub, ".bashrc").writeText("cd /root/workspace 2>/dev/null\\n[ -f /root/.cue/hook.sh ] && . /root/.cue/hook.sh\\n")
+            File(staging, ".ready").writeText("v1")
+            val target = environmentRoot(sessionId)
+            target.deleteRecursively()
+            if (!staging.renameTo(target)) error("Não foi possível ativar o ambiente do chat")
+            true
+        } catch (_: Throwable) {
+            staging.deleteRecursively()
+            false
+        }
+    }
+
+    private fun copyTree(source: File, target: File) {
+        if (source.isDirectory) {
+            if (!target.exists() && !target.mkdirs()) error("Falha ao criar ${target.name}")
+            source.listFiles()?.forEach { child -> copyTree(child, File(target, child.name)) }
+        } else {
+            source.inputStream().use { input -> target.outputStream().use { out -> input.copyTo(out) } }
+            if (source.canExecute()) target.setExecutable(true, false)
+        }
+    }
+
+    fun deleteEnvironment(sessionId: String) {
+        runCatching { dev.cueopen.app.CueApp.instance.terminals.close(sessionId) }
+        environmentRoot(sessionId).deleteRecursively()
+    }
 
     private val _state = MutableStateFlow(if (isInstalled()) State.READY else State.NOT_INSTALLED)
     val state: StateFlow<State> = _state
@@ -49,17 +99,17 @@ class Sandbox(private val ctx: Context) {
 
     fun isInstalled() = File(prefix, ".configured").exists() && File(alpineDir, "bin/busybox").exists()
 
-    fun workspaceFor(sessionId: String) = File(workspaceRoot, sessionId).apply { mkdirs() }
+    fun workspaceFor(sessionId: String) = File(publicFor(sessionId), "workspace").apply { mkdirs() }
     /** Caminho visto de dentro do sandbox. */
-    fun guestPath(sessionId: String) = "/root/workspace/$sessionId"
+    fun guestPath(sessionId: String) = "/root/workspace"
 
     /** Converte caminho do sandbox (/root/...) para arquivo real do Android. */
     fun hostFile(guestPath: String, sessionId: String): File {
         val p = guestPath.trim()
         return when {
-            p.startsWith("/root/") || p == "/root" -> File(publicDir, p.removePrefix("/root").trimStart('/'))
-            p.startsWith("/home/") -> File(publicDir, p.removePrefix("/home").trimStart('/'))
-            p.startsWith("/") -> File(alpineDir, p.trimStart('/'))
+            p.startsWith("/root/") || p == "/root" -> File(publicFor(sessionId), p.removePrefix("/root").trimStart('/'))
+            p.startsWith("/home/") -> File(publicFor(sessionId), p.removePrefix("/home").trimStart('/'))
+            p.startsWith("/") -> File(rootfsFor(sessionId), p.trimStart('/'))
             else -> File(workspaceFor(sessionId), p)
         }
     }
@@ -86,7 +136,11 @@ class Sandbox(private val ctx: Context) {
 
     fun prepareScripts() = writeScripts()
 
-    fun envArray(): Array<String> = (env() + mapOf("TERM" to "xterm-256color", "LANG" to "C.UTF-8", "COLORTERM" to "truecolor"))
+    fun envArray(sessionId: String? = null): Array<String> = (env() + mapOf(
+        "TERM" to "xterm-256color", "LANG" to "C.UTF-8", "COLORTERM" to "truecolor",
+        "ALPINE_ROOT" to (sessionId?.let { rootfsFor(it).absolutePath } ?: alpineDir.absolutePath),
+        "SESSION_PUBLIC_ROOT" to (sessionId?.let { publicFor(it).absolutePath } ?: publicDir.absolutePath),
+    ))
         .map { (k, v) -> "$k=$v" }.toTypedArray()
 
     private fun writeScripts() {
@@ -247,6 +301,7 @@ class Sandbox(private val ctx: Context) {
     fun uninstall() {
         stopAxs()
         alpineDir.deleteRecursively()
+        environmentsDir.deleteRecursively()
         File(prefix, ".configured").deleteRecursively()
         _state.value = State.NOT_INSTALLED
     }
