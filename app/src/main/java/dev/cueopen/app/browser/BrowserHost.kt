@@ -99,10 +99,22 @@ class BrowserHost(private val appCtx: Context) {
     init { runCatching { watchNetwork() } }
     private var pageDone: CompletableDeferred<Unit>? = null
     private var _view: WebView? = null
+    private var _agentView: WebView? = null
 
     @SuppressLint("SetJavaScriptEnabled")
     fun view(ctx: Context = appCtx): WebView {
-        _view?.let { v -> (v.parent as? ViewGroup)?.removeView(v); return v }
+        _view?.let { return it }
+        return createView(ctx, false).also { _view = it; it.loadUrl(HOME) }
+    }
+
+    /** WebView isolado para ferramentas do agente. Nunca é o mesmo widget exibido ao usuário. */
+    private fun agentView(): WebView {
+        _agentView?.let { return it }
+        return createView(appCtx, true).also { _agentView = it; it.loadUrl("about:blank") }
+    }
+
+    @SuppressLint("SetJavaScriptEnabled")
+    private fun createView(ctx: Context, agentMode: Boolean): WebView {
         val v = WebView(ctx.applicationContext)
         with(v.settings) {
             javaScriptEnabled = true
@@ -127,10 +139,11 @@ class BrowserHost(private val appCtx: Context) {
         if (android.os.Build.VERSION.SDK_INT >= 26) v.setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_IMPORTANT, false)
         if (android.os.Build.VERSION.SDK_INT >= 23) v.settings.offscreenPreRaster = true
         v.webViewClient = object : WebViewClient() {
-            override fun onPageStarted(view: WebView, url: String, favicon: Bitmap?) { sync(view, loading = true) }
+            override fun onPageStarted(view: WebView, url: String, favicon: Bitmap?) { if (!agentMode) sync(view, loading = true) }
             override fun onPageFinished(view: WebView, url: String) {
-                sync(view, loading = false); pageDone?.complete(Unit)
+                if (!agentMode) sync(view, loading = false) else pageDone?.complete(Unit)
                 collectTimings(view)
+                installSnapshotInstrumentation(view)
             }
             override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): android.webkit.WebResourceResponse? {
                 // só observa (não intercepta): alimenta o painel de rede
@@ -152,16 +165,14 @@ class BrowserHost(private val appCtx: Context) {
             }
         }
         v.webChromeClient = object : WebChromeClient() {
-            override fun onProgressChanged(view: WebView, newProgress: Int) { _ui.value = _ui.value.copy(progress = newProgress) }
-            override fun onReceivedTitle(view: WebView, title: String?) { sync(view) }
+            override fun onProgressChanged(view: WebView, newProgress: Int) { if (!agentMode) _ui.value = _ui.value.copy(progress = newProgress) }
+            override fun onReceivedTitle(view: WebView, title: String?) { if (!agentMode) sync(view) }
             override fun onConsoleMessage(m: android.webkit.ConsoleMessage): Boolean {
                 _console.value = (_console.value + ConsoleEntry(System.currentTimeMillis(), m.messageLevel().name.lowercase(),
                     m.message(), "${m.sourceId().substringAfterLast('/')}:${m.lineNumber()}")).takeLast(300)
                 return true
             }
         }
-        _view = v
-        v.loadUrl(HOME)
         return v
     }
 
@@ -222,7 +233,7 @@ class BrowserHost(private val appCtx: Context) {
             else -> "https://www.google.com/search?q=" + java.net.URLEncoder.encode(url, "UTF-8")
         }
         pageDone = CompletableDeferred()
-        view().loadUrl(target)
+        agentView().loadUrl(target)
         target
     }.also { awaitLoad() }
 
@@ -231,15 +242,15 @@ class BrowserHost(private val appCtx: Context) {
         kotlinx.coroutines.delay(600) // deixa JS da página renderizar
     }
 
-    suspend fun back() { onMain { pageDone = CompletableDeferred(); view().goBack() }; awaitLoad() }
-    suspend fun reload() { onMain { pageDone = CompletableDeferred(); view().reload() }; awaitLoad() }
+    suspend fun back() { onMain { pageDone = CompletableDeferred(); agentView().goBack() }; awaitLoad() }
+    suspend fun reload() { onMain { pageDone = CompletableDeferred(); agentView().reload() }; awaitLoad() }
 
-    /** Texto legível + lista numerada de elementos interativos (o agente usa o índice para clicar). */
+    /** Snapshot semântico da página, próximo ao formato Playwright: landmarks, headings, texto e controles nomeados. */
     suspend fun read(maxChars: Int = 9000): String {
         val js = """
             (function(){
-              var els=[].slice.call(document.querySelectorAll('a,button,input,textarea,select,[role=button],[onclick],summary'));
-              var out=[],i=0;
+              var els=[].slice.call(document.querySelectorAll('a,button,input,textarea,select,[role=button],[onclick],summary,[role=link],[role=checkbox],[role=tab]'));
+              var out=[],i=0, headings=[];\n              [].slice.call(document.querySelectorAll("h1,h2,h3,h4,[role=heading]")).forEach(function(h){var t=(h.innerText||h.getAttribute("aria-label")||"").trim().replace(/\\s+/g," ");if(t)headings.push({level:h.tagName.toLowerCase(),text:t.slice(0,180)});});
               els.forEach(function(e){
                 var r=e.getBoundingClientRect(); if(r.width<2||r.height<2) return;
                 var st=getComputedStyle(e); if(st.visibility=='hidden'||st.display=='none') return;
@@ -247,10 +258,10 @@ class BrowserHost(private val appCtx: Context) {
                 var label=(e.innerText||e.value||e.placeholder||e.getAttribute('aria-label')||e.title||e.name||'').trim().replace(/\s+/g,' ').slice(0,80);
                 var tag=e.tagName.toLowerCase(); if(tag=='input') tag+='['+(e.type||'text')+']';
                 var href=e.href?(' -> '+String(e.href).slice(0,120)):'';
-                out.push('['+i+'] '+tag+' "'+label+'"'+href); i++;
+                var role=e.getAttribute("role")||({A:"link",BUTTON:"button",INPUT:"textbox",TEXTAREA:"textbox",SELECT:"combobox"}[e.tagName]||tag);\n                var extra=e.disabled?" [disabled]":""; if(e.getAttribute("aria-expanded"))extra+=" [expanded="+e.getAttribute("aria-expanded")+"]";\n                out.push("["+i+"] "+role+" \""+label+"\""+extra+href); i++;
               });
               var text=(document.body?document.body.innerText:'').replace(/\n{3,}/g,'\n\n');
-              return JSON.stringify({url:location.href,title:document.title,text:text,elements:out.slice(0,150)});
+              var main=document.querySelector("main,[role=main,article")||document.body;\n              var links=[].slice.call(document.querySelectorAll("a[href]")).filter(function(a){return a.innerText.trim()}).slice(0,80).map(function(a){return {text:a.innerText.trim().replace(/\\s+/g," ").slice(0,100),href:a.href}});\n              return JSON.stringify({url:location.href,title:document.title,text:text,headings:headings.slice(0,80),landmark:main?main.tagName.toLowerCase():"body",links:links,elements:out.slice(0,180)});
             })()
         """.trimIndent()
         val raw = eval(js)
@@ -298,7 +309,7 @@ class BrowserHost(private val appCtx: Context) {
 
     private suspend fun eval(js: String): String {
         val d = CompletableDeferred<String>()
-        onMain { view().evaluateJavascript(js) { d.complete(it ?: "null") } }
+        onMain { agentView().evaluateJavascript(js) { d.complete(it ?: "null") } }
         val raw = withTimeoutOrNull(15_000) { d.await() } ?: return "timeout"
         // evaluateJavascript devolve um literal JSON (string entre aspas)
         return runCatching {
