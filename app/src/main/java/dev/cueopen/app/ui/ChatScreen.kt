@@ -12,6 +12,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
@@ -216,14 +217,34 @@ fun ChatScreen(nav: NavController, sessionId: String) {
     }
     if (usage) {
         AlertDialog(onDismissRequest = { usage = false }, title = { Text("Uso e contexto") }, text = {
-            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            val totalTokens = (session.tokensIn + session.tokensOut).coerceAtLeast(1L)
+            Column(Modifier.heightIn(max = 500.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text("Modelo: ${session.modelUsed ?: app.store.settings.model}", fontSize = 12.sp, color = c.ink2)
                 Text("Chamadas ao modelo: ${session.llmCalls}")
-                Text("Tokens de entrada: ${session.tokensIn}  (em cache: ${session.tokensCached})")
-                Text("Tokens de saída: ${session.tokensOut}")
-                Text("Mensagens no contexto ativo: ${session.llm.size}")
-                Text("Compactações de contexto: ${session.compactions}")
+                Text("Contexto ativo: ${session.llm.size} mensagens · ${session.compactions} compactações")
+                Text("Tokens usados", fontWeight = FontWeight.SemiBold)
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("Entrada", modifier = Modifier.width(68.dp), fontSize = 12.sp)
+                    LinearProgressIndicator(progress = { session.tokensIn.toFloat() / totalTokens }, modifier = Modifier.weight(1f), color = c.accent)
+                    Text(session.tokensIn.toString(), fontSize = 11.sp)
+                }
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("Saída", modifier = Modifier.width(68.dp), fontSize = 12.sp)
+                    LinearProgressIndicator(progress = { session.tokensOut.toFloat() / totalTokens }, modifier = Modifier.weight(1f), color = c.ink)
+                    Text(session.tokensOut.toString(), fontSize = 11.sp)
+                }
+                Text("Tokens em cache: ${session.tokensCached}")
+                if (session.hasPricedUsage) {
+                    HorizontalDivider()
+                    Text("Gasto estimado neste chat", fontWeight = FontWeight.SemiBold)
+                    Text("$" + String.format(java.util.Locale.US, "%.6f", session.costUsd), fontSize = 22.sp, fontWeight = FontWeight.Bold, color = c.accent)
+                    Text("Estimativa baseada nos preços publicados pela OpenRouter e no uso informado pela API. O valor pode variar.", fontSize = 11.sp, color = c.ink2)
+                }
                 Text("Modo contínuo: ${if (session.continuous) "ativo" else "desligado"}")
-                if (session.summary.isNotBlank()) { Text("Resumo da sessão:", fontWeight = FontWeight.SemiBold); Text(session.summary.take(1500), fontSize = 12.sp, color = c.ink2) }
+                if (session.summary.isNotBlank()) {
+                    Text("Resumo da sessão:", fontWeight = FontWeight.SemiBold)
+                    Text(session.summary.take(1500), fontSize = 12.sp, color = c.ink2)
+                }
             }
         }, confirmButton = { TextButton({ usage = false }) { Text("Fechar") } })
     }
