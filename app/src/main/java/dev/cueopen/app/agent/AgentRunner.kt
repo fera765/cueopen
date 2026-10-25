@@ -885,65 +885,95 @@ class AgentRunner(
     }
 
 
-    /** Executa workers temporários em workspaces isolados e branches independentes; nunca mescla automaticamente. */
+    /**
+     * Orquestra subtarefas paralelas com workspaces isolados e estado explícito.
+     * Concluir o loop do modelo não equivale a validar o código produzido.
+     */
     private suspend fun runMultiAgents(sessionId: String, tasksJson: String, repoPathArg: String, requestedWorkers: Int, requestedBudget: Int): String {
         val tasks = runCatching {
             val arr = org.json.JSONArray(tasksJson)
             (0 until arr.length()).mapNotNull { arr.optString(it).trim().takeIf { task -> task.isNotBlank() } }
         }.getOrElse { return "ERRO: tasks_json deve ser um array JSON de strings." }
         if (tasks.isEmpty()) return "ERRO: informe pelo menos uma subtarefa."
+
         val count = minOf(tasks.size, requestedWorkers.coerceIn(1, 5))
         val budget = requestedBudget.coerceIn(2000, 12000).toLong()
         val parentPath = sandbox.guestPath(sessionId)
         val terminal = terminals.get(sessionId, parentPath)
         val requestedRepoPath = repoPathArg.trim().ifBlank { parentPath }
-        val probe = terminal.runAgentCommand("git -C " + shQuote(requestedRepoPath) + " rev-parse --show-toplevel && git -C " + shQuote(requestedRepoPath) + " rev-parse HEAD && git -C " + shQuote(requestedRepoPath) + " status --porcelain", 20L, false)
+        val probe = terminal.runAgentCommand(
+            "git -C " + shQuote(requestedRepoPath) +
+                " rev-parse --show-toplevel && git -C " + shQuote(requestedRepoPath) +
+                " rev-parse HEAD && git -C " + shQuote(requestedRepoPath) + " status --porcelain",
+            20L, false
+        )
         val lines = probe.output.lines().map { it.trim() }.filter { it.isNotBlank() }
         val gitRoot = lines.firstOrNull()?.takeIf { probe.exitCode == 0 && it.startsWith("/") }
         val baseSha = lines.getOrNull(1)?.takeIf { it.matches(Regex("[0-9a-fA-F]{40}")) }
         val dirty = gitRoot != null && baseSha != null && lines.drop(2).isNotEmpty()
-        if (dirty) return "Multi Agents pausado: o repositório tem alterações não commitadas. Faça commit/stash para garantir uma base reproduzível antes de criar branches."
+        if (dirty) return "Multi Agents pausado: o repositório tem alterações não commitadas. Salve-as antes de criar worktrees isoladas."
+
         val workers = tasks.take(count).mapIndexed { index, task ->
-            val child = Session(
-                title = "[Worker " + (index + 1) + "] " + task.take(42),
+            Session(
+                title = "[Worker ${index + 1}] ${task.take(42)}",
                 agentId = store.session(sessionId)?.agentId,
                 status = SessionStatus.RUNNING,
-                llm = listOf(LlmMessage("user",
-                    "Você é um subagente temporário do CueOpen. Tarefa: " + task +
-                    "\n\nTrabalhe somente no seu workspace/branch. Não faça merge nem push. Não use multi_agents. Evite browser para não competir com outros workers. Economize tokens. Ao concluir, reporte resumo, arquivos alterados, testes e riscos."))
+                llm = listOf(
+                    LlmMessage(
+                        "user",
+                        "Você é um subagente temporário do CueOpen. Tarefa: " + task +
+                            "\n\nTrabalhe somente no seu workspace/branch. Não faça merge nem push; não chame multi_agents. " +
+                            "Não afirme que testes passaram sem executá-los. Ao concluir, reporte resumo, arquivos alterados, " +
+                            "comandos de teste executados, resultados e riscos."
+                    )
+                )
             )
-            store.upsertSession(child)
-            child
         }
+        workers.forEach { store.upsertSession(it) }
+
         if (gitRoot != null && baseSha != null) {
             val setupErrors = mutableListOf<String>()
             workers.forEach { child ->
-                val branch = "cue/agents/" + child.id
+                val branchName = "cue/agents/" + child.id
                 val target = sandbox.guestPath(child.id)
-                val cmd = "git -C " + shQuote(gitRoot) + " worktree add -b " + shQuote(branch) + " " + shQuote(target) + " " + shQuote(baseSha)
+                val cmd = "git -C " + shQuote(gitRoot) + " worktree add -b " +
+                    shQuote(branchName) + " " + shQuote(target) + " " + shQuote(baseSha)
                 val result = terminal.runAgentCommand(cmd, 45L, false)
                 if (result.exitCode != 0) setupErrors += child.id + ": " + result.output.takeLast(350)
             }
             if (setupErrors.isNotEmpty()) {
                 workers.forEach { child ->
-                    terminal.runAgentCommand("git -C " + shQuote(gitRoot) + " worktree remove --force " + shQuote(sandbox.guestPath(child.id)) + " >/dev/null 2>&1 || true; git -C " + shQuote(gitRoot) + " branch -D " + shQuote("cue/agents/" + child.id) + " >/dev/null 2>&1 || true", 20L, false)
+                    terminal.runAgentCommand(
+                        "git -C " + shQuote(gitRoot) + " worktree remove --force " +
+                            shQuote(sandbox.guestPath(child.id)) + " >/dev/null 2>&1 || true; git -C " +
+                            shQuote(gitRoot) + " branch -D " + shQuote("cue/agents/" + child.id) +
+                            " >/dev/null 2>&1 || true",
+                        20L, false
+                    )
                     store.deleteSession(child.id)
                 }
-                return "Não iniciei workers porque a criação de branches isoladas falhou:\n" + setupErrors.joinToString("\n")
+                return "Não iniciei workers porque a criação de worktrees falhou:\n" + setupErrors.joinToString("\n")
             }
         } else {
-            workers.forEach { child ->
+            for (child in workers) {
                 val target = sandbox.guestPath(child.id)
-                terminal.runAgentCommand("mkdir -p " + shQuote(target) + " && cp -a " + shQuote(parentPath) + "/. " + shQuote(target) + "/ 2>/dev/null || true", 45L, false)
+                val copy = terminal.runAgentCommand(
+                    "mkdir -p " + shQuote(target) + " && cp -a " + shQuote(parentPath) + "/. " + shQuote(target) + "/ 2>/dev/null",
+                    45L, false
+                )
+                if (copy.exitCode != 0) {
+                    workers.forEach { store.deleteSession(it.id) }
+                    return "Não iniciei os workers: falhou a cópia isolada do workspace (" + copy.output.takeLast(300) + ")."
+                }
             }
         }
-        // Publica uma pílula por worker na conversa principal para que o usuário acompanhe o progresso real.
+
         val workerSteps = workers.associate { child ->
             val workerNumber = child.title.removePrefix("[Worker ").substringBefore("]")
             val taskLabel = child.title.substringAfter("] ", child.title).take(48)
             val step = ChatItem.Step(
                 tool = "multi_agent_worker",
-                title = "Agente $workerNumber · $taskLabel",
+                title = "Agente " + workerNumber + " · " + taskLabel,
                 args = "Executando",
                 result = "",
                 status = StepStatus.RUNNING
@@ -951,28 +981,49 @@ class AgentRunner(
             store.addItem(sessionId, step)
             child.id to step
         }
+
         val workerJobs = workers.map { child ->
             scope.launch {
-                val parentStep = workerSteps[child.id]
+                val parentStep = workerSteps.getValue(child.id)
                 try {
                     loop(child.id, maxStepsOverride = 6, tokenBudgetOverride = budget)
                     val finished = store.session(child.id)
-                    val failed = finished?.status == SessionStatus.ERROR
-                    val summary = (finished?.items?.lastOrNull { it is ChatItem.Assistant } as? ChatItem.Assistant)?.text.orEmpty()
-                    if (parentStep != null) store.replaceItem(sessionId, parentStep.copy(
-                        title = parentStep.title.substringBefore(" ·"),
-                        args = if (failed) "Falhou" else "Concluído",
-                        result = summary.ifBlank { if (failed) "O agente terminou com erro." else "Subtarefa concluída." }.take(1800),
-                        status = if (failed) StepStatus.ERROR else StepStatus.OK
-                    ))
+                    val assistant = finished?.items?.lastOrNull { it is ChatItem.Assistant } as? ChatItem.Assistant
+                    val error = finished?.items?.lastOrNull { it is ChatItem.Error } as? ChatItem.Error
+                    val workerStatus = finished?.status
+                    val isSuccessful = workerStatus == SessionStatus.DONE && error == null
+                    val statusLabel = when {
+                        isSuccessful -> "Pronto para integração"
+                        workerStatus == SessionStatus.STOPPED -> "Cancelado"
+                        workerStatus == SessionStatus.WAITING_USER -> "Precisa de intervenção"
+                        workerStatus == SessionStatus.ERROR || error != null -> "Falhou"
+                        else -> "Parcial / não validado"
+                    }
+                    val details = "Estado: " + statusLabel + " (" + (workerStatus ?: "desconhecido") + "). " +
+                        "A compilação/testes agregados ainda não foram executados.\n" +
+                        (assistant?.text ?: error?.text ?: "Nenhum relatório final foi produzido.")
+                    store.replaceItem(
+                        sessionId,
+                        parentStep.copy(
+                            args = statusLabel,
+                            result = details.take(1800),
+                            status = if (isSuccessful) StepStatus.OK else StepStatus.ERROR
+                        )
+                    )
                 } catch (cancel: kotlinx.coroutines.CancellationException) {
                     store.editSession(child.id) { it.copy(status = SessionStatus.STOPPED) }
-                    if (parentStep != null) store.replaceItem(sessionId, parentStep.copy(args = "Cancelado", result = "Subtarefa cancelada.", status = StepStatus.ERROR))
+                    store.replaceItem(
+                        sessionId,
+                        parentStep.copy(args = "Cancelado", result = "Subtarefa cancelada.", status = StepStatus.ERROR)
+                    )
                     throw cancel
                 } catch (t: Throwable) {
                     store.addItem(child.id, ChatItem.Error(text = "Worker falhou: " + (t.message ?: t.toString()).take(300)))
                     store.editSession(child.id) { it.copy(status = SessionStatus.ERROR) }
-                    if (parentStep != null) store.replaceItem(sessionId, parentStep.copy(args = "Falhou", result = (t.message ?: "Erro do worker").take(1800), status = StepStatus.ERROR))
+                    store.replaceItem(
+                        sessionId,
+                        parentStep.copy(args = "Falhou", result = (t.message ?: "Erro do worker").take(1800), status = StepStatus.ERROR)
+                    )
                 }
             }
         }
@@ -982,8 +1033,10 @@ class AgentRunner(
         } finally {
             synchronized(childJobsByParent) { childJobsByParent.remove(sessionId) }
         }
+
         val report = StringBuilder().apply {
-            appendLine("Multi Agents concluiu " + workers.size + " worker(s); orçamento de até " + budget + " tokens por worker.")
+            appendLine("Parallel Agent Engine: " + workers.size + " worker(s), orçamento máximo de " + budget + " tokens por worker.")
+            appendLine("Pronto para integração não significa que os testes do projeto agregado passaram.")
             workers.forEachIndexed { index, child ->
                 val finished = store.session(child.id)
                 val last = finished?.items?.lastOrNull { it is ChatItem.Assistant } as? ChatItem.Assistant
@@ -994,55 +1047,91 @@ class AgentRunner(
                 appendLine((last?.text ?: error?.text ?: "Progresso parcial preservado.").take(1400))
             }
         }
-        // Integra artefatos antes de apagar os workers. Git: aplica cada diff sobre a base principal;
-        // conflitos são preservados como patch dentro do workspace principal para recuperação.
+
+        var integrationFailures = 0
+        var integratedCount = 0
         if (gitRoot != null && baseSha != null) {
             workers.forEachIndexed { index, child ->
-                val branch = "cue/agents/" + child.id
-                val patchName = ".cueopen-worker-" + (index + 1) + ".patch"
-                val patchPath = gitRoot.trimEnd('/') + "/" + patchName
+                val patchPath = gitRoot.trimEnd('/') + "/.cueopen-worker-" + (index + 1) + ".patch"
                 val createPatch = terminal.runAgentCommand(
-                    "git -C " + shQuote(sandbox.guestPath(child.id)) + " add -N -A >/dev/null 2>&1 || true; git -C " + shQuote(sandbox.guestPath(child.id)) + " diff --binary " + shQuote(baseSha) +
-                    " -- > " + shQuote(patchPath) + " && test -s " + shQuote(patchPath),
+                    "git -C " + shQuote(sandbox.guestPath(child.id)) +
+                        " add -N -A >/dev/null 2>&1 || true; git -C " +
+                        shQuote(sandbox.guestPath(child.id)) + " diff --binary " + shQuote(baseSha) +
+                        " -- > " + shQuote(patchPath) + " && test -s " + shQuote(patchPath),
                     30L, false
                 )
                 if (createPatch.exitCode == 0) {
-                    val apply = terminal.runAgentCommand("git -C " + shQuote(gitRoot) + " apply --3way " + shQuote(patchPath), 45L, false)
+                    val apply = terminal.runAgentCommand(
+                        "git -C " + shQuote(gitRoot) + " apply --3way " + shQuote(patchPath),
+                        45L, false
+                    )
                     if (apply.exitCode == 0) {
                         terminal.runAgentCommand("rm -f " + shQuote(patchPath), 10L, false)
-                        appendReportLine(report, "Agente " + (index + 1) + ": alterações integradas ao workspace principal.")
+                        integratedCount++
+                        appendReportLine(report, "Agente " + (index + 1) + ": patch aplicado ao workspace principal.")
                     } else {
-                        appendReportLine(report, "Agente " + (index + 1) + ": conflito de integração. Patch preservado no workspace principal para resolução.")
+                        integrationFailures++
+                        appendReportLine(report, "Agente " + (index + 1) + ": CONFLITO; patch preservado em " + patchPath + ".")
                     }
                 } else {
-                    appendReportLine(report, "Agente " + (index + 1) + ": não produziu diff de arquivos; resultado textual preservado.")
+                    appendReportLine(report, "Agente " + (index + 1) + ": nenhum diff aplicável foi gerado.")
                 }
             }
+            if (integratedCount > 0) {
+                val status = terminal.runAgentCommand("git -C " + shQuote(gitRoot) + " status --short", 15L, false)
+                appendReportLine(
+                    report,
+                    "Workspace após integração: " + status.output.lines().count { it.isNotBlank() } +
+                        " caminho(s) alterado(s). Testes/build agregados não executados por este método."
+                )
+            }
         } else {
-            // Sem Git, copia arquivos novos/modificados do workspace do worker para o principal;
-            // não sobrescreve arquivos diferentes já existentes sem sinalizar conflito.
             workers.forEachIndexed { index, child ->
                 val source = sandbox.workspaceFor(child.id).absolutePath
                 val dest = sandbox.workspaceFor(sessionId).absolutePath
                 val sync = terminal.runAgentCommand(
-                    "cd " + shQuote(source) + " && find . -type f ! -path './.git/*' -print0 | while IFS= read -r -d '' f; do mkdir -p " + shQuote(dest) + "/\"\$(dirname \"\$f\")\"; if [ ! -e " + shQuote(dest) + "/\"\$f\" ]; then cp -p \"\$f\" " + shQuote(dest) + "/\"\$f\"; elif ! cmp -s \"\$f\" " + shQuote(dest) + "/\"\$f\"; then cp -p \"\$f\" " + shQuote(dest) + "/\"\$f.worker-" + (index + 1) + "\"; fi; done",
+                    "cd " + shQuote(source) +
+                        " && find . -type f ! -path './.git/*' ! -name '*.worker-*' -print0 | while IFS= read -r -d '' f; do " +
+                        "mkdir -p " + shQuote(dest) + "/\"\$(dirname \"\$f\")\"; " +
+                        "if [ ! -e " + shQuote(dest) + "/\"\$f\" ]; then cp -p \"\$f\" " +
+                        shQuote(dest) + "/\"\$f\"; elif ! cmp -s \"\$f\" " + shQuote(dest) +
+                        "/\"\$f\"; then cp -p \"\$f\" " + shQuote(dest) +
+                        "/\"\$f.worker-" + (index + 1) + "\"; fi; done",
                     45L, false
                 )
-                appendReportLine(report, "Agente " + (index + 1) + ": " + if (sync.exitCode == 0) "arquivos sincronizados ao workspace principal." else "sincronização parcial; veja o resultado textual do agente.")
-            }
-        }
-        // Limpa workers só depois de tentar integrar os artefatos.
-        workers.forEach { child ->
-            if (gitRoot != null && baseSha != null) {
-                val target = sandbox.guestPath(child.id)
-                terminal.runAgentCommand(
-                    "git -C " + shQuote(gitRoot) + " worktree remove --force " + shQuote(target) +
-                    " >/dev/null 2>&1 || true; git -C " + shQuote(gitRoot) + " branch -D " + shQuote("cue/agents/" + child.id) +
-                    " >/dev/null 2>&1 || true",
-                    30L, false
+                if (sync.exitCode == 0) integratedCount++ else integrationFailures++
+                appendReportLine(
+                    report,
+                    "Agente " + (index + 1) + ": " +
+                        if (sync.exitCode == 0) "sincronização concluída; arquivos divergentes usam sufixo .worker-" + (index + 1) + "."
+                        else "sincronização parcial; revisar workspace."
                 )
             }
-            store.deleteSession(child.id)
+        }
+
+        if (integrationFailures > 0) {
+            appendReportLine(report, "ATENÇÃO: " + integrationFailures + " worker(s) tiveram integração incompleta; artefatos de conflito foram preservados.")
+        } else {
+            appendReportLine(report, "Integração de arquivos: " + integratedCount + " worker(s) processados. Execute os testes antes de declarar a tarefa concluída.")
+        }
+
+        workers.forEachIndexed { index, child ->
+            val workerStatus = store.session(child.id)?.status
+            val completedCleanly = workerStatus == SessionStatus.DONE && integrationFailures == 0
+            if (completedCleanly) {
+                if (gitRoot != null && baseSha != null) {
+                    terminal.runAgentCommand(
+                        "git -C " + shQuote(gitRoot) + " worktree remove --force " +
+                            shQuote(sandbox.guestPath(child.id)) + " >/dev/null 2>&1 || true; git -C " +
+                            shQuote(gitRoot) + " branch -D " + shQuote("cue/agents/" + child.id) +
+                            " >/dev/null 2>&1 || true",
+                        30L, false
+                    )
+                }
+                store.deleteSession(child.id)
+            } else {
+                appendReportLine(report, "Worker " + (index + 1) + " preservado para inspeção: " + child.id + " (estado=" + (workerStatus ?: "desconhecido") + ").")
+            }
         }
         return report.toString()
     }
