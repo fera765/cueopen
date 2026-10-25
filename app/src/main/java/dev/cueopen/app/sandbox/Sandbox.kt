@@ -58,8 +58,8 @@ class Sandbox(private val ctx: Context) {
             val pub = publicFor(sessionId)
             File(pub, "workspace").mkdirs()
             File(pub, ".cue").mkdirs()
-            // Usar quebras de linha reais: "\\n" literal fazia o bash interpretar o caminho /dev/nulln[.
-            File(pub, ".bashrc").writeText("cd /root/workspace 2>/dev/null\\n[ -f /root/.cue/hook.sh ] && . /root/.cue/hook.sh\\n")
+            // Usar quebras de linha reais: "\n" literal fazia o bash interpretar o caminho /dev/nulln[.
+            File(pub, ".bashrc").writeText("cd /root/workspace 2>/dev/null\n[ -f /root/.cue/hook.sh ] && . /root/.cue/hook.sh\n")
             File(root, ".ready").writeText("v2")
             true
         } catch (t: Throwable) {
