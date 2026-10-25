@@ -574,7 +574,7 @@ class AgentRunner(
     }
 
     private fun tools(agent: AgentProfile?, allowMultiAgent: Boolean = true) = buildJsonArray {
-        if (allowMultiAgent) add(tool("multi_agents", "Executa até cinco subtarefas em paralelo com orçamento limitado. Em repositório Git limpo, cada worker recebe branch/worktree isolada; o agente principal revisa e integra após testes. tasks_json é um array JSON de strings.", buildJsonObject {
+        if (allowMultiAgent) add(tool("multi_agents", "Executa todas as subtarefas em ondas com no máximo cinco workers simultâneos. Cada worker usa workspace isolado; resultados parciais não são integrados automaticamente e conflitos são preservados. tasks_json é um array JSON de strings independentes; budget_tokens é por worker.", buildJsonObject {
             put("tasks_json", str("Array JSON de tarefas independentes"))
             put("repo_path", str("Caminho opcional do repositório Git dentro do sandbox; padrão workspace atual"))
             put("max_workers", int("Quantidade de workers (1-5; padrão 3)"))
@@ -890,7 +890,43 @@ class AgentRunner(
      * Parallel agent orchestration: each worker executes in isolation, reports structured outcomes,
      * and only then participates in integration. Model completion alone does not mean task success.
      */
+    /**
+     * Runs every independent task in bounded waves. max_workers limits concurrency, not task count.
+     * Later waves can build on earlier uncommitted integration results without touching main.
+     */
     private suspend fun runMultiAgents(sessionId: String, tasksJson: String, repoPathArg: String, requestedWorkers: Int, requestedBudget: Int): String {
+        val tasks = runCatching {
+            val arr = org.json.JSONArray(tasksJson)
+            (0 until arr.length()).mapNotNull { arr.optString(it).trim().takeIf { task -> task.isNotBlank() } }
+        }.getOrElse { return "ERRO: tasks_json deve ser um array JSON de strings." }
+        if (tasks.isEmpty()) return "ERRO: informe pelo menos uma subtarefa."
+
+        val workerLimit = requestedWorkers.coerceIn(1, 5)
+        val report = StringBuilder()
+        val batches = tasks.chunked(workerLimit)
+        appendLine(report, "Plano: " + tasks.size + " subtarefa(s), até " + workerLimit + " worker(s) simultâneos, " + batches.size + " onda(s).")
+        batches.forEachIndexed { index, batch ->
+            appendLine(report, "")
+            appendLine(report, "## Onda " + (index + 1) + "/" + batches.size)
+            val payload = org.json.JSONArray().apply { batch.forEach { put(it) } }.toString()
+            val result = runMultiAgentsBatch(
+                sessionId = sessionId,
+                tasksJson = payload,
+                repoPathArg = repoPathArg,
+                requestedWorkers = workerLimit,
+                requestedBudget = requestedBudget,
+                allowDirtyWorkspace = index > 0
+            )
+            appendLine(report, result)
+            if (result.startsWith("ERRO:") || result.startsWith("Multi Agents pausado:") || result.contains("ATENÇÃO:")) {
+                appendLine(report, "Execução interrompida após a onda " + (index + 1) + " para evitar propagar falhas ou conflitos para tarefas posteriores.")
+                break
+            }
+        }
+        return report.toString()
+    }
+
+    private suspend fun runMultiAgentsBatch(sessionId: String, tasksJson: String, repoPathArg: String, requestedWorkers: Int, requestedBudget: Int, allowDirtyWorkspace: Boolean = false): String {
         val tasks = runCatching {
             val arr = org.json.JSONArray(tasksJson)
             (0 until arr.length()).mapNotNull { arr.optString(it).trim().takeIf { task -> task.isNotBlank() } }
@@ -912,7 +948,7 @@ class AgentRunner(
         val gitRoot = lines.firstOrNull()?.takeIf { probe.exitCode == 0 && it.startsWith("/") }
         val baseSha = lines.getOrNull(1)?.takeIf { it.matches(Regex("[0-9a-fA-F]{40}")) }
         val dirty = gitRoot != null && baseSha != null && lines.drop(2).isNotEmpty()
-        if (dirty) return "Multi Agents pausado: o repositório tem alterações não commitadas. Salve-as antes de criar worktrees isoladas."
+        if (dirty && !allowDirtyWorkspace) return "Multi Agents pausado: o repositório tem alterações não commitadas. Salve-as antes de criar worktrees isoladas."
 
         val workers = tasks.take(count).mapIndexed { index, task ->
             Session(
