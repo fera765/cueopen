@@ -333,6 +333,7 @@ fun toolIcon(tool: String): ImageVector = when {
     tool.startsWith("file") -> Icons.Rounded.EditNote
     tool == "remember" -> Icons.Rounded.Psychology
     tool == "create_skill" -> Icons.Rounded.AutoAwesome
+    tool == "multi_agent_worker" -> Icons.Rounded.CheckCircle
     else -> Icons.Rounded.Bolt
 }
 
