@@ -1002,7 +1002,7 @@ class AgentRunner(
                 val patchName = ".cueopen-worker-" + (index + 1) + ".patch"
                 val patchPath = gitRoot.trimEnd('/') + "/" + patchName
                 val createPatch = terminal.runAgentCommand(
-                    "git -C " + shQuote(sandbox.guestPath(child.id)) + " add -N -A >/dev/null 2>&1 || true; git -C " + shQuote(gitRoot) + " diff --binary " + shQuote(baseSha) + " " + shQuote(branch) +
+                    "git -C " + shQuote(sandbox.guestPath(child.id)) + " add -N -A >/dev/null 2>&1 || true; git -C " + shQuote(sandbox.guestPath(child.id)) + " diff --binary " + shQuote(baseSha) +
                     " -- > " + shQuote(patchPath) + " && test -s " + shQuote(patchPath),
                     30L, false
                 )
