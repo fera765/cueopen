@@ -633,7 +633,7 @@ class AgentRunner(
         if (dev.cueopen.app.device.DeviceCaps.OVERLAY in caps)
             add(tool("device_overlay", "Mostra um balão flutuante sobre os outros apps.", buildJsonObject { put("text", str("Texto")) }, listOf("text")))
         if (allowMultiAgent) connectorTools().forEach { add(it) }
-        add(tool("ask_user", "Faz uma pergunta ao usuário e pausa a tarefa até ele responder.", buildJsonObject { put("question", str("Pergunta")) }, listOf("question")))
+        if (allowMultiAgent) add(tool("ask_user", "Faz uma pergunta ao usuário e pausa a tarefa até ele responder.", buildJsonObject { put("question", str("Pergunta")) }, listOf("question")))
         add(tool("finish", "Conclui a tarefa com um resumo e a lista de entregáveis.", buildJsonObject {
             put("summary", str("Resumo do resultado")); put("files", strArray("Caminhos dos arquivos entregues"))
         }, listOf("summary")))
