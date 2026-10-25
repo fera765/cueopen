@@ -259,15 +259,16 @@ class BrowserHost(private val appCtx: Context) {
         val l = _net.value.filter { filter.isBlank() || it.url.contains(filter, true) }.takeLast(60)
         if (l.isEmpty()) return "Nenhuma requisição registrada (rede: ${_ui.value.netType}, online=${_ui.value.online})."
         val fails = l.count { (it.status ?: 0) >= 400 || it.error != null }
-        return "Rede: ${_ui.value.netType} · ${l.size} requisições · $fails com erro\\n" + l.joinToString("\\n") { e ->
+        return "Rede: ${_ui.value.netType} · ${l.size} requisições · $fails com erro\n" + l.joinToString("\n") { e ->
             buildString {
                 append("${e.method} ${e.status ?: e.error ?: "-"} ${e.type} ${e.durationMs?.let { "${it}ms" } ?: ""} ${e.sizeBytes?.let { "${it / 1024}KB" } ?: ""} ${e.url.take(160)}")
-                if (e.requestHeaders.isNotEmpty()) append("\\n  Request headers: ").append(e.requestHeaders.entries.joinToString { "${it.key}=${it.value}" }.take(1500))
-                e.requestBody?.let { append("\\n  Request payload: ").append(it.take(3000)) }
-                if (e.responseHeaders.isNotEmpty()) append("\\n  Response headers: ").append(e.responseHeaders.entries.joinToString { "${it.key}=${it.value}" }.take(1500))
-                e.responseBody?.let { append("\\n  Response body: ").append(it.take(3000)) }
+                if (e.requestHeaders.isNotEmpty()) append("\n  Request headers: ").append(e.requestHeaders.entries.joinToString { "${it.key}=${it.value}" }.take(1500))
+                e.requestBody?.let { append("\n  Request payload: ").append(it.take(3000)) }
+                if (e.responseHeaders.isNotEmpty()) append("\n  Response headers: ").append(e.responseHeaders.entries.joinToString { "${it.key}=${it.value}" }.take(1500))
+                e.responseBody?.let { append("\n  Response body: ").append(it.take(3000)) }
             }
         }
+    }
 
     fun consoleSummary(): String = _console.value.takeLast(60).joinToString("\n") { "[${it.level}] ${it.message.take(300)} (${it.source})" }
         .ifBlank { "Console vazio." }
