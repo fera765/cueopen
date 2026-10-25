@@ -16,6 +16,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.runBlocking
 import java.io.File
 import java.util.concurrent.ConcurrentHashMap
 
@@ -71,13 +72,15 @@ class TerminalManager(private val ctx: Context, private val sandbox: Sandbox) {
             check(Looper.myLooper() == Looper.getMainLooper())
             if (_alive.value) return
             sandbox.prepareScripts()
-            File(sandbox.publicDir, cwd.removePrefix("/root/")).mkdirs()
+            // First launch clones the installed base; it never downloads Alpine per chat.
+            check(runBlocking { sandbox.ensureEnvironment(key) }) { "Could not create this chat's Linux environment" }
+            File(sandbox.publicFor(key), cwd.removePrefix("/root/")).mkdirs()
             installShellHook()
             val shell = "cd '$cwd' 2>/dev/null; if command -v bash >/dev/null 2>&1; then exec bash --rcfile /root/.bashrc -i; else exec sh -i; fi"
             term = TerminalSession(
                 "/system/bin/sh", sandbox.prefix.absolutePath,
                 arrayOf("sh", File(sandbox.prefix, "init-sandbox.sh").absolutePath, "/bin/sh", "-c", shell),
-                sandbox.envArray(), 5000, client,
+                sandbox.envArray(key), 5000, client,
             )
             _alive.value = true
             val v = view
@@ -159,13 +162,13 @@ class TerminalManager(private val ctx: Context, private val sandbox: Sandbox) {
     }
 
     private fun installShellHook() {
-        val cue = File(sandbox.publicDir, ".cue").apply { mkdirs() }
+        val cue = File(sandbox.publicFor(key), ".cue").apply { mkdirs() }
         File(cue, "hook.sh").writeText(
             "# CueOpen: avisa o app (sequência OSC invisível) sempre que o prompt volta\n" +
             "set +H 2>/dev/null  # sem expansão de histórico: '!' em HTML/JS não quebra comandos\n" +
             "__cue_pc() { local e=\$?; printf '\\033]777;cue;done;%s\\007' \"\$e\"; return \$e; }\n" +
             "case \"\$PROMPT_COMMAND\" in *__cue_pc*) ;; *) PROMPT_COMMAND=\"__cue_pc\${PROMPT_COMMAND:+;\$PROMPT_COMMAND}\" ;; esac\n")
-        val rc = File(sandbox.publicDir, ".bashrc")
+        val rc = File(sandbox.publicFor(key), ".bashrc")
         val line = "[ -f /root/.cue/hook.sh ] && . /root/.cue/hook.sh"
         val cur = if (rc.exists()) rc.readText() else "cd /root/workspace 2>/dev/null\n"
         if (!cur.contains(line)) rc.writeText(cur.trimEnd() + "\n" + line + "\n")
@@ -173,6 +176,8 @@ class TerminalManager(private val ctx: Context, private val sandbox: Sandbox) {
 
     fun get(key: String, cwd: String = "/root/workspace/$key"): Session =
         sessions.getOrPut(key) { Session(key, cwd).also { _count.value = sessions.size + 1 } }
+
+    fun close(key: String) { main.post { sessions.remove(key)?.kill(); _count.value = sessions.size } }
 
     fun closeAll() { main.post { sessions.values.forEach { it.kill() }; sessions.clear(); _count.value = 0 } }
 
