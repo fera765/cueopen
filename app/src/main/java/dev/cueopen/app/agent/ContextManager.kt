@@ -27,8 +27,11 @@ import java.io.File
  */
 class ContextManager(private val store: Store, private val sandbox: Sandbox, private val llm: OpenRouter) {
 
-    fun estimateTokens(text: String?): Int = ((text?.length ?: 0) / 3.6).toInt() + 4
-    fun estimateTokens(msgs: List<LlmMessage>): Int = msgs.sumOf { estimateTokens(it.content) + estimateTokens(it.toolCallsJson) }
+    /** Estimativa deliberadamente conservadora: inclui uma margem para JSON, nomes de ferramentas e metadados. */
+    fun estimateTokens(text: String?): Int = ((text?.length ?: 0) / 3.2).toInt() + 4
+    fun estimateTokens(msgs: List<LlmMessage>): Int = msgs.sumOf {
+        estimateTokens(it.content) + estimateTokens(it.toolCallsJson) + 8
+    }
 
     // ---------- Camada 1 ----------
     /** Salva a saída completa da ferramenta e devolve a versão que entra no contexto. */
@@ -115,20 +118,43 @@ class ContextManager(private val store: Store, private val sandbox: Sandbox, pri
         return hit / Math.sqrt(w.size.coerceAtLeast(1).toDouble())
     }
 
-    fun relevantMemories(query: String, agentId: String?, k: Int = 8): List<MemoryItem> {
+    /** Recupera memórias relevantes com limite total de caracteres, não apenas limite por quantidade. */
+    fun relevantMemories(query: String, agentId: String?, k: Int = 8, maxChars: Int = 2400): List<MemoryItem> {
         val q = words(query)
         val pool = store.state.value.memories.filter { it.agentId == null || it.agentId == agentId }
-        val ranked = pool.map { it to score(q, it.text, it.tags) + it.uses * 0.01 }.sortedByDescending { it.second }
-        // sempre inclui as 3 mais recentes do Agent para continuidade
-        val recent = pool.filter { it.agentId == agentId && agentId != null }.sortedByDescending { it.createdAt }.take(3)
-        return (ranked.filter { it.second > 0 }.map { it.first }.take(k) + recent).distinctBy { it.id }.take(k)
+        val ranked = pool.map { it to score(q, it.text, it.tags) + it.uses * 0.01 }
+            .sortedByDescending { it.second }.filter { it.second > 0 }.map { it.first }
+        // Inclui algumas memórias recentes do agente, mas respeita o mesmo orçamento global.
+        val recent = if (agentId == null) emptyList() else pool.filter { it.agentId == agentId }
+            .sortedByDescending { it.createdAt }.take(3)
+        val candidates = (ranked + recent).distinctBy { it.id }.take(k)
+        var used = 0
+        return candidates.filter { m ->
+            val cost = m.text.length + m.tags.sumOf { it.length }
+            if (used + cost > maxChars) false else { used += cost; true }
+        }
     }
 
-    fun relevantKnowledge(query: String, k: Int = 5): List<KnowledgeItem> {
+    /** Knowledge ranqueado e truncado por orçamento para impedir que documentos grandes explodam o prompt. */
+    fun relevantKnowledge(query: String, k: Int = 5, maxChars: Int = 4500): List<KnowledgeItem> {
         val q = words(query)
-        val all = store.state.value.knowledge.filter { it.enabled }
-        if (all.size <= k) return all
-        return all.map { it to score(q, it.title + " " + it.content) }.sortedByDescending { it.second }.take(k).map { it.first }
+        val ranked = store.state.value.knowledge.filter { it.enabled }
+            .map { it to score(q, it.title + " " + it.content) }
+            .sortedByDescending { it.second }
+        var remaining = maxChars
+        val result = mutableListOf<KnowledgeItem>()
+        for ((item, relevance) in ranked) {
+            if (result.size >= k || remaining <= 0) break
+            if (relevance <= 0 && result.isNotEmpty()) continue
+            val title = item.title.take(180)
+            val overhead = title.length + 24
+            val bodyLimit = minOf(1500, (remaining - overhead).coerceAtLeast(0))
+            if (bodyLimit < 80) break
+            val body = item.content.take(bodyLimit)
+            result += item.copy(title = title, content = body)
+            remaining -= title.length + body.length + 24
+        }
+        return result
     }
 
     fun searchMemories(query: String, agentId: String?): List<MemoryItem> = relevantMemories(query, agentId, 15)
