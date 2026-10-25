@@ -982,23 +982,34 @@ class AgentRunner(
         } finally {
             synchronized(childJobsByParent) { childJobsByParent.remove(sessionId) }
         }
-        return buildString {
-            appendLine("Multi Agents concluiu " + workers.size + " worker(s); orçamento estimado: " + budget + " tokens por worker; máximo 6 passos.")
-            if (gitRoot != null && baseSha != null) appendLine("Base Git: " + gitRoot + " @ " + baseSha + ". Branches criadas como cue/agents/<id>; nenhum merge automático.")
-            else appendLine("Sem Git: workers usaram cópias de workspace isoladas.")
+        val report = buildString {
+            appendLine("Multi Agents concluiu " + workers.size + " worker(s); orçamento de até " + budget + " tokens por worker.")
             workers.forEachIndexed { index, child ->
                 val finished = store.session(child.id)
                 val last = finished?.items?.lastOrNull { it is ChatItem.Assistant } as? ChatItem.Assistant
                 val error = finished?.items?.lastOrNull { it is ChatItem.Error } as? ChatItem.Error
                 appendLine()
-                appendLine("### Worker " + (index + 1) + " · " + child.id + " · " + (finished?.status ?: "desconhecido"))
+                appendLine("### Agente " + (index + 1) + " · " + (finished?.status ?: "desconhecido"))
                 appendLine("Tarefa: " + tasks[index])
-                appendLine((last?.text ?: error?.text ?: "Sem resumo final.").take(1400))
-                if (gitRoot != null && baseSha != null) appendLine("Branch: cue/agents/" + child.id + " — revise o diff, rode testes e só então faça merge.")
-                appendLine("Workspace: " + sandbox.guestPath(child.id))
+                appendLine((last?.text ?: error?.text ?: "Progresso parcial preservado.").take(1400))
+                if (gitRoot != null && baseSha != null) appendLine("As alterações ficaram isoladas na branch temporária; revise antes de integrar.")
             }
-            append("Integração segura: revise cada diff, resolva conflitos e execute testes antes de mesclar. Workers não podem fazer merge/push.")
+            append("Os agentes temporários e seus workspaces serão removidos; somente este relatório permanece na conversa principal.")
         }
+        // Os workers são efêmeros: remove worktree/branch temporária e sessão para não poluir a lista de chats.
+        workers.forEach { child ->
+            if (gitRoot != null && baseSha != null) {
+                val target = sandbox.guestPath(child.id)
+                terminal.runAgentCommand(
+                    "git -C " + shQuote(gitRoot) + " worktree remove --force " + shQuote(target) +
+                    " >/dev/null 2>&1 || true; git -C " + shQuote(gitRoot) + " branch -D " + shQuote("cue/agents/" + child.id) +
+                    " >/dev/null 2>&1 || true",
+                    30L, false
+                )
+            }
+            store.deleteSession(child.id)
+        }
+        return report
     }
 
     private fun shQuote(s: String) = "'" + s.replace("'", "'\\''") + "'"
