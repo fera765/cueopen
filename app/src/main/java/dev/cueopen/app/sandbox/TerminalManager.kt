@@ -100,7 +100,12 @@ class TerminalManager(private val ctx: Context, private val sandbox: Sandbox) {
 
         fun detach(v: TerminalView) { if (view === v) view = null }
 
-        fun kill() { if (_alive.value) runCatching { term.finishIfRunning() }; _alive.value = false }
+        fun cancelAgentCommand() {
+            pending?.cancel(kotlinx.coroutines.CancellationException("Comando interrompido pelo usuário"))
+            main.post { if (_alive.value) term.write("\u0003") }
+        }
+
+        fun kill() { cancelAgentCommand(); if (_alive.value) runCatching { term.finishIfRunning() }; _alive.value = false }
 
         private suspend fun transcript(): String = withContext(Dispatchers.Main) {
             runCatching { term.emulator?.screen?.transcriptTextWithFullLinesJoined ?: "" }.getOrDefault("")
@@ -133,8 +138,16 @@ class TerminalManager(private val ctx: Context, private val sandbox: Sandbox) {
                 val waiter = kotlinx.coroutines.CompletableDeferred<Int>()
                 pending = waiter
                 write("\u0015$typed\r") // Ctrl-U limpa algo digitado pela metade
-                val exit = withTimeoutOrNull(timeoutSec * 1000) { waiter.await() }
-                pending = null
+                val exit = try {
+                    withTimeoutOrNull(timeoutSec * 1000) { waiter.await() }
+                } finally {
+                    // Se o agente for pausado/cancelado, interrompe também o processo no PTY.
+                    if (!waiter.isCompleted) {
+                        withContext(kotlinx.coroutines.NonCancellable + Dispatchers.Main) { write("\u0003") }
+                        delay(150)
+                    }
+                    if (pending === waiter) pending = null
+                }
                 if (exit == null) { write("\u0003"); delay(500) }
                 val t = transcript()
                 val added = if (t.length >= before.length && t.startsWith(before.take(200))) t.substring(before.length) else t.takeLast(12_000)
