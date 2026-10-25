@@ -211,7 +211,7 @@ fun BrowserPane() {
     val ctx = LocalContext.current
     Column(Modifier.fillMaxSize()) {
         Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-            IconButton({ scope.launch { app.browser.back() } }, enabled = ui.canBack) { Icon(Icons.AutoMirrored.Rounded.ArrowBack, "Voltar") }
+            IconButton({ scope.launch { app.browser.uiBack() } }, enabled = ui.canBack) { Icon(Icons.AutoMirrored.Rounded.ArrowBack, "Voltar") }
             IconButton({ app.browser.view().goForward() }, enabled = ui.canForward) { Icon(Icons.AutoMirrored.Rounded.ArrowForward, "Avançar") }
             Row(Modifier.weight(1f).clip(CircleShape).background(c.surface2).padding(horizontal = 12.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
                 Icon(if (ui.url.startsWith("https")) Icons.Rounded.Lock else Icons.Rounded.Public, null, Modifier.size(14.dp), tint = c.ink3)
@@ -221,7 +221,7 @@ fun BrowserPane() {
                     keyboardOptions = KeyboardOptions(imeAction = ImeAction.Go),
                     keyboardActions = KeyboardActions(onGo = { scope.launch { app.browser.navigate(url) } }))
             }
-            IconButton({ scope.launch { app.browser.reload() } }) { Icon(if (ui.loading) Icons.Rounded.Close else Icons.Rounded.Refresh, "Recarregar") }
+            IconButton({ scope.launch { app.browser.uiReload() } }) { Icon(if (ui.loading) Icons.Rounded.Close else Icons.Rounded.Refresh, "Recarregar") }
             Box {
                 IconButton({ menu = true }) { Icon(Icons.Rounded.MoreVert, "Mais") }
                 DropdownMenu(menu, { menu = false }) {
@@ -280,7 +280,7 @@ private fun DevToolsPanel(modifier: Modifier) {
                 }
             }
             val list = net.filter { type == "all" || it.type == type }.asReversed()
-            val sel = selected
+            val sel = selected?.let { chosen -> net.firstOrNull { it.id == chosen.id } ?: chosen }
             if (sel != null) {
                 Column(Modifier.fillMaxWidth().padding(10.dp).verticalScroll(rememberScrollState())) {
                     Text("← voltar", color = c.accent, fontSize = 12.sp, modifier = Modifier.clickable { selected = null })
@@ -288,6 +288,16 @@ private fun DevToolsPanel(modifier: Modifier) {
                     Text("Método: ${sel.method} · Tipo: ${sel.type} · Status: ${sel.status ?: "—"}", fontSize = 12.sp)
                     Text("Tempo: ${sel.durationMs?.let { "$it ms" } ?: "—"} · Tamanho: ${sel.sizeBytes?.let { humanSize(it) } ?: "—"}", fontSize = 12.sp)
                     sel.error?.let { Text("Erro: $it", color = c.err, fontSize = 12.sp) }
+                    if (sel.requestHeaders.isNotEmpty()) {
+                        Text("HEADERS DA REQUISIÇÃO", fontSize = 10.sp, color = c.accent, fontWeight = FontWeight.Bold)
+                        Text(sel.requestHeaders.entries.joinToString("\n") { "${it.key}: ${it.value}" }.take(5000), fontFamily = FontFamily.Monospace, fontSize = 10.sp)
+                    }
+                    sel.requestBody?.let { Text("PAYLOAD DE ENVIO\n" + it.take(6000), fontFamily = FontFamily.Monospace, fontSize = 10.sp) }
+                    if (sel.responseHeaders.isNotEmpty()) {
+                        Text("HEADERS DA RESPOSTA", fontSize = 10.sp, color = c.accent, fontWeight = FontWeight.Bold)
+                        Text(sel.responseHeaders.entries.joinToString("\n") { "${it.key}: ${it.value}" }.take(5000), fontFamily = FontFamily.Monospace, fontSize = 10.sp)
+                    }
+                    sel.responseBody?.let { Text("CORPO DA RESPOSTA\n" + it.take(6000), fontFamily = FontFamily.Monospace, fontSize = 10.sp) }
                 }
             } else LazyColumn(Modifier.fillMaxSize()) {
                 items(list, key = { it.id }) { e ->

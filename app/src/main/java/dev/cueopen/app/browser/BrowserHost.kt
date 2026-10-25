@@ -33,7 +33,8 @@ class BrowserHost(private val appCtx: Context) {
     /** Uma requisição vista pelo WebView (painel Rede + ferramenta browser_network). */
     data class NetEntry(val id: Long, val url: String, val method: String, val type: String, val mainFrame: Boolean,
                         val time: Long, val status: Int? = null, val durationMs: Long? = null, val sizeBytes: Long? = null,
-                        val error: String? = null)
+                        val error: String? = null, val requestHeaders: Map<String, String> = emptyMap(),
+                        val requestBody: String? = null, val responseHeaders: Map<String, String> = emptyMap(), val responseBody: String? = null)
     data class ConsoleEntry(val time: Long, val level: String, val message: String, val source: String)
 
     private val _net = MutableStateFlow<List<NetEntry>>(emptyList())
@@ -99,10 +100,22 @@ class BrowserHost(private val appCtx: Context) {
     init { runCatching { watchNetwork() } }
     private var pageDone: CompletableDeferred<Unit>? = null
     private var _view: WebView? = null
+    private var _agentView: WebView? = null
 
     @SuppressLint("SetJavaScriptEnabled")
     fun view(ctx: Context = appCtx): WebView {
-        _view?.let { v -> (v.parent as? ViewGroup)?.removeView(v); return v }
+        _view?.let { return it }
+        return createView(ctx, false).also { _view = it; it.loadUrl(HOME) }
+    }
+
+    /** WebView isolado para ferramentas do agente. Nunca é o mesmo widget exibido ao usuário. */
+    private fun agentView(): WebView {
+        _agentView?.let { return it }
+        return createView(appCtx, true).also { _agentView = it; it.loadUrl("about:blank") }
+    }
+
+    @SuppressLint("SetJavaScriptEnabled")
+    private fun createView(ctx: Context, agentMode: Boolean): WebView {
         val v = WebView(ctx.applicationContext)
         with(v.settings) {
             javaScriptEnabled = true
@@ -127,10 +140,12 @@ class BrowserHost(private val appCtx: Context) {
         if (android.os.Build.VERSION.SDK_INT >= 26) v.setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_IMPORTANT, false)
         if (android.os.Build.VERSION.SDK_INT >= 23) v.settings.offscreenPreRaster = true
         v.webViewClient = object : WebViewClient() {
-            override fun onPageStarted(view: WebView, url: String, favicon: Bitmap?) { sync(view, loading = true) }
+            override fun onPageStarted(view: WebView, url: String, favicon: Bitmap?) { if (!agentMode) sync(view, loading = true) }
             override fun onPageFinished(view: WebView, url: String) {
-                sync(view, loading = false); pageDone?.complete(Unit)
+                if (!agentMode) sync(view, loading = false) else pageDone?.complete(Unit)
                 collectTimings(view)
+                installSnapshotInstrumentation(view)
+                if (agentMode) installNetworkInstrumentation(view)
             }
             override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): android.webkit.WebResourceResponse? {
                 // só observa (não intercepta): alimenta o painel de rede
@@ -152,17 +167,56 @@ class BrowserHost(private val appCtx: Context) {
             }
         }
         v.webChromeClient = object : WebChromeClient() {
-            override fun onProgressChanged(view: WebView, newProgress: Int) { _ui.value = _ui.value.copy(progress = newProgress) }
-            override fun onReceivedTitle(view: WebView, title: String?) { sync(view) }
+            override fun onProgressChanged(view: WebView, newProgress: Int) { if (!agentMode) _ui.value = _ui.value.copy(progress = newProgress) }
+            override fun onReceivedTitle(view: WebView, title: String?) { if (!agentMode) sync(view) }
             override fun onConsoleMessage(m: android.webkit.ConsoleMessage): Boolean {
                 _console.value = (_console.value + ConsoleEntry(System.currentTimeMillis(), m.messageLevel().name.lowercase(),
                     m.message(), "${m.sourceId().substringAfterLast('/')}:${m.lineNumber()}")).takeLast(300)
                 return true
             }
         }
-        _view = v
-        v.loadUrl(HOME)
         return v
+    }
+
+
+    /** Captura sem depender de proxy/VPN: instrumenta fetch/XHR da página após cada navegação. */
+    private fun installNetworkInstrumentation(v: WebView) {
+        v.evaluateJavascript("""(function(){if(window.__cueNetInstalled)return 'ok';window.__cueNetInstalled=true;window.__cueNet=[];
+          function trim(x){try{return String(x||'').slice(0,12000)}catch(e){return ''}}
+          function headers(h){var o={};try{if(h&&h.forEach)h.forEach(function(v,k){o[k]=v});else if(h)Object.keys(h).forEach(function(k){o[k]=h[k]})}catch(e){}return o}
+          var oldFetch=window.fetch;if(oldFetch)window.fetch=function(input,init){var u=typeof input==='string'?input:(input&&input.url)||'',m=(init&&init.method)||(input&&input.method)||'GET',rh=headers((init&&init.headers)||(input&&input.headers)),rb=trim(init&&init.body),t=Date.now();
+            return oldFetch.apply(this,arguments).then(function(r){var row={url:u,method:m,requestHeaders:rh,requestBody:rb,status:r.status,responseHeaders:headers(r.headers),durationMs:Date.now()-t};window.__cueNet.push(row);if(window.__cueNet.length>300)window.__cueNet.shift();return r.clone().text().then(function(b){row.responseBody=trim(b);return r},function(){return r})},function(e){window.__cueNet.push({url:u,method:m,requestHeaders:rh,requestBody:rb,error:String(e),durationMs:Date.now()-t});throw e})};
+          var X=window.XMLHttpRequest;if(X){var op=X.prototype.open,sp=X.prototype.send,sh=X.prototype.setRequestHeader;X.prototype.open=function(m,u){this.__cue={url:String(u),method:m,requestHeaders:{},requestBody:'',start:0};return op.apply(this,arguments)};
+            X.prototype.setRequestHeader=function(k,v){if(this.__cue)this.__cue.requestHeaders[k]=v;return sh.apply(this,arguments)};
+            X.prototype.send=function(b){var x=this; if(this.__cue){this.__cue.requestBody=trim(b);this.__cue.start=Date.now();this.addEventListener('loadend',function(){var row={url:x.__cue.url,method:x.__cue.method,requestHeaders:x.__cue.requestHeaders,requestBody:x.__cue.requestBody,status:x.status,responseHeaders:{},responseBody:'',durationMs:Date.now()-x.__cue.start};try{x.getAllResponseHeaders().trim().split(/[\\r\\n]+/).forEach(function(s){var p=s.indexOf(':');if(p>0)row.responseHeaders[s.slice(0,p).trim()]=s.slice(p+1).trim()});row.responseBody=trim(x.responseType===''||x.responseType==='text'?x.responseText:'[non-text response]')}catch(e){}window.__cueNet.push(row);if(window.__cueNet.length>300)window.__cueNet.shift()})}return sp.apply(this,arguments)}}return 'ok'})()""")
+    }
+
+    /** Snapshot com estrutura acessível, landmarks, headings, links e controles nomeados. */
+    private fun installSnapshotInstrumentation(v: WebView) {
+        v.evaluateJavascript("""(function(){try{document.documentElement.setAttribute('data-cue-snapshot-ready','1');return 'ok'}catch(e){return 'err'}})()""", null)
+    }
+
+    private suspend fun mergeCapturedNetwork() {
+        val raw = runCatching { eval("JSON.stringify((window.__cueNet||[]).slice(-200))") }.getOrNull() ?: return
+        runCatching {
+            val arr = JSONArray(raw)
+            val captured = (0 until arr.length()).mapNotNull { arr.optJSONObject(it) }
+            val entries = _net.value.toMutableList()
+            captured.forEach { o ->
+                val url=o.optString("url"); val method=o.optString("method","GET")
+                val idx=entries.indexOfLast { it.url == url && it.method.equals(method,true) }
+                if(idx>=0) {
+                    val old=entries[idx]
+                    fun objMap(key:String):Map<String,String> { val jo=o.optJSONObject(key)?:return emptyMap(); val m=linkedMapOf<String,String>(); jo.keys().forEach { k->m[k]=jo.optString(k).take(2000) }; return m }
+                    entries[idx]=old.copy(status=o.optInt("status",old.status?:0).takeIf{it>0}?:old.status,
+                        durationMs=o.optLong("durationMs",old.durationMs?:0).takeIf{it>0}?:old.durationMs,
+                        requestHeaders=objMap("requestHeaders"), requestBody=o.optString("requestBody").takeIf{it.isNotBlank()},
+                        responseHeaders=objMap("responseHeaders"), responseBody=o.optString("responseBody").takeIf{it.isNotBlank()},
+                        error=o.optString("error").takeIf{it.isNotBlank()}?:old.error)
+                }
+            }
+            _net.value=entries.takeLast(500)
+        }
     }
 
     private fun sync(v: WebView, loading: Boolean = _ui.value.loading) {
@@ -171,6 +225,9 @@ class BrowserHost(private val appCtx: Context) {
     }
 
     fun home() { _view?.loadUrl(HOME) }
+
+    suspend fun uiBack() = onMain { _view?.takeIf { it.canGoBack() }?.goBack() }
+    suspend fun uiReload() = onMain { _view?.reload() }
 
     /** Alterna entre versão mobile e desktop dos sites. */
     fun setDesktop(on: Boolean) {
@@ -197,12 +254,13 @@ class BrowserHost(private val appCtx: Context) {
         }
     }
 
-    fun networkSummary(filter: String): String {
+    suspend fun networkSummary(filter: String): String {
+        mergeCapturedNetwork()
         val l = _net.value.filter { filter.isBlank() || it.url.contains(filter, true) }.takeLast(60)
         if (l.isEmpty()) return "Nenhuma requisição registrada (rede: ${_ui.value.netType}, online=${_ui.value.online})."
         val fails = l.count { (it.status ?: 0) >= 400 || it.error != null }
         return "Rede: ${_ui.value.netType} · ${l.size} requisições · $fails com erro\n" + l.joinToString("\n") { e ->
-            "${e.method} ${e.status ?: e.error ?: "-"} ${e.type} ${e.durationMs?.let { "${it}ms" } ?: ""} ${e.sizeBytes?.let { "${it / 1024}KB" } ?: ""} ${e.url.take(160)}"
+            buildString { append("${e.method} ${e.status ?: e.error ?: "-"} ${e.type} ${e.durationMs?.let { "${it}ms" } ?: ""} ${e.sizeBytes?.let { "${it / 1024}KB" } ?: ""} ${e.url.take(160)}");\n                if(e.requestHeaders.isNotEmpty()) append("\\n  Request headers: ").append(e.requestHeaders.entries.joinToString { "${it.key}=${it.value}" }.take(1500));\n                e.requestBody?.let { append("\\n  Request payload: ").append(it.take(3000)) };\n                if(e.responseHeaders.isNotEmpty()) append("\\n  Response headers: ").append(e.responseHeaders.entries.joinToString { "${it.key}=${it.value}" }.take(1500));\n                e.responseBody?.let { append("\\n  Response body: ").append(it.take(3000)) }\n            }
         }
     }
 
@@ -222,7 +280,7 @@ class BrowserHost(private val appCtx: Context) {
             else -> "https://www.google.com/search?q=" + java.net.URLEncoder.encode(url, "UTF-8")
         }
         pageDone = CompletableDeferred()
-        view().loadUrl(target)
+        agentView().loadUrl(target)
         target
     }.also { awaitLoad() }
 
@@ -231,15 +289,16 @@ class BrowserHost(private val appCtx: Context) {
         kotlinx.coroutines.delay(600) // deixa JS da página renderizar
     }
 
-    suspend fun back() { onMain { pageDone = CompletableDeferred(); view().goBack() }; awaitLoad() }
-    suspend fun reload() { onMain { pageDone = CompletableDeferred(); view().reload() }; awaitLoad() }
+    suspend fun back() { onMain { pageDone = CompletableDeferred(); agentView().goBack() }; awaitLoad() }
+    suspend fun reload() { onMain { pageDone = CompletableDeferred(); agentView().reload() }; awaitLoad() }
 
-    /** Texto legível + lista numerada de elementos interativos (o agente usa o índice para clicar). */
+    /** Snapshot semântico da página, próximo ao formato Playwright: landmarks, headings, texto e controles nomeados. */
     suspend fun read(maxChars: Int = 9000): String {
         val js = """
             (function(){
-              var els=[].slice.call(document.querySelectorAll('a,button,input,textarea,select,[role=button],[onclick],summary'));
-              var out=[],i=0;
+              var els=[].slice.call(document.querySelectorAll('a,button,input,textarea,select,[role=button],[onclick],summary,[role=link],[role=checkbox],[role=tab]'));
+              var out=[],i=0, headings=[];
+              [].slice.call(document.querySelectorAll("h1,h2,h3,h4,[role=heading]")).forEach(function(h){var t=(h.innerText||h.getAttribute("aria-label")||"").trim().replace(/\\s+/g," ");if(t)headings.push({level:h.tagName.toLowerCase(),text:t.slice(0,180)});});
               els.forEach(function(e){
                 var r=e.getBoundingClientRect(); if(r.width<2||r.height<2) return;
                 var st=getComputedStyle(e); if(st.visibility=='hidden'||st.display=='none') return;
@@ -247,10 +306,13 @@ class BrowserHost(private val appCtx: Context) {
                 var label=(e.innerText||e.value||e.placeholder||e.getAttribute('aria-label')||e.title||e.name||'').trim().replace(/\s+/g,' ').slice(0,80);
                 var tag=e.tagName.toLowerCase(); if(tag=='input') tag+='['+(e.type||'text')+']';
                 var href=e.href?(' -> '+String(e.href).slice(0,120)):'';
-                out.push('['+i+'] '+tag+' "'+label+'"'+href); i++;
+                var role=e.getAttribute("role")||({A:"link",BUTTON:"button",INPUT:"textbox",TEXTAREA:"textbox",SELECT:"combobox"}[e.tagName]||tag);
+                var extra=e.disabled?" [disabled]":""; if(e.getAttribute("aria-expanded"))extra+=" [expanded="+e.getAttribute("aria-expanded")+"]";\n                out.push("["+i+"] "+role+" \""+label+"\""+extra+href); i++;
               });
               var text=(document.body?document.body.innerText:'').replace(/\n{3,}/g,'\n\n');
-              return JSON.stringify({url:location.href,title:document.title,text:text,elements:out.slice(0,150)});
+              var main=document.querySelector("main,[role=main],article")||document.body;
+              var links=[].slice.call(document.querySelectorAll("a[href]")).filter(function(a){return a.innerText.trim()}).slice(0,80).map(function(a){return {text:a.innerText.trim().replace(/\\s+/g," ").slice(0,100),href:a.href}});
+              return JSON.stringify({url:location.href,title:document.title,text:text,headings:headings.slice(0,80),landmark:main?main.tagName.toLowerCase():"body",links:links,elements:out.slice(0,180)});
             })()
         """.trimIndent()
         val raw = eval(js)
@@ -259,6 +321,10 @@ class BrowserHost(private val appCtx: Context) {
             val els = o.getJSONArray("elements")
             buildString {
                 append("URL: ${o.optString("url")}\nTítulo: ${o.optString("title")}\n\n--- Conteúdo ---\n")
+                append("--- Estrutura (headings) ---\n")
+                val hs = o.optJSONArray("headings") ?: JSONArray()
+                for (i in 0 until hs.length()) { val h=hs.optJSONObject(i) ?: continue; append("${h.optString("level")} ${h.optString("text")}\n") }
+                append("\n--- Conteúdo principal (${o.optString("landmark", "body")}) ---\n")
                 append(o.optString("text").take(maxChars))
                 append("\n\n--- Elementos interativos ---\n")
                 for (i in 0 until els.length()) append(els.getString(i)).append('\n')
@@ -293,12 +359,12 @@ class BrowserHost(private val appCtx: Context) {
 
     private suspend fun awaitLoadIfNavigating() {
         kotlinx.coroutines.delay(800)
-        if (_ui.value.loading) { pageDone = CompletableDeferred(); awaitLoad() }
+        if (agentView().progress < 100) { pageDone = CompletableDeferred(); awaitLoad() }
     }
 
     private suspend fun eval(js: String): String {
         val d = CompletableDeferred<String>()
-        onMain { view().evaluateJavascript(js) { d.complete(it ?: "null") } }
+        onMain { agentView().evaluateJavascript(js) { d.complete(it ?: "null") } }
         val raw = withTimeoutOrNull(15_000) { d.await() } ?: return "timeout"
         // evaluateJavascript devolve um literal JSON (string entre aspas)
         return runCatching {

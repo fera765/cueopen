@@ -568,7 +568,8 @@ class AgentRunner(
         add(tool("file_list", "Lista arquivos de um diretório.", buildJsonObject { put("path", str("Diretório (padrão: workspace)")) }))
         if (web) {
             add(tool("browser_navigate", "Abre uma URL (ou termos de busca) no browser.", buildJsonObject { put("url", str("URL ou busca")) }, listOf("url")))
-            add(tool("browser_read", "Lê o texto da página atual e lista elementos interativos numerados.", buildJsonObject {}))
+            add(tool("browser_snapshot", "Gera snapshot semântico da página atual com headings, conteúdo, links e controles nomeados; refs/índices expiram após navegação.", buildJsonObject { put("max_chars", int("Limite de caracteres (padrão 9000)")) }))
+            add(tool("browser_read", "Compatibilidade: lê o snapshot e o texto da página atual.", buildJsonObject {}))
             add(tool("browser_click", "Clica no elemento [índice] de browser_read.", buildJsonObject { put("index", int("Índice")) }, listOf("index")))
             add(tool("browser_type", "Digita num campo [índice]; submit=true envia.", buildJsonObject {
                 put("index", int("Índice")); put("text", str("Texto")); put("submit", bool("Enviar formulário"))
@@ -578,7 +579,7 @@ class AgentRunner(
             add(tool("browser_js", "Executa JavaScript na página e retorna o resultado.", buildJsonObject { put("code", str("Código JS (expressão)")) }, listOf("code")))
         }
         if (web) {
-            add(tool("browser_network", "Lista as requisições de rede recentes da página (URL, método, tipo, status, tempo).", buildJsonObject { put("filter", str("Filtro opcional por texto na URL")) }))
+            add(tool("browser_network", "Inspeciona requisições da página: método, URL, status, tempo, headers e payloads fetch/XHR capturados (limitados).", buildJsonObject { put("filter", str("Filtro opcional por texto na URL")) }))
             add(tool("browser_console", "Mostra as mensagens recentes do console JavaScript da página.", buildJsonObject {}))
         }
         add(tool("notes_write", "Escreve no NOTES.md da tarefa (memória de trabalho que sempre volta ao seu contexto).", buildJsonObject {
@@ -709,7 +710,7 @@ class AgentRunner(
             "file_read" -> "Lendo arquivo" to Activity.Kind.EDITOR
             "file_list" -> "Listando arquivos" to Activity.Kind.EDITOR
             "browser_navigate" -> "Navegando" to Activity.Kind.BROWSER
-            "browser_read" -> "Lendo página" to Activity.Kind.BROWSER
+            "browser_read", "browser_snapshot" -> "Lendo snapshot da página" to Activity.Kind.BROWSER
             "browser_click" -> "Clicando" to Activity.Kind.BROWSER
             "browser_type" -> "Digitando" to Activity.Kind.BROWSER
             "browser_scroll" -> "Rolando página" to Activity.Kind.BROWSER
@@ -789,7 +790,7 @@ class AgentRunner(
                     val url = s("url").let { u -> if (u.startsWith("/root")) "file://" + sandbox.hostFile(u, sessionId).absolutePath else u }
                     browser.navigate(url); browser.read(4000)
                 }
-                "browser_read" -> browser.read()
+                "browser_read", "browser_snapshot" -> browser.read((i("max_chars") ?: 9000).coerceIn(1000, 20000))
                 "browser_click" -> browser.click(i("index") ?: -1)
                 "browser_type" -> browser.type(i("index") ?: -1, s("text"), b("submit"))
                 "browser_scroll" -> browser.scroll(s("direction") != "up")
