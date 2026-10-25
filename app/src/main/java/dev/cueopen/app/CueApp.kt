@@ -29,7 +29,7 @@ class CueApp : Application() {
         }
         store = Store(this)
         sandbox = Sandbox(this)
-        store.onDeleteWorkspace = { sid -> runCatching { sandbox.workspaceFor(sid).deleteRecursively() } }
+        store.onDeleteWorkspace = { sid -> runCatching { sandbox.deleteEnvironment(sid) }; runCatching { sandbox.workspaceFor(sid).deleteRecursively() } }
         browser = BrowserHost(this)
         llm = OpenRouter { store.settings }
         terminals = dev.cueopen.app.sandbox.TerminalManager(this, sandbox)
