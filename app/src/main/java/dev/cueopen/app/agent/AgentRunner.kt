@@ -904,10 +904,10 @@ class AgentRunner(
         val workerLimit = requestedWorkers.coerceIn(1, 5)
         val report = StringBuilder()
         val batches = tasks.chunked(workerLimit)
-        appendLine(report, "Plano: " + tasks.size + " subtarefa(s), até " + workerLimit + " worker(s) simultâneos, " + batches.size + " onda(s).")
+        appendReportLine(report, "Plano: " + tasks.size + " subtarefa(s), até " + workerLimit + " worker(s) simultâneos, " + batches.size + " onda(s).")
         batches.forEachIndexed { index, batch ->
-            appendLine(report, "")
-            appendLine(report, "## Onda " + (index + 1) + "/" + batches.size)
+            appendReportLine(report, "")
+            appendReportLine(report, "## Onda " + (index + 1) + "/" + batches.size)
             val payload = org.json.JSONArray().apply { batch.forEach { put(it) } }.toString()
             val result = runMultiAgentsBatch(
                 sessionId = sessionId,
@@ -917,9 +917,9 @@ class AgentRunner(
                 requestedBudget = requestedBudget,
                 allowDirtyWorkspace = index > 0
             )
-            appendLine(report, result)
+            appendReportLine(report, result)
             if (result.startsWith("ERRO:") || result.startsWith("Multi Agents pausado:") || result.contains("ATENÇÃO:")) {
-                appendLine(report, "Execução interrompida após a onda " + (index + 1) + " para evitar propagar falhas ou conflitos para tarefas posteriores.")
+                appendReportLine(report, "Execução interrompida após a onda " + (index + 1) + " para evitar propagar falhas ou conflitos para tarefas posteriores.")
                 break
             }
         }
