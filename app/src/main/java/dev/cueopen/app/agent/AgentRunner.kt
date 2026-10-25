@@ -143,13 +143,18 @@ class AgentRunner(
         var repeats = 0
         var lastContent = ""
         while (scope.isActive) {
-            if (tokenBudgetOverride != null) {
-                val used = (store.session(sessionId)?.let { it.tokensIn + it.tokensOut } ?: startingTokens) - startingTokens
-                if (used >= tokenBudgetOverride) {
-                    store.addItem(sessionId, ChatItem.Error(text = "Limite de tokens do subagente atingido (" + used + "/" + tokenBudgetOverride + "). Entregue o progresso parcial."))
-                    store.editSession(sessionId) { it.copy(status = SessionStatus.WAITING_USER) }
-                    return
-                }
+            val workerUsed = if (tokenBudgetOverride != null) {
+                ((store.session(sessionId)?.let { it.tokensIn + it.tokensOut } ?: startingTokens) - startingTokens).coerceAtLeast(0)
+            } else 0L
+            if (tokenBudgetOverride != null && workerUsed >= tokenBudgetOverride - 128L) {
+                // Finalização segura: não faz outra chamada que possa ultrapassar o orçamento.
+                val partial = store.session(sessionId)?.items?.lastOrNull { it is ChatItem.Assistant } as? ChatItem.Assistant
+                if (partial == null || partial.text.isBlank()) store.addItem(sessionId, ChatItem.Assistant(
+                    text = "Progresso parcial preservado nos arquivos e nas etapas concluídas. Encerrando antes do limite de tokens para evitar estouro.",
+                    final = true
+                ))
+                store.editSession(sessionId) { it.copy(status = SessionStatus.DONE) }
+                return
             }
             var s = store.session(sessionId) ?: return
             val agent = store.agent(s.agentId)
@@ -163,8 +168,17 @@ class AgentRunner(
             if (history.firstOrNull()?.role != "user") history = listOf(LlmMessage("user", "[Contexto anterior compactado no resumo da sessão. Continue de onde parou.]")) + history
             // Resiliência: tenta a chamada; em erro, reenvia (backoff) e só desiste após 3 falhas.
             val replyTokenLimit = tokenBudgetOverride?.let { budget ->
-                val used = (store.session(sessionId)?.let { it.tokensIn + it.tokensOut } ?: startingTokens) - startingTokens
-                (budget - used).coerceIn(256L, 2048L).toInt()
+                val used = ((store.session(sessionId)?.let { it.tokensIn + it.tokensOut } ?: startingTokens) - startingTokens).coerceAtLeast(0)
+                val remaining = budget - used
+                val estimatedInput = ctxMgr.estimateTokens(listOf(sys) + history).toLong()
+                // Reservamos espaço para a entrada estimada e margem de segurança; nunca forçamos 256 tokens
+                // quando o orçamento restante é menor do que isso.
+                val safeOutput = remaining - estimatedInput - 128L
+                if (safeOutput < 128L) {
+                    store.editSession(sessionId) { it.copy(status = SessionStatus.DONE) }
+                    return
+                }
+                safeOutput.coerceAtMost(2048L).toInt()
             } ?: 16000
             val reply = run {
                 var attempt = 0
