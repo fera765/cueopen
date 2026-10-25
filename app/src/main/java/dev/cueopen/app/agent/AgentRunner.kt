@@ -1136,6 +1136,21 @@ class AgentRunner(
         return report.toString()
     }
 
+    /**
+     * Compact worker-output contract, used by the orchestrator when summarizing parallel work.
+     * Structured reports reduce ambiguity between model completion and verified repository changes.
+     */
+    private data class WorkerOutcome(
+        val sessionId: String,
+        val task: String,
+        val status: SessionStatus?,
+        val summary: String,
+        val errors: List<String>,
+        val tokenUsage: Long
+    ) {
+        val completed: Boolean get() = status == SessionStatus.DONE && errors.isEmpty()
+    }
+
     private fun appendReportLine(report: StringBuilder, line: String) { report.appendLine(line) }
 
     private fun shQuote(s: String) = "'" + s.replace("'", "'\\''") + "'"
