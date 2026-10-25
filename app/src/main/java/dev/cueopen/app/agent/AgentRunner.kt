@@ -1209,7 +1209,7 @@ class AgentRunner(
                 val dest = sandbox.workspaceFor(sessionId)
                 val synced = runCatching {
                     source.walkTopDown()
-                        .filter { it.isFile && !it.toRelativeString(source).startsWith(".git/") && !it.toRelativeString(source).startsWith(".cue/") && !it.name.endsWith(Regex("\\.worker-\\d+$").pattern) }
+                        .filter { it.isFile && !it.toRelativeString(source).startsWith(".git/") && !it.toRelativeString(source).startsWith(".cue/") && !Regex("""\\.worker-\\d+$""").containsMatchIn(it.name) }
                         .forEach { file ->
                             val rel = file.relativeTo(source).path
                             val target = File(dest, rel)
