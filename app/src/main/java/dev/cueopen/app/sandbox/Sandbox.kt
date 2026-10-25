@@ -43,51 +43,29 @@ class Sandbox(private val ctx: Context) {
 
     private fun safeId(sessionId: String): String = sessionId.filter { it.isLetterOrDigit() || it == '-' || it == '_' }.take(80).ifBlank { "default" }
     fun environmentRoot(sessionId: String): File = File(environmentsDir, safeId(sessionId))
-    fun rootfsFor(sessionId: String): File = File(environmentRoot(sessionId), "rootfs")
+    // Todos os chats reutilizam o Alpine já instalado; dados de usuário continuam separados por chat.
+    // Não copiar centenas/milhares de arquivos no primeiro comando ou ao criar uma conversa.
+    fun rootfsFor(sessionId: String): File = alpineDir
     fun publicFor(sessionId: String): File = File(environmentRoot(sessionId), "public").apply { mkdirs() }
-    fun environmentReady(sessionId: String): Boolean = File(environmentRoot(sessionId), ".ready").isFile && File(rootfsFor(sessionId), "bin/busybox").isFile
+    fun environmentReady(sessionId: String): Boolean =
+        File(environmentRoot(sessionId), ".ready").isFile && File(alpineDir, "bin/busybox").isFile
 
-    /** Cria um rootfs gravável por chat a partir da base já instalada; não baixa nem instala Alpine novamente. */
     suspend fun ensureEnvironment(sessionId: String): Boolean = withContext(Dispatchers.IO) {
         if (!isInstalled()) return@withContext false
         if (environmentReady(sessionId)) return@withContext true
-        val staging = File(environmentsDir, ".${safeId(sessionId)}.creating")
-        runCatching { staging.deleteRecursively() }
-        val root = File(staging, "rootfs")
-        if (!root.mkdirs()) return@withContext false
         try {
-            copyTree(alpineDir, root)
-            File(root, "tmp").mkdirs()
-            File(root, "etc/resolv.conf").writeText("nameserver 8.8.8.8\\nnameserver 1.1.1.1\\n")
-            val pub = File(staging, "public")
+            val root = environmentRoot(sessionId)
+            val pub = publicFor(sessionId)
             File(pub, "workspace").mkdirs()
             File(pub, ".cue").mkdirs()
+            // Usar quebras de linha reais: "\\n" literal fazia o bash interpretar o caminho /dev/nulln[.
             File(pub, ".bashrc").writeText("cd /root/workspace 2>/dev/null\\n[ -f /root/.cue/hook.sh ] && . /root/.cue/hook.sh\\n")
-            File(staging, ".ready").writeText("v1")
-            val target = environmentRoot(sessionId)
-            target.deleteRecursively()
-            if (!staging.renameTo(target)) error("Não foi possível ativar o ambiente do chat")
+            File(root, ".ready").writeText("v2")
             true
         } catch (t: Throwable) {
-            android.util.Log.e("CueOpenSandbox", "Falha ao criar ambiente Linux para chat ${safeId(sessionId)}", t)
+            android.util.Log.e("CueOpenSandbox", "Falha ao preparar dados do chat ${safeId(sessionId)}", t)
             appendLog("❌ Ambiente do chat: ${t.javaClass.simpleName}: ${t.message ?: "erro sem detalhes"}")
-            staging.deleteRecursively()
             false
-        }
-    }
-
-    private fun copyTree(source: File, target: File) {
-        val linkTarget = runCatching { android.system.Os.readlink(source.absolutePath) }.getOrNull()
-        if (linkTarget != null) {
-            android.system.Os.symlink(linkTarget, target.absolutePath)
-            return
-        }
-        if (source.isDirectory) {
-            if (!target.exists() && !target.mkdirs()) error("Falha ao criar diretório ${target.absolutePath}")
-            source.listFiles()?.forEach { child -> copyTree(child, File(target, child.name)) }
-        } else {
-            source.inputStream().use { input -> target.outputStream().use { out -> input.copyTo(out) } }
-            if (source.canExecute()) target.setExecutable(true, false)
         }
     }
 
