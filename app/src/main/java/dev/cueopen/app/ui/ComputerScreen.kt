@@ -280,7 +280,7 @@ private fun DevToolsPanel(modifier: Modifier) {
                 }
             }
             val list = net.filter { type == "all" || it.type == type }.asReversed()
-            val sel = selected
+            val sel = selected?.let { chosen -> net.firstOrNull { it.id == chosen.id } ?: chosen }
             if (sel != null) {
                 Column(Modifier.fillMaxWidth().padding(10.dp).verticalScroll(rememberScrollState())) {
                     Text("← voltar", color = c.accent, fontSize = 12.sp, modifier = Modifier.clickable { selected = null })
