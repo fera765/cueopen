@@ -298,7 +298,7 @@ private fun DevToolsPanel(browser: dev.cueopen.app.browser.BrowserHost, modifier
     val ui by browser.ui.collectAsStateWithLifecycle()
     var tab by remember { mutableStateOf("net") }
     var type by remember { mutableStateOf("all") }
-    var selected by remember { mutableStateOf<dev.cueopen.browser.BrowserHost.NetEntry?>(null) }
+    var selected by remember { mutableStateOf<dev.cueopen.app.browser.BrowserHost.NetEntry?>(null) }
     val c = Cue.c
     Column(modifier.background(c.surface).border(1.dp, c.line)) {
         Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
