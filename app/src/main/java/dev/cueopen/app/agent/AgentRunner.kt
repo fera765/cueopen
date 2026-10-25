@@ -885,10 +885,7 @@ class AgentRunner(
     }
 
 
-    /**
-     * Orquestra subtarefas paralelas com workspaces isolados e estado explícito.
-     * Concluir o loop do modelo não equivale a validar o código produzido.
-     */
+    /** Orquestra tarefas paralelas com workspaces isolados e estados explícitos. */
     /**
      * Parallel agent orchestration: each worker executes in isolation, reports structured outcomes,
      * and only then participates in integration. Model completion alone does not mean task success.
