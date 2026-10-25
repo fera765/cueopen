@@ -81,6 +81,7 @@ class AgentRunner(
         store.state.value.agents.filter { it.homeSessionId == sessionId && it.autonomous }.forEach {
             store.upsertAgent(it.copy(autonomous = false)); dev.cueopen.app.scheduler.Heartbeat.cancel(ctx, it.id)
         }
+        finalizeRunningSteps(sessionId, "Execução interrompida pelo usuário.")
         store.editSession(sessionId) { it.copy(status = SessionStatus.STOPPED, wakeAt = null) }
         setActivity(sessionId, Activity())
         browser.setAgentControl(false)
@@ -113,6 +114,8 @@ class AgentRunner(
                 store.addItem(sessionId, ChatItem.Error(text = t.message ?: t.toString()))
                 store.editSession(sessionId) { it.copy(status = SessionStatus.ERROR) }
             } finally {
+                // Nunca deixe pílulas RUNNING órfãs quando um job termina, falha ou é substituído.
+                finalizeRunningSteps(sessionId, "Execução encerrada sem retorno da ferramenta.")
                 setActivity(sessionId, Activity())
                 browser.setAgentControl(false)
                 jobs.remove(sessionId, coroutineContext[Job])
@@ -1277,6 +1280,14 @@ class AgentRunner(
     private fun appendTerm(sessionId: String, text: String) {
         val m = _termLog.value
         _termLog.value = m + (sessionId to ((m[sessionId] ?: "") + text).takeLast(60_000))
+    }
+
+    private fun finalizeRunningSteps(sessionId: String, reason: String) {
+        val steps = store.session(sessionId)?.items?.filterIsInstance<ChatItem.Step>()
+            ?.filter { it.status == StepStatus.RUNNING }.orEmpty()
+        steps.forEach { step ->
+            store.replaceItem(sessionId, step.copy(result = reason, status = StepStatus.ERROR))
+        }
     }
 
     private fun setActivity(sessionId: String, a: Activity) {
