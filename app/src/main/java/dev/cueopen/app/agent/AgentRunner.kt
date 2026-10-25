@@ -622,7 +622,7 @@ class AgentRunner(
         add(tool("file_read", "Lê um arquivo de texto.", buildJsonObject { put("path", str("Caminho")) }, listOf("path")))
         add(tool("file_list", "Lista arquivos de um diretório.", buildJsonObject { put("path", str("Diretório (padrão: workspace)")) }))
         if (web) {
-            add(tool("browser_navigate", "Abre uma URL (ou termos de busca) no browserFor(sessionId).", buildJsonObject { put("url", str("URL ou busca")) }, listOf("url")))
+            add(tool("browser_navigate", "Abre uma URL (ou termos de busca) no browser.", buildJsonObject { put("url", str("URL ou busca")) }, listOf("url")))
             add(tool("browser_snapshot", "Gera snapshot semântico da página atual com headings, conteúdo, links e controles nomeados; refs/índices expiram após navegação.", buildJsonObject { put("max_chars", int("Limite de caracteres (padrão 9000)")) }))
             add(tool("browser_read", "Compatibilidade: lê o snapshot e o texto da página atual.", buildJsonObject {}))
             add(tool("browser_click", "Clica no elemento [índice] de browser_read.", buildJsonObject { put("index", int("Índice")) }, listOf("index")))
