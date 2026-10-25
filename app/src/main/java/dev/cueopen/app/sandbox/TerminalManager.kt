@@ -143,8 +143,10 @@ class TerminalManager(private val ctx: Context, private val sandbox: Sandbox) {
                 } finally {
                     // Se o agente for pausado/cancelado, interrompe também o processo no PTY.
                     if (!waiter.isCompleted) {
-                        withContext(kotlinx.coroutines.NonCancellable + Dispatchers.Main) { write("\u0003") }
-                        delay(150)
+                        withContext(kotlinx.coroutines.NonCancellable) {
+                            withContext(Dispatchers.Main) { write("\u0003") }
+                            delay(150)
+                        }
                     }
                     if (pending === waiter) pending = null
                 }
