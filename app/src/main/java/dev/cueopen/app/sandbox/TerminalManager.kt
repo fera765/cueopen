@@ -73,7 +73,10 @@ class TerminalManager(private val ctx: Context, private val sandbox: Sandbox) {
             if (_alive.value) return
             sandbox.prepareScripts()
             // First launch clones the installed base; it never downloads Alpine per chat.
-            check(runBlocking { sandbox.ensureEnvironment(key) }) { "Could not create this chat's Linux environment" }
+            if (!runBlocking { sandbox.ensureEnvironment(key) }) {
+                android.util.Log.e("CueOpenTerminal", "Ambiente Linux do chat não foi criado; consulte o log do Sandbox nas Configurações.")
+                return
+            }
             File(sandbox.publicFor(key), cwd.removePrefix("/root/")).mkdirs()
             installShellHook(key)
             val shell = "cd '$cwd' 2>/dev/null; if command -v bash >/dev/null 2>&1; then exec bash --rcfile /root/.bashrc -i; else exec sh -i; fi"
