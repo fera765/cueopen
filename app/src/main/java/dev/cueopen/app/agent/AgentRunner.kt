@@ -982,7 +982,7 @@ class AgentRunner(
         } finally {
             synchronized(childJobsByParent) { childJobsByParent.remove(sessionId) }
         }
-        val report = buildString {
+        val report = StringBuilder().apply {
             appendLine("Multi Agents concluiu " + workers.size + " worker(s); orçamento de até " + budget + " tokens por worker.")
             workers.forEachIndexed { index, child ->
                 val finished = store.session(child.id)
@@ -1002,7 +1002,7 @@ class AgentRunner(
                 val patchName = ".cueopen-worker-" + (index + 1) + ".patch"
                 val patchPath = gitRoot.trimEnd('/') + "/" + patchName
                 val createPatch = terminal.runAgentCommand(
-                    "git -C " + shQuote(gitRoot) + " diff --binary " + shQuote(baseSha) + " " + shQuote(branch) +
+                    "git -C " + shQuote(sandbox.guestPath(child.id)) + " add -N -A >/dev/null 2>&1 || true; git -C " + shQuote(gitRoot) + " diff --binary " + shQuote(baseSha) + " " + shQuote(branch) +
                     " -- > " + shQuote(patchPath) + " && test -s " + shQuote(patchPath),
                     30L, false
                 )
