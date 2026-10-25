@@ -878,7 +878,7 @@ class AgentRunner(
         val parentPath = sandbox.guestPath(sessionId)
         val terminal = terminals.get(sessionId, parentPath)
         val requestedRepoPath = repoPathArg.trim().ifBlank { parentPath }
-        val probe = terminal.runAgentCommand("git -C " + shQuote(requestedRepoPath) + " rev-parse --show-toplevel && git -C " + shQuote(requestedRepoPath) + " rev-parse HEAD && git -C " + shQuote(requestedRepoPath) + " status --porcelain", 20, false)
+        val probe = terminal.runAgentCommand("git -C " + shQuote(requestedRepoPath) + " rev-parse --show-toplevel && git -C " + shQuote(requestedRepoPath) + " rev-parse HEAD && git -C " + shQuote(requestedRepoPath) + " status --porcelain", 20L, false)
         val lines = probe.output.lines().map { it.trim() }.filter { it.isNotBlank() }
         val gitRoot = lines.firstOrNull()?.takeIf { probe.exitCode == 0 && it.startsWith("/") }
         val baseSha = lines.getOrNull(1)?.takeIf { it.matches(Regex("[0-9a-fA-F]{40}")) }
@@ -902,12 +902,12 @@ class AgentRunner(
                 val branch = "cue/agents/" + child.id
                 val target = sandbox.guestPath(child.id)
                 val cmd = "git -C " + shQuote(gitRoot) + " worktree add -b " + shQuote(branch) + " " + shQuote(target) + " " + shQuote(baseSha)
-                val result = terminal.runAgentCommand(cmd, 45, false)
+                val result = terminal.runAgentCommand(cmd, 45L, false)
                 if (result.exitCode != 0) setupErrors += child.id + ": " + result.output.takeLast(350)
             }
             if (setupErrors.isNotEmpty()) {
                 workers.forEach { child ->
-                    terminal.runAgentCommand("git -C " + shQuote(gitRoot) + " worktree remove --force " + shQuote(sandbox.guestPath(child.id)) + " >/dev/null 2>&1 || true; git -C " + shQuote(gitRoot) + " branch -D " + shQuote("cue/agents/" + child.id) + " >/dev/null 2>&1 || true", 20, false)
+                    terminal.runAgentCommand("git -C " + shQuote(gitRoot) + " worktree remove --force " + shQuote(sandbox.guestPath(child.id)) + " >/dev/null 2>&1 || true; git -C " + shQuote(gitRoot) + " branch -D " + shQuote("cue/agents/" + child.id) + " >/dev/null 2>&1 || true", 20L, false)
                     store.editSession(child.id) { it.copy(status = SessionStatus.ERROR) }
                 }
                 return "Não iniciei workers porque a criação de branches isoladas falhou:\n" + setupErrors.joinToString("\n")
@@ -915,7 +915,7 @@ class AgentRunner(
         } else {
             workers.forEach { child ->
                 val target = sandbox.guestPath(child.id)
-                terminal.runAgentCommand("mkdir -p " + shQuote(target) + " && cp -a " + shQuote(parentPath) + "/. " + shQuote(target) + "/ 2>/dev/null || true", 45, false)
+                terminal.runAgentCommand("mkdir -p " + shQuote(target) + " && cp -a " + shQuote(parentPath) + "/. " + shQuote(target) + "/ 2>/dev/null || true", 45L, false)
             }
         }
         val workerJobs = workers.map { child ->
