@@ -31,6 +31,12 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.foundation.gestures.detectTapGestures
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -209,17 +215,28 @@ private fun ExtraKeys(
                 keys.forEach { (label, sequence) ->
                     val modifierKey = label == "CTRL" || label == "ALT"
                     val selected = (label == "CTRL" && ctrl) || (label == "ALT" && alt)
+                    val arrowKey = label in setOf("↑", "↓", "←", "→")
+                    val keySurface = Modifier.weight(1f).padding(2.dp).clip(RoundedCornerShape(7.dp))
+                        .background(if (selected) Color(0xFFFF6B3D) else Color(0xFF23262D))
                     Box(
-                        Modifier.weight(1f).padding(2.dp).clip(RoundedCornerShape(7.dp))
-                            .background(if (selected) Color(0xFFFF6B3D) else Color(0xFF23262D))
-                            .clickable {
-                                when (label) {
-                                    "CTRL" -> onCtrl()
-                                    "ALT" -> onAlt()
-                                    else -> send(sequence)
+                        (if (arrowKey) keySurface.pointerInput(label, sequence) {
+                            detectTapGestures(onPress = {
+                                val repeatJob: Job = launch {
+                                    while (isActive) {
+                                        send(sequence)
+                                        delay(80)
+                                    }
                                 }
+                                tryAwaitRelease()
+                                repeatJob.cancel()
+                            })
+                        } else keySurface.clickable {
+                            when (label) {
+                                "CTRL" -> onCtrl()
+                                "ALT" -> onAlt()
+                                else -> send(sequence)
                             }
-                            .padding(horizontal = 2.dp, vertical = 9.dp),
+                        }).padding(horizontal = 2.dp, vertical = 9.dp),
                         contentAlignment = Alignment.Center
                     ) {
                         Text(
