@@ -58,29 +58,57 @@ object Connectors {
         Catalog("microsoftlearn", "Microsoft Learn", "https://learn.microsoft.com/api/mcp", "Documentação oficial da Microsoft/Azure (sem login)", needsAuth = false),
     )
 
-    /** Busca servidores MCP remotos no registro OFICIAL (grátis, sem API key). */
+    /** Busca servidores MCP remotos no registro oficial. Usa busca remota e fallback local para versões do registro que não aceitam o parâmetro search. */
     suspend fun searchRegistry(query: String, limit: Int = 30): List<Catalog> = withContext(Dispatchers.IO) {
-        val url = "https://registry.modelcontextprotocol.io/v0/servers?limit=$limit" + if (query.isBlank()) "" else "&search=" + Uri.encode(query)
-        val body = http.newCall(Request.Builder().url(url).header("Accept", "application/json").build()).execute().use { r ->
-            if (!r.isSuccessful) error("Registro respondeu HTTP ${r.code}"); r.body!!.string()
+        fun request(url: String): String = http.newCall(
+            Request.Builder().url(url).header("Accept", "application/json").build()
+        ).execute().use { r ->
+            if (!r.isSuccessful) error("Registro MCP respondeu HTTP ${r.code}: ${r.body?.string()?.take(180).orEmpty()}")
+            r.body?.string() ?: error("O registro MCP retornou uma resposta vazia.")
+        }
+        val base = "https://registry.modelcontextprotocol.io/v0/servers?limit=${limit.coerceIn(1, 100)}"
+        val body = if (query.isBlank()) request(base) else runCatching {
+            request("$base&search=${Uri.encode(query.trim())}")
+        }.getOrElse {
+            // Compatibilidade com deployments do registro que não implementam ?search=.
+            request(base)
         }
         val servers = JSONObject(body).optJSONArray("servers") ?: JSONArray()
         val out = mutableListOf<Catalog>()
         for (i in 0 until servers.length()) {
-            val srv = servers.getJSONObject(i).optJSONObject("server") ?: continue
-            val name = srv.optString("name"); val desc = srv.optString("description")
-            // só servidores REMOTOS (streamable-http/sse têm url); stdio/npx não roda aqui
-            var remoteUrl: String? = null; var auth = true
-            srv.optJSONArray("remotes")?.let { rem -> for (j in 0 until rem.length()) { val o = rem.getJSONObject(j); if (o.has("url")) { remoteUrl = o.getString("url") } } }
-            if (remoteUrl == null) srv.optJSONArray("packages")?.let { pk -> for (j in 0 until pk.length()) { val tr = pk.getJSONObject(j).optJSONObject("transport"); val u = tr?.optString("url"); if (!u.isNullOrBlank()) remoteUrl = u } }
+            val srv = servers.optJSONObject(i)?.optJSONObject("server") ?: continue
+            val name = srv.optString("name")
+            if (name.isBlank()) continue
+            val desc = srv.optString("description")
+            var remoteUrl: String? = null
+            srv.optJSONArray("remotes")?.let { rem ->
+                for (j in 0 until rem.length()) {
+                    val o = rem.optJSONObject(j) ?: continue
+                    val u = o.optString("url")
+                    if (u.startsWith("https://")) { remoteUrl = u; break }
+                }
+            }
+            if (remoteUrl == null) srv.optJSONArray("packages")?.let { pk ->
+                for (j in 0 until pk.length()) {
+                    val tr = pk.optJSONObject(j)?.optJSONObject("transport")
+                    val u = tr?.optString("url").orEmpty()
+                    if (u.startsWith("https://")) { remoteUrl = u; break }
+                }
+            }
             val u = remoteUrl ?: continue
-            val id = name.substringAfterLast('/').ifBlank { name }.lowercase().replace(Regex("[^a-z0-9]+"), "_").trim('_')
-            out += Catalog(id, name.substringAfterLast('/').ifBlank { name }, u, desc.take(200), auth)
+            val displayName = name.substringAfterLast('/').ifBlank { name }
+            val id = name.lowercase().replace(Regex("[^a-z0-9]+"), "_").trim('_').take(80).ifBlank { "mcp_$i" }
+            out += Catalog(id, displayName, u, desc.take(200), needsAuth = true)
         }
-        out
+        if (query.isBlank()) out
+        else {
+            val q = query.trim()
+            val matching = out.filter { it.name.contains(q, true) || it.description.contains(q, true) || it.url.contains(q, true) }
+            matching
+        }
     }
 
-    private val http = OkHttpClient.Builder().connectTimeout(20, TimeUnit.SECONDS).readTimeout(120, TimeUnit.SECONDS).build()
+    private val http = OkHttpClient.Builder().connectTimeout(12, TimeUnit.SECONDS).readTimeout(30, TimeUnit.SECONDS).callTimeout(45, TimeUnit.SECONDS).retryOnConnectionFailure(true).build()
     private val sessions = java.util.concurrent.ConcurrentHashMap<String, String>() // connectorId -> Mcp-Session-Id
     private val jsonType = "application/json".toMediaType()
     private var rpcId = 1
@@ -129,13 +157,12 @@ object Connectors {
         val reg = JSONObject().put("client_name", "CueOpen").put("redirect_uris", JSONArray().put(redirect))
             .put("grant_types", JSONArray().put("authorization_code").put("refresh_token"))
             .put("response_types", JSONArray().put("code")).put("application_type", "native")
-            .put("token_endpoint_auth_method", "client_secret_post")
+            .put("token_endpoint_auth_method", "none")
             .put("scope", prm?.optJSONArray("scopes_supported")?.let { a -> (0 until a.length()).joinToString(" ") { a.getString(it) } } ?: "")
-        var clientSecret: String? = null
         val clientId = http.newCall(Request.Builder().url(regEp).post(reg.toString().toRequestBody(jsonType)).build()).execute().use { r ->
             val body = r.body?.string().orEmpty()
-            if (!r.isSuccessful) error("Registro de cliente falhou (HTTP ${r.code}): ${body.take(200)}")
-            val o = JSONObject(body); clientSecret = o.optString("client_secret").ifBlank { null }; o.getString("client_id")
+            if (!r.isSuccessful) error("Registro dinâmico de cliente falhou (HTTP ${r.code}): ${body.take(200)}. O servidor pode exigir cadastro prévio ou não aceitar clientes públicos.")
+            JSONObject(body).getString("client_id")
         }
 
         // 4) PKCE + autorização no navegador
@@ -159,14 +186,14 @@ object Connectors {
         // 5) troca do código por tokens
         val form = FormBody.Builder().add("grant_type", "authorization_code").add("code", code)
             .add("redirect_uri", redirect).add("client_id", clientId).add("code_verifier", verifier).add("resource", c.url)
-            .apply { clientSecret?.let { add("client_secret", it) } }.build()
+            .build()
         val tok = http.newCall(Request.Builder().url(tokenEp).post(form).header("Accept", "application/json").build()).execute().use { r ->
             val body = r.body?.string().orEmpty()
             if (!r.isSuccessful) error("Troca de token falhou (HTTP ${r.code}): ${body.take(200)}")
             JSONObject(body)
         }
         val connected = c.copy(
-            clientId = clientId, clientSecret = clientSecret, tokenEndpoint = tokenEp,
+            clientId = clientId, clientSecret = null, tokenEndpoint = tokenEp,
             accessToken = tok.getString("access_token"), refreshToken = tok.optString("refresh_token").ifBlank { null },
             expiresAt = tok.optLong("expires_in", 0).takeIf { it > 0 }?.let { System.currentTimeMillis() + it * 1000 },
             connectedAt = System.currentTimeMillis(), lastError = null,

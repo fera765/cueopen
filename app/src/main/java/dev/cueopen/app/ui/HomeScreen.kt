@@ -8,6 +8,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -328,20 +329,50 @@ private fun DrawerItem(icon: ImageVector, text: String, badge: String? = null, o
 @Composable
 private fun SessionRow(s: Session, agent: AgentProfile?, onClick: () -> Unit) {
     val c = Cue.c
-    Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).clickable(onClick = onClick).padding(horizontal = 8.dp, vertical = 9.dp),
-        verticalAlignment = Alignment.CenterVertically) {
-        if (agent != null) AgentFace(Color(agent.color), agent.face, 26.dp)
-        else Box(Modifier.size(26.dp).clip(RoundedCornerShape(8.dp)).background(c.surface2), contentAlignment = Alignment.Center) {
-            Icon(if (s.scheduledTaskId != null) Icons.Rounded.Schedule else Icons.Rounded.ChatBubbleOutline, null, Modifier.size(14.dp), tint = c.ink2)
+    val store = CueApp.instance.store
+    var menu by remember { mutableStateOf(false) }
+    var renameDialog by remember { mutableStateOf(false) }
+    var deleteDialog by remember { mutableStateOf(false) }
+    var title by remember(s.id, s.title) { mutableStateOf(s.title) }
+    Box {
+        Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).combinedClickable(
+            onClick = onClick, onLongClick = { menu = true }
+        ).padding(horizontal = 8.dp, vertical = 9.dp), verticalAlignment = Alignment.CenterVertically) {
+            if (agent != null) AgentFace(Color(agent.color), agent.face, 26.dp)
+            else Box(Modifier.size(26.dp).clip(RoundedCornerShape(8.dp)).background(c.surface2), contentAlignment = Alignment.Center) {
+                Icon(if (s.scheduledTaskId != null) Icons.Rounded.Schedule else Icons.Rounded.ChatBubbleOutline, null, Modifier.size(14.dp), tint = c.ink2)
+            }
+            Spacer(Modifier.width(10.dp))
+            Column(Modifier.weight(1f)) {
+                Text(s.title, maxLines = 1, overflow = TextOverflow.Ellipsis, fontSize = 15.sp)
+                val last = s.items.lastOrNull()?.let { previewOf(it) }.orEmpty()
+                if (last.isNotBlank()) Text(last, maxLines = 1, overflow = TextOverflow.Ellipsis, fontSize = 12.sp, color = c.ink3)
+            }
+            StatusDot(s.status)
         }
-        Spacer(Modifier.width(10.dp))
-        Column(Modifier.weight(1f)) {
-            Text(s.title, maxLines = 1, overflow = TextOverflow.Ellipsis, fontSize = 15.sp)
-            val last = s.items.lastOrNull()?.let { previewOf(it) }.orEmpty()
-            if (last.isNotBlank()) Text(last, maxLines = 1, overflow = TextOverflow.Ellipsis, fontSize = 12.sp, color = c.ink3)
+        DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+            DropdownMenuItem(text = { Text("Mudar título") }, leadingIcon = { Icon(Icons.Rounded.Edit, null) }, onClick = {
+                title = s.title; menu = false; renameDialog = true
+            })
+            DropdownMenuItem(text = { Text("Excluir chat", color = c.err) }, leadingIcon = { Icon(Icons.Rounded.DeleteOutline, null, tint = c.err) }, onClick = {
+                menu = false; deleteDialog = true
+            })
         }
-        StatusDot(s.status)
     }
+    if (renameDialog) AlertDialog(
+        onDismissRequest = { renameDialog = false },
+        title = { Text("Mudar título do chat") },
+        text = { OutlinedTextField(value = title, onValueChange = { title = it }, singleLine = true, label = { Text("Título") }) },
+        confirmButton = { TextButton(onClick = { val t = title.trim(); if (t.isNotEmpty()) store.editSession(s.id) { it.copy(title = t) }; renameDialog = false }) { Text("Salvar") } },
+        dismissButton = { TextButton(onClick = { renameDialog = false }) { Text("Cancelar") } }
+    )
+    if (deleteDialog) AlertDialog(
+        onDismissRequest = { deleteDialog = false },
+        title = { Text("Excluir conversa?") },
+        text = { Text("O chat “${s.title}” e seu histórico serão removidos deste aparelho.") },
+        confirmButton = { TextButton(onClick = { store.deleteSession(s.id); deleteDialog = false }) { Text("Excluir", color = c.err) } },
+        dismissButton = { TextButton(onClick = { deleteDialog = false }) { Text("Cancelar") } }
+    )
 }
 
 @Composable
