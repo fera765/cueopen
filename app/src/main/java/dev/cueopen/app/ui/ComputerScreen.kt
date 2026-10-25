@@ -101,7 +101,7 @@ fun ComputerScreen(nav: NavController, sessionId: String, initialTab: String?) {
         Box(Modifier.fillMaxSize().padding(pad).consumeWindowInsets(pad).imePadding()) {
             when (tab) {
                 "terminal" -> TerminalPane(sessionId)
-                "browser" -> BrowserPane()
+                "browser" -> BrowserPane(sessionId)
                 else -> FilesPane(app.sandbox.workspaceFor(sessionId), "/root/workspace/$sessionId")
             }
         }
@@ -237,9 +237,10 @@ private fun ExtraKeys(
 }
 
 @Composable
-fun BrowserPane() {
+fun BrowserPane(sessionId: String) {
     val app = CueApp.instance
-    val ui by app.browser.ui.collectAsStateWithLifecycle()
+    val browser = app.browserFor(sessionId)
+    val ui by browser.ui.collectAsStateWithLifecycle()
     val c = Cue.c
     var url by remember(ui.url) { mutableStateOf(if (ui.url.startsWith("file:///android_asset")) "" else ui.url) }
     val scope = rememberCoroutineScope()
@@ -248,23 +249,23 @@ fun BrowserPane() {
     val ctx = LocalContext.current
     Column(Modifier.fillMaxSize()) {
         Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-            IconButton({ scope.launch { app.browser.uiBack() } }, enabled = ui.canBack) { Icon(Icons.AutoMirrored.Rounded.ArrowBack, "Voltar") }
-            IconButton({ app.browser.view().goForward() }, enabled = ui.canForward) { Icon(Icons.AutoMirrored.Rounded.ArrowForward, "Avançar") }
+            IconButton({ scope.launch { browser.uiBack() } }, enabled = ui.canBack) { Icon(Icons.AutoMirrored.Rounded.ArrowBack, "Voltar") }
+            IconButton({ browser.view().goForward() }, enabled = ui.canForward) { Icon(Icons.AutoMirrored.Rounded.ArrowForward, "Avançar") }
             Row(Modifier.weight(1f).clip(CircleShape).background(c.surface2).padding(horizontal = 12.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
                 Icon(if (ui.url.startsWith("https")) Icons.Rounded.Lock else Icons.Rounded.Public, null, Modifier.size(14.dp), tint = c.ink3)
                 Spacer(Modifier.width(6.dp))
                 BasicTextField(url, { url = it }, singleLine = true, textStyle = MaterialTheme.typography.bodyMedium.copy(color = c.ink),
                     cursorBrush = SolidColor(c.accent), modifier = Modifier.weight(1f),
                     keyboardOptions = KeyboardOptions(imeAction = ImeAction.Go),
-                    keyboardActions = KeyboardActions(onGo = { scope.launch { app.browser.navigate(url) } }))
+                    keyboardActions = KeyboardActions(onGo = { scope.launch { browser.navigate(url) } }))
             }
-            IconButton({ scope.launch { app.browser.uiReload() } }) { Icon(if (ui.loading) Icons.Rounded.Close else Icons.Rounded.Refresh, "Recarregar") }
+            IconButton({ scope.launch { browser.uiReload() } }) { Icon(if (ui.loading) Icons.Rounded.Close else Icons.Rounded.Refresh, "Recarregar") }
             Box {
                 IconButton({ menu = true }) { Icon(Icons.Rounded.MoreVert, "Mais") }
                 DropdownMenu(menu, { menu = false }) {
-                    DropdownMenuItem({ Text("Página inicial") }, { menu = false; app.browser.home() }, leadingIcon = { Icon(Icons.Rounded.Home, null) })
+                    DropdownMenuItem({ Text("Página inicial") }, { menu = false; browser.home() }, leadingIcon = { Icon(Icons.Rounded.Home, null) })
                     DropdownMenuItem({ Text(if (devtools) "Ocultar Rede/Console" else "Rede e Console") }, { menu = false; devtools = !devtools }, leadingIcon = { Icon(Icons.Rounded.NetworkCheck, null) })
-                    DropdownMenuItem({ Text(if (ui.desktop) "Versão mobile" else "Versão desktop") }, { menu = false; app.browser.setDesktop(!ui.desktop) }, leadingIcon = { Icon(Icons.Rounded.DesktopWindows, null) })
+                    DropdownMenuItem({ Text(if (ui.desktop) "Versão mobile" else "Versão desktop") }, { menu = false; browser.setDesktop(!ui.desktop) }, leadingIcon = { Icon(Icons.Rounded.DesktopWindows, null) })
                     DropdownMenuItem({ Text("Abrir no navegador do sistema") }, {
                         menu = false
                         runCatching { ctx.startActivity(android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse(ui.url))) }
@@ -281,24 +282,23 @@ fun BrowserPane() {
             Row(Modifier.fillMaxWidth().background(c.accentSoft).padding(horizontal = 16.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
                 Icon(Icons.Rounded.SmartToy, null, Modifier.size(16.dp), tint = c.accent); Spacer(Modifier.width(6.dp))
                 Text("O agente está controlando o browser", fontSize = 12.sp, modifier = Modifier.weight(1f))
-                Text("Assumir", fontSize = 12.sp, color = c.accent, fontWeight = FontWeight.Bold, modifier = Modifier.clickable { app.browser.setAgentControl(false) })
+                Text("Assumir", fontSize = 12.sp, color = c.accent, fontWeight = FontWeight.Bold, modifier = Modifier.clickable { browser.setAgentControl(false) })
             }
         }
-        AndroidView(factory = { c2 -> app.browser.view(c2) }, modifier = Modifier.fillMaxWidth().weight(1f))
-        if (devtools) DevToolsPanel(Modifier.fillMaxWidth().height(300.dp))
+        AndroidView(factory = { c2 -> browser.view(c2) }, modifier = Modifier.fillMaxWidth().weight(1f))
+        if (devtools) DevToolsPanel(browser, Modifier.fillMaxWidth().height(300.dp))
     }
 }
 
 /** Painel estilo DevTools: requisições de rede (com filtro por tipo) e console JS. */
 @Composable
-private fun DevToolsPanel(modifier: Modifier) {
-    val app = CueApp.instance
-    val net by app.browser.net.collectAsStateWithLifecycle()
-    val console by app.browser.console.collectAsStateWithLifecycle()
-    val ui by app.browser.ui.collectAsStateWithLifecycle()
+private fun DevToolsPanel(browser: dev.cueopen.browser.BrowserHost, modifier: Modifier) {
+    val net by browser.net.collectAsStateWithLifecycle()
+    val console by browser.console.collectAsStateWithLifecycle()
+    val ui by browser.ui.collectAsStateWithLifecycle()
     var tab by remember { mutableStateOf("net") }
     var type by remember { mutableStateOf("all") }
-    var selected by remember { mutableStateOf<dev.cueopen.app.browser.BrowserHost.NetEntry?>(null) }
+    var selected by remember { mutableStateOf<dev.cueopen.browser.BrowserHost.NetEntry?>(null) }
     val c = Cue.c
     Column(modifier.background(c.surface).border(1.dp, c.line)) {
         Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -307,7 +307,7 @@ private fun DevToolsPanel(modifier: Modifier) {
             Chip("Console (${console.size})", tab == "console") { tab = "console" }
             Spacer(Modifier.weight(1f))
             Text(ui.netType, fontSize = 11.sp, color = if (ui.online) c.ok else c.err)
-            IconButton({ app.browser.clearNet() }) { Icon(Icons.Rounded.DeleteSweep, "Limpar", Modifier.size(18.dp)) }
+            IconButton({ browser.clearNet() }) { Icon(Icons.Rounded.DeleteSweep, "Limpar", Modifier.size(18.dp)) }
         }
         if (tab == "net") {
             Row(Modifier.horizontalScroll(rememberScrollState()).padding(horizontal = 8.dp), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
