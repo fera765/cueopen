@@ -107,6 +107,11 @@ data class Session(
     val tokensOut: Long = 0,
     val tokensCached: Long = 0,
     val llmCalls: Int = 0,
+    /** Modelo usado na chamada mais recente desta sessão. */
+    val modelUsed: String? = null,
+    /** Custo estimado acumulado em USD apenas para chamadas com preço conhecido. */
+    val costUsd: Double = 0.0,
+    val hasPricedUsage: Boolean = false,
     val autoCompact: Boolean = true,
 )
 
