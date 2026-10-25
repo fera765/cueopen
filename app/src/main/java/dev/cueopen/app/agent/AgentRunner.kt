@@ -919,7 +919,17 @@ class AgentRunner(
             }
         }
         val workerJobs = workers.map { child ->
-            scope.launch { loop(child.id, maxStepsOverride = 6, tokenBudgetOverride = budget) }
+            scope.launch {
+                try {
+                    loop(child.id, maxStepsOverride = 6, tokenBudgetOverride = budget)
+                } catch (cancel: kotlinx.coroutines.CancellationException) {
+                    store.editSession(child.id) { it.copy(status = SessionStatus.STOPPED) }
+                    throw cancel
+                } catch (t: Throwable) {
+                    store.addItem(child.id, ChatItem.Error(text = "Worker falhou: " + (t.message ?: t.toString()).take(300)))
+                    store.editSession(child.id) { it.copy(status = SessionStatus.ERROR) }
+                }
+            }
         }
         synchronized(childJobsByParent) { childJobsByParent[sessionId] = workerJobs.toMutableList() }
         try {
