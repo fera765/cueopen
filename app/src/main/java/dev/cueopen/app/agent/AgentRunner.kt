@@ -1,6 +1,6 @@
 package dev.cueopen.app.agent
 
-import dev.cueopen.app.browserFor(sessionId).BrowserHost
+import dev.cueopen.app.browser.BrowserHost
 import dev.cueopen.app.data.AgentProfile
 import dev.cueopen.app.data.ChatItem
 import dev.cueopen.app.data.KnowledgeItem
