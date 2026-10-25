@@ -922,16 +922,41 @@ class AgentRunner(
                 terminal.runAgentCommand("mkdir -p " + shQuote(target) + " && cp -a " + shQuote(parentPath) + "/. " + shQuote(target) + "/ 2>/dev/null || true", 45L, false)
             }
         }
+        // Publica uma pílula por worker na conversa principal para que o usuário acompanhe o progresso real.
+        val workerSteps = workers.associate { child ->
+            val title = child.title.removePrefix("[Worker ")
+            val step = ChatItem.Step(
+                tool = "multi_agent_worker",
+                title = "Agente $title",
+                args = "Executando",
+                result = "",
+                status = StepStatus.RUNNING
+            )
+            store.addItem(sessionId, step)
+            child.id to step
+        }
         val workerJobs = workers.map { child ->
             scope.launch {
+                val parentStep = workerSteps[child.id]
                 try {
                     loop(child.id, maxStepsOverride = 6, tokenBudgetOverride = budget)
+                    val finished = store.session(child.id)
+                    val failed = finished?.status == SessionStatus.ERROR
+                    val summary = (finished?.items?.lastOrNull { it is ChatItem.Assistant } as? ChatItem.Assistant)?.text.orEmpty()
+                    if (parentStep != null) store.replaceItem(sessionId, parentStep.copy(
+                        title = parentStep.title.substringBefore(" ·"),
+                        args = if (failed) "Falhou" else "Concluído",
+                        result = summary.ifBlank { if (failed) "O agente terminou com erro." else "Subtarefa concluída." }.take(1800),
+                        status = if (failed) StepStatus.ERROR else StepStatus.OK
+                    ))
                 } catch (cancel: kotlinx.coroutines.CancellationException) {
                     store.editSession(child.id) { it.copy(status = SessionStatus.STOPPED) }
+                    if (parentStep != null) store.replaceItem(sessionId, parentStep.copy(args = "Cancelado", result = "Subtarefa cancelada.", status = StepStatus.ERROR))
                     throw cancel
                 } catch (t: Throwable) {
                     store.addItem(child.id, ChatItem.Error(text = "Worker falhou: " + (t.message ?: t.toString()).take(300)))
                     store.editSession(child.id) { it.copy(status = SessionStatus.ERROR) }
+                    if (parentStep != null) store.replaceItem(sessionId, parentStep.copy(args = "Falhou", result = (t.message ?: "Erro do worker").take(1800), status = StepStatus.ERROR))
                 }
             }
         }
