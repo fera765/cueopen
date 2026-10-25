@@ -75,7 +75,7 @@ class TerminalManager(private val ctx: Context, private val sandbox: Sandbox) {
             // First launch clones the installed base; it never downloads Alpine per chat.
             check(runBlocking { sandbox.ensureEnvironment(key) }) { "Could not create this chat's Linux environment" }
             File(sandbox.publicFor(key), cwd.removePrefix("/root/")).mkdirs()
-            installShellHook()
+            installShellHook(key)
             val shell = "cd '$cwd' 2>/dev/null; if command -v bash >/dev/null 2>&1; then exec bash --rcfile /root/.bashrc -i; else exec sh -i; fi"
             term = TerminalSession(
                 "/system/bin/sh", sandbox.prefix.absolutePath,
@@ -161,7 +161,7 @@ class TerminalManager(private val ctx: Context, private val sandbox: Sandbox) {
         }
     }
 
-    private fun installShellHook() {
+    private fun installShellHook(key: String) {
         val cue = File(sandbox.publicFor(key), ".cue").apply { mkdirs() }
         File(cue, "hook.sh").writeText(
             "# CueOpen: avisa o app (sequência OSC invisível) sempre que o prompt volta\n" +
