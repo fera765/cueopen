@@ -1020,19 +1020,10 @@ class AgentRunner(
         val count = minOf(tasks.size, requestedWorkers.coerceIn(1, 5))
         val budget = requestedBudget.coerceIn(2000, 12000).toLong()
         val parentPath = sandbox.guestPath(sessionId)
-        val terminal = terminals.get(sessionId, parentPath)
-        val requestedRepoPath = repoPathArg.trim().ifBlank { parentPath }
-        val probe = terminal.runAgentCommand(
-            "git -C " + shQuote(requestedRepoPath) +
-                " rev-parse --show-toplevel && git -C " + shQuote(requestedRepoPath) +
-                " rev-parse HEAD && git -C " + shQuote(requestedRepoPath) + " status --porcelain",
-            20L, false
-        )
-        val lines = probe.output.lines().map { it.trim() }.filter { it.isNotBlank() }
-        val gitRoot = lines.firstOrNull()?.takeIf { probe.exitCode == 0 && it.startsWith("/") }
-        val baseSha = lines.getOrNull(1)?.takeIf { it.matches(Regex("[0-9a-fA-F]{40}")) }
-        val dirty = gitRoot != null && baseSha != null && lines.drop(2).isNotEmpty()
-        if (dirty && !allowDirtyWorkspace) return "Multi Agents pausado: o repositório tem alterações não commitadas. Salve-as antes de criar worktrees isoladas."
+        // Não use git worktree dentro de /root/workspace: cada sessão é montada num rootfs
+        // público diferente, e a pasta de destino já existe. A cópia é feita no filesystem host.
+        val gitRoot: String? = null
+        val baseSha: String? = null
 
         val workers = tasks.take(count).mapIndexed { index, task ->
             Session(
@@ -1076,15 +1067,13 @@ class AgentRunner(
                 return "Não iniciei workers porque a criação de worktrees falhou:\n" + setupErrors.joinToString("\n")
             }
         } else {
+            val source = sandbox.workspaceFor(sessionId)
             for (child in workers) {
-                val target = sandbox.guestPath(child.id)
-                val copy = terminal.runAgentCommand(
-                    "mkdir -p " + shQuote(target) + " && cp -a " + shQuote(parentPath) + "/. " + shQuote(target) + "/ 2>/dev/null",
-                    45L, false
-                )
-                if (copy.exitCode != 0) {
+                val target = sandbox.workspaceFor(child.id)
+                val copied = runCatching { source.copyRecursively(target, overwrite = true); true }.getOrElse { false }
+                if (!copied) {
                     workers.forEach { store.deleteSession(it.id) }
-                    return "Não iniciei os workers: falhou a cópia isolada do workspace (" + copy.output.takeLast(300) + ")."
+                    return "Não iniciei os workers: falhou a cópia isolada do workspace para " + child.id + "."
                 }
             }
         }
@@ -1215,21 +1204,25 @@ class AgentRunner(
                     appendReportLine(report, "Agente " + (index + 1) + ": artefatos não integrados; resultado parcial preservado.")
                     return@forEachIndexed
                 }
-                val source = sandbox.workspaceFor(child.id).absolutePath
-                val dest = sandbox.workspaceFor(sessionId).absolutePath
-                val sync = terminal.runAgentCommand(
-                    "cd " + shQuote(source) +
-                        " && find . -type f ! -path './.git/*' ! -name '*.worker-*' -print0 | while IFS= read -r -d '' f; do " +
-                        "mkdir -p " + shQuote(dest) + "/\"\$(dirname \"\$f\")\"; " +
-                        "if [ ! -e " + shQuote(dest) + "/\"\$f\" ]; then cp -p \"\$f\" " +
-                        shQuote(dest) + "/\"\$f\"; elif ! cmp -s \"\$f\" " + shQuote(dest) +
-                        "/\"\$f\"; then cp -p \"\$f\" " + shQuote(dest) +
-                        "/\"\$f.worker-" + (index + 1) + "\"; fi; done",
-                    45L, false
-                )
-                if (sync.exitCode == 0) integratedCount++ else integrationFailures++
+                val source = sandbox.workspaceFor(child.id)
+                val dest = sandbox.workspaceFor(sessionId)
+                val synced = runCatching {
+                    source.walkTopDown()
+                        .filter { it.isFile && !it.toRelativeString(source).startsWith(".git/") && !it.toRelativeString(source).startsWith(".cue/") && !it.name.endsWith(Regex("\\.worker-\\d+$").pattern) }
+                        .forEach { file ->
+                            val rel = file.relativeTo(source).path
+                            val target = File(dest, rel)
+                            target.parentFile?.mkdirs()
+                            if (!target.exists()) file.copyTo(target, overwrite = false)
+                            else if (target.readBytes().contentEquals(file.readBytes()).not()) {
+                                file.copyTo(File(target.parentFile, target.name + ".worker-" + (index + 1)), overwrite = true)
+                            }
+                        }
+                    true
+                }.getOrElse { false }
+                if (synced) integratedCount++ else integrationFailures++
                 appendReportLine(report, "Agente " + (index + 1) + ": " +
-                    if (sync.exitCode == 0) "sincronização concluída; divergências com sufixo .worker-" + (index + 1) + "."
+                    if (synced) "sincronização concluída; divergências com sufixo .worker-" + (index + 1) + "."
                     else "sincronização parcial; revisar workspace.")
             }
         }
