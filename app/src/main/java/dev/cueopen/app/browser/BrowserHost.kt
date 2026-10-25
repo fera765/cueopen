@@ -142,7 +142,13 @@ class BrowserHost(private val appCtx: Context) {
             @Suppress("DEPRECATION") allowFileAccessFromFileURLs = true
             @Suppress("DEPRECATION") allowUniversalAccessFromFileURLs = true
             mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
-            userAgentString = userAgentString.replace("; wv", "")
+            // O WebView padrão anuncia "Version/4.0" e "wv", identificadores que alguns sites
+            // modernos (incluindo portais de notícias) recusam como navegador incompatível.
+            // Manter o motor real do WebView, mas anunciar Chrome Android sem o marcador de WebView.
+            userAgentString = userAgentString
+                .replace("; wv", "")
+                .replace(" Version/4.0", "")
+                .replace(Regex("; Android [^;]+; [^;]+ Build/[^;)]+"), "; Android 12")
             cacheMode = WebSettings.LOAD_DEFAULT
             mediaPlaybackRequiresUserGesture = false
             setSupportMultipleWindows(false)
@@ -249,9 +255,13 @@ class BrowserHost(private val appCtx: Context) {
     /** Alterna entre versão mobile e desktop dos sites. */
     fun setDesktop(on: Boolean) {
         val v = _view ?: return
-        v.settings.userAgentString = if (on) "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36" else defaultUa
-        v.settings.useWideViewPort = true; v.settings.loadWithOverviewMode = true
-        _ui.value = _ui.value.copy(desktop = on); v.reload()
+        v.settings.userAgentString = if (on)
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36"
+        else defaultUa
+        v.settings.useWideViewPort = true
+        v.settings.loadWithOverviewMode = true
+        _ui.value = _ui.value.copy(desktop = on)
+        v.reload()
     }
 
     /** Completa duração/tamanho das requisições com a Resource Timing API da página. */
