@@ -211,7 +211,7 @@ fun BrowserPane() {
     val ctx = LocalContext.current
     Column(Modifier.fillMaxSize()) {
         Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-            IconButton({ scope.launch { app.browser.back() } }, enabled = ui.canBack) { Icon(Icons.AutoMirrored.Rounded.ArrowBack, "Voltar") }
+            IconButton({ scope.launch { app.browser.uiBack() } }, enabled = ui.canBack) { Icon(Icons.AutoMirrored.Rounded.ArrowBack, "Voltar") }
             IconButton({ app.browser.view().goForward() }, enabled = ui.canForward) { Icon(Icons.AutoMirrored.Rounded.ArrowForward, "Avançar") }
             Row(Modifier.weight(1f).clip(CircleShape).background(c.surface2).padding(horizontal = 12.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
                 Icon(if (ui.url.startsWith("https")) Icons.Rounded.Lock else Icons.Rounded.Public, null, Modifier.size(14.dp), tint = c.ink3)
@@ -221,7 +221,7 @@ fun BrowserPane() {
                     keyboardOptions = KeyboardOptions(imeAction = ImeAction.Go),
                     keyboardActions = KeyboardActions(onGo = { scope.launch { app.browser.navigate(url) } }))
             }
-            IconButton({ scope.launch { app.browser.reload() } }) { Icon(if (ui.loading) Icons.Rounded.Close else Icons.Rounded.Refresh, "Recarregar") }
+            IconButton({ scope.launch { app.browser.uiReload() } }) { Icon(if (ui.loading) Icons.Rounded.Close else Icons.Rounded.Refresh, "Recarregar") }
             Box {
                 IconButton({ menu = true }) { Icon(Icons.Rounded.MoreVert, "Mais") }
                 DropdownMenu(menu, { menu = false }) {
