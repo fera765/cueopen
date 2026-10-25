@@ -242,9 +242,15 @@ fun ReplayScreen(nav: NavController, sessionId: String) {
     var playing by remember { mutableStateOf(true) }
     var speed by remember { mutableFloatStateOf(1f) }
     val c = Cue.c
+    val replayList = androidx.compose.foundation.lazy.rememberLazyListState()
     LaunchedEffect(playing, speed) {
         while (playing && shown < session.items.size) { delay((900 / speed).toLong()); shown++ }
         if (shown >= session.items.size) playing = false
+    }
+    // Mantém o item recém-revelado visível durante a reprodução e volta ao início ao reiniciar.
+    LaunchedEffect(shown, session.items.size) {
+        if (shown > 0) replayList.animateScrollToItem((shown - 1).coerceAtMost(session.items.lastIndex))
+        else if (session.items.isNotEmpty()) replayList.scrollToItem(0)
     }
     Scaffold(containerColor = c.bg, topBar = { CueTopBar("Replay · ${session.title}", { nav.popBackStack() }) }, bottomBar = {
         Column(Modifier.navigationBarsPadding().padding(16.dp)) {
@@ -260,7 +266,7 @@ fun ReplayScreen(nav: NavController, sessionId: String) {
             }
         }
     }) { pad ->
-        LazyColumn(Modifier.padding(pad), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        LazyColumn(state = replayList, modifier = Modifier.padding(pad), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             itemsIndexed(session.items.take(shown), key = { _, it -> it.id }) { _, item -> TimelineItem(item, onOpenComputer = {}) }
         }
     }
