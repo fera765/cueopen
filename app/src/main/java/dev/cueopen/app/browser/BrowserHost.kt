@@ -294,7 +294,8 @@ class BrowserHost(private val appCtx: Context) {
         val js = """
             (function(){
               var els=[].slice.call(document.querySelectorAll('a,button,input,textarea,select,[role=button],[onclick],summary,[role=link],[role=checkbox],[role=tab]'));
-              var out=[],i=0, headings=[];\n              [].slice.call(document.querySelectorAll("h1,h2,h3,h4,[role=heading]")).forEach(function(h){var t=(h.innerText||h.getAttribute("aria-label")||"").trim().replace(/\\s+/g," ");if(t)headings.push({level:h.tagName.toLowerCase(),text:t.slice(0,180)});});
+              var out=[],i=0, headings=[];
+              [].slice.call(document.querySelectorAll("h1,h2,h3,h4,[role=heading]")).forEach(function(h){var t=(h.innerText||h.getAttribute("aria-label")||"").trim().replace(/\\s+/g," ");if(t)headings.push({level:h.tagName.toLowerCase(),text:t.slice(0,180)});});
               els.forEach(function(e){
                 var r=e.getBoundingClientRect(); if(r.width<2||r.height<2) return;
                 var st=getComputedStyle(e); if(st.visibility=='hidden'||st.display=='none') return;
@@ -302,10 +303,13 @@ class BrowserHost(private val appCtx: Context) {
                 var label=(e.innerText||e.value||e.placeholder||e.getAttribute('aria-label')||e.title||e.name||'').trim().replace(/\s+/g,' ').slice(0,80);
                 var tag=e.tagName.toLowerCase(); if(tag=='input') tag+='['+(e.type||'text')+']';
                 var href=e.href?(' -> '+String(e.href).slice(0,120)):'';
-                var role=e.getAttribute("role")||({A:"link",BUTTON:"button",INPUT:"textbox",TEXTAREA:"textbox",SELECT:"combobox"}[e.tagName]||tag);\n                var extra=e.disabled?" [disabled]":""; if(e.getAttribute("aria-expanded"))extra+=" [expanded="+e.getAttribute("aria-expanded")+"]";\n                out.push("["+i+"] "+role+" \""+label+"\""+extra+href); i++;
+                var role=e.getAttribute("role")||({A:"link",BUTTON:"button",INPUT:"textbox",TEXTAREA:"textbox",SELECT:"combobox"}[e.tagName]||tag);
+                var extra=e.disabled?" [disabled]":""; if(e.getAttribute("aria-expanded"))extra+=" [expanded="+e.getAttribute("aria-expanded")+"]";\n                out.push("["+i+"] "+role+" \""+label+"\""+extra+href); i++;
               });
               var text=(document.body?document.body.innerText:'').replace(/\n{3,}/g,'\n\n');
-              var main=document.querySelector("main,[role=main,article")||document.body;\n              var links=[].slice.call(document.querySelectorAll("a[href]")).filter(function(a){return a.innerText.trim()}).slice(0,80).map(function(a){return {text:a.innerText.trim().replace(/\\s+/g," ").slice(0,100),href:a.href}});\n              return JSON.stringify({url:location.href,title:document.title,text:text,headings:headings.slice(0,80),landmark:main?main.tagName.toLowerCase():"body",links:links,elements:out.slice(0,180)});
+              var main=document.querySelector("main,[role=main],article")||document.body;
+              var links=[].slice.call(document.querySelectorAll("a[href]")).filter(function(a){return a.innerText.trim()}).slice(0,80).map(function(a){return {text:a.innerText.trim().replace(/\\s+/g," ").slice(0,100),href:a.href}});
+              return JSON.stringify({url:location.href,title:document.title,text:text,headings:headings.slice(0,80),landmark:main?main.tagName.toLowerCase():"body",links:links,elements:out.slice(0,180)});
             })()
         """.trimIndent()
         val raw = eval(js)
@@ -314,6 +318,10 @@ class BrowserHost(private val appCtx: Context) {
             val els = o.getJSONArray("elements")
             buildString {
                 append("URL: ${o.optString("url")}\nTítulo: ${o.optString("title")}\n\n--- Conteúdo ---\n")
+                append("--- Estrutura (headings) ---\n")
+                val hs = o.optJSONArray("headings") ?: JSONArray()
+                for (i in 0 until hs.length()) { val h=hs.optJSONObject(i) ?: continue; append("${h.optString("level")} ${h.optString("text")}\n") }
+                append("\n--- Conteúdo principal (${o.optString("landmark", "body")}) ---\n")
                 append(o.optString("text").take(maxChars))
                 append("\n\n--- Elementos interativos ---\n")
                 for (i in 0 until els.length()) append(els.getString(i)).append('\n')
