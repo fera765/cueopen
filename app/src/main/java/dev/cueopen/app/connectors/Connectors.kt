@@ -77,7 +77,8 @@ object Connectors {
         val out = mutableListOf<Catalog>()
         for (i in 0 until servers.length()) {
             val srv = servers.optJSONObject(i)?.optJSONObject("server") ?: continue
-            val name = srv.optString("name").ifBlank { continue }
+            val name = srv.optString("name")
+            if (name.isBlank()) continue
             val desc = srv.optString("description")
             var remoteUrl: String? = null
             srv.optJSONArray("remotes")?.let { rem ->
