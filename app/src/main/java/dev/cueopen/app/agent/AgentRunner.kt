@@ -878,7 +878,7 @@ class AgentRunner(
         val parentPath = sandbox.guestPath(sessionId)
         val terminal = terminals.get(sessionId, parentPath)
         val requestedRepoPath = repoPathArg.trim().ifBlank { parentPath }
-        val probe = terminal.runAgentCommand("git -C " + shQuote(requestedRepoPath) + " rev-parse --show-toplevel && git -C " + shQuote(parentPath) + " rev-parse HEAD && git -C " + shQuote(parentPath) + " status --porcelain", 20, false)
+        val probe = terminal.runAgentCommand("git -C " + shQuote(requestedRepoPath) + " rev-parse --show-toplevel && git -C " + shQuote(requestedRepoPath) + " rev-parse HEAD && git -C " + shQuote(requestedRepoPath) + " status --porcelain", 20, false)
         val lines = probe.output.lines().map { it.trim() }.filter { it.isNotBlank() }
         val gitRoot = lines.firstOrNull()?.takeIf { probe.exitCode == 0 && it.startsWith("/") }
         val baseSha = lines.getOrNull(1)?.takeIf { it.matches(Regex("[0-9a-fA-F]{40}")) }
