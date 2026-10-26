@@ -7,7 +7,9 @@ import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
+import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Request
 import java.io.IOException
 import java.util.concurrent.TimeUnit
@@ -42,7 +44,7 @@ class SolanaRpcClient(
 
         val request = Request.Builder()
             .url(endpoint)
-            .post(okhttp3.RequestBody.create(JSON_MEDIA_TYPE, payload))
+            .post(payload.toRequestBody(JSON_MEDIA_TYPE.toMediaType()))
             .header("Accept", "application/json")
             .build()
 
