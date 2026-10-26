@@ -24,7 +24,7 @@ class SolanaTransferExecutor(
     private val vault = WalletSecretVault(context.applicationContext)
     private val policyStore = WalletAgentPolicyStore(context.applicationContext)
 
-    suspend fun signAuthorizedTransfer(
+    internal suspend fun signAuthorizedTransfer(
         requestId: String,
         policy: WalletAgentPolicy,
         windowStartEpochMs: Long,
@@ -148,7 +148,7 @@ class SolanaTransferExecutor(
         }
     }
 
-    suspend fun broadcastPersistedTransfer(
+    internal suspend fun broadcastPersistedTransfer(
         requestId: String,
         expectedAgentId: String,
         policy: WalletAgentPolicy,
@@ -224,7 +224,7 @@ class SolanaTransferExecutor(
             }
         }
 
-    suspend fun reconcileSignature(
+    internal suspend fun reconcileSignature(
         requestId: String,
         expectedAgentId: String
     ): TransferExecutionResult = withContext(Dispatchers.IO) {
