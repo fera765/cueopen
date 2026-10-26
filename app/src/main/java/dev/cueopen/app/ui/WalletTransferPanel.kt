@@ -385,6 +385,9 @@ fun WalletTransferPanel(context: Context, repository: SolanaWalletRepository) {
                         "\nValor: " + (current?.amountLamports?.let {
                             String.format(Locale.US, "%.9f SOL", it / LAMPORTS_PER_SOL)
                         } ?: "indisponível") +
+                        "\nTaxa estimada: " + ((result as? TransferExecutionResult.Signed)?.feeLamports?.let {
+                            String.format(Locale.US, "%.9f SOL", it / LAMPORTS_PER_SOL)
+                        } ?: "indisponível") +
                         "\n\nTransações confirmadas não podem ser desfeitas."
                 )
             },
