@@ -194,7 +194,7 @@ fun WalletScreen(nav: NavController) {
             if (address != null) {
                 Text("Endereço público", style = androidx.compose.material3.MaterialTheme.typography.titleMedium)
                 Text(address!!, color = c.ink2)
-                WalletReceiveQr(address!!)
+                WalletReceiveQr(address!!, selectedNetwork)
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     OutlinedButton(onClick = {
                         val clipboard = context.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
