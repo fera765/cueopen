@@ -56,3 +56,22 @@ These are implementation features, not evidence that the entire wallet is releas
 Implemented in the repository: local BIP-39/Solana key derivation and restore path; encrypted local secret vault; backup confirmation; public address and QR UI; read-only balance; mainnet/devnet selection; manual SOL transfer UI; typed transfer intent; deny-by-default policy; SQLite request ledger with spend reservations and idempotency; local transaction signing, simulation, signed-byte persistence, explicit broadcast confirmation and signature reconciliation; per-agent read grants; and an agent SOL request → local approval queue → local signing → separate human broadcast confirmation path. Tests have been authored for several components, including per-agent read/transfer policies and intent validation.
 
 Not verified yet: automated tests/build have not been run, per the current workflow decision that the user will perform installation and end-to-end manual checks. The wallet must not be considered release-ready until those checks and the documented release gates are satisfied. Token swaps are still not implemented; this phase supports SOL transfers only. Do not use real funds until the manual validation and security review are complete.
+
+
+## Manual validation checklist for the current SOL/agent flow
+
+Use **Devnet only** for the first pass and a disposable test wallet. Do not paste a recovery phrase into chat, screenshots, logs, or bug reports.
+
+1. Create a wallet, write down the recovery phrase offline, confirm the backup, then verify the public address and QR show only the public address.
+2. Switch to Devnet and verify the displayed balance is explicitly labeled Devnet. Temporarily disable network access and confirm errors do not silently fall back to Mainnet.
+3. Open agent permissions. Verify all grants start disabled. Grant only address/balance reads to one test agent and confirm a different agent and normal chat cannot call those tools.
+4. Enable “Solicitar transferência SOL” for the test agent. Ask that agent for a small Devnet transfer request to a valid test address. Verify the tool response says the request is pending and no transaction was signed or sent.
+5. In the wallet approval queue, verify agent name, recipient, amount, and network. Cancel one request and confirm it never reaches signing.
+6. Create another small Devnet request. Approve/sign it in the wallet, then cancel the final broadcast dialog and confirm it is still not submitted.
+7. Repeat and explicitly confirm broadcast. Verify a signature is persisted, status can be reconciled, and the explorer link uses Devnet.
+8. Revoke the agent transfer grant before approval and verify the pending request cannot be approved/signed. Revoke after signing and verify broadcast is blocked.
+9. Attempt invalid addresses, zero/negative amounts, more than nine decimals, amounts above 0.05 SOL, and cumulative agent spend above 0.10 SOL/day; each should be rejected before signing.
+10. Reopen the app with a signed-but-not-broadcast or UNKNOWN request and verify the agent request history lets you recover it without blindly rebuilding/resending.
+11. Confirm neither recovery phrase nor private key appears in chat/tool output, agent history, logs, or the request ledger.
+
+Record any failure with app version, network, request state, and public transaction signature only; never include secret material.
