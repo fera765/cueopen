@@ -1,12 +1,8 @@
 package dev.cueopen.app.agent
 
-import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import java.util.UUID
-import java.util.concurrent.ConcurrentHashMap
 
 /**
  * Lifecycle registry for agent tool calls. The executor owns the work; this registry records
@@ -29,7 +25,6 @@ class ToolExecutionManager {
 
     private val lock = Any()
     private val records = LinkedHashMap<String, Execution>()
-    private val activeJobs = ConcurrentHashMap<String, Job>()
     private val _state = MutableStateFlow<List<Execution>>(emptyList())
     val state: StateFlow<List<Execution>> = _state
 
@@ -44,14 +39,9 @@ class ToolExecutionManager {
         return id
     }
 
-    suspend fun bindCurrentJob(id: String) {
-        activeJobs[id] = currentCoroutineContext()[Job] ?: return
-    }
-
     fun finish(id: String, output: String) = update(id, Status.COMPLETED, output.takeLast(12_000), null)
     fun fail(id: String, message: String) = update(id, Status.FAILED, "", message.take(2000))
     fun cancel(id: String) {
-        activeJobs[id]?.cancel(CancellationException("Tool execution cancelled"))
         update(id, Status.CANCELLED, "", "Execution cancelled")
     }
 
@@ -64,7 +54,6 @@ class ToolExecutionManager {
         synchronized(lock) {
             val old = records[id] ?: return
             records[id] = old.copy(status = status, updatedAt = System.currentTimeMillis(), output = output, error = error)
-            activeJobs.remove(id)
             publishLocked()
         }
     }
