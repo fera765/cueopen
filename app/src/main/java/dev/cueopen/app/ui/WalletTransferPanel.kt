@@ -428,6 +428,59 @@ fun WalletTransferPanel(context: Context, repository: SolanaWalletRepository, ne
                 it.agentId != WalletAgentPolicyStore.manualAgentId(network) &&
                 it.state == LedgerState.AWAITING_APPROVAL
         }
+        val recoverableAgentRequests = recentRecords.filter {
+            it.network == network &&
+                it.agentId != WalletAgentPolicyStore.manualAgentId(network) &&
+                it.state in setOf(
+                    LedgerState.SIGNED, LedgerState.SUBMITTED, LedgerState.UNKNOWN,
+                    LedgerState.CONFIRMED, LedgerState.SIGNING, LedgerState.AUTHORIZED
+                )
+        }
+        if (recoverableAgentRequests.isNotEmpty()) {
+            Text("Histórico de pedidos dos agentes", style = androidx.compose.material3.MaterialTheme.typography.titleMedium)
+            recoverableAgentRequests.forEach { entry ->
+                Column(
+                    modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    Text((CueApp.instance.store.agent(entry.agentId)?.name ?: entry.agentId) + " · " + entry.state.name)
+                    Text(entry.recipientAddress)
+                    Text(String.format(Locale.US, "%.9f SOL", entry.amountLamports / LAMPORTS_PER_SOL))
+                    entry.signature?.let { signature ->
+                        Text("Assinatura: " + signature)
+                    }
+                    OutlinedButton(
+                        enabled = !busy,
+                        onClick = {
+                            requestId = entry.requestId
+                            recipient = entry.recipientAddress
+                            amountSol = String.format(Locale.US, "%.9f", entry.amountLamports / LAMPORTS_PER_SOL)
+                            result = when (entry.state) {
+                                LedgerState.SIGNED -> entry.signature?.let {
+                                    TransferExecutionResult.Signed(
+                                        entry.requestId, it,
+                                        ledger.signedTransaction(entry.requestId)?.size ?: 0,
+                                        null, null
+                                    )
+                                }
+                                LedgerState.SUBMITTED -> entry.signature?.let {
+                                    TransferExecutionResult.Submitted(entry.requestId, it)
+                                }
+                                LedgerState.UNKNOWN -> entry.signature?.let {
+                                    TransferExecutionResult.Unknown(entry.requestId, it, "Resultado aguardando reconciliação")
+                                }
+                                LedgerState.CONFIRMED -> entry.signature?.let {
+                                    TransferExecutionResult.Confirmed(entry.requestId, it, 0L)
+                                }
+                                else -> null
+                            }
+                            message = "Pedido do agente recuperado do ledger local."
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    ) { Text("Abrir / recuperar pedido") }
+                }
+            }
+        }
         if (pendingAgentRequests.isNotEmpty()) {
             Text("Pedidos de agentes aguardando aprovação", style = androidx.compose.material3.MaterialTheme.typography.titleMedium)
             Text("Revise cada destinatário e valor. Aprovar assina localmente; a transmissão exige uma segunda confirmação explícita.")
