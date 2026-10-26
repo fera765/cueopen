@@ -9,6 +9,7 @@ import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -70,15 +71,7 @@ fun ComputerScreen(nav: NavController, sessionId: String, initialTab: String?) {
     }
     val activity by app.agent.activity.collectAsStateWithLifecycle()
     val act = activity[sessionId]
-    // segue o agente automaticamente quando ele troca de ferramenta
-    LaunchedEffect(act?.kind) {
-        when (act?.kind) {
-            dev.cueopen.app.agent.Activity.Kind.TERMINAL -> changeTab("terminal")
-            dev.cueopen.app.agent.Activity.Kind.BROWSER -> changeTab("browser")
-            dev.cueopen.app.agent.Activity.Kind.EDITOR -> changeTab("files")
-            else -> {}
-        }
-    }
+    // A atividade do agente não muda a aba visível; o foco permanece sob controle do usuário.
     val c = Cue.c
     Scaffold(containerColor = c.bg, topBar = {
         Column(Modifier.statusBarsPadding()) {
@@ -367,8 +360,16 @@ fun FilesPane(root: File, guestRoot: String) {
     val dirHistory = remember(root) { mutableStateListOf<File>() }
     var editing by remember { mutableStateOf<File?>(null) }
     var viewing by remember { mutableStateOf<File?>(null) }
-    BackHandler(enabled = editing != null || viewing != null || dirHistory.isNotEmpty()) {
+    var actionFile by remember { mutableStateOf<File?>(null) }
+    var renameFile by remember { mutableStateOf<File?>(null) }
+    var renameName by remember { mutableStateOf("") }
+    var deleteFile by remember { mutableStateOf<File?>(null) }
+    var fileError by remember { mutableStateOf<String?>(null) }
+    BackHandler(enabled = editing != null || viewing != null || actionFile != null || renameFile != null || deleteFile != null || dirHistory.isNotEmpty()) {
         when {
+            renameFile != null -> renameFile = null
+            deleteFile != null -> deleteFile = null
+            actionFile != null -> actionFile = null
             editing != null -> editing = null
             viewing != null -> viewing = null
             dirHistory.isNotEmpty() -> dir = dirHistory.removeAt(dirHistory.lastIndex)
@@ -390,19 +391,73 @@ fun FilesPane(root: File, guestRoot: String) {
         if (files.isEmpty()) EmptyState(Icons.Rounded.FolderOpen, "Pasta vazia", "Os arquivos criados pelo agente aparecem aqui.")
         LazyColumn(contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
             items(files, key = { it.absolutePath }) { f ->
-                FileRow(f, onClick = { if (f.isDirectory) { dirHistory.add(dir); dir = f } else viewing = f }, onShare = { openExternal(ctx, f, share = true) })
+                FileRow(f, onClick = { if (f.isDirectory) { dirHistory.add(dir); dir = f } else viewing = f },
+                    onLongClick = { actionFile = f }, onShare = { openExternal(ctx, f, share = true) })
             }
         }
+    }
+    val target = actionFile
+    if (target != null) AlertDialog(
+        onDismissRequest = { actionFile = null },
+        title = { Text(target.name) },
+        text = { Text("O que você deseja fazer com ${if (target.isDirectory) "esta pasta" else "este arquivo"}?") },
+        confirmButton = { TextButton(onClick = { renameFile = target; renameName = target.name; actionFile = null }) { Text("Renomear") } },
+        dismissButton = {
+            Row {
+                TextButton(onClick = { deleteFile = target; actionFile = null }) { Text("Excluir", color = c.err) }
+                TextButton(onClick = { actionFile = null }) { Text("Cancelar") }
+            }
+        }
+    )
+    val renaming = renameFile
+    if (renaming != null) AlertDialog(
+        onDismissRequest = { renameFile = null },
+        title = { Text("Renomear") },
+        text = { OutlinedTextField(value = renameName, onValueChange = { renameName = it }, singleLine = true, label = { Text("Novo nome") }) },
+        confirmButton = {
+            TextButton(onClick = {
+                val name = renameName.trim()
+                val safe = name.isNotBlank() && name != "." && name != ".." && !name.contains("/") && !name.contains("\\\\")
+                val dest = File(renaming.parentFile, name)
+                when {
+                    !safe -> fileError = "Nome inválido."
+                    dest.exists() && dest.absolutePath != renaming.absolutePath -> fileError = "Já existe um arquivo ou pasta com esse nome."
+                    !renaming.renameTo(dest) -> fileError = "Não foi possível renomear. Verifique as permissões."
+                    else -> { tick++; renameFile = null }
+                }
+            }) { Text("Salvar") }
+        },
+        dismissButton = { TextButton(onClick = { renameFile = null }) { Text("Cancelar") } }
+    )
+    val deleting = deleteFile
+    if (deleting != null) AlertDialog(
+        onDismissRequest = { deleteFile = null },
+        title = { Text("Excluir ${if (deleting.isDirectory) "pasta" else "arquivo"}?") },
+        text = { Text("Essa ação não pode ser desfeita. ${deleting.name}") },
+        confirmButton = {
+            TextButton(onClick = {
+                fun removeRecursively(file: File): Boolean =
+                    if (file.isDirectory) (file.listFiles()?.all { removeRecursively(it) } ?: false) && file.delete()
+                    else file.delete()
+                if (!removeRecursively(deleting)) fileError = "Não foi possível excluir ${deleting.name}."
+                else { tick++; if (dir.absolutePath == deleting.absolutePath) dir = deleting.parentFile ?: root; dirHistory.removeAll { it.absolutePath == deleting.absolutePath }; deleteFile = null }
+            }) { Text("Excluir", color = c.err) }
+        },
+        dismissButton = { TextButton(onClick = { deleteFile = null }) { Text("Cancelar") } }
+    )
+    fileError?.let { msg ->
+        AlertDialog(onDismissRequest = { fileError = null }, title = { Text("Operação não concluída") },
+            text = { Text(msg) }, confirmButton = { TextButton(onClick = { fileError = null; tick++ }) { Text("OK") } })
     }
 }
 
 /** Linha elegante do gerenciador: ícone colorido por tipo, nome, tamanho e extensão. */
 @Composable
-private fun FileRow(f: File, onClick: () -> Unit, onShare: () -> Unit) {
+private fun FileRow(f: File, onClick: () -> Unit, onLongClick: () -> Unit, onShare: () -> Unit) {
     val c = Cue.c
     val (icon, tint) = fileIconTint(f, c)
     Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(c.surface).border(1.dp, c.line, RoundedCornerShape(14.dp))
-        .clickable(onClick = onClick).padding(10.dp), verticalAlignment = Alignment.CenterVertically) {
+        .combinedClickable(onClick = onClick, onLongClick = onLongClick).padding(10.dp), verticalAlignment = Alignment.CenterVertically) {
         Box(Modifier.size(40.dp).clip(RoundedCornerShape(11.dp)).background(tint.copy(alpha = 0.14f)), contentAlignment = Alignment.Center) {
             Icon(icon, null, Modifier.size(22.dp), tint = tint)
         }
