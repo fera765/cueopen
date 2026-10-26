@@ -511,6 +511,41 @@ class WalletRequestLedgerTest {
         )
         assertTrue(signResult is TransferExecutionResult.Rejected)
         assertEquals(LedgerState.AUTHORIZED, ledger.find(authorizedRequest.requestId)?.state)
+
+        val store = WalletAgentPolicyStore(context)
+        store.setManualTransferEnabled(SolanaNetwork.MAINNET, false)
+        val manualAgentId = WalletAgentPolicyStore.manualAgentId(SolanaNetwork.MAINNET)
+        val forgedPolicy = WalletAgentPolicy(
+            agentId = manualAgentId,
+            enabled = true,
+            canTransfer = true,
+            autonomousExecution = true,
+            maxTransferLamports = 100L,
+            dailyLimitLamports = 100L,
+            allowedRecipients = setOf(recipient)
+        )
+        val manualRequest = WalletTransferIntent(
+            requestId = "request_forged_policy01",
+            agentId = manualAgentId,
+            recipientAddress = recipient,
+            amountLamports = 10L,
+            createdAtEpochMs = now,
+            network = SolanaNetwork.MAINNET
+        )
+        assertTrue(ledger.claimAndAuthorize(
+            manualRequest, forgedPolicy,
+            now - 10_000L, now + 10_000L, now
+        ) is LedgerAuthorizationResult.Created)
+        val mainnetExecutor = SolanaTransferExecutor(
+            context, SolanaWalletRepository(context), ledger,
+            SolanaRpcClient(endpoint = SolanaNetwork.MAINNET.rpcEndpoint, network = SolanaNetwork.MAINNET)
+        )
+        val forgedResult = mainnetExecutor.signAuthorizedTransfer(
+            manualRequest.requestId, forgedPolicy,
+            now - 10_000L, now + 10_000L, humanApproval = false, signingTimeEpochMs = now
+        )
+        assertTrue(forgedResult is TransferExecutionResult.Rejected)
+        assertEquals(LedgerState.AUTHORIZED, ledger.find(manualRequest.requestId)?.state)
     }
 
     @Test
