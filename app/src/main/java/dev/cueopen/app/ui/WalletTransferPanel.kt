@@ -91,7 +91,7 @@ fun WalletTransferPanel(context: Context, repository: SolanaWalletRepository) {
     ) {
         Text("Enviar SOL")
         Text(
-            "Mainnet Solana. Limite manual: 0,05 SOL por transferência e 0,10 SOL por dia. " +
+            "Mainnet Solana. Limite manual: 0,05 SOL por transferência e 0,10 SOL por dia (taxas à parte). " +
                 "O envio exige aprovação e uma segunda confirmação explícita."
         )
         OutlinedTextField(
@@ -262,7 +262,7 @@ fun WalletTransferPanel(context: Context, repository: SolanaWalletRepository) {
                             busy = true
                             scope.launch {
                                 try {
-                                    result = executor.reconcileSignature(id)
+                                    result = executor.reconcileSignature(id, MANUAL_AGENT_ID)
                                     message = result.toString()
                                 } finally {
                                     busy = false
@@ -282,7 +282,7 @@ fun WalletTransferPanel(context: Context, repository: SolanaWalletRepository) {
                             busy = true
                             scope.launch {
                                 try {
-                                    result = executor.reconcileSignature(id)
+                                    result = executor.reconcileSignature(id, MANUAL_AGENT_ID)
                                     message = result.toString()
                                 } finally {
                                     busy = false
@@ -324,7 +324,7 @@ fun WalletTransferPanel(context: Context, repository: SolanaWalletRepository) {
             ) { Text("Limpar formulário") }
 
             Text("Transferências recentes")
-            recentRecords.forEach { entry ->
+            recentRecords.filter { it.agentId == MANUAL_AGENT_ID }.forEach { entry ->
                 Column(
                     modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
                     verticalArrangement = Arrangement.spacedBy(4.dp)
@@ -403,7 +403,7 @@ fun WalletTransferPanel(context: Context, repository: SolanaWalletRepository) {
                             busy = true
                             scope.launch {
                                 try {
-                                    result = executor.broadcastPersistedTransfer(id)
+                                    result = executor.broadcastPersistedTransfer(id, MANUAL_AGENT_ID)
                                     message = result.toString()
                                 } finally {
                                     busy = false
