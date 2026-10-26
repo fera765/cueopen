@@ -206,12 +206,12 @@ fun WalletTransferPanel(context: Context, repository: SolanaWalletRepository, ne
             )
             if (record?.state == LedgerState.AUTHORIZED) {
                 Button(
-                    enabled = !busy && transfersEnabled,
+                    enabled = !busy && policyStore.transferPolicy(record.agentId, record.network).enabled,
                     onClick = {
                         busy = true
                         scope.launch {
                             try {
-                                val policy = policyStore.manualTransferPolicy(network)
+                                val policy = policyStore.transferPolicy(record.agentId, record.network)
                                 val window = walletSpendingWindow()
                                 result = executor.signAuthorizedTransfer(
                                     id, policy, window.first, window.second,
