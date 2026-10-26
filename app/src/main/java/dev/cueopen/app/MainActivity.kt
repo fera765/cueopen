@@ -120,6 +120,7 @@ fun CueNav(nav: NavHostController, startOnboarding: Boolean) {
         composable("memory") { MemoryScreen(nav) }
         composable("connectors") { ConnectorsScreen(nav) }
         composable("settings") { SettingsScreen(nav) }
+        composable("wallet") { WalletScreen(nav) }
         composable("sandbox") { SandboxScreen(nav) }
         composable("terminal") { StandaloneTerminalScreen(nav) }
     }
