@@ -185,8 +185,10 @@ fun WalletTransferPanel(context: Context, repository: SolanaWalletRepository) {
                     modifier = Modifier.fillMaxWidth()
                 ) { Text(if (busy) "Retomando..." else "Retomar assinatura autorizada") }
             }
-            if (record?.state == LedgerState.SIGNING) {
-                Text("Há uma tentativa de assinatura interrompida sem bytes persistidos. Não reenvie.")
+            if (record?.state == LedgerState.SIGNING ||
+                (record?.state == LedgerState.UNKNOWN && record.signature == null)
+            ) {
+                Text("Há uma tentativa interrompida sem assinatura/bytes persistidos. Nenhuma transmissão foi autorizada por este fluxo.")
                 OutlinedButton(
                     enabled = !busy,
                     onClick = {
