@@ -806,4 +806,34 @@ class WalletRequestLedgerTest {
         assertEquals(LedgerState.PREPARED, duplicate?.state)
     }
 
+
+    @Test
+    fun authorizedClaimAtomicallyDeduplicatesSameRecentAgentIntent() {
+        val now = System.currentTimeMillis()
+        val start = now - 10_000L
+        val end = now + 10_000L
+        val first = ledger.claimAndAuthorize(
+            intent(
+                requestId = "request_first_001",
+                amountLamports = 50L,
+                createdAtEpochMs = now,
+                memo = null
+            ),
+            transferPolicy(), start, end, now
+        )
+        assertTrue(first is LedgerAuthorizationResult.Created)
+
+        val repeated = ledger.claimAndAuthorize(
+            intent(
+                requestId = "request_second_01",
+                amountLamports = 50L,
+                createdAtEpochMs = now + 1L,
+                memo = null
+            ),
+            transferPolicy(), start, end, now + 1L
+        )
+        assertTrue(repeated is LedgerAuthorizationResult.Existing)
+        assertEquals("request_first_001", (repeated as LedgerAuthorizationResult.Existing).record.requestId)
+    }
+
 }
