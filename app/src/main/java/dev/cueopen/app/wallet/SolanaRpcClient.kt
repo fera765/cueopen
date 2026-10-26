@@ -12,6 +12,7 @@ import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -53,7 +54,7 @@ class SolanaRpcClient(
     val network: SolanaNetwork? = SolanaNetwork.fromEndpoint(endpoint)
 ) {
     init {
-        val parsed = runCatching { okhttp3.HttpUrl.get(endpoint) }.getOrNull()
+        val parsed = endpoint.toHttpUrlOrNull()
         require(parsed != null && parsed.isHttps && parsed.username.isEmpty() &&
             parsed.password.isEmpty() && parsed.fragment == null
         ) { "RPC endpoint must be a valid HTTPS URL without embedded credentials or fragments" }
