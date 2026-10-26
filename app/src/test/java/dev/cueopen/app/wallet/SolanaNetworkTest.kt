@@ -10,6 +10,8 @@ class SolanaNetworkTest {
         assertEquals(SolanaNetwork.MAINNET, SolanaNetwork.fromEndpoint(SolanaNetwork.MAINNET.rpcEndpoint))
         assertEquals(SolanaNetwork.DEVNET, SolanaNetwork.fromEndpoint(SolanaNetwork.DEVNET.rpcEndpoint))
         assertNull(SolanaNetwork.fromEndpoint("https://rpc.example.test"))
+        assertEquals(SolanaNetwork.DEVNET, SolanaRpcClient(endpoint = SolanaNetwork.DEVNET.rpcEndpoint).network)
+        assertNull(SolanaRpcClient(endpoint = "https://rpc.example.test").network)
     }
 
     @Test
