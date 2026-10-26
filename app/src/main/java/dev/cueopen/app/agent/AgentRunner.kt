@@ -835,37 +835,48 @@ class AgentRunner(
                 "multi_agents" -> runMultiAgents(sessionId, s("tasks_json"), s("repo_path"), i("max_workers") ?: 3, i("budget_tokens") ?: 6000)
                 "wallet_get_address" -> {
                     val agentId = store.session(sessionId)?.agentId
-                        ?: return ToolResult("ERRO: esta sessão não pertence a um agente.")
                     val policies = WalletAgentPolicyStore(ctx.applicationContext)
-                    if (!policies.canAgentReadAddress(agentId)) {
-                        return ToolResult("Acesso negado: o usuário não concedeu a este agente permissão para consultar o endereço.")
+                    when {
+                        agentId.isNullOrBlank() -> "ERRO: esta sessão não pertence a um agente."
+                        !policies.canAgentReadAddress(agentId) ->
+                            "Acesso negado: o usuário não concedeu a este agente permissão para consultar o endereço."
+                        else -> {
+                            val wallet = SolanaWalletRepository(ctx.applicationContext)
+                            if (!wallet.hasWallet() || !wallet.backupConfirmed()) {
+                                "Carteira indisponível ou backup ainda não confirmado."
+                            } else {
+                                "Endereço público Solana: " + (wallet.publicAddress()
+                                    ?: "Endereço público indisponível.")
+                            }
+                        }
                     }
-                    val wallet = SolanaWalletRepository(ctx.applicationContext)
-                    if (!wallet.hasWallet() || !wallet.backupConfirmed()) {
-                        return ToolResult("Carteira indisponível ou backup ainda não confirmado.")
-                    }
-                    "Endereço público Solana: " + (wallet.publicAddress()
-                        ?: return ToolResult("Endereço público indisponível."))
                 }
                 "wallet_get_balance" -> {
                     val agentId = store.session(sessionId)?.agentId
-                        ?: return ToolResult("ERRO: esta sessão não pertence a um agente.")
                     val policies = WalletAgentPolicyStore(ctx.applicationContext)
-                    if (!policies.canAgentReadBalance(agentId)) {
-                        return ToolResult("Acesso negado: o usuário não concedeu a este agente permissão para consultar o saldo.")
+                    when {
+                        agentId.isNullOrBlank() -> "ERRO: esta sessão não pertence a um agente."
+                        !policies.canAgentReadBalance(agentId) ->
+                            "Acesso negado: o usuário não concedeu a este agente permissão para consultar o saldo."
+                        else -> {
+                            val wallet = SolanaWalletRepository(ctx.applicationContext)
+                            if (!wallet.hasWallet() || !wallet.backupConfirmed()) {
+                                "Carteira indisponível ou backup ainda não confirmado."
+                            } else {
+                                val prefs = ctx.applicationContext.getSharedPreferences("solana_wallet_settings", android.content.Context.MODE_PRIVATE)
+                                val network = runCatching {
+                                    SolanaNetwork.valueOf(prefs.getString("network", SolanaNetwork.MAINNET.name) ?: SolanaNetwork.MAINNET.name)
+                                }.getOrDefault(SolanaNetwork.MAINNET)
+                                val address = wallet.publicAddress()
+                                if (address == null) {
+                                    "Endereço público indisponível."
+                                } else {
+                                    val lamports = SolanaRpcClient(endpoint = network.rpcEndpoint, network = network).getBalanceLamports(address)
+                                    "Saldo " + network.displayName + ": " + String.format(Locale.US, "%.9f SOL", lamports / 1_000_000_000.0)
+                                }
+                            }
+                        }
                     }
-                    val wallet = SolanaWalletRepository(ctx.applicationContext)
-                    if (!wallet.hasWallet() || !wallet.backupConfirmed()) {
-                        return ToolResult("Carteira indisponível ou backup ainda não confirmado.")
-                    }
-                    val prefs = ctx.applicationContext.getSharedPreferences("solana_wallet_settings", android.content.Context.MODE_PRIVATE)
-                    val network = runCatching {
-                        SolanaNetwork.valueOf(prefs.getString("network", SolanaNetwork.MAINNET.name) ?: SolanaNetwork.MAINNET.name)
-                    }.getOrDefault(SolanaNetwork.MAINNET)
-                    val address = wallet.publicAddress()
-                        ?: return ToolResult("Endereço público indisponível.")
-                    val lamports = SolanaRpcClient(endpoint = network.rpcEndpoint, network = network).getBalanceLamports(address)
-                    "Saldo " + network.displayName + ": " + String.format(Locale.US, "%.9f SOL", lamports / 1_000_000_000.0)
                 }
                 "shell" -> {
                     // Guardrail determinístico: recusa invocações diretas de scripts inexistentes,
