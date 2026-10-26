@@ -618,7 +618,7 @@ class AgentRunner(
             put("done_count", int("Quantas fases já foram concluídas"))
         }, listOf("goal", "phases")))
         if (term) {
-            add(tool("shell", "Executa um comando bash no sandbox Linux (Alpine). Retorna stdout+stderr. GUARDRAILS: antes de executar bash/python/node com caminho de script, confirme que o arquivo existe com file_list/file_read; nunca invente nomes .sh ou caminhos. Antes de cd, confirme que o diretório existe. Se uma execução anterior retornou ENOENT/No such file or directory, não repita o mesmo comando: inspecione o workspace e corrija o caminho.", buildJsonObject {
+            add(tool("shell", "Executa um comando bash no sandbox Linux (Alpine). Retorna stdout+stderr e o exit code do comando. IMPORTANTE: em sequências, o exit code normal é o do último comando; para que uma etapa com falha interrompa a sequência, use && em vez de ;. Em pipelines, use set -o pipefail quando a falha de qualquer etapa importar. Não masque falhas com cat/echo após um comando separado por ;: confira o exit code da operação principal. GUARDRAILS: antes de executar bash/python/node com caminho de script, confirme que o arquivo existe com file_list/file_read; nunca invente nomes .sh ou caminhos. Antes de cd, confirme que o diretório existe. Se uma execução anterior retornou ENOENT/No such file or directory, não repita o mesmo comando: inspecione o workspace e corrija o caminho.", buildJsonObject {
                 put("command", str("Comando a executar"))
                 put("timeout", int("Timeout em segundos (padrão 180)"))
                 put("background", bool("Rodar em segundo plano (servidores)"))
