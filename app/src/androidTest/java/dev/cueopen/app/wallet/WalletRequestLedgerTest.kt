@@ -36,14 +36,15 @@ class WalletRequestLedgerTest {
     private fun intent(
         requestId: String = "request_12345678",
         recipientAddress: String = recipient,
-        amountLamports: Long = 50L
+        amountLamports: Long = 50L,
+        memo: String? = "test"
     ) = WalletTransferIntent(
         requestId = requestId,
         agentId = "test-agent",
         recipientAddress = recipientAddress,
         amountLamports = amountLamports,
         createdAtEpochMs = 1L,
-        memo = "test"
+        memo = memo
     )
 
     @Test
