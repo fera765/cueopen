@@ -101,9 +101,9 @@ class WalletRequestLedgerTest {
         } catch (expected: IllegalArgumentException) {
             assertTrue(expected.message.orEmpty().contains("Illegal transfer state transition"))
         }
-        assertTrue(ledger.transition(
-            "request_12345678", LedgerState.AUTHORIZED, LedgerState.SIGNING
-        ))
+        assertTrue(ledger.beginSigningAfterHumanApproval(
+            "request_12345678", transferPolicy(), now - 10_000L, now + 10_000L, now
+        ) is LedgerSigningStartResult.Started)
         assertTrue(ledger.transition(
             "request_12345678", LedgerState.SIGNING, LedgerState.SIGNED, "67rpwLCuS5DGA8KGZXKsVQ7dnPb9goRLoKfgGbLfQg9WoLUgNY77E2jT11fem3coV9nAkguBACzrU1iyZM4B8roQ"
         ))
@@ -118,7 +118,9 @@ class WalletRequestLedgerTest {
             "request_12345678", transferPolicy(), now - 10_000L, now + 10_000L, now
         )
         assertTrue(approved is LedgerAuthorizationResult.Approved)
-        assertTrue(ledger.transition("request_12345678", LedgerState.AUTHORIZED, LedgerState.SIGNING))
+        assertTrue(ledger.beginSigningAfterHumanApproval(
+            "request_12345678", transferPolicy(), now - 10_000L, now + 10_000L, now
+        ) is LedgerSigningStartResult.Started)
         try {
             ledger.transition("request_12345678", LedgerState.SIGNING, LedgerState.SIGNED)
             throw AssertionError("Expected missing durable signature to be rejected")
@@ -163,9 +165,9 @@ class WalletRequestLedgerTest {
             "request_12345678", transferPolicy(), now - 10_000L, now + 10_000L, now
         )
         assertTrue(approval is LedgerAuthorizationResult.Approved)
-        assertTrue(ledger.transition(
-            "request_12345678", LedgerState.AUTHORIZED, LedgerState.SIGNING
-        ))
+        assertTrue(ledger.beginSigningAfterHumanApproval(
+            "request_12345678", transferPolicy(), now - 10_000L, now + 10_000L, now
+        ) is LedgerSigningStartResult.Started)
         val signature = "4QuYxZ8wHiUWSRDBNgYuzbk6Bvj6nsHECYn7r4ZSc7mLsDz7v2QQV29y11SmWN5XzSBnAnw7mofZyg9ehu37kuXw"
         assertTrue(ledger.transition(
             "request_12345678", LedgerState.SIGNING, LedgerState.SIGNED, signature
@@ -195,9 +197,10 @@ class WalletRequestLedgerTest {
             transferPolicy(autonomous = true), now - 10_000L, now + 10_000L, now + 1L
         )
         assertTrue(fresh is LedgerAuthorizationResult.Created)
-        assertTrue(ledger.transition(
-            "request_valid_sig01", LedgerState.AUTHORIZED, LedgerState.SIGNING
-        ))
+        assertTrue(ledger.beginSigningAutonomously(
+            "request_valid_sig01", transferPolicy(autonomous = true),
+            now - 10_000L, now + 10_000L, now
+        ) is LedgerSigningStartResult.Started)
         try {
             ledger.transition(
                 "request_valid_sig01", LedgerState.SIGNING, LedgerState.SIGNED, "not-a-signature"
@@ -218,9 +221,10 @@ class WalletRequestLedgerTest {
             now - 10_000L, now + 10_000L, now
         )
         assertTrue(authorized is LedgerAuthorizationResult.Created)
-        assertTrue(ledger.transition(
-            intent.requestId, LedgerState.AUTHORIZED, LedgerState.SIGNING
-        ))
+        assertTrue(ledger.beginSigningAutonomously(
+            intent.requestId, transferPolicy(autonomous = true),
+            now - 10_000L, now + 10_000L, now
+        ) is LedgerSigningStartResult.Started)
         try {
             ledger.transition(intent.requestId, LedgerState.SIGNING, LedgerState.FAILED)
             throw AssertionError("Signing state must remain reserved when outcome is ambiguous")
@@ -254,9 +258,10 @@ class WalletRequestLedgerTest {
             now - 10_000L, now + 10_000L, now
         )
         assertTrue(initial is LedgerAuthorizationResult.Created)
-        assertTrue(ledger.transition(
-            request.requestId, LedgerState.AUTHORIZED, LedgerState.SIGNING
-        ))
+        assertTrue(ledger.beginSigningAutonomously(
+            request.requestId, transferPolicy(autonomous = true),
+            now - 10_000L, now + 10_000L, now
+        ) is LedgerSigningStartResult.Started)
         val revokedPolicy = WalletAgentPolicy(
             agentId = "test-agent",
             enabled = false,
@@ -336,9 +341,10 @@ class WalletRequestLedgerTest {
             LedgerState.AUTHORIZED,
             (result as LedgerAuthorizationResult.Created).record.state
         )
-        assertTrue(ledger.transition(
-            "request_auto_0001", LedgerState.AUTHORIZED, LedgerState.SIGNING
-        ))
+        assertTrue(ledger.beginSigningAutonomously(
+            "request_auto_0001", transferPolicy(autonomous = true),
+            now - 10_000L, now + 10_000L, now
+        ) is LedgerSigningStartResult.Started)
         assertTrue(ledger.transition(
             "request_auto_0001", LedgerState.SIGNING, LedgerState.SIGNED, "5n4yLmzWc14iDPJ3vZAszSSXTu1wWQzX5ZtZnVBcrAUHDKBNHEZmUdR9oQpg7JukPQfHqWWN5j8bZwounf3xrsM7"
         ))
