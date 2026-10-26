@@ -489,6 +489,31 @@ class WalletRequestLedgerTest {
     }
 
     @Test
+    fun sameRequestIdCannotBeReusedAcrossSolanaNetworks() {
+        val now = System.currentTimeMillis()
+        val devnetIntent = intent(
+            requestId = "request_network_001",
+            amountLamports = 20L
+        ).copy(network = SolanaNetwork.DEVNET)
+        val created = ledger.claimAndAuthorize(
+            devnetIntent, transferPolicy(autonomous = true),
+            now - 10_000L, now + 10_000L, now
+        )
+        assertTrue(created is LedgerAuthorizationResult.Created)
+        try {
+            ledger.claimAndAuthorize(
+                devnetIntent.copy(network = SolanaNetwork.MAINNET),
+                transferPolicy(autonomous = true),
+                now - 10_000L, now + 10_000L, now + 1L
+            )
+            throw AssertionError("A request ID cannot be replayed on another network")
+        } catch (expected: IllegalStateException) {
+            assertTrue(expected.message.orEmpty().contains("different transfer payload"))
+        }
+        assertEquals(SolanaNetwork.DEVNET, ledger.find(devnetIntent.requestId)?.network)
+    }
+
+    @Test
     fun terminalStatesCannotBeReopened() {
         ledger.claim(intent())
         assertTrue(ledger.transition(
