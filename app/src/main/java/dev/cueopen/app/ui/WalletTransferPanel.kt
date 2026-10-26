@@ -251,9 +251,14 @@ fun WalletTransferPanel(context: Context, repository: SolanaWalletRepository) {
 
             TextButton(
                 enabled = !busy && record?.state !in setOf(
-                    LedgerState.SIGNED, LedgerState.SUBMITTED, LedgerState.UNKNOWN
+                    LedgerState.SIGNING, LedgerState.SIGNED, LedgerState.SUBMITTED, LedgerState.UNKNOWN
                 ),
                 onClick = {
+                    if (record?.state in setOf(
+                        LedgerState.PREPARED, LedgerState.AWAITING_APPROVAL, LedgerState.AUTHORIZED
+                    )) {
+                        ledger.cancelBeforeSigning(id)
+                    }
                     requestId = null
                     result = null
                     message = null
