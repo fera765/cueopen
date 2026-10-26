@@ -71,9 +71,12 @@ class WalletRequestLedgerTest {
     @Test
     fun transitionsRequireExpectedStateAndApprovalBeforeSigning() {
         ledger.claim(intent())
-        assertFalse(ledger.transition(
-            "request_12345678", LedgerState.PREPARED, LedgerState.SIGNED
-        ))
+        try {
+            ledger.transition("request_12345678", LedgerState.PREPARED, LedgerState.SIGNED)
+            throw AssertionError("Signing directly from PREPARED must be rejected")
+        } catch (expected: IllegalArgumentException) {
+            assertTrue(expected.message.orEmpty().contains("Illegal transfer state transition"))
+        }
         assertTrue(ledger.transition(
             "request_12345678", LedgerState.PREPARED, LedgerState.AWAITING_APPROVAL
         ))
