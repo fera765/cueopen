@@ -196,3 +196,5 @@ Ao concluir uma tarefa, marcar sua caixa como `[x]`, anotar o commit que contém
 - 2026-10-26 — Ajuste de usabilidade/segurança no recebimento: a área do QR agora mostra a rede selecionada e alerta explicitamente que o QR contém só o endereço, não a rede; o remetente precisa confirmar a mesma rede. O teste de política foi ampliado para verificar que a permissão sobrevive à recriação do store, sem misturar Mainnet e Devnet. Commits: `e23a3d858df2eed1d26ec051262be39e5a55573e`, `0be500d62fbd9d2661c155d9d7942ae7174d662d`, `113c1202584079ad22ba4a1b91b9136a003ac2f7`. Não compilei nem executei testes.
 
 - 2026-10-26 — A tela também desativa o botão de aprovação/assinatura quando a permissão persistida é revogada, em vez de oferecer uma ação que só falharia no executor. Commit: `c2c7c64fdd200e09a033f6274c325b9c91223209`. Nenhum build ou teste foi executado.
+
+- 2026-10-26 — O teste do QR agora verifica decodificação ponta a ponta: gera a matriz, reconstrói a imagem binária e confirma que o conteúdo lido é exatamente o endereço público. Teste escrito, ainda não executado. Commit: `fa6929919d7b41a087f36721fe8b1bcaaf611133`.
