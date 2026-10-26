@@ -87,6 +87,31 @@ class WalletAgentPolicyStore(context: Context) {
             .commit()) { "Could not persist agent transfer limits" }
     }
 
+    /** Atomically saves the full agent transfer policy so a partial UI save cannot loosen constraints. */
+    fun setAgentTransferSettings(
+        agentId: String,
+        maxPerTransferLamports: Long,
+        dailyLimitLamports: Long,
+        recipients: Set<String>
+    ) {
+        require(agentId.isNotBlank()) { "Agent ID is required" }
+        require(maxPerTransferLamports in 1L..MAX_AGENT_TRANSFER_LAMPORTS) {
+            "Per-transfer agent limit must be between 1 lamport and 0.05 SOL"
+        }
+        require(dailyLimitLamports in maxPerTransferLamports..DAILY_AGENT_TRANSFER_LIMIT_LAMPORTS) {
+            "Daily agent limit must be at least the per-transfer limit and no more than 0.10 SOL"
+        }
+        require(recipients.size <= 100) { "Recipient allowlist cannot exceed 100 addresses" }
+        require(recipients.all { SolanaAddressValidator.isValidAddress(it) }) {
+            "Every allowlisted recipient must be a valid Solana address"
+        }
+        check(prefs.edit()
+            .putLong(agentCapabilityKey(agentId, "max_transfer_lamports"), maxPerTransferLamports)
+            .putLong(agentCapabilityKey(agentId, "daily_limit_lamports"), dailyLimitLamports)
+            .putStringSet(agentCapabilityKey(agentId, "allowed_recipients"), HashSet(recipients))
+            .commit()) { "Could not persist agent transfer settings" }
+    }
+
     /** Empty allowlist means human-reviewed destinations are allowed; non-empty means exact match only. */
     fun setAgentAllowedRecipients(agentId: String, recipients: Set<String>) {
         require(agentId.isNotBlank()) { "Agent ID is required" }
