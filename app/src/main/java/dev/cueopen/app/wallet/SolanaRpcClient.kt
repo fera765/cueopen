@@ -20,6 +20,24 @@ import java.io.IOException
 import java.util.Base64
 import java.util.concurrent.TimeUnit
 
+enum class SolanaNetwork(
+    val rpcEndpoint: String,
+    val displayName: String
+) {
+    MAINNET("https://api.mainnet-beta.solana.com", "Mainnet"),
+    DEVNET("https://api.devnet.solana.com", "Devnet");
+
+    fun transactionExplorerUrl(signature: String): String {
+        val base = "https://explorer.solana.com/tx/" + signature
+        return if (this == DEVNET) base + "?cluster=devnet" else base
+    }
+
+    companion object {
+        fun fromEndpoint(endpoint: String): SolanaNetwork? =
+            entries.firstOrNull { it.rpcEndpoint == endpoint }
+    }
+}
+
 /**
  * Bounded-timeout JSON-RPC client. It never receives a key or seed.
  * The submit method is internal so a caller outside the wallet module cannot use this
@@ -31,7 +49,8 @@ class SolanaRpcClient(
         .callTimeout(12, TimeUnit.SECONDS)
         .connectTimeout(5, TimeUnit.SECONDS)
         .readTimeout(8, TimeUnit.SECONDS)
-        .build()
+        .build(),
+    val network: SolanaNetwork? = SolanaNetwork.fromEndpoint(endpoint)
 ) {
     init {
         val parsed = runCatching { okhttp3.HttpUrl.get(endpoint) }.getOrNull()
