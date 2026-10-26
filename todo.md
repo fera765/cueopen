@@ -257,3 +257,6 @@ Estado honesto de release: **NÃO CONCLUÍDO**. A implementação do painel de c
 
 
 - 2026-10-26 — Revisão adicional da UX e da fronteira de assinatura: painel mostra até 100 registros para não ocultar pedidos pendentes, lista de permissões foi renomeada para incluir transferências, grants são revalidados imediatamente antes da assinatura local, e a recuperação de histórico não inventa slot de confirmação quando o ledger não o armazena. Documentação atualizada com deduplicação atômica. Commits: `8abdc600`, `f61966b7`, `66e71f5d`, `2f0bd0de`, `c9de2feb`. **Sem build ou testes executados**; validação manual do usuário continua pendente.
+
+
+- 2026-10-26 — Configurações de transferência por agente agora incluem limites por pedido/diário configuráveis para baixo e allowlist opcional de destinatários exatos. Os tetos são 0,05 SOL por pedido e 0,10 SOL/dia; valores persistidos inválidos e allowlists corrompidas falham fechados. A tela valida SOL em precisão exata de lamports e salva limites + allowlist em uma única gravação de preferências. Teste instrumentado cobre persistência, limite e destino fora da allowlist; **não executado**. Commits: `593fc2af`, `4ac62c76`, `7236387e`, `d11322aa`, `b9da1276`, `2d6a6e25`, `5a92ce26`, `4718697d`.
