@@ -286,6 +286,7 @@ fun WalletTransferPanel(context: Context, repository: SolanaWalletRepository) {
                                     message = result.toString()
                                 } finally {
                                     busy = false
+                                    refreshHistory()
                                 }
                             }
                         },
