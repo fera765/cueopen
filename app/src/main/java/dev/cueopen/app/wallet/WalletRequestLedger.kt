@@ -349,6 +349,137 @@ class WalletRequestLedger(context: Context) : SQLiteOpenHelper(
         }
     }
 
+    /**
+     * Start signing only after atomically rechecking the local policy, agent identity,
+     * current spending window and reserved spend. The human path may accept
+     * RequiresUserApproval only after approveForSigning has already recorded consent.
+     */
+    internal fun beginSigningAutonomously(
+        requestId: String,
+        policy: WalletAgentPolicy,
+        windowStartEpochMs: Long,
+        windowEndEpochMs: Long,
+        signingTimeEpochMs: Long = System.currentTimeMillis()
+    ): LedgerSigningStartResult = beginSigningInternal(
+        requestId, policy, windowStartEpochMs, windowEndEpochMs, signingTimeEpochMs,
+        humanApprovalRecorded = false
+    )
+
+    internal fun beginSigningAfterHumanApproval(
+        requestId: String,
+        policy: WalletAgentPolicy,
+        windowStartEpochMs: Long,
+        windowEndEpochMs: Long,
+        signingTimeEpochMs: Long = System.currentTimeMillis()
+    ): LedgerSigningStartResult = beginSigningInternal(
+        requestId, policy, windowStartEpochMs, windowEndEpochMs, signingTimeEpochMs,
+        humanApprovalRecorded = true
+    )
+
+    @Synchronized
+    private fun beginSigningInternal(
+        requestId: String,
+        policy: WalletAgentPolicy,
+        windowStartEpochMs: Long,
+        windowEndEpochMs: Long,
+        signingTimeEpochMs: Long,
+        humanApprovalRecorded: Boolean
+    ): LedgerSigningStartResult {
+        require(requestId.isNotBlank())
+        require(windowStartEpochMs > 0L && windowEndEpochMs > windowStartEpochMs) {
+            "Invalid spending window"
+        }
+        require(signingTimeEpochMs in windowStartEpochMs until windowEndEpochMs) {
+            "Signing time is outside the spending window"
+        }
+
+        val db = writableDatabase
+        db.beginTransaction()
+        try {
+            val record = readRecord(db, requestId)
+            if (record == null) {
+                db.setTransactionSuccessful()
+                return LedgerSigningStartResult.Rejected(
+                    PolicyDecision.Denied("Transfer request does not exist")
+                )
+            }
+            if (record.state != LedgerState.AUTHORIZED) {
+                db.setTransactionSuccessful()
+                return LedgerSigningStartResult.Rejected(
+                    PolicyDecision.Denied("Transfer is not authorized to start signing")
+                )
+            }
+            if (record.agentId != policy.agentId) {
+                db.setTransactionSuccessful()
+                return LedgerSigningStartResult.Rejected(
+                    PolicyDecision.Denied("Agent identity does not match wallet policy")
+                )
+            }
+
+            val intent = WalletTransferIntent(
+                requestId = record.requestId,
+                agentId = record.agentId,
+                recipientAddress = record.recipientAddress,
+                amountLamports = record.amountLamports,
+                createdAtEpochMs = record.createdAtEpochMs,
+                memo = record.memo
+            )
+            val spent = sumReservedSpend(
+                db, record.agentId, windowStartEpochMs, windowEndEpochMs,
+                excludeRequestId = requestId
+            )
+            val decision = policy.authorize(
+                WalletAction.TRANSFER, intent.amountLamports, intent.recipientAddress, spent
+            )
+            if (decision is PolicyDecision.Denied) {
+                val changed = db.update(
+                    TABLE,
+                    ContentValues().apply {
+                        put("state", LedgerState.FAILED.name)
+                        put("updated_at_ms", System.currentTimeMillis())
+                    },
+                    "request_id = ? AND state = ?",
+                    arrayOf(requestId, LedgerState.AUTHORIZED.name)
+                )
+                check(changed == 1) { "Could not fail a request denied before signing" }
+                db.setTransactionSuccessful()
+                return LedgerSigningStartResult.Rejected(decision)
+            }
+            if (decision == PolicyDecision.RequiresUserApproval && !humanApprovalRecorded) {
+                val changed = db.update(
+                    TABLE,
+                    ContentValues().apply {
+                        put("state", LedgerState.AWAITING_APPROVAL.name)
+                        put("updated_at_ms", System.currentTimeMillis())
+                    },
+                    "request_id = ? AND state = ?",
+                    arrayOf(requestId, LedgerState.AUTHORIZED.name)
+                )
+                check(changed == 1) { "Could not require human approval before signing" }
+                db.setTransactionSuccessful()
+                return LedgerSigningStartResult.AwaitingHumanApproval(
+                    record.copy(state = LedgerState.AWAITING_APPROVAL)
+                )
+            }
+
+            val changed = db.update(
+                TABLE,
+                ContentValues().apply {
+                    put("state", LedgerState.SIGNING.name)
+                    put("reserved_at_ms", signingTimeEpochMs)
+                    put("updated_at_ms", System.currentTimeMillis())
+                },
+                "request_id = ? AND state = ?",
+                arrayOf(requestId, LedgerState.AUTHORIZED.name)
+            )
+            check(changed == 1) { "Could not claim transfer for signing" }
+            db.setTransactionSuccessful()
+            return LedgerSigningStartResult.Started(record.copy(state = LedgerState.SIGNING))
+        } finally {
+            db.endTransaction()
+        }
+    }
+
     /** Compare-and-set transition prevents stale callers from overwriting a newer state. */
     @Synchronized
     fun transition(
@@ -465,7 +596,7 @@ class WalletRequestLedger(context: Context) : SQLiteOpenHelper(
 
     private fun allowedNextStates(state: LedgerState): Set<LedgerState> = when (state) {
         LedgerState.PREPARED -> setOf(LedgerState.AWAITING_APPROVAL, LedgerState.FAILED)
-        LedgerState.AUTHORIZED -> setOf(LedgerState.SIGNING, LedgerState.FAILED)
+        LedgerState.AUTHORIZED -> setOf(LedgerState.FAILED)
         LedgerState.AWAITING_APPROVAL -> setOf(LedgerState.FAILED)
         // Once signing has started, failure is ambiguous unless chain state has been reconciled.
         // Keep the reservation for SIGNING/SIGNED/SUBMITTED/UNKNOWN; never release budget blindly.
@@ -517,6 +648,12 @@ data class LedgerRecord(
 sealed interface LedgerClaim {
     data class Created(val record: LedgerRecord) : LedgerClaim
     data class Existing(val record: LedgerRecord) : LedgerClaim
+}
+
+sealed interface LedgerSigningStartResult {
+    data class Started(val record: LedgerRecord) : LedgerSigningStartResult
+    data class AwaitingHumanApproval(val record: LedgerRecord) : LedgerSigningStartResult
+    data class Rejected(val decision: PolicyDecision.Denied) : LedgerSigningStartResult
 }
 
 sealed interface LedgerAuthorizationResult {
