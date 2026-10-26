@@ -260,3 +260,6 @@ Estado honesto de release: **NÃO CONCLUÍDO**. A implementação do painel de c
 
 
 - 2026-10-26 — Configurações de transferência por agente agora incluem limites por pedido/diário configuráveis para baixo e allowlist opcional de destinatários exatos. Os tetos são 0,05 SOL por pedido e 0,10 SOL/dia; valores persistidos inválidos e allowlists corrompidas falham fechados. A tela valida SOL em precisão exata de lamports e salva limites + allowlist em uma única gravação de preferências. Teste instrumentado cobre persistência, limite e destino fora da allowlist; **não executado**. Commits: `593fc2af`, `4ac62c76`, `7236387e`, `d11322aa`, `b9da1276`, `2d6a6e25`, `5a92ce26`, `4718697d`.
+
+
+- 2026-10-26 — Reforçado o limite entre ledger local e broadcast: antes de qualquer chamada RPC, o executor valida o formato da transação serializada persistida e confirma que a assinatura nos bytes corresponde exatamente à assinatura registrada no pedido. Em caso de divergência, coloca o pedido em quarentena (`UNKNOWN`) e bloqueia o envio, sem reconstruir nem assinar novamente. Commit: `23cc44f41688fa2b024aade382e42b6240ed361b`. **Alteração não compilada nem testada; requer validação manual/automatizada antes de confiar em transações.**
