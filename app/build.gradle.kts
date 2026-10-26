@@ -59,6 +59,9 @@ dependencies {
     implementation("androidx.navigation:navigation-compose:2.8.5")
     implementation("androidx.work:work-runtime-ktx:2.10.0")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
+    // Solana keypair/signing primitives and BIP-39 mnemonic generation/validation.
+    implementation("org.sol4k:sol4k:0.8.2")
+    implementation("cash.z.ecc.android:kotlin-bip39:1.0.9")
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.3")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
     testImplementation("junit:junit:4.13.2")
