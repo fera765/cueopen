@@ -293,6 +293,62 @@ fun WalletScreen(nav: NavController) {
                                         }
                                     )
                                 }
+                                var maxAgentSol by remember(agent.id, permissionRefresh) {
+                                    mutableStateOf(String.format(Locale.US, "%.9f", walletPolicyStore.agentMaxTransferLamports(agent.id) / 1_000_000_000.0))
+                                }
+                                var dailyAgentSol by remember(agent.id, permissionRefresh) {
+                                    mutableStateOf(String.format(Locale.US, "%.9f", walletPolicyStore.agentDailyLimitLamports(agent.id) / 1_000_000_000.0))
+                                }
+                                var recipientAllowlist by remember(agent.id, permissionRefresh) {
+                                    mutableStateOf(walletPolicyStore.agentAllowedRecipients(agent.id).joinToString("\n"))
+                                }
+                                OutlinedTextField(
+                                    value = maxAgentSol,
+                                    onValueChange = { maxAgentSol = it },
+                                    label = { Text("Limite por pedido do agente (SOL, máx. 0,05)") },
+                                    modifier = Modifier.fillMaxWidth(),
+                                    singleLine = true
+                                )
+                                OutlinedTextField(
+                                    value = dailyAgentSol,
+                                    onValueChange = { dailyAgentSol = it },
+                                    label = { Text("Limite diário do agente (SOL, máx. 0,10)") },
+                                    modifier = Modifier.fillMaxWidth(),
+                                    singleLine = true
+                                )
+                                OutlinedTextField(
+                                    value = recipientAllowlist,
+                                    onValueChange = { recipientAllowlist = it },
+                                    label = { Text("Destinatários autorizados (um por linha; opcional)") },
+                                    supportingText = { Text("Se preenchida, apenas estes endereços poderão ser solicitados. A aprovação humana continua obrigatória.") },
+                                    modifier = Modifier.fillMaxWidth(),
+                                    minLines = 2
+                                )
+                                OutlinedButton(
+                                    onClick = {
+                                        try {
+                                            fun toLamports(value: String): Long =
+                                                java.math.BigDecimal(value.trim())
+                                                    .setScale(9, java.math.RoundingMode.UNNECESSARY)
+                                                    .multiply(java.math.BigDecimal("1000000000"))
+                                                    .longValueExact()
+                                            val maxLamports = toLamports(maxAgentSol)
+                                            val dailyLamports = toLamports(dailyAgentSol)
+                                            walletPolicyStore.setAgentTransferLimits(agent.id, maxLamports, dailyLamports)
+                                            val recipients = recipientAllowlist
+                                                .split(Regex("""[,\s]+"""))
+                                                .map { it.trim() }
+                                                .filter { it.isNotEmpty() }
+                                                .toSet()
+                                            walletPolicyStore.setAgentAllowedRecipients(agent.id, recipients)
+                                            error = null
+                                            permissionRefresh++
+                                        } catch (e: Exception) {
+                                            error = e.message ?: "Limites ou destinatários inválidos."
+                                        }
+                                    },
+                                    modifier = Modifier.fillMaxWidth()
+                                ) { Text("Salvar limites e destinatários") }
                             }
                         }
                     }
