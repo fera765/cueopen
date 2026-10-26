@@ -95,4 +95,32 @@ class WalletTransferIntentTest {
             )
         }
     }
+    @Test
+    fun requestGuardRejectsDuplicateClaimsWhileEntryIsRetained() {
+        val guard = InMemoryWalletRequestGuard(maxEntries = 3)
+        assertEquals(true, guard.claim("request_12345678"))
+        assertEquals(false, guard.claim("request_12345678"))
+        assertEquals(true, guard.claim("request_abcdefgh"))
+    }
+
+    @Test
+    fun requestGuardEvictsOldestEntryAtCapacity() {
+        val guard = InMemoryWalletRequestGuard(maxEntries = 2)
+        assertEquals(true, guard.claim("request_12345678"))
+        assertEquals(true, guard.claim("request_abcdefgh"))
+        assertEquals(true, guard.claim("request_87654321"))
+        // This explicitly documents the limitation: eviction permits a prior ID again.
+        assertEquals(true, guard.claim("request_12345678"))
+    }
+
+    @Test
+    fun requestGuardRejectsBlankIdsAndNonPositiveCapacity() {
+        assertThrows(IllegalArgumentException::class.java) {
+            InMemoryWalletRequestGuard(maxEntries = 0)
+        }
+        assertThrows(IllegalArgumentException::class.java) {
+            InMemoryWalletRequestGuard().claim(" ")
+        }
+    }
+
 }
