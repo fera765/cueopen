@@ -437,6 +437,23 @@ class WalletRequestLedgerTest {
     }
 
     @Test
+    fun recentRecordsIncludesPendingAndTerminalRequests() {
+        val now = System.currentTimeMillis()
+        val pending = intent(requestId = "request_history_01", amountLamports = 10L)
+        val terminal = intent(requestId = "request_history_02", amountLamports = 15L)
+        assertTrue(ledger.claimAndAuthorize(
+            pending, transferPolicy(), now - 10_000L, now + 10_000L, now
+        ) is LedgerAuthorizationResult.Created)
+        assertTrue(ledger.claimAndAuthorize(
+            terminal, transferPolicy(), now - 10_000L, now + 10_000L, now + 1L
+        ) is LedgerAuthorizationResult.Created)
+        assertTrue(ledger.cancelBeforeSigning(terminal.requestId))
+        val recentIds = ledger.recentRecords(10).map { it.requestId }.toSet()
+        assertTrue(recentIds.contains(pending.requestId))
+        assertTrue(recentIds.contains(terminal.requestId))
+    }
+
+    @Test
     fun terminalStatesCannotBeReopened() {
         ledger.claim(intent())
         assertTrue(ledger.transition(
