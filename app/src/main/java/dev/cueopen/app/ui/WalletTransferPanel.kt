@@ -347,7 +347,7 @@ fun WalletTransferPanel(context: Context, repository: SolanaWalletRepository, ne
                     entry.signature?.let { signature ->
                         OutlinedButton(onClick = {
                             uriHandler.openUri(network.transactionExplorerUrl(signature))
-                        }) { Text("Ver assinatura no Solscan") }
+                        }) { Text("Ver assinatura no Explorer Solana") }
                     }
                     if (entry.state in setOf(
                         LedgerState.AWAITING_APPROVAL, LedgerState.AUTHORIZED,
