@@ -985,7 +985,6 @@ class WalletRequestLedger(context: Context) : SQLiteOpenHelper(
         private const val DATABASE_VERSION = 5
         private const val TABLE = "wallet_transfer_requests"
         private const val MAX_SIGNATURE_LENGTH = 128
-        private const val MAX_SERIALIZED_TRANSACTION_BYTES = 1232
         private const val RECENT_INTENT_DEDUPE_WINDOW_MS = 120_000L
         private const val MAX_HUMAN_APPROVAL_AGE_MS = 120_000L
     }
