@@ -36,6 +36,7 @@ import androidx.compose.ui.unit.dp
 import androidx.navigation.NavController
 import dev.cueopen.app.ui.theme.Cue
 import dev.cueopen.app.wallet.SolanaRpcClient
+import dev.cueopen.app.wallet.SolanaNetwork
 import dev.cueopen.app.wallet.SolanaWalletRepository
 import dev.cueopen.app.wallet.WalletSetupSession
 import kotlinx.coroutines.Dispatchers
@@ -46,6 +47,16 @@ import java.util.Locale
 fun WalletScreen(nav: NavController) {
     val context = LocalContext.current
     val repository = remember(context) { SolanaWalletRepository(context.applicationContext) }
+    val networkPrefs = remember(context) {
+        context.applicationContext.getSharedPreferences("solana_wallet_settings", android.content.Context.MODE_PRIVATE)
+    }
+    var selectedNetwork by remember(context) {
+        mutableStateOf(
+            runCatching {
+                SolanaNetwork.valueOf(networkPrefs.getString("network", SolanaNetwork.MAINNET.name)!!)
+            }.getOrDefault(SolanaNetwork.MAINNET)
+        )
+    }
     val c = Cue.c
     var address by remember { mutableStateOf<String?>(null) }
     var walletExists by remember { mutableStateOf(false) }
@@ -87,12 +98,12 @@ fun WalletScreen(nav: NavController) {
         walletExists = repository.hasWallet()
         refreshAddress()
     }
-    LaunchedEffect(address, refreshCounter) {
+    LaunchedEffect(address, refreshCounter, selectedNetwork) {
         val current = address ?: return@LaunchedEffect
         loading = true
         error = null
         try {
-            val lamports = withContext(Dispatchers.IO) { SolanaRpcClient().getBalanceLamports(current) }
+            val lamports = withContext(Dispatchers.IO) { SolanaRpcClient(endpoint = selectedNetwork.rpcEndpoint, network = selectedNetwork).getBalanceLamports(current) }
             balance = String.format(Locale.US, "%.9f SOL", lamports / 1_000_000_000.0)
         } catch (e: Exception) {
             balance = null
@@ -196,13 +207,40 @@ fun WalletScreen(nav: NavController) {
                         Text("Atualizar")
                     }
                 }
-                Text("Saldo (mainnet)", style = androidx.compose.material3.MaterialTheme.typography.titleMedium)
+                Text("Saldo (" + selectedNetwork.displayName + ")", style = androidx.compose.material3.MaterialTheme.typography.titleMedium)
                 if (loading) CircularProgressIndicator()
                 else Text(balance ?: "Saldo ainda não disponível")
-                Text("Saldo e taxas podem mudar rapidamente. Transações transmitidas à mainnet não podem ser desfeitas.", color = c.ink2)
+                Text("Saldo e taxas podem mudar rapidamente. Transações transmitidas à " + selectedNetwork.displayName + " não podem ser desfeitas.", color = c.ink2)
             }
 
-            if (address != null) WalletTransferPanel(context.applicationContext, repository)
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(
+                    enabled = selectedNetwork != SolanaNetwork.MAINNET,
+                    onClick = {
+                        selectedNetwork = SolanaNetwork.MAINNET
+                        networkPrefs.edit().putString("network", selectedNetwork.name).apply()
+                        balance = null
+                        refreshCounter++
+                    }
+                ) { Text("Mainnet") }
+                OutlinedButton(
+                    enabled = selectedNetwork != SolanaNetwork.DEVNET,
+                    onClick = {
+                        selectedNetwork = SolanaNetwork.DEVNET
+                        networkPrefs.edit().putString("network", selectedNetwork.name).apply()
+                        balance = null
+                        refreshCounter++
+                    }
+                ) { Text("Devnet (testes)") }
+            }
+            Text(
+                if (selectedNetwork == SolanaNetwork.DEVNET)
+                    "Devnet usa tokens de teste sem valor real."
+                else
+                    "Mainnet usa SOL real. Verifique a rede antes de enviar.",
+                color = c.ink2
+            )
+            if (address != null) WalletTransferPanel(context.applicationContext, repository, selectedNetwork)
 
             if (setup != null && revealPhrase) {
                 Text("Frase de recuperação", style = androidx.compose.material3.MaterialTheme.typography.titleMedium)
