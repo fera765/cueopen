@@ -376,6 +376,41 @@ class WalletRequestLedgerTest {
     }
 
     @Test
+    fun onlyFinalizedChainFailureCanReleaseSignedTransferReservation() {
+        val now = System.currentTimeMillis()
+        val request = intent(requestId = "request_chain_fail01", amountLamports = 20L)
+        val created = ledger.claimAndAuthorize(
+            request, transferPolicy(autonomous = true),
+            now - 10_000L, now + 10_000L, now
+        )
+        assertTrue(created is LedgerAuthorizationResult.Created)
+        assertTrue(ledger.beginSigningAutonomously(
+            request.requestId, transferPolicy(autonomous = true),
+            now - 10_000L, now + 10_000L, now
+        ) is LedgerSigningStartResult.Started)
+        val signature = "67rpwLCuS5DGA8KGZXKsVQ7dnPb9goRLoKfgGbLfQg9WoLUgNY77E2jT11fem3coV9nAkguBACzrU1iyZM4B8roQ"
+        assertTrue(ledger.persistSignedTransaction(
+            request.requestId, signature, serializedSignedTransaction(signature)
+        ))
+        try {
+            ledger.markFinalizedChainFailure(
+                request.requestId, signature, "confirmed", "InstructionError"
+            )
+            throw AssertionError("A non-final chain error must not release the reservation")
+        } catch (expected: IllegalArgumentException) {
+            assertTrue(expected.message.orEmpty().contains("finalized"))
+        }
+        assertEquals(LedgerState.SIGNED, ledger.find(request.requestId)?.state)
+        assertTrue(ledger.markFinalizedChainFailure(
+            request.requestId, signature, "finalized", "InstructionError"
+        ))
+        assertEquals(LedgerState.FAILED, ledger.find(request.requestId)?.state)
+        assertFalse(ledger.markFinalizedChainFailure(
+            request.requestId, signature, "finalized", "InstructionError"
+        ))
+    }
+
+    @Test
     fun terminalStatesCannotBeReopened() {
         ledger.claim(intent())
         assertTrue(ledger.transition(
