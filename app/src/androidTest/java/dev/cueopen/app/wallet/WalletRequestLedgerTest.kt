@@ -140,6 +140,14 @@ class WalletRequestLedgerTest {
         assertFalse(ledger.transition(
             "request_12345678", LedgerState.SUBMITTED, LedgerState.UNKNOWN, "6".repeat(88)
         ))
+        try {
+            ledger.transition(
+                "request_12345678", LedgerState.SIGNED, LedgerState.SUBMITTED, "6".repeat(88)
+            )
+            throw AssertionError("Submitted signature must match the persisted signature")
+        } catch (expected: IllegalArgumentException) {
+            assertTrue(expected.message.orEmpty().contains("must match"))
+        }
         assertEquals("5".repeat(88), ledger.find("request_12345678")?.signature)
     }
 
