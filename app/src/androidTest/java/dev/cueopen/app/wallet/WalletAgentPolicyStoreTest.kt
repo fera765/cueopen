@@ -242,8 +242,7 @@ class WalletAgentPolicyStoreTest {
         val recipient = "HAgk14JpMQLgt6rVgv7cBQFJWFto5Dqxi472uT3DKpqk"
         val otherRecipient = "11111111111111111111111111111111"
         store.setAgentRequestTransfer(agentId, true)
-        store.setAgentTransferLimits(agentId, 10_000_000L, 20_000_000L)
-        store.setAgentAllowedRecipients(agentId, setOf(recipient))
+        store.setAgentTransferSettings(agentId, 10_000_000L, 20_000_000L, setOf(recipient))
 
         val recreated = WalletAgentPolicyStore(context)
         val policy = recreated.transferPolicy(agentId, SolanaNetwork.DEVNET)
