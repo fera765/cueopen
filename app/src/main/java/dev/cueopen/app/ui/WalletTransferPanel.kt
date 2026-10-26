@@ -19,6 +19,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.unit.dp
 import dev.cueopen.app.wallet.LedgerAuthorizationResult
 import dev.cueopen.app.wallet.LedgerState
@@ -69,6 +70,7 @@ fun WalletTransferPanel(context: Context, repository: SolanaWalletRepository) {
         SolanaTransferExecutor(context.applicationContext, repository, ledger)
     }
     val scope = rememberCoroutineScope()
+    val uriHandler = LocalUriHandler.current
     var recipient by remember { mutableStateOf("") }
     var amountSol by remember { mutableStateOf("") }
     var requestId by remember { mutableStateOf<String?>(null) }
@@ -334,6 +336,11 @@ fun WalletTransferPanel(context: Context, repository: SolanaWalletRepository) {
                     Text(entry.state.name + " · " + entry.requestId)
                     Text(entry.recipientAddress)
                     Text(String.format(Locale.US, "%.9f SOL", entry.amountLamports / LAMPORTS_PER_SOL))
+                    entry.signature?.let { signature ->
+                        OutlinedButton(onClick = {
+                            uriHandler.openUri("https://solscan.io/tx/" + signature)
+                        }) { Text("Ver assinatura no Solscan") }
+                    }
                     if (entry.state in setOf(
                         LedgerState.AWAITING_APPROVAL, LedgerState.AUTHORIZED,
                         LedgerState.SIGNING, LedgerState.SIGNED, LedgerState.SUBMITTED,
