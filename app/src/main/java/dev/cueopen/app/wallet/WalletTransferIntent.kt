@@ -13,7 +13,8 @@ data class WalletTransferIntent(
     val recipientAddress: String,
     val amountLamports: Long,
     val createdAtEpochMs: Long,
-    val memo: String? = null
+    val memo: String? = null,
+    val network: SolanaNetwork = SolanaNetwork.MAINNET
 ) {
     init {
         require(requestId.matches(Regex("[A-Za-z0-9_-]{12,96}"))) { "Invalid transfer request ID" }
@@ -36,7 +37,8 @@ data class WalletTransferIntent(
             recipientAddress: String,
             amountSol: String,
             createdAtEpochMs: Long,
-            memo: String? = null
+            memo: String? = null,
+            network: SolanaNetwork = SolanaNetwork.MAINNET
         ): WalletTransferIntent {
             val amount = try {
                 BigDecimal(amountSol).setScale(9, RoundingMode.UNNECESSARY)
@@ -52,7 +54,8 @@ data class WalletTransferIntent(
                 recipientAddress = recipientAddress,
                 amountLamports = amount,
                 createdAtEpochMs = createdAtEpochMs,
-                memo = memo
+                memo = memo,
+                network = network
             )
         }
     }
