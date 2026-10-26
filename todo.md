@@ -202,3 +202,24 @@ Ao concluir uma tarefa, marcar sua caixa como `[x]`, anotar o commit que contém
 
 - 2026-10-26 — Higiene do workflow de release: removido o passo legado de publicação forçada na branch `build-output` (que contradizia o modo manual-only), removida permissão de escrita desnecessária do workflow e adicionados passos explícitos de testes JVM, lint Android, build release e geração de checksum do APK. Commit: `c8e914505d0e094533ac599e918c9013a01d48a7`. **O workflow foi corrigido, mas não disparado nesta etapa.** Isso não é evidência de compilação nem aprovação dos testes; continua necessário fechar os gates de carteira e executar as validações pelo GitHub Actions.
 - 2026-10-26 — Auditoria de status antes do fechamento: o painel manual de SOL está integrado a criação/recuperação local, QR, seleção Mainnet/Devnet, ledger persistente, assinatura local e broadcast com confirmação humana. Permanecem sem evidência de execução: testes unitários/instrumentados, build atual e validação completa em Devnet. A permissão de agentes de chat ainda não está ligada a uma identidade confiável de execução; não há fluxo de swaps validado. Não marcar as quatro tarefas como concluídas até haver implementação, revisão e evidência.
+
+
+## Auditoria de fechamento — 2026-10-26 (GitHub only)
+
+Estado honesto de release: **NÃO CONCLUÍDO**. A implementação do painel de carteira SOL é substancial, mas não existe evidência de build/testes do commit atual. Nenhuma tarefa deve ser marcada como concluída até a evidência existir.
+
+### Bloqueios para encerrar sem pendências
+- [ ] Executar e corrigir `gradle testDebugUnitTest` e `gradle lintDebug` pelo workflow manual em `main`; registrar resultado do commit exato.
+- [ ] Habilitar um ambiente de instrumentação Android (emulador ou dispositivo em CI) e executar os testes `androidTest`, em especial ledger SQLite, cofre Keystore e reabertura/restauração; revisar qualquer falha sem suprimi-la.
+- [ ] Validar em Devnet o ciclo criação/restauração → saldo → construir/assinar → confirmação humana → broadcast → reconciliação, com SOL de teste e sem segredos em logs.
+- [ ] Integrar uma identidade de agente confiável fornecida pelo runtime local, e não por texto/argumento do modelo; ferramentas de carteira precisam estar ausentes/bloqueadas para chat normal e agentes não autorizados. O estado atual dá permissão apenas ao painel manual.
+- [ ] Decidir explicitamente o escopo: swaps não são implementados. Não expor troca/trade nem declarar a carteira completa para SOL + tokens até haver provedor/programas permitidos, validação de mint/token program/rota/slippage/destinatário, simulação e testes. Se swaps forem fora do escopo da fase, declarar isso como limitação de produto, não como concluído.
+- [ ] Completar auditoria do ledger para janelas temporais, transições, estado UNKNOWN, blockhash expirado, concorrência e revogação; adicionar/ajustar testes conforme achados.
+- [ ] Revisar dependências criptográficas e interoperabilidade externa da frase/caminho `m/44'/501'/0'/0'`; o vetor independente está codificado em teste, mas não executado.
+- [ ] Somente depois dos itens acima passarem: executar workflow manual de release, revisar logs, artefato APK e SHA-256. O workflow de release permanece manual e não deve publicar uma branch de build por force-push.
+
+### Evidência observada durante a auditoria
+- Workflow de release foi corrigido no commit `c8e914505d0e094533ac599e918c9013a01d48a7`: gatilho manual, testes JVM, lint, assembleRelease, verificação e checksum.
+- `todo.md` recebeu este relatório no commit registrado logo após a correção do workflow.
+- Testes encontrados em `main` são arquivos de teste; a existência deles não significa que passaram.
+- Uma execução antiga de CI em `efda70f4d8bd5bb4086e43bd2a924f3f9d3d48a5` foi concluída com sucesso antes dos commits posteriores da carteira e não comprova o estado atual.
