@@ -76,9 +76,14 @@ class SolanaWalletRepository(context: Context) {
 
     @Synchronized
     fun beginRestore(phrase: CharArray): WalletSetupSession {
-        check(!vault.hasSecret()) { "Wallet already exists" }
-        return WalletSetupSession(SolanaWalletKeyDerivation.restore(phrase)) { material ->
-            persist(material)
+        try {
+            check(!vault.hasSecret()) { "Wallet already exists" }
+            return WalletSetupSession(SolanaWalletKeyDerivation.restore(phrase)) { material ->
+                persist(material)
+            }
+        } finally {
+            // This method consumes the caller-provided phrase, including when restore fails.
+            phrase.fill(0.toChar())
         }
     }
 
