@@ -350,18 +350,6 @@ class WalletRequestLedger(context: Context) : SQLiteOpenHelper(
         if (next == LedgerState.SIGNED && !isValidSolanaSignature(signature)) {
             throw IllegalArgumentException("A valid base58 Solana transaction signature is required")
         }
-        if (expected == LedgerState.SIGNED && next == LedgerState.SUBMITTED &&
-            signature != readRecord(writableDatabase, requestId)?.signature
-        ) {
-            throw IllegalArgumentException("Submitted signature must match the signature persisted before network submission")
-        }
-        if (expected in setOf(LedgerState.SIGNED, LedgerState.SUBMITTED, LedgerState.UNKNOWN) &&
-            next == LedgerState.CONFIRMED &&
-            signature != readRecord(writableDatabase, requestId)?.signature
-        ) {
-            throw IllegalArgumentException("Confirmation signature must match the original transaction signature")
-        }
-
         // State change and signature invariants are enforced in one SQLite transaction.
         val db = writableDatabase
         db.beginTransaction()
