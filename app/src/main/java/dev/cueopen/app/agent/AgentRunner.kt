@@ -62,6 +62,8 @@ class AgentRunner(
     private val ctx: android.content.Context,
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    /** Registro explícito do ciclo de vida de cada chamada de ferramenta. */
+    val executions = ToolExecutionManager()
     private val jobs = java.util.concurrent.ConcurrentHashMap<String, Job>()
     private val childJobsByParent = mutableMapOf<String, MutableList<Job>>()
     private val _activity = MutableStateFlow<Map<String, Activity>>(emptyMap())
@@ -74,6 +76,7 @@ class AgentRunner(
     fun isRunning(sessionId: String) = jobs[sessionId]?.isActive == true
 
     fun stop(sessionId: String) {
+        executions.cancelSession(sessionId)
         // Primeiro envia Ctrl+C ao PTY ativo; cancelar só a coroutine deixava o processo vivo.
         terminals.get(sessionId).cancelAgentCommand()
         jobs.remove(sessionId)?.cancel()
@@ -806,6 +809,7 @@ class AgentRunner(
             else -> ""
         }
         val step = ChatItem.Step(tool = call.name, title = title, args = argPreview)
+        val executionId = executions.begin(sessionId, call.name, call.argsJson)
         store.addItem(sessionId, step)
         setActivity(sessionId, Activity(kind, argPreview.take(80)))
         if (kind == Activity.Kind.BROWSER) browserFor(sessionId).setAgentControl(true)
@@ -921,12 +925,15 @@ class AgentRunner(
                         else "Ferramenta desconhecida: ${call.name}"
             }
         } catch (c: kotlinx.coroutines.CancellationException) {
+            executions.cancel(executionId)
             store.replaceItem(sessionId, step.copy(result = "Execução interrompida.", status = StepStatus.ERROR))
             throw c
         } catch (t: Throwable) {
+            executions.fail(executionId, t.message.orEmpty())
             store.replaceItem(sessionId, step.copy(result = t.message.orEmpty(), status = StepStatus.ERROR))
             return ToolResult("Erro: ${t.message}")
         }
+        executions.finish(executionId, out)
         store.replaceItem(sessionId, step.copy(result = out.take(4000), status = StepStatus.OK))
         return ToolResult(out)
     }
