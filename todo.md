@@ -150,3 +150,5 @@ Ao concluir uma tarefa, marcar sua caixa como `[x]`, anotar o commit que contém
 - 2026-10-26 — Simplificado o setup do teste de assinatura malformada para não depender de uma solicitação duplicada; o cenário agora cria diretamente uma autorização autônoma nova e exercita a rejeição antes de persistir `SIGNED`. Commit: `f28e0383c20f8d24c8cd5c714ac5170aeb135c18`. Teste não executado.
 
 - 2026-10-26 — Pequeno endurecimento defensivo: limite do tamanho textual da assinatura é conferido antes da decodificação Base58, evitando processar entradas absurdamente grandes. Commit: `d380d7343d9a2b4c2c4ffce9c1b812c6f39da020`. Ainda sem execução dos testes.
+
+- 2026-10-26 — Transição do ledger agora faz leitura, checagem de estado/assinatura e atualização dentro de uma única transação SQLite, reduzindo a janela de corrida entre validação e escrita. Teste adicional cobre chamada repetida com estado já alterado. Commits: `0064b617894bc05d26d89fbdfcfd2ae0c9ee5187`, `d37b6b7ee466eaad9e5e14644ca202408c78d2d0`. **Testes não executados.**
