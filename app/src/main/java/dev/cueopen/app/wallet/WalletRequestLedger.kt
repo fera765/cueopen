@@ -756,7 +756,7 @@ class WalletRequestLedger(context: Context) : SQLiteOpenHelper(
         // Once signing has started, failure is ambiguous unless chain state has been reconciled.
         // Keep the reservation for SIGNING/SIGNED/SUBMITTED/UNKNOWN; never release budget blindly.
         LedgerState.SIGNING -> setOf(LedgerState.SIGNED, LedgerState.UNKNOWN)
-        LedgerState.SIGNED -> setOf(LedgerState.SUBMITTED, LedgerState.UNKNOWN)
+        LedgerState.SIGNED -> setOf(LedgerState.SUBMITTED, LedgerState.CONFIRMED, LedgerState.UNKNOWN)
         LedgerState.SUBMITTED -> setOf(LedgerState.CONFIRMED, LedgerState.UNKNOWN)
         LedgerState.UNKNOWN -> setOf(LedgerState.CONFIRMED)
         LedgerState.CONFIRMED, LedgerState.FAILED -> emptySet()
