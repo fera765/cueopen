@@ -281,6 +281,8 @@ class WalletRequestLedgerTest {
         )
         assertTrue(replay is LedgerAuthorizationResult.Existing)
         assertEquals(LedgerState.UNKNOWN, ledger.find(request.requestId)?.state)
+        assertTrue(ledger.abortSigningBeforePersistence(request.requestId))
+        assertEquals(LedgerState.FAILED, ledger.find(request.requestId)?.state)
     }
 
     @Test
