@@ -580,6 +580,34 @@ class WalletRequestLedger(context: Context) : SQLiteOpenHelper(
         }
     }
 
+    /**
+     * Releases a signing reservation only when this process knows no signed bytes were
+     * persisted. A process crash cannot call this method and therefore remains quarantined.
+     */
+    @Synchronized
+    internal fun abortSigningBeforePersistence(requestId: String): Boolean {
+        require(requestId.isNotBlank())
+        val db = writableDatabase
+        db.beginTransaction()
+        try {
+            val changed = db.update(
+                TABLE,
+                ContentValues().apply {
+                    put("state", LedgerState.FAILED.name)
+                    put("human_approved_at_ms", 0L)
+                    put("updated_at_ms", System.currentTimeMillis())
+                },
+                "request_id = ? AND state = ? AND signature IS NULL AND signed_transaction IS NULL",
+                arrayOf(requestId, LedgerState.SIGNING.name)
+            )
+            if (changed != 1) return false
+            db.setTransactionSuccessful()
+            return true
+        } finally {
+            db.endTransaction()
+        }
+    }
+
     /** Returns a defensive copy only for a durable signed transaction awaiting reconciliation. */
     @Synchronized
     fun signedTransaction(requestId: String): ByteArray? {
