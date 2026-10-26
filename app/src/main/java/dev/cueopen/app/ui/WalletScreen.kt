@@ -334,13 +334,14 @@ fun WalletScreen(nav: NavController) {
                                                     .longValueExact()
                                             val maxLamports = toLamports(maxAgentSol)
                                             val dailyLamports = toLamports(dailyAgentSol)
-                                            walletPolicyStore.setAgentTransferLimits(agent.id, maxLamports, dailyLamports)
                                             val recipients = recipientAllowlist
                                                 .split(Regex("""[,\s]+"""))
                                                 .map { it.trim() }
                                                 .filter { it.isNotEmpty() }
                                                 .toSet()
-                                            walletPolicyStore.setAgentAllowedRecipients(agent.id, recipients)
+                                            walletPolicyStore.setAgentTransferSettings(
+                                                agent.id, maxLamports, dailyLamports, recipients
+                                            )
                                             error = null
                                             permissionRefresh++
                                         } catch (e: Exception) {
