@@ -299,11 +299,13 @@ class WalletRequestLedger(context: Context) : SQLiteOpenHelper(
                     )
                 }
             if (record.state != LedgerState.AWAITING_APPROVAL) {
+                db.setTransactionSuccessful()
                 return LedgerAuthorizationResult.Rejected(
                     PolicyDecision.Denied("Transfer is not awaiting human approval")
                 )
             }
             if (record.agentId != policy.agentId) {
+                db.setTransactionSuccessful()
                 return LedgerAuthorizationResult.Rejected(
                     PolicyDecision.Denied("Agent identity does not match wallet policy")
                 )
