@@ -539,6 +539,41 @@ class WalletRequestLedgerTest {
     }
 
     @Test
+    fun broadcastRevalidatesPolicyAndMovesReservationIntoCurrentDay() {
+        val now = System.currentTimeMillis()
+        val oldStart = now - 2L * 24L * 60L * 60L * 1000L
+        val oldEnd = now - 24L * 60L * 60L * 1000L
+        val request = intent(requestId = "request_broadcast_01", amountLamports = 20L, memo = null)
+        val policy = transferPolicy(autonomous = true, dailyLimit = 100L)
+        val created = ledger.claimAndAuthorize(
+            request, policy, oldStart, oldEnd, oldStart + 1_000L
+        )
+        assertTrue(created is LedgerAuthorizationResult.Created)
+        assertTrue(ledger.beginSigningAutonomously(
+            request.requestId, policy, oldStart, oldEnd, oldStart + 2_000L
+        ) is LedgerSigningStartResult.Started)
+        val signature = "67rpwLCuS5DGA8KGZXKsVQ7dnPb9goRLoKfgGbLfQg9WoLUgNY77E2jT11fem3coV9nAkguBACzrU1iyZM4B8roQ"
+        assertTrue(ledger.persistSignedTransaction(
+            request.requestId, signature, serializedSignedTransaction(signature)
+        ))
+
+        val disabledPolicy = policy.copy(enabled = false, canTransfer = false)
+        assertTrue(ledger.authorizeBroadcast(
+            request.requestId, disabledPolicy, now - 10_000L, now + 10_000L, now
+        ) is PolicyDecision.Denied)
+        assertEquals(LedgerState.SIGNED, ledger.find(request.requestId)?.state)
+
+        assertTrue(ledger.authorizeBroadcast(
+            request.requestId, policy, now - 10_000L, now + 10_000L, now
+        ) is PolicyDecision.Allowed)
+        val next = ledger.claimAndAuthorize(
+            intent(requestId = "request_after_bcast01", amountLamports = 90L, memo = null),
+            policy, now - 10_000L, now + 10_000L, now + 1L
+        )
+        assertTrue(next is LedgerAuthorizationResult.Rejected)
+    }
+
+    @Test
     fun terminalStatesCannotBeReopened() {
         ledger.claim(intent())
         assertTrue(ledger.transition(
