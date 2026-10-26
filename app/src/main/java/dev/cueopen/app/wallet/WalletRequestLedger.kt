@@ -144,7 +144,7 @@ class WalletRequestLedger(context: Context) : SQLiteOpenHelper(
                 // Re-evaluation must never silently bypass a previously required human approval.
                 var effectiveRecord = existing
                 if (existing.state == LedgerState.AUTHORIZED &&
-                    decision == PolicyDecision.RequiresUserApproval
+                    decision != PolicyDecision.Allowed
                 ) {
                     val changed = db.update(
                         TABLE,
