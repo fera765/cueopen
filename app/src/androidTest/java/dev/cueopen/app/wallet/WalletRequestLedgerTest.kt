@@ -10,6 +10,8 @@ import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
+import kotlinx.coroutines.runBlocking
+import okhttp3.OkHttpClient
 
 @RunWith(AndroidJUnit4::class)
 class WalletRequestLedgerTest {
@@ -453,6 +455,36 @@ class WalletRequestLedgerTest {
         val recentIds = ledger.recentRecords(10).map { it.requestId }.toSet()
         assertTrue(recentIds.contains(pending.requestId))
         assertTrue(recentIds.contains(terminal.requestId))
+    }
+
+    @Test
+    fun executorCannotBroadcastOrReconcileAnotherAgentsRequest() = runBlocking {
+        val now = System.currentTimeMillis()
+        val request = intent(requestId = "request_agent_guard01", amountLamports = 20L, memo = null)
+        val created = ledger.claimAndAuthorize(
+            request, transferPolicy(autonomous = true),
+            now - 10_000L, now + 10_000L, now
+        )
+        assertTrue(created is LedgerAuthorizationResult.Created)
+        assertTrue(ledger.beginSigningAutonomously(
+            request.requestId, transferPolicy(autonomous = true),
+            now - 10_000L, now + 10_000L, now
+        ) is LedgerSigningStartResult.Started)
+        val signature = "67rpwLCuS5DGA8KGZXKsVQ7dnPb9goRLoKfgGbLfQg9WoLUgNY77E2jT11fem3coV9nAkguBACzrU1iyZM4B8roQ"
+        assertTrue(ledger.persistSignedTransaction(
+            request.requestId, signature, serializedSignedTransaction(signature)
+        ))
+        val executor = SolanaTransferExecutor(
+            context,
+            SolanaWalletRepository(context),
+            ledger,
+            SolanaRpcClient(endpoint = "https://rpc.test", client = OkHttpClient())
+        )
+        val broadcast = executor.broadcastPersistedTransfer(request.requestId, "other-agent")
+        val reconcile = executor.reconcileSignature(request.requestId, "other-agent")
+        assertTrue(broadcast is TransferExecutionResult.Rejected)
+        assertTrue(reconcile is TransferExecutionResult.Rejected)
+        assertEquals(LedgerState.SIGNED, ledger.find(request.requestId)?.state)
     }
 
     @Test
