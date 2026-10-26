@@ -541,6 +541,69 @@ class WalletRequestLedger(context: Context) : SQLiteOpenHelper(
     }
 
     /**
+     * Revalidates policy at broadcast time and moves the reservation into the current
+     * spending window atomically. RequiresUserApproval is returned to the caller, which
+     * must separately prove that the user confirmed the final broadcast.
+     */
+    @Synchronized
+    internal fun authorizeBroadcast(
+        requestId: String,
+        policy: WalletAgentPolicy,
+        windowStartEpochMs: Long,
+        windowEndEpochMs: Long,
+        broadcastTimeEpochMs: Long = System.currentTimeMillis()
+    ): PolicyDecision {
+        require(windowStartEpochMs > 0L && windowEndEpochMs > windowStartEpochMs) {
+            "Invalid spending window"
+        }
+        require(broadcastTimeEpochMs in windowStartEpochMs until windowEndEpochMs) {
+            "Broadcast time is outside the spending window"
+        }
+        val db = writableDatabase
+        db.beginTransaction()
+        try {
+            val record = readRecord(db, requestId)
+                ?: run {
+                    db.setTransactionSuccessful()
+                    return PolicyDecision.Denied("Transfer request does not exist")
+                }
+            if (record.state != LedgerState.SIGNED || record.signature.isNullOrBlank()) {
+                db.setTransactionSuccessful()
+                return PolicyDecision.Denied("Only a durably signed request can be broadcast")
+            }
+            if (record.agentId != policy.agentId) {
+                db.setTransactionSuccessful()
+                return PolicyDecision.Denied("Agent identity does not match wallet policy")
+            }
+            val spent = sumReservedSpend(
+                db, record.agentId, windowStartEpochMs, windowEndEpochMs,
+                excludeRequestId = requestId
+            )
+            val decision = policy.authorize(
+                WalletAction.TRANSFER, record.amountLamports, record.recipientAddress, spent
+            )
+            if (decision is PolicyDecision.Denied) {
+                db.setTransactionSuccessful()
+                return decision
+            }
+            val changed = db.update(
+                TABLE,
+                ContentValues().apply {
+                    put("reserved_at_ms", broadcastTimeEpochMs)
+                    put("updated_at_ms", System.currentTimeMillis())
+                },
+                "request_id = ? AND state = ? AND signature IS NOT NULL AND signed_transaction IS NOT NULL",
+                arrayOf(requestId, LedgerState.SIGNED.name)
+            )
+            check(changed == 1) { "Could not reserve signed transfer for broadcast" }
+            db.setTransactionSuccessful()
+            return decision
+        } finally {
+            db.endTransaction()
+        }
+    }
+
+    /**
      * Atomically persists the signed transaction bytes and their signature before any network
      * call. The signature must match the first signature in the serialized Solana transaction.
      * This method is the only permitted SIGNING -> SIGNED transition.
