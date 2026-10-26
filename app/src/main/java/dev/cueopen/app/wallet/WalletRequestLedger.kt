@@ -31,7 +31,7 @@ class WalletRequestLedger(context: Context) : SQLiteOpenHelper(
         try {
             val existing = db.query(
                 TABLE,
-                arrayOf("agent_id", "recipient", "amount_lamports", "created_at_ms", "memo", "state", "signature"),
+                arrayOf("agent_id", "recipient", "amount_lamports", "created_at_ms", "memo", "state", "signature", "human_approved_at_ms"),
                 "request_id = ?",
                 arrayOf(intent.requestId),
                 null,
@@ -46,7 +46,8 @@ class WalletRequestLedger(context: Context) : SQLiteOpenHelper(
                     createdAtEpochMs = cursor.getLong(3),
                     memo = if (cursor.isNull(4)) null else cursor.getString(4),
                     state = LedgerState.valueOf(cursor.getString(5)),
-                    signature = if (cursor.isNull(6)) null else cursor.getString(6)
+                    signature = if (cursor.isNull(6)) null else cursor.getString(6),
+                    humanApprovedAtEpochMs = cursor.getLong(7)
                 )
             }
 
@@ -68,6 +69,7 @@ class WalletRequestLedger(context: Context) : SQLiteOpenHelper(
                 if (intent.memo == null) putNull("memo") else put("memo", intent.memo)
                 put("state", LedgerState.PREPARED.name)
                 put("signature", null as String?)
+                put("human_approved_at_ms", 0L)
                 put("updated_at_ms", System.currentTimeMillis())
             }
             val inserted = db.insertOrThrow(TABLE, null, values)
@@ -154,6 +156,7 @@ class WalletRequestLedger(context: Context) : SQLiteOpenHelper(
                         TABLE,
                         ContentValues().apply {
                             put("state", LedgerState.AWAITING_APPROVAL.name)
+                            put("human_approved_at_ms", 0L)
                             put("updated_at_ms", System.currentTimeMillis())
                         },
                         "request_id = ? AND state = ?",
@@ -205,6 +208,7 @@ class WalletRequestLedger(context: Context) : SQLiteOpenHelper(
                 if (intent.memo == null) putNull("memo") else put("memo", intent.memo)
                 put("state", initialState.name)
                 put("signature", null as String?)
+                put("human_approved_at_ms", 0L)
                 put("updated_at_ms", System.currentTimeMillis())
             }
             db.insertOrThrow(TABLE, null, values)
@@ -228,7 +232,7 @@ class WalletRequestLedger(context: Context) : SQLiteOpenHelper(
     private fun readRecord(db: SQLiteDatabase, requestId: String): LedgerRecord? =
         db.query(
             TABLE,
-            arrayOf("agent_id", "recipient", "amount_lamports", "created_at_ms", "memo", "state", "signature"),
+            arrayOf("agent_id", "recipient", "amount_lamports", "created_at_ms", "memo", "state", "signature", "human_approved_at_ms"),
             "request_id = ?",
             arrayOf(requestId),
             null, null, null
@@ -241,7 +245,8 @@ class WalletRequestLedger(context: Context) : SQLiteOpenHelper(
                 createdAtEpochMs = cursor.getLong(3),
                 memo = if (cursor.isNull(4)) null else cursor.getString(4),
                 state = LedgerState.valueOf(cursor.getString(5)),
-                signature = if (cursor.isNull(6)) null else cursor.getString(6)
+                signature = if (cursor.isNull(6)) null else cursor.getString(6),
+                humanApprovedAtEpochMs = cursor.getLong(7)
             )
         }
 
@@ -336,6 +341,7 @@ class WalletRequestLedger(context: Context) : SQLiteOpenHelper(
                 ContentValues().apply {
                     put("state", LedgerState.AUTHORIZED.name)
                     put("reserved_at_ms", approvalTimeEpochMs)
+                    put("human_approved_at_ms", approvalTimeEpochMs)
                     put("updated_at_ms", System.currentTimeMillis())
                 },
                 "request_id = ? AND state = ?",
@@ -544,7 +550,7 @@ class WalletRequestLedger(context: Context) : SQLiteOpenHelper(
         require(requestId.isNotBlank())
         return readableDatabase.query(
             TABLE,
-            arrayOf("agent_id", "recipient", "amount_lamports", "created_at_ms", "memo", "state", "signature"),
+            arrayOf("agent_id", "recipient", "amount_lamports", "created_at_ms", "memo", "state", "signature", "human_approved_at_ms"),
             "request_id = ?",
             arrayOf(requestId),
             null,
@@ -559,7 +565,8 @@ class WalletRequestLedger(context: Context) : SQLiteOpenHelper(
                 createdAtEpochMs = cursor.getLong(3),
                 memo = if (cursor.isNull(4)) null else cursor.getString(4),
                 state = LedgerState.valueOf(cursor.getString(5)),
-                signature = if (cursor.isNull(6)) null else cursor.getString(6)
+                signature = if (cursor.isNull(6)) null else cursor.getString(6),
+                humanApprovedAtEpochMs = cursor.getLong(7)
             )
         }
     }
@@ -576,6 +583,7 @@ class WalletRequestLedger(context: Context) : SQLiteOpenHelper(
                 memo TEXT,
                 state TEXT NOT NULL,
                 signature TEXT,
+                human_approved_at_ms INTEGER NOT NULL DEFAULT 0,
                 updated_at_ms INTEGER NOT NULL
             )""".trimIndent()
         )
@@ -588,7 +596,11 @@ class WalletRequestLedger(context: Context) : SQLiteOpenHelper(
             db.execSQL("ALTER TABLE $TABLE ADD COLUMN reserved_at_ms INTEGER NOT NULL DEFAULT 1")
             db.execSQL("UPDATE $TABLE SET reserved_at_ms = created_at_ms")
         }
-        if (newVersion > 2) {
+        if (oldVersion < 3) {
+            // Existing requests were not accompanied by a durable human-approval marker.
+            db.execSQL("ALTER TABLE $TABLE ADD COLUMN human_approved_at_ms INTEGER NOT NULL DEFAULT 0")
+        }
+        if (newVersion > 3) {
             error("Unsupported wallet ledger schema upgrade: $oldVersion -> $newVersion")
         }
     }
@@ -616,7 +628,7 @@ class WalletRequestLedger(context: Context) : SQLiteOpenHelper(
 
     companion object {
         private const val DATABASE_NAME = "cueopen_wallet_requests.db"
-        private const val DATABASE_VERSION = 2
+        private const val DATABASE_VERSION = 3
         private const val TABLE = "wallet_transfer_requests"
         private const val MAX_SIGNATURE_LENGTH = 128
     }
@@ -642,7 +654,8 @@ data class LedgerRecord(
     val createdAtEpochMs: Long,
     val memo: String?,
     val state: LedgerState,
-    val signature: String?
+    val signature: String?,
+    val humanApprovedAtEpochMs: Long = 0L
 )
 
 sealed interface LedgerClaim {
