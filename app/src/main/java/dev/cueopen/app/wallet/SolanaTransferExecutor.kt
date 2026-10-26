@@ -1,0 +1,218 @@
+package dev.cueopen.app.wallet
+
+import android.content.Context
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import org.sol4k.Base58
+import org.sol4k.Keypair
+import org.sol4k.PublicKey
+import org.sol4k.TransactionMessage
+import org.sol4k.VersionedTransaction
+import org.sol4k.instruction.TransferInstruction
+
+/**
+ * Local SOL transfer signing and durable broadcast orchestration.
+ * Only policy-ledger transfer intents are accepted; arbitrary agent instructions are not.
+ * Signed bytes and signature must be committed before any network broadcast.
+ */
+class SolanaTransferExecutor(
+    context: Context,
+    private val walletRepository: SolanaWalletRepository,
+    private val ledger: WalletRequestLedger,
+    private val rpc: SolanaRpcClient = SolanaRpcClient()
+) {
+    private val vault = WalletSecretVault(context.applicationContext)
+
+    suspend fun signAuthorizedTransfer(
+        requestId: String,
+        policy: WalletAgentPolicy,
+        windowStartEpochMs: Long,
+        windowEndEpochMs: Long,
+        humanApproval: Boolean = false,
+        signingTimeEpochMs: Long = System.currentTimeMillis()
+    ): TransferExecutionResult = withContext(Dispatchers.IO) {
+        val record = ledger.find(requestId)
+            ?: return@withContext TransferExecutionResult.Rejected("Transfer request does not exist")
+        if (record.state != LedgerState.AUTHORIZED) {
+            return@withContext TransferExecutionResult.Rejected("Transfer is not authorized")
+        }
+        if (record.amountLamports <= 0L ||
+            !SolanaAddressValidator.isValidAddress(record.recipientAddress)
+        ) {
+            return@withContext TransferExecutionResult.Rejected("Transfer payload is invalid")
+        }
+
+        val claim = if (humanApproval) {
+            ledger.beginSigningAfterHumanApproval(
+                requestId, policy, windowStartEpochMs, windowEndEpochMs, signingTimeEpochMs
+            )
+        } else {
+            ledger.beginSigningAutonomously(
+                requestId, policy, windowStartEpochMs, windowEndEpochMs, signingTimeEpochMs
+            )
+        }
+        when (claim) {
+            is LedgerSigningStartResult.AwaitingHumanApproval ->
+                return@withContext TransferExecutionResult.AwaitingApproval
+            is LedgerSigningStartResult.Rejected ->
+                return@withContext TransferExecutionResult.Rejected(claim.decision.reason)
+            is LedgerSigningStartResult.Started -> Unit
+        }
+
+        var seed: ByteArray? = null
+        var keypair: Keypair? = null
+        var serialized: ByteArray? = null
+        try {
+            val expectedAddress = walletRepository.publicAddress()
+                ?: return@withContext TransferExecutionResult.Rejected("Wallet metadata is unavailable")
+            seed = vault.read()
+            require(seed.size == 32) { "Stored wallet seed has an unexpected length" }
+            keypair = Keypair.fromSecretKey(seed)
+            if (keypair.publicKey.toBase58() != expectedAddress) {
+                return@withContext TransferExecutionResult.Rejected(
+                    "Stored secret does not match wallet metadata"
+                )
+            }
+
+            val blockhash = rpc.getLatestBlockhash()
+            val instruction = TransferInstruction(
+                keypair.publicKey,
+                PublicKey(record.recipientAddress),
+                record.amountLamports
+            )
+            val message = TransactionMessage.newMessage(keypair.publicKey, blockhash.blockhash, instruction)
+            val fee = rpc.getFeeForMessageLamports(message.serialize())
+                ?: return@withContext TransferExecutionResult.Rejected("Network fee is unavailable")
+            val balance = rpc.getBalanceLamports(expectedAddress)
+            if (record.amountLamports > Long.MAX_VALUE - fee ||
+                balance < record.amountLamports + fee
+            ) {
+                return@withContext TransferExecutionResult.Rejected(
+                    "Insufficient SOL for transfer amount and network fee"
+                )
+            }
+
+            val transaction = VersionedTransaction(message)
+            transaction.sign(keypair)
+            serialized = transaction.serialize()
+            if (serialized.size !in 66..MAX_TRANSACTION_BYTES || serialized[0].toInt() != 1) {
+                return@withContext TransferExecutionResult.Rejected("Unsupported signed transaction format")
+            }
+            val signature = Base58.encode(serialized.copyOfRange(1, 65))
+            if (!SolanaSignatureValidator.isValid(signature)) {
+                return@withContext TransferExecutionResult.Rejected("Signer returned an invalid signature")
+            }
+            if (!ledger.persistSignedTransaction(requestId, signature, serialized)) {
+                return@withContext TransferExecutionResult.Rejected(
+                    "Signed transaction could not be durably recorded; no broadcast was attempted"
+                )
+            }
+            TransferExecutionResult.Signed(
+                requestId, signature, serialized.size, fee, blockhash.lastValidBlockHeight
+            )
+        } catch (error: Exception) {
+            // Never reset a request to AUTHORIZED after signing may have started.
+            TransferExecutionResult.Rejected(error.message ?: "Could not sign transfer")
+        } finally {
+            seed?.fill(0)
+            keypair?.secret?.fill(0)
+            serialized?.fill(0)
+        }
+    }
+
+    suspend fun broadcastPersistedTransfer(requestId: String): TransferExecutionResult =
+        withContext(Dispatchers.IO) {
+            val record = ledger.find(requestId)
+                ?: return@withContext TransferExecutionResult.Rejected("Transfer request does not exist")
+            if (record.state != LedgerState.SIGNED || record.signature.isNullOrBlank()) {
+                return@withContext TransferExecutionResult.Rejected(
+                    "Only a durably signed transaction may be broadcast"
+                )
+            }
+            val bytes = ledger.signedTransaction(requestId)
+                ?: return@withContext TransferExecutionResult.Rejected(
+                    "Persisted transaction bytes are unavailable; refusing to rebuild or re-sign"
+                )
+            try {
+                val returnedSignature = rpc.sendPersistedTransaction(bytes)
+                if (returnedSignature != record.signature) {
+                    ledger.transition(requestId, LedgerState.SIGNED, LedgerState.UNKNOWN, record.signature)
+                    return@withContext TransferExecutionResult.Unknown(
+                        requestId, record.signature,
+                        "RPC returned a signature different from the durable local signature"
+                    )
+                }
+                if (!ledger.transition(
+                    requestId, LedgerState.SIGNED, LedgerState.SUBMITTED, record.signature
+                )) {
+                    return@withContext TransferExecutionResult.Unknown(
+                        requestId, record.signature, "Broadcast outcome requires reconciliation"
+                    )
+                }
+                TransferExecutionResult.Submitted(requestId, record.signature)
+            } catch (error: Exception) {
+                // A timeout may occur after acceptance. Mark UNKNOWN and never blind-retry.
+                ledger.transition(requestId, LedgerState.SIGNED, LedgerState.UNKNOWN, record.signature)
+                TransferExecutionResult.Unknown(
+                    requestId, record.signature,
+                    error.message ?: "Network outcome is ambiguous; reconcile before any retry"
+                )
+            } finally {
+                bytes.fill(0)
+            }
+        }
+
+    suspend fun reconcileSignature(requestId: String): TransferExecutionResult =
+        withContext(Dispatchers.IO) {
+            val record = ledger.find(requestId)
+                ?: return@withContext TransferExecutionResult.Rejected("Transfer request does not exist")
+            val signature = record.signature
+                ?: return@withContext TransferExecutionResult.Rejected("No persisted signature to reconcile")
+            try {
+                val status = rpc.getSignatureStatus(signature)
+                    ?: return@withContext TransferExecutionResult.Unknown(
+                        requestId, signature, "RPC has no status record; absence is not proof of failure"
+                    )
+                if (status.failedOnChain) {
+                    return@withContext TransferExecutionResult.ChainFailed(
+                        requestId, signature, status.error ?: "Transaction failed on chain"
+                    )
+                }
+                if (status.isFinalized) {
+                    val current = ledger.find(requestId)
+                    if (current?.state == LedgerState.SUBMITTED || current?.state == LedgerState.UNKNOWN) {
+                        ledger.transition(requestId, current.state, LedgerState.CONFIRMED, signature)
+                    }
+                    return@withContext TransferExecutionResult.Confirmed(requestId, signature, status.slot)
+                }
+                TransferExecutionResult.Unknown(
+                    requestId, signature,
+                    "Transaction is not finalized yet (${status.confirmationStatus ?: "pending"})"
+                )
+            } catch (error: Exception) {
+                TransferExecutionResult.Unknown(
+                    requestId, signature, error.message ?: "Could not reconcile signature status"
+                )
+            }
+        }
+
+    companion object {
+        private const val MAX_TRANSACTION_BYTES = 1232
+    }
+}
+
+sealed interface TransferExecutionResult {
+    data class Signed(
+        val requestId: String,
+        val signature: String,
+        val serializedBytes: Int,
+        val feeLamports: Long,
+        val lastValidBlockHeight: Long
+    ) : TransferExecutionResult
+    data class Submitted(val requestId: String, val signature: String) : TransferExecutionResult
+    data class Confirmed(val requestId: String, val signature: String, val slot: Long) : TransferExecutionResult
+    data class ChainFailed(val requestId: String, val signature: String, val reason: String) : TransferExecutionResult
+    data class Unknown(val requestId: String, val signature: String, val reason: String) : TransferExecutionResult
+    data object AwaitingApproval : TransferExecutionResult
+    data class Rejected(val reason: String) : TransferExecutionResult
+}
