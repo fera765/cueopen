@@ -144,3 +144,5 @@ Ao concluir uma tarefa, marcar sua caixa como `[x]`, anotar o commit que contém
 - 2026-10-26 — Adicionado teste instrumentado explícito para confirmar que `CONFIRMED` só pode ser associado à mesma assinatura gravada e submetida originalmente; uma assinatura diferente deve ser rejeitada. Commit: `6069c1842dffb5d1dd36e5c0f1a5e2cc23af7b87`. Testes não executados.
 
 - 2026-10-26 — Confirmei o novo caso de integridade de assinatura e adicionei a cobertura de regressão da confirmação on-chain. A transação só pode ser marcada como confirmada com a mesma assinatura original persistida. Commit de teste: `6069c1842dffb5d1dd36e5c0f1a5e2cc23af7b87`. Não executado.
+
+- 2026-10-26 — Adicionado teste de regressão para assinatura malformada: dados que não sejam uma assinatura Base58 de 64 bytes devem deixar o pedido em `SIGNING`, sem avançar para `SIGNED`. Commit: `80b9cbd1cb8c02943de8ab4e29bbe619d5d528bc`. Teste escrito, não executado.
