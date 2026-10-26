@@ -31,7 +31,7 @@ class SolanaRpcClient(
     }
 
     suspend fun getBalanceLamports(publicKey: String): Long = withContext(Dispatchers.IO) {
-        require(isBase58AddressShape(publicKey)) { "Invalid public key format" }
+        require(SolanaAddressValidator.isValidAddress(publicKey)) { "Invalid 32-byte Solana public key" }
         val payload = buildJsonObject {
             put("jsonrpc", "2.0")
             put("id", 1)
@@ -60,13 +60,10 @@ class SolanaRpcClient(
         }
     }
 
-    private fun isBase58AddressShape(value: String): Boolean =
-        value.length in 32..44 && value.all { it in BASE58_ALPHABET }
 
     companion object {
         private const val DEFAULT_MAINNET_RPC = "https://api.mainnet-beta.solana.com"
         private const val JSON_MEDIA_TYPE = "application/json; charset=utf-8"
-        private const val BASE58_ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
         fun lamportsToSol(lamports: Long): Double = lamports / 1_000_000_000.0
     }
 }
