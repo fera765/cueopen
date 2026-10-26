@@ -146,3 +146,5 @@ Ao concluir uma tarefa, marcar sua caixa como `[x]`, anotar o commit que contém
 - 2026-10-26 — Confirmei o novo caso de integridade de assinatura e adicionei a cobertura de regressão da confirmação on-chain. A transação só pode ser marcada como confirmada com a mesma assinatura original persistida. Commit de teste: `6069c1842dffb5d1dd36e5c0f1a5e2cc23af7b87`. Não executado.
 
 - 2026-10-26 — Adicionado teste de regressão para assinatura malformada: dados que não sejam uma assinatura Base58 de 64 bytes devem deixar o pedido em `SIGNING`, sem avançar para `SIGNED`. Commit: `80b9cbd1cb8c02943de8ab4e29bbe619d5d528bc`. Teste escrito, não executado.
+
+- 2026-10-26 — Simplificado o setup do teste de assinatura malformada para não depender de uma solicitação duplicada; o cenário agora cria diretamente uma autorização autônoma nova e exercita a rejeição antes de persistir `SIGNED`. Commit: `f28e0383c20f8d24c8cd5c714ac5170aeb135c18`. Teste não executado.
