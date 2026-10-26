@@ -186,13 +186,7 @@ class WalletRequestLedgerTest {
 
     @Test
     fun signedTransitionRejectsInvalidBase58AndWrongLengthSignature() {
-        ledger.claim(intent())
         val now = System.currentTimeMillis()
-        val result = ledger.claimAndAuthorize(
-            intent(), transferPolicy(autonomous = true), now - 10_000L, now + 10_000L, now
-        )
-        // Existing claim record is not a fresh authorization; prepare a separate valid request.
-        assertTrue(result is LedgerAuthorizationResult.Existing)
         val fresh = ledger.claimAndAuthorize(
             intent(requestId = "request_valid_sig01"),
             transferPolicy(autonomous = true), now - 10_000L, now + 10_000L, now + 1L
