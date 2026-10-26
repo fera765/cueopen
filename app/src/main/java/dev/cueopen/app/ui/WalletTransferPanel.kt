@@ -99,6 +99,7 @@ fun WalletTransferPanel(context: Context, repository: SolanaWalletRepository) {
             onValueChange = { recipient = it; message = null },
             label = { Text("Endereço Solana do destinatário") },
             modifier = Modifier.fillMaxWidth(),
+            enabled = requestId == null && !busy,
             singleLine = true
         )
         OutlinedTextField(
@@ -106,6 +107,7 @@ fun WalletTransferPanel(context: Context, repository: SolanaWalletRepository) {
             onValueChange = { amountSol = it; message = null },
             label = { Text("Valor em SOL (até 9 casas decimais)") },
             modifier = Modifier.fillMaxWidth(),
+            enabled = requestId == null && !busy,
             singleLine = true
         )
         Button(
