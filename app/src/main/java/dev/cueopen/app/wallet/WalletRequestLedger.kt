@@ -142,10 +142,12 @@ class WalletRequestLedger(context: Context) : SQLiteOpenHelper(
                     )
                 }
                 // Re-evaluation must never silently bypass a previously required human approval.
+                // Every replay after the first authorization is informational only.
+                // If policy no longer grants fully autonomous execution, revoke the pending
+                // authorization even when the durable state has already moved toward signing.
                 var effectiveRecord = existing
-                if (existing.state == LedgerState.AUTHORIZED &&
-                    decision != PolicyDecision.Allowed
-                ) {
+                val authorizationStates = setOf(LedgerState.AUTHORIZED, LedgerState.SIGNING)
+                if (existing.state in authorizationStates && decision != PolicyDecision.Allowed) {
                     val changed = db.update(
                         TABLE,
                         ContentValues().apply {
@@ -153,9 +155,9 @@ class WalletRequestLedger(context: Context) : SQLiteOpenHelper(
                             put("updated_at_ms", System.currentTimeMillis())
                         },
                         "request_id = ? AND state = ?",
-                        arrayOf(intent.requestId, LedgerState.AUTHORIZED.name)
+                        arrayOf(intent.requestId, existing.state.name)
                     )
-                    check(changed == 1) { "Could not downgrade authorization after policy change" }
+                    check(changed == 1) { "Could not revoke authorization after policy change" }
                     effectiveRecord = existing.copy(state = LedgerState.AWAITING_APPROVAL)
                 }
                 db.setTransactionSuccessful()
