@@ -12,9 +12,10 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.unit.dp
 import com.google.zxing.BarcodeFormat
 import com.google.zxing.qrcode.QRCodeWriter
+import dev.cueopen.app.wallet.SolanaNetwork
 
 @Composable
-fun WalletReceiveQr(address: String) {
+fun WalletReceiveQr(address: String, network: SolanaNetwork) {
     val bitmap = remember(address) {
         runCatching {
             val matrix = QRCodeWriter().encode(address, BarcodeFormat.QR_CODE, QR_SIZE, QR_SIZE)
@@ -31,7 +32,7 @@ fun WalletReceiveQr(address: String) {
         }.getOrNull()
     }
     Column {
-        Text("Receber SOL — QR do endereço público")
+        Text("Receber SOL — " + network.displayName)
         if (bitmap != null) {
             Image(
                 bitmap = bitmap.asImageBitmap(),
@@ -41,7 +42,7 @@ fun WalletReceiveQr(address: String) {
         } else {
             Text("Não foi possível gerar o QR. Use o endereço público exibido acima.")
         }
-        Text("Este QR contém somente o endereço público, não a frase de recuperação, e não identifica a rede. Confirme mainnet/devnet no aplicativo remetente.")
+        Text("O QR contém apenas o endereço público e não a frase de recuperação nem a rede. Confirme que o remetente usa " + network.displayName + ".")
     }
 }
 
