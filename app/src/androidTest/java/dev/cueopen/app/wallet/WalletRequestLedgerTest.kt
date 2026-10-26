@@ -93,8 +93,14 @@ class WalletRequestLedgerTest {
             "request_12345678", transferPolicy(), now - 10_000L, now + 10_000L, now
         )
         assertTrue(approved is LedgerAuthorizationResult.Approved)
+        assertFalse(ledger.transition(
+            "request_12345678", LedgerState.AUTHORIZED, LedgerState.SIGNED, "chain-signature-1"
+        ))
         assertTrue(ledger.transition(
-            "request_12345678", LedgerState.AUTHORIZED, LedgerState.SIGNED
+            "request_12345678", LedgerState.AUTHORIZED, LedgerState.SIGNING
+        ))
+        assertTrue(ledger.transition(
+            "request_12345678", LedgerState.SIGNING, LedgerState.SIGNED, "chain-signature-1"
         ))
     }
 
@@ -107,7 +113,16 @@ class WalletRequestLedgerTest {
             "request_12345678", transferPolicy(), now - 10_000L, now + 10_000L, now
         )
         assertTrue(approved is LedgerAuthorizationResult.Approved)
-        ledger.transition("request_12345678", LedgerState.AUTHORIZED, LedgerState.SIGNED)
+        assertTrue(ledger.transition("request_12345678", LedgerState.AUTHORIZED, LedgerState.SIGNING))
+        try {
+            ledger.transition("request_12345678", LedgerState.SIGNING, LedgerState.SIGNED)
+            throw AssertionError("Expected missing durable signature to be rejected")
+        } catch (expected: IllegalArgumentException) {
+            assertTrue(expected.message.orEmpty().contains("signature"))
+        }
+        assertTrue(ledger.transition(
+            "request_12345678", LedgerState.SIGNING, LedgerState.SIGNED, "chain-signature-1"
+        ))
         try {
             ledger.transition("request_12345678", LedgerState.SIGNED, LedgerState.SUBMITTED)
             throw AssertionError("Expected missing signature to be rejected")
@@ -187,7 +202,10 @@ class WalletRequestLedgerTest {
             (result as LedgerAuthorizationResult.Created).record.state
         )
         assertTrue(ledger.transition(
-            "request_auto_0001", LedgerState.AUTHORIZED, LedgerState.SIGNED
+            "request_auto_0001", LedgerState.AUTHORIZED, LedgerState.SIGNING
+        ))
+        assertTrue(ledger.transition(
+            "request_auto_0001", LedgerState.SIGNING, LedgerState.SIGNED, "chain-signature-auto"
         ))
     }
 
