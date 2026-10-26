@@ -248,3 +248,6 @@ Estado honesto de release: **NÃO CONCLUÍDO**. A implementação do painel de c
 
 
 - 2026-10-26 — Revisão estática do fluxo integrado encontrou e corrigiu dois caminhos que ainda usavam identidade/política manual no lugar da política do agente: revalidação imediatamente antes do broadcast e reconciliação de assinatura em estado UNKNOWN. Também foi acrescentada recuperação no histórico para pedidos de agentes em SIGNED/SUBMITTED/UNKNOWN/CONFIRMED/SIGNING/AUTHORIZED e checklist de validação manual em `docs/solana-wallet-security.md`. Commits: `53b9803a`, `a5150cac`, `c3ebc8df`, `c71831be`. **Não foi feito build nem execução automatizada; validação manual ponta a ponta continua pendente.**
+
+
+- 2026-10-26 — Proteção contra repetição de chamadas da ferramenta de agente: o ledger agora procura uma solicitação recente idêntica (mesmo agente, rede, destinatário e valor) em janela de 2 minutos antes de criar novo pedido, mesmo quando o modelo gera outro request ID. Adicionado teste instrumentado para o caso. Commits: `0677e69d`, `dee3726c`, `04c5e7eb`. Teste escrito, **não executado**, conforme o plano de validação manual do usuário.
