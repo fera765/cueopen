@@ -269,6 +269,30 @@ fun WalletScreen(nav: NavController) {
                                         }
                                     )
                                 }
+                                var transferRequestPermission by remember(agent.id, permissionRefresh) {
+                                    mutableStateOf(walletPolicyStore.canAgentRequestTransfer(agent.id))
+                                }
+                                Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+                                    Column(Modifier.weight(1f)) {
+                                        Text("Solicitar transferência SOL (sempre exige aprovação humana)")
+                                        Text(
+                                            "Limite do agente: 0,05 SOL por pedido e 0,10 SOL por dia; sem assinatura ou envio autônomo.",
+                                            color = c.ink2
+                                        )
+                                    }
+                                    androidx.compose.material3.Switch(
+                                        checked = transferRequestPermission,
+                                        onCheckedChange = { enabled ->
+                                            try {
+                                                walletPolicyStore.setAgentRequestTransfer(agent.id, enabled)
+                                                transferRequestPermission = enabled
+                                                permissionRefresh++
+                                            } catch (e: Exception) {
+                                                error = e.message ?: "Não foi possível salvar a permissão."
+                                            }
+                                        }
+                                    )
+                                }
                             }
                         }
                     }
