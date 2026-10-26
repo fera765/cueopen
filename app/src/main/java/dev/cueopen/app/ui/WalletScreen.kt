@@ -203,7 +203,7 @@ fun WalletScreen(nav: NavController) {
                 }) { Text("Cancelar e apagar a sessão temporária") }
             }
 
-            error?.let { Text(it, color = c.danger) }
+            error?.let { Text(it, color = c.ink2) }
         }
     }
 }
