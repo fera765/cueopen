@@ -63,8 +63,8 @@ class SolanaRpcClient(
             ?: throw IOException("RPC omitted recent blockhash")
         val expiry = result["lastValidBlockHeight"]?.jsonPrimitive?.content?.toLongOrNull()
             ?: throw IOException("RPC omitted blockhash expiry height")
-        if (!SolanaAddressValidator.isValidAddress(blockhash) && blockhash.length !in 32..64) {
-            throw IOException("RPC returned a malformed blockhash")
+        if (!SolanaAddressValidator.isValidAddress(blockhash)) {
+            throw IOException("RPC returned a malformed 32-byte Base58 blockhash")
         }
         SolanaBlockhash(blockhash, expiry)
     }
@@ -119,7 +119,7 @@ class SolanaRpcClient(
     /** Status is null when RPC has no record; this is not proof of transaction failure. */
     suspend fun getSignatureStatus(signature: String): SolanaSignatureStatus? =
         withContext(Dispatchers.IO) {
-            require(isValidSignatureText(signature)) { "Invalid Solana transaction signature" }
+            require(SolanaSignatureValidator.isValid(signature)) { "Invalid Solana transaction signature" }
             val result = rpc("getSignatureStatuses", listOf(
                 JsonArray(listOf(JsonPrimitive(signature))),
                 buildJsonObject { put("searchTransactionHistory", true) }
@@ -157,7 +157,7 @@ class SolanaRpcClient(
                     put("maxRetries", 0)
                 }
             )).jsonPrimitive.content.also { signature ->
-                if (!isValidSignatureText(signature)) throw IOException("RPC returned an invalid signature")
+                if (!SolanaSignatureValidator.isValid(signature)) throw IOException("RPC returned an invalid signature")
             }
         }
 
@@ -190,27 +190,12 @@ class SolanaRpcClient(
             }
         }
 
-    private fun isValidSignatureText(signature: String): Boolean {
-        if (signature.length !in 80..MAX_SIGNATURE_LENGTH) return false
-        return runCatching {
-            val alphabet = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
-            var value = java.math.BigInteger.ZERO
-            for (character in signature) {
-                val digit = alphabet.indexOf(character)
-                require(digit >= 0)
-                value = value.multiply(java.math.BigInteger.valueOf(58L))
-                    .add(java.math.BigInteger.valueOf(digit.toLong()))
-            }
-            signature.takeWhile { it == '1' }.length + (value.bitLength() + 7) / 8 == 64
-        }.getOrDefault(false)
-    }
 
     companion object {
         private const val DEFAULT_MAINNET_RPC = "https://api.mainnet-beta.solana.com"
         private const val JSON_MEDIA_TYPE = "application/json; charset=utf-8"
         private const val MAX_TRANSACTION_BYTES = 1232
         private const val MAX_RESPONSE_CHARS = 512 * 1024
-        private const val MAX_SIGNATURE_LENGTH = 128
 
         fun lamportsToSol(lamports: Long): Double = lamports / 1_000_000_000.0
     }
