@@ -865,7 +865,8 @@ class WalletRequestLedger(context: Context) : SQLiteOpenHelper(
             recipientAddress == intent.recipientAddress &&
             amountLamports == intent.amountLamports &&
             createdAtEpochMs == intent.createdAtEpochMs &&
-            memo == intent.memo
+            memo == intent.memo &&
+            network == intent.network
 
     companion object {
         private const val DATABASE_NAME = "cueopen_wallet_requests.db"
