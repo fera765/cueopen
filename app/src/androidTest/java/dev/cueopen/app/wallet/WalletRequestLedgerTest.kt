@@ -212,6 +212,10 @@ class WalletRequestLedgerTest {
         assertTrue(ledger.transition(
             "request_auto_0001", LedgerState.SIGNING, LedgerState.SIGNED, "7".repeat(88)
         ))
+        assertEquals(
+            LedgerState.SIGNED,
+            ledger.find("request_auto_0001")?.state
+        )
     }
 
     @Test
