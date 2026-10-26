@@ -428,7 +428,7 @@ fun WalletTransferPanel(context: Context, repository: SolanaWalletRepository, ne
                     modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
                     verticalArrangement = Arrangement.spacedBy(4.dp)
                 ) {
-                    Text("Agente: " + (CueOpenAgentNameLookup.name(context, pending.agentId) ?: pending.agentId))
+                    Text("Agente (ID local): " + pending.agentId)
                     Text("Destinatário: " + pending.recipientAddress)
                     Text("Valor: " + String.format(Locale.US, "%.9f SOL", pending.amountLamports / LAMPORTS_PER_SOL))
                     Text("Estado: aguardando aprovação humana")
