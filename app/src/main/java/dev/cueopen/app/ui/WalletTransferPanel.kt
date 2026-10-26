@@ -77,6 +77,8 @@ fun WalletTransferPanel(context: Context, repository: SolanaWalletRepository) {
     var busy by remember { mutableStateOf(false) }
     var confirmBroadcast by remember { mutableStateOf(false) }
     var message by remember { mutableStateOf<String?>(null) }
+    var recentRecords by remember { mutableStateOf(ledger.recentRecords()) }
+    fun refreshHistory() { recentRecords = ledger.recentRecords() }
 
     Column(
         modifier = Modifier.fillMaxWidth().padding(top = 12.dp),
@@ -137,6 +139,7 @@ fun WalletTransferPanel(context: Context, repository: SolanaWalletRepository) {
                         message = error.message ?: "Não foi possível preparar a transferência."
                     } finally {
                         busy = false
+                        refreshHistory()
                     }
                 }
             },
@@ -152,6 +155,48 @@ fun WalletTransferPanel(context: Context, repository: SolanaWalletRepository) {
                     String.format(Locale.US, "%.9f SOL", it / LAMPORTS_PER_SOL)
                 } ?: amountSol)
             )
+            if (record?.state == LedgerState.AUTHORIZED) {
+                Button(
+                    enabled = !busy,
+                    onClick = {
+                        busy = true
+                        scope.launch {
+                            try {
+                                val policy = manualTransferPolicy()
+                                val window = walletSpendingWindow()
+                                result = executor.signAuthorizedTransfer(
+                                    id, policy, window.first, window.second,
+                                    humanApproval = record.humanApprovedAtEpochMs > 0L
+                                )
+                                message = result.toString()
+                            } catch (error: Exception) {
+                                message = error.message ?: "Não foi possível retomar a assinatura."
+                            } finally {
+                                busy = false
+                                refreshHistory()
+                            }
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth()
+                ) { Text(if (busy) "Retomando..." else "Retomar assinatura autorizada") }
+            }
+            if (record?.state == LedgerState.SIGNING) {
+                Text("Há uma tentativa de assinatura interrompida sem bytes persistidos. Não reenvie.")
+                OutlinedButton(
+                    enabled = !busy,
+                    onClick = {
+                        if (ledger.abortSigningBeforePersistence(id)) {
+                            result = TransferExecutionResult.Rejected("Tentativa incompleta encerrada; nenhuma transmissão ocorreu.")
+                            message = result.toString()
+                            refreshHistory()
+                        } else {
+                            message = "A tentativa não pôde ser encerrada; mantenha o pedido para revisão."
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth()
+                ) { Text("Encerrar tentativa incompleta") }
+            }
+
             if (record?.state == LedgerState.AWAITING_APPROVAL) {
                 Button(
                     enabled = !busy,
@@ -185,6 +230,7 @@ fun WalletTransferPanel(context: Context, repository: SolanaWalletRepository) {
                                 message = error.message ?: "Não foi possível assinar a transferência."
                             } finally {
                                 busy = false
+                                refreshHistory()
                             }
                         }
                     },
@@ -213,6 +259,7 @@ fun WalletTransferPanel(context: Context, repository: SolanaWalletRepository) {
                                     message = result.toString()
                                 } finally {
                                     busy = false
+                                    refreshHistory()
                                 }
                             }
                         },
@@ -259,6 +306,7 @@ fun WalletTransferPanel(context: Context, repository: SolanaWalletRepository) {
                     )) {
                         ledger.cancelBeforeSigning(id)
                     }
+                    refreshHistory()
                     requestId = null
                     result = null
                     message = null
@@ -266,6 +314,53 @@ fun WalletTransferPanel(context: Context, repository: SolanaWalletRepository) {
                     amountSol = ""
                 }
             ) { Text("Limpar formulário") }
+
+            Text("Transferências recentes")
+            recentRecords.forEach { entry ->
+                Column(
+                    modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    Text(entry.state.name + " · " + entry.requestId)
+                    Text(entry.recipientAddress)
+                    Text(String.format(Locale.US, "%.9f SOL", entry.amountLamports / LAMPORTS_PER_SOL))
+                    if (entry.state in setOf(
+                        LedgerState.AWAITING_APPROVAL, LedgerState.AUTHORIZED,
+                        LedgerState.SIGNING, LedgerState.SIGNED, LedgerState.SUBMITTED,
+                        LedgerState.UNKNOWN
+                    )) {
+                        OutlinedButton(
+                            enabled = !busy,
+                            onClick = {
+                                requestId = entry.requestId
+                                recipient = entry.recipientAddress
+                                amountSol = String.format(
+                                    Locale.US, "%.9f", entry.amountLamports / LAMPORTS_PER_SOL
+                                )
+                                result = when (entry.state) {
+                                    LedgerState.SIGNED -> entry.signature?.let {
+                                        TransferExecutionResult.Signed(
+                                            entry.requestId, it,
+                                            ledger.signedTransaction(entry.requestId)?.size ?: 0,
+                                            0L, 0L
+                                        )
+                                    }
+                                    LedgerState.SUBMITTED -> entry.signature?.let {
+                                        TransferExecutionResult.Submitted(entry.requestId, it)
+                                    }
+                                    LedgerState.UNKNOWN -> entry.signature?.let {
+                                        TransferExecutionResult.Unknown(
+                                            entry.requestId, it, "Resultado aguardando reconciliação"
+                                        )
+                                    }
+                                    else -> null
+                                }
+                                message = "Pedido recuperado do ledger local."
+                            }
+                        ) { Text("Abrir / recuperar") }
+                    }
+                }
+            }
         }
         message?.let { Text(it) }
     }
@@ -301,6 +396,7 @@ fun WalletTransferPanel(context: Context, repository: SolanaWalletRepository) {
                                     message = result.toString()
                                 } finally {
                                     busy = false
+                                    refreshHistory()
                                 }
                             }
                         }
