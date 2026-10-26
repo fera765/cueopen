@@ -41,6 +41,9 @@ class SolanaTransferExecutor(
         ) {
             return@withContext TransferExecutionResult.Rejected("Transfer payload is invalid")
         }
+        if (record.memo != null) {
+            return@withContext TransferExecutionResult.Rejected("Memo transfers are not supported by this signer")
+        }
 
         val claim = if (humanApproval) {
             ledger.beginSigningAfterHumanApproval(
