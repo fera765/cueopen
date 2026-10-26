@@ -350,7 +350,7 @@ fun WalletTransferPanel(context: Context, repository: SolanaWalletRepository) {
                                         TransferExecutionResult.Signed(
                                             entry.requestId, it,
                                             ledger.signedTransaction(entry.requestId)?.size ?: 0,
-                                            0L, 0L
+                                            null, null
                                         )
                                     }
                                     LedgerState.SUBMITTED -> entry.signature?.let {
