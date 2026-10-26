@@ -936,8 +936,13 @@ class AgentRunner(
             store.replaceItem(sessionId, step.copy(result = t.message.orEmpty(), status = StepStatus.ERROR))
             return ToolResult("Erro: ${t.message}")
         }
-        executions.finish(executionId, out)
-        store.replaceItem(sessionId, step.copy(result = out.take(4000), status = StepStatus.OK))
+        val commandFailed = Regex("""\\[exit ([1-9]\\d*)\\]""").containsMatchIn(out)
+        if (out.startsWith("ERROR:") || out.startsWith("TIMEOUT:") || out.startsWith("ERRO:") || commandFailed) {
+            executions.fail(executionId, out)
+        } else {
+            executions.finish(executionId, out)
+        }
+        store.replaceItem(sessionId, step.copy(result = out.take(4000), status = if (commandFailed || out.startsWith("ERROR:") || out.startsWith("TIMEOUT:") || out.startsWith("ERRO:")) StepStatus.ERROR else StepStatus.OK))
         return ToolResult(out)
     }
 
