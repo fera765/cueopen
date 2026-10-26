@@ -239,7 +239,7 @@ fun WalletTransferPanel(context: Context, repository: SolanaWalletRepository, ne
 
             if (record?.state == LedgerState.AWAITING_APPROVAL) {
                 Button(
-                    enabled = !busy,
+                    enabled = !busy && transfersEnabled,
                     onClick = {
                         busy = true
                         message = null
