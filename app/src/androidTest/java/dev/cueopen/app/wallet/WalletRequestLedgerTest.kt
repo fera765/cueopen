@@ -80,6 +80,14 @@ class WalletRequestLedgerTest {
         assertTrue(ledger.transition(
             "request_12345678", LedgerState.PREPARED, LedgerState.AWAITING_APPROVAL
         ))
+        try {
+            ledger.transition(
+                "request_12345678", LedgerState.AWAITING_APPROVAL, LedgerState.SIGNED
+            )
+            throw AssertionError("Human approval state must not sign directly")
+        } catch (expected: IllegalArgumentException) {
+            assertTrue(expected.message.orEmpty().contains("Illegal transfer state transition"))
+        }
         val now = System.currentTimeMillis()
         val approved = ledger.approveForSigning(
             "request_12345678", transferPolicy(), now - 10_000L, now + 10_000L, now
