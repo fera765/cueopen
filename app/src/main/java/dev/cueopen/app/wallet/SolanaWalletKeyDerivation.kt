@@ -32,13 +32,12 @@ object SolanaWalletKeyDerivation {
     fun restore(recoveryPhrase: CharArray): WalletKeyMaterial {
         require(recoveryPhrase.isNotEmpty()) { "Recovery phrase is required" }
         val phraseCopy = recoveryPhrase.copyOf()
-        val mnemonic = try {
-            MnemonicCode(phraseCopy)
-        } catch (t: Throwable) {
-            phraseCopy.fill('\u0000')
-            throw t
+        return try {
+            val mnemonic = MnemonicCode(phraseCopy)
+            materialFromMnemonic(mnemonic, generated = false)
+        } finally {
+            phraseCopy.fill(0.toChar())
         }
-        return materialFromMnemonic(mnemonic, generated = false)
     }
 
     private fun materialFromMnemonic(mnemonic: MnemonicCode, generated: Boolean): WalletKeyMaterial {
@@ -76,8 +75,11 @@ object SolanaWalletKeyDerivation {
                 privateKey.copyInto(data, destinationOffset = 1)
                 ByteBuffer.wrap(data, 1 + privateKey.size, 4)
                     .putInt(index or Int.MIN_VALUE)
-                digest = hmac(chainCode, data)
-                data.fill(0)
+                digest = try {
+                    hmac(chainCode, data)
+                } finally {
+                    data.fill(0)
+                }
 
                 privateKey.fill(0)
                 chainCode.fill(0)
