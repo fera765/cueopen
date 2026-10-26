@@ -40,10 +40,9 @@ class SolanaTransferExecutor(
         if (rpc.network != record.network) {
             return@withContext TransferExecutionResult.Rejected("RPC network does not match the transfer request network")
         }
-        if (record.agentId != WalletAgentPolicyStore.manualAgentId(record.network)) {
-            return@withContext TransferExecutionResult.Rejected("No persisted manual policy grants this agent signing access")
-        }
-        val persistedPolicy = policyStore.manualTransferPolicy(record.network)
+        // Agent requests use their own persisted, opt-in policy. The policy is always
+        // non-autonomous, so the ledger requires recorded human approval before signing.
+        val persistedPolicy = policyStore.transferPolicy(record.agentId, record.network)
         if (!persistedPolicy.enabled || policy != persistedPolicy) {
             return@withContext TransferExecutionResult.Rejected("Transfer permission is disabled or the supplied policy is stale")
         }
@@ -159,12 +158,10 @@ class SolanaTransferExecutor(
             require(expectedAgentId.isNotBlank())
             val record = ledger.find(requestId)
                 ?: return@withContext TransferExecutionResult.Rejected("Transfer request does not exist")
-            if (record.agentId != expectedAgentId || policy.agentId != expectedAgentId ||
-                expectedAgentId != WalletAgentPolicyStore.manualAgentId(record.network)
-            ) {
+            if (record.agentId != expectedAgentId || policy.agentId != expectedAgentId) {
                 return@withContext TransferExecutionResult.Rejected("Agent identity does not own this transfer request")
             }
-            val persistedPolicy = policyStore.manualTransferPolicy(record.network)
+            val persistedPolicy = policyStore.transferPolicy(record.agentId, record.network)
             if (!persistedPolicy.enabled || policy != persistedPolicy) {
                 return@withContext TransferExecutionResult.Rejected("Transfer permission is disabled or the supplied policy is stale")
             }
