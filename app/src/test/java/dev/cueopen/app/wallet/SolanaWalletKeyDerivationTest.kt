@@ -20,7 +20,7 @@ class SolanaWalletKeyDerivationTest {
             }
         } finally {
             generated.close()
-            recoveryPhrase.fill('\u0000')
+            recoveryPhrase.fill(0.toChar())
         }
     }
 
@@ -35,7 +35,7 @@ class SolanaWalletKeyDerivationTest {
                 SolanaWalletKeyDerivation.restore(invalidPhrase)
             }
         } finally {
-            invalidPhrase.fill('\u0000')
+            invalidPhrase.fill(0.toChar())
         }
     }
 
@@ -45,12 +45,12 @@ class SolanaWalletKeyDerivationTest {
         val phrase = material.recoveryPhrase
         val seed = material.secretSeed
         material.close()
-        assertEquals(true, phrase.all { it == '\u0000' })
+        assertEquals(true, phrase.all { it == 0.toChar() })
         assertEquals(true, seed.all { it == 0.toByte() })
     }
+
     @Test
     fun matchesIndependentSolanaDerivationVector() {
-        // Public test vector cross-checked by independent BIP-39/SLIP-0010 implementations.
         val phrase = (
             "abandon abandon abandon abandon abandon abandon " +
                 "abandon abandon abandon abandon abandon about"
@@ -66,8 +66,7 @@ class SolanaWalletKeyDerivationTest {
                 restored.close()
             }
         } finally {
-            phrase.fill('\\u0000')
+            phrase.fill(0.toChar())
         }
     }
-
 }
