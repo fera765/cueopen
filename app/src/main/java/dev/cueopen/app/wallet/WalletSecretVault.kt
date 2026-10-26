@@ -97,7 +97,12 @@ class WalletSecretVault(context: Context) {
 
     private fun getOrCreateKey(): SecretKey {
         val keyStore = KeyStore.getInstance(ANDROID_KEYSTORE).apply { load(null) }
-        (keyStore.getKey(KEY_ALIAS, null) as? SecretKey)?.let { return it }
+        // Never silently replace an unexpected existing alias: doing so could make an
+        // existing ciphertext permanently unreadable while appearing to create a new key.
+        if (keyStore.containsAlias(KEY_ALIAS)) {
+            return keyStore.getKey(KEY_ALIAS, null) as? SecretKey
+                ?: error("Wallet encryption key alias exists but is not a usable secret key")
+        }
         val generator = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, ANDROID_KEYSTORE)
         generator.init(
             KeyGenParameterSpec.Builder(
