@@ -98,27 +98,17 @@ class BrowserHost(private val appCtx: Context) {
 
     // precisa vir DEPOIS de _ui (ordem de inicialização das propriedades)
     init { runCatching { watchNetwork() } }
-    private var pageDone: CompletableDeferred<Unit>? = null
+    private var pageDone: CompletableDeferred<String>? = null
     private var _view: WebView? = null
     private var _agentView: WebView? = null
-    @Volatile private var viewUsesApplicationContext = false
-
     @SuppressLint("SetJavaScriptEnabled")
     @Synchronized
     fun view(ctx: Context = appCtx): WebView {
-        val current = _view
-        if (current != null && !(viewUsesApplicationContext && ctx !== appCtx)) return current
-
-        // Se o agente iniciou o browser antes da tela ser aberta, o WebView foi criado com
-        // applicationContext. Recrie-o com o contexto da Activity para garantir renderização na UI,
-        // preservando a URL atual e mantendo agente e tela apontando para a mesma instância.
-        val target = current?.url?.takeIf { it.isNotBlank() } ?: HOME
-        if (current != null) runCatching { current.stopLoading(); current.destroy() }
-        return createView(ctx, false).also {
-            _view = it
-            viewUsesApplicationContext = ctx === appCtx
-            it.loadUrl(target)
-        }
+        // Nunca recriar o WebView ao abrir/focar a aba Browser. A mesma instância pertence
+        // à sessão do agente e à UI; destruí-la durante uma navegação cancelava o carregamento
+        // e fazia o site parecer travado até o usuário abrir o Browser.
+        _view?.let { return it }
+        return createView(ctx, false).also { _view = it }
     }
 
     /**
@@ -159,10 +149,10 @@ class BrowserHost(private val appCtx: Context) {
         if (android.os.Build.VERSION.SDK_INT >= 26) v.setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_IMPORTANT, false)
         if (android.os.Build.VERSION.SDK_INT >= 23) v.settings.offscreenPreRaster = true
         v.webViewClient = object : WebViewClient() {
-            override fun onPageStarted(view: WebView, url: String, favicon: Bitmap?) { if (!agentMode) sync(view, loading = true) }
+            override fun onPageStarted(view: WebView, url: String, favicon: Bitmap?) { sync(view, loading = true) }
             override fun onPageFinished(view: WebView, url: String) {
                 sync(view, loading = false)
-                pageDone?.complete(Unit)
+                pageDone?.complete("OK")
                 collectTimings(view)
                 installSnapshotInstrumentation(view)
                 installNetworkInstrumentation(view)
@@ -180,8 +170,8 @@ class BrowserHost(private val appCtx: Context) {
             override fun onReceivedError(view: WebView, request: WebResourceRequest, error: android.webkit.WebResourceError) {
                 patchNet(request.url.toString()) { it.copy(error = error.description?.toString()) }
                 if (request.isForMainFrame) {
-                    if (!agentMode) sync(view, loading = false)
-                    pageDone?.complete(Unit)
+                    sync(view, loading = false)
+                    pageDone?.complete("ERROR: " + (error.description?.toString() ?: "Falha ao carregar a página"))
                 }
             }
             override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
@@ -190,8 +180,8 @@ class BrowserHost(private val appCtx: Context) {
             }
         }
         v.webChromeClient = object : WebChromeClient() {
-            override fun onProgressChanged(view: WebView, newProgress: Int) { if (!agentMode) _ui.value = _ui.value.copy(progress = newProgress) }
-            override fun onReceivedTitle(view: WebView, title: String?) { if (!agentMode) sync(view) }
+            override fun onProgressChanged(view: WebView, newProgress: Int) { _ui.value = _ui.value.copy(progress = newProgress) }
+            override fun onReceivedTitle(view: WebView, title: String?) { sync(view) }
             override fun onConsoleMessage(m: android.webkit.ConsoleMessage): Boolean {
                 _console.value = (_console.value + ConsoleEntry(System.currentTimeMillis(), m.messageLevel().name.lowercase(),
                     m.message(), "${m.sourceId().substringAfterLast('/')}:${m.lineNumber()}")).takeLast(300)
@@ -249,8 +239,8 @@ class BrowserHost(private val appCtx: Context) {
 
     fun home() { _view?.loadUrl(HOME) }
 
-    suspend fun uiBack() = onMain { _view?.takeIf { it.canGoBack() }?.goBack() }
-    suspend fun uiReload() = onMain { _view?.reload() }
+    suspend fun uiBack() = onMain { if (_view?.canGoBack() == true) { pageDone = CompletableDeferred(); _view?.goBack() } }
+    suspend fun uiReload() = onMain { pageDone = CompletableDeferred(); _view?.reload() }
 
     /** Alterna entre versão mobile e desktop dos sites. */
     fun setDesktop(on: Boolean) {
@@ -306,24 +296,49 @@ class BrowserHost(private val appCtx: Context) {
 
     // ---------------- API usada pelo agente ----------------
 
-    suspend fun navigate(url: String): String = onMain {
-        val target = when {
-            url.startsWith("http") || url.startsWith("file:") || url.startsWith("about:") -> url
-            url.contains(".") && !url.contains(" ") -> "https://$url"
-            else -> "https://www.google.com/search?q=" + java.net.URLEncoder.encode(url, "UTF-8")
+    suspend fun navigate(url: String): String {
+        val target = onMain {
+            val normalized = when {
+                url.startsWith("http://", true) || url.startsWith("https://", true) || url.startsWith("file:") || url.startsWith("about:") -> url
+                url.contains(".") && !url.contains(" ") -> "https://$url"
+                else -> "https://www.google.com/search?q=" + java.net.URLEncoder.encode(url, "UTF-8")
+            }
+            pageDone = CompletableDeferred()
+            _ui.value = _ui.value.copy(loading = true, progress = 0)
+            agentView().loadUrl(normalized)
+            normalized
         }
-        pageDone = CompletableDeferred()
-        agentView().loadUrl(target)
-        target
-    }.also { awaitLoad() }
-
-    private suspend fun awaitLoad() {
-        withTimeoutOrNull(25_000) { pageDone?.await() }
-        kotlinx.coroutines.delay(600) // deixa JS da página renderizar
+        return awaitLoad(target)
     }
 
-    suspend fun back() { onMain { pageDone = CompletableDeferred(); agentView().goBack() }; awaitLoad() }
-    suspend fun reload() { onMain { pageDone = CompletableDeferred(); agentView().reload() }; awaitLoad() }
+    /** Aguarda o callback real do WebView e verifica o DOM; falha e timeout não viram sucesso silencioso. */
+    private suspend fun awaitLoad(target: String = _ui.value.url): String {
+        val deferred = pageDone ?: return "ERROR: não foi possível acompanhar o carregamento desta navegação."
+        val result = withTimeoutOrNull(45_000) { deferred.await() } ?: run {
+            _ui.value = _ui.value.copy(loading = false)
+            return "TIMEOUT: a página não concluiu o carregamento em 45 segundos: $target"
+        }
+        if (result.startsWith("ERROR:")) return result
+        val deadline = System.currentTimeMillis() + 8_000
+        var ready = ""
+        while (System.currentTimeMillis() < deadline) {
+            ready = runCatching { eval("document.readyState") }.getOrDefault("")
+            if (ready == "complete") break
+            kotlinx.coroutines.delay(250)
+        }
+        kotlinx.coroutines.delay(500)
+        return if (ready == "complete") "OK: página carregada ($target)"
+        else "OK: carregamento principal concluído; DOM=${ready.ifBlank { "indisponível" }} ($target)"
+    }
+
+    suspend fun cancelNavigation() = onMain {
+        _view?.stopLoading()
+        pageDone?.complete("ERROR: navegação cancelada.")
+        _ui.value = _ui.value.copy(loading = false)
+    }
+
+    suspend fun back() { onMain { pageDone = CompletableDeferred(); agentView().goBack() }; awaitLoad(_ui.value.url) }
+    suspend fun reload() { onMain { pageDone = CompletableDeferred(); agentView().reload() }; awaitLoad(_ui.value.url) }
 
     /** Snapshot semântico da página, próximo ao formato Playwright: landmarks, headings, texto e controles nomeados. */
     suspend fun read(maxChars: Int = 9000): String {
