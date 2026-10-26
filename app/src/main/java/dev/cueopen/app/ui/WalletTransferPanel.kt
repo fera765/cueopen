@@ -250,7 +250,9 @@ fun WalletTransferPanel(context: Context, repository: SolanaWalletRepository) {
             }
 
             TextButton(
-                enabled = !busy,
+                enabled = !busy && record?.state !in setOf(
+                    LedgerState.SIGNED, LedgerState.SUBMITTED, LedgerState.UNKNOWN
+                ),
                 onClick = {
                     requestId = null
                     result = null
