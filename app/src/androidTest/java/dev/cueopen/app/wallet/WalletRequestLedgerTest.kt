@@ -105,7 +105,7 @@ class WalletRequestLedgerTest {
             "request_12345678", LedgerState.AUTHORIZED, LedgerState.SIGNING
         ))
         assertTrue(ledger.transition(
-            "request_12345678", LedgerState.SIGNING, LedgerState.SIGNED, "chain-signature-1"
+            "request_12345678", LedgerState.SIGNING, LedgerState.SIGNED, "5".repeat(88)
         ))
     }
 
@@ -126,7 +126,7 @@ class WalletRequestLedgerTest {
             assertTrue(expected.message.orEmpty().contains("signature"))
         }
         assertTrue(ledger.transition(
-            "request_12345678", LedgerState.SIGNING, LedgerState.SIGNED, "chain-signature-1"
+            "request_12345678", LedgerState.SIGNING, LedgerState.SIGNED, "5".repeat(88)
         ))
         try {
             ledger.transition("request_12345678", LedgerState.SIGNED, LedgerState.SUBMITTED)
@@ -135,10 +135,10 @@ class WalletRequestLedgerTest {
             assertTrue(expected.message.orEmpty().contains("signature"))
         }
         assertTrue(ledger.transition(
-            "request_12345678", LedgerState.SIGNED, LedgerState.SUBMITTED, "chain-signature-1"
+            "request_12345678", LedgerState.SIGNED, LedgerState.SUBMITTED, "5".repeat(88)
         ))
         assertFalse(ledger.transition(
-            "request_12345678", LedgerState.SUBMITTED, LedgerState.UNKNOWN, "chain-signature-2"
+            "request_12345678", LedgerState.SUBMITTED, LedgerState.UNKNOWN, "6".repeat(88)
         ))
         assertEquals("chain-signature-1", ledger.find("request_12345678")?.signature)
     }
@@ -210,7 +210,7 @@ class WalletRequestLedgerTest {
             "request_auto_0001", LedgerState.AUTHORIZED, LedgerState.SIGNING
         ))
         assertTrue(ledger.transition(
-            "request_auto_0001", LedgerState.SIGNING, LedgerState.SIGNED, "chain-signature-auto"
+            "request_auto_0001", LedgerState.SIGNING, LedgerState.SIGNED, "7".repeat(88)
         ))
     }
 
