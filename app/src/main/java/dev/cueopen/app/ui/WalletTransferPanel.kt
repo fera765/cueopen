@@ -79,6 +79,9 @@ fun WalletTransferPanel(context: Context, repository: SolanaWalletRepository, ne
     var message by remember { mutableStateOf<String?>(null) }
     var recentRecords by remember { mutableStateOf(emptyList<dev.cueopen.app.wallet.LedgerRecord>()) }
     fun refreshHistory() { recentRecords = ledger.recentRecords() }
+    val activePolicy = requestId?.let { id ->
+        ledger.find(id)?.let { policyStore.transferPolicy(it.agentId, it.network) }
+    }
     LaunchedEffect(ledger) { refreshHistory() }
 
     if (!repository.backupConfirmed()) {
@@ -239,13 +242,13 @@ fun WalletTransferPanel(context: Context, repository: SolanaWalletRepository, ne
 
             if (record?.state == LedgerState.AWAITING_APPROVAL) {
                 Button(
-                    enabled = !busy && transfersEnabled,
+                    enabled = !busy && policyStore.transferPolicy(record.agentId, record.network).enabled,
                     onClick = {
                         busy = true
                         message = null
                         scope.launch {
                             try {
-                                val policy = policyStore.manualTransferPolicy(network)
+                                val policy = policyStore.transferPolicy(record.agentId, record.network)
                                 val window = walletSpendingWindow()
                                 when (val approval = ledger.approveForSigning(
                                     id, policy, window.first, window.second, System.currentTimeMillis()
@@ -282,7 +285,7 @@ fun WalletTransferPanel(context: Context, repository: SolanaWalletRepository, ne
                 is TransferExecutionResult.Signed -> {
                     Text("Assinatura: " + current.signature)
                     Button(
-                        enabled = !busy && transfersEnabled,
+                        enabled = !busy && (activePolicy?.enabled ?: transfersEnabled),
                         onClick = { confirmBroadcast = true },
                         modifier = Modifier.fillMaxWidth()
                     ) { Text("Transmitir à " + network.displayName + "…") }
@@ -295,7 +298,7 @@ fun WalletTransferPanel(context: Context, repository: SolanaWalletRepository, ne
                             busy = true
                             scope.launch {
                                 try {
-                                    result = executor.reconcileSignature(id, WalletAgentPolicyStore.manualAgentId(network))
+                                    result = executor.reconcileSignature(id, ledger.find(id)?.agentId ?: WalletAgentPolicyStore.manualAgentId(network))
                                     message = result.toString()
                                 } catch (error: Exception) {
                                     message = error.message ?: "Não foi possível consultar o estado da transação."
@@ -412,6 +415,72 @@ fun WalletTransferPanel(context: Context, repository: SolanaWalletRepository, ne
                 }
             }
         }
+        val pendingAgentRequests = recentRecords.filter {
+            it.network == network &&
+                it.agentId != WalletAgentPolicyStore.manualAgentId(network) &&
+                it.state == LedgerState.AWAITING_APPROVAL
+        }
+        if (pendingAgentRequests.isNotEmpty()) {
+            Text("Pedidos de agentes aguardando aprovação", style = androidx.compose.material3.MaterialTheme.typography.titleMedium)
+            Text("Revise cada destinatário e valor. Aprovar assina localmente; a transmissão exige uma segunda confirmação explícita.")
+            pendingAgentRequests.forEach { pending ->
+                Column(
+                    modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    Text("Agente: " + (CueOpenAgentNameLookup.name(context, pending.agentId) ?: pending.agentId))
+                    Text("Destinatário: " + pending.recipientAddress)
+                    Text("Valor: " + String.format(Locale.US, "%.9f SOL", pending.amountLamports / LAMPORTS_PER_SOL))
+                    Text("Estado: aguardando aprovação humana")
+                    Button(
+                        enabled = !busy && policyStore.transferPolicy(pending.agentId, pending.network).enabled,
+                        onClick = {
+                            requestId = pending.requestId
+                            recipient = pending.recipientAddress
+                            amountSol = String.format(Locale.US, "%.9f", pending.amountLamports / LAMPORTS_PER_SOL)
+                            result = null
+                            busy = true
+                            scope.launch {
+                                try {
+                                    val current = ledger.find(pending.requestId)
+                                        ?: error("Pedido não encontrado.")
+                                    val policy = policyStore.transferPolicy(current.agentId, current.network)
+                                    check(policy.enabled) { "A permissão de transferência deste agente foi revogada." }
+                                    val window = walletSpendingWindow()
+                                    when (val approval = ledger.approveForSigning(
+                                        pending.requestId, policy, window.first, window.second,
+                                        System.currentTimeMillis()
+                                    )) {
+                                        is LedgerAuthorizationResult.Approved -> {
+                                            result = executor.signAuthorizedTransfer(
+                                                pending.requestId, policy, window.first, window.second,
+                                                humanApproval = true
+                                            )
+                                            message = when (val signed = result) {
+                                                is TransferExecutionResult.Signed ->
+                                                    "Pedido do agente aprovado e assinado localmente. Revise e confirme a transmissão separadamente."
+                                                is TransferExecutionResult.Rejected -> signed.reason
+                                                TransferExecutionResult.AwaitingApproval ->
+                                                    "A aprovação expirou; revise e aprove novamente."
+                                                else -> "Estado: " + signed.toString()
+                                            }
+                                        }
+                                        is LedgerAuthorizationResult.Rejected -> message = approval.decision.reason
+                                        else -> message = "Nenhuma nova autorização foi criada."
+                                    }
+                                } catch (error: Exception) {
+                                    message = error.message ?: "Não foi possível aprovar o pedido."
+                                } finally {
+                                    busy = false
+                                    refreshHistory()
+                                }
+                            }
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    ) { Text(if (busy) "Processando..." else "Revisar, aprovar e assinar") }
+                }
+            }
+        }
         message?.let { Text(it) }
     }
 
@@ -435,7 +504,7 @@ fun WalletTransferPanel(context: Context, repository: SolanaWalletRepository, ne
             },
             confirmButton = {
                 Button(
-                    enabled = !busy && transfersEnabled && requestId != null,
+                    enabled = !busy && (activePolicy?.enabled ?: transfersEnabled) && requestId != null,
                     onClick = {
                         val id = requestId
                         if (id == null) {
@@ -445,11 +514,16 @@ fun WalletTransferPanel(context: Context, repository: SolanaWalletRepository, ne
                             busy = true
                             scope.launch {
                                 try {
-                                    val policy = policyStore.manualTransferPolicy(network)
+                                    val record = ledger.find(id)
+                                    if (record == null) {
+                                        message = "Pedido não encontrado."
+                                        return@launch
+                                    }
+                                    val policy = policyStore.transferPolicy(record.agentId, record.network)
                                     val window = walletSpendingWindow()
                                     result = executor.broadcastPersistedTransfer(
                                         id,
-                                        WalletAgentPolicyStore.manualAgentId(network),
+                                        record.agentId,
                                         policy,
                                         window.first,
                                         window.second,
