@@ -292,9 +292,12 @@ class WalletRequestLedger(context: Context) : SQLiteOpenHelper(
         db.beginTransaction()
         try {
             val record = readRecord(db, requestId)
-                ?: return LedgerAuthorizationResult.Rejected(
-                    PolicyDecision.Denied("Transfer request does not exist")
-                )
+                ?: run {
+                    db.setTransactionSuccessful()
+                    return LedgerAuthorizationResult.Rejected(
+                        PolicyDecision.Denied("Transfer request does not exist")
+                    )
+                }
             if (record.state != LedgerState.AWAITING_APPROVAL) {
                 return LedgerAuthorizationResult.Rejected(
                     PolicyDecision.Denied("Transfer is not awaiting human approval")
