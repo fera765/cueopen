@@ -56,6 +56,9 @@ Ao concluir uma tarefa, marcar sua caixa como `[x]`, anotar o commit que contém
 
 ## Registro de progresso (não altera o estado das tarefas)
 
+- 2026-10-26 — Adicionada validação estrita de endereço Solana: além de Base58, exige que o texto decodifique para exatamente 32 bytes; `WalletTransferIntent` agora rejeita destinatários malformados antes de qualquer fluxo de transação. Commits: `750813fb7254d6704b7604812e17b32781fb2070`, `defbc6e0a83f8461025140fefffe0afc25b94241`. **Validação automatizada ainda pendente; não compilado/testado**.
+
+
 - 2026-10-26 — Adicionado `SolanaWalletRepository` e sessão temporária de configuração: criação/restauração fica em memória até o usuário confirmar a frase; a persistência local grava a seed no cofre e o endereço público/metadado de backup em preferências; falha ao salvar metadados tenta reverter o cofre. Commit: `3bec15e8b346cc439ef7ac98ae286d61824786cd`. **Ainda sem integração à interface e sem testes/build**. Revisão pendente: evitar cópias imutáveis da frase durante normalização da confirmação e cobrir recuperação/rollback com testes.
 
 
