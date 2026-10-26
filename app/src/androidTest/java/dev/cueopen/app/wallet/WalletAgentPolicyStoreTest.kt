@@ -182,4 +182,57 @@ class WalletAgentPolicyStoreTest {
         }
     }
 
+
+    @Test
+    fun agentTransferRequestsDefaultToDeniedAndRequireHumanApproval() {
+        val agentA = "agent-wallet-request-a"
+        val agentB = "agent-wallet-request-b"
+        val recipient = "HAgk14JpMQLgt6rVgv7cBQFJWFto5Dqxi472uT3DKpqk"
+
+        assertFalse(store.canAgentRequestTransfer(agentA))
+        assertFalse(store.transferPolicy(agentA, SolanaNetwork.DEVNET).enabled)
+        assertTrue(
+            store.transferPolicy(agentA, SolanaNetwork.DEVNET).authorize(
+                WalletAction.TRANSFER, 1L, recipient, 0L
+            ) is PolicyDecision.Denied
+        )
+
+        store.setAgentRequestTransfer(agentA, true)
+        val policy = store.transferPolicy(agentA, SolanaNetwork.DEVNET)
+        assertTrue(policy.enabled)
+        assertTrue(policy.canTransfer)
+        assertFalse(policy.autonomousExecution)
+        assertTrue(
+            policy.authorize(WalletAction.TRANSFER, 1L, recipient, 0L)
+                is PolicyDecision.RequiresUserApproval
+        )
+        assertFalse(store.canAgentRequestTransfer(agentB))
+        assertFalse(store.transferPolicy(agentB, SolanaNetwork.DEVNET).enabled)
+        assertTrue(WalletAgentPolicyStore(context).canAgentRequestTransfer(agentA))
+
+        store.setAgentRequestTransfer(agentA, false)
+        assertFalse(store.transferPolicy(agentA, SolanaNetwork.DEVNET).enabled)
+    }
+
+    @Test
+    fun agentTransferPolicyEnforcesPerRequestAndDailyLimits() {
+        val agentId = "agent-wallet-limits"
+        val recipient = "HAgk14JpMQLgt6rVgv7cBQFJWFto5Dqxi472uT3DKpqk"
+        store.setAgentRequestTransfer(agentId, true)
+        val policy = store.transferPolicy(agentId, SolanaNetwork.MAINNET)
+
+        assertTrue(
+            policy.authorize(WalletAction.TRANSFER, 50_000_000L, recipient, 0L)
+                is PolicyDecision.RequiresUserApproval
+        )
+        assertTrue(
+            policy.authorize(WalletAction.TRANSFER, 50_000_001L, recipient, 0L)
+                is PolicyDecision.Denied
+        )
+        assertTrue(
+            policy.authorize(WalletAction.TRANSFER, 1L, recipient, 100_000_000L)
+                is PolicyDecision.Denied
+        )
+    }
+
 }
