@@ -127,7 +127,7 @@ fun WalletScreen(nav: NavController) {
                 Text("Carteira local", style = androidx.compose.material3.MaterialTheme.typography.titleLarge)
             }
             Text(
-                "A chave privada fica no dispositivo. Transferências exigem aprovação humana, assinatura local e confirmação separada antes da transmissão à mainnet.",
+                "A chave privada fica no dispositivo. Transferências exigem aprovação humana, assinatura local e confirmação separada antes da transmissão à rede selecionada.",
                 color = c.ink2
             )
             if (walletExists && address == null && setup == null) {
