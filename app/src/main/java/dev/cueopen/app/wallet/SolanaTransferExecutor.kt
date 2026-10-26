@@ -136,7 +136,7 @@ class SolanaTransferExecutor(
                 )
             }
             TransferExecutionResult.Signed(
-                requestId, signature, serialized.size, fee, blockhash.lastValidBlockHeight
+                requestId, signature, signedBytes.size, fee, blockhash.lastValidBlockHeight
             )
         } catch (error: Exception) {
             // This executor never broadcasts before durable persistence; abort only if bytes were not stored.
