@@ -235,4 +235,35 @@ class WalletAgentPolicyStoreTest {
         )
     }
 
+
+    @Test
+    fun agentTransferLimitsAndRecipientAllowlistPersistAndEnforce() {
+        val agentId = "agent-wallet-custom-policy"
+        val recipient = "HAgk14JpMQLgt6rVgv7cBQFJWFto5Dqxi472uT3DKpqk"
+        val otherRecipient = "11111111111111111111111111111111"
+        store.setAgentRequestTransfer(agentId, true)
+        store.setAgentTransferLimits(agentId, 10_000_000L, 20_000_000L)
+        store.setAgentAllowedRecipients(agentId, setOf(recipient))
+
+        val recreated = WalletAgentPolicyStore(context)
+        val policy = recreated.transferPolicy(agentId, SolanaNetwork.DEVNET)
+        org.junit.Assert.assertEquals(10_000_000L, policy.maxTransferLamports)
+        org.junit.Assert.assertEquals(20_000_000L, policy.dailyLimitLamports)
+        org.junit.Assert.assertEquals(setOf(recipient), policy.allowedRecipients)
+        assertTrue(
+            policy.authorize(WalletAction.TRANSFER, 1L, recipient, 0L)
+                is PolicyDecision.RequiresUserApproval
+        )
+        assertTrue(
+            policy.authorize(WalletAction.TRANSFER, 1L, otherRecipient, 0L)
+                is PolicyDecision.Denied
+        )
+        org.junit.Assert.assertThrows(IllegalArgumentException::class.java) {
+            recreated.setAgentTransferLimits(agentId, 50_000_001L, 100_000_000L)
+        }
+        org.junit.Assert.assertThrows(IllegalArgumentException::class.java) {
+            recreated.setAgentAllowedRecipients(agentId, setOf("invalid-address"))
+        }
+    }
+
 }
