@@ -254,3 +254,6 @@ Estado honesto de release: **NÃO CONCLUÍDO**. A implementação do painel de c
 
 
 - 2026-10-26 — Endurecida a proteção contra duplicatas: a deduplicação não depende mais apenas de uma consulta prévia; a mesma checagem agora ocorre dentro da transação SQLite de autorização/inserção, evitando que chamadas concorrentes com IDs novos criem pedidos idênticos em paralelo. A deduplicação se aplica a intenções sem memo, que é o formato aceito pela ferramenta de agente. Testes instrumentados adicionados para consulta e reserva atômica, **não executados**. Commits: `871c4d64`, `82fda88d`, `f7ff39f8`.
+
+
+- 2026-10-26 — Revisão adicional da UX e da fronteira de assinatura: painel mostra até 100 registros para não ocultar pedidos pendentes, lista de permissões foi renomeada para incluir transferências, grants são revalidados imediatamente antes da assinatura local, e a recuperação de histórico não inventa slot de confirmação quando o ledger não o armazena. Documentação atualizada com deduplicação atômica. Commits: `8abdc600`, `f61966b7`, `66e71f5d`, `2f0bd0de`, `c9de2feb`. **Sem build ou testes executados**; validação manual do usuário continua pendente.
