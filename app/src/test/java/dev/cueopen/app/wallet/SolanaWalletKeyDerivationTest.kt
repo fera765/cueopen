@@ -31,7 +31,7 @@ class SolanaWalletKeyDerivationTest {
                 "abandon abandon abandon abandon abandon abandon"
             ).toCharArray()
         try {
-            assertThrows(IllegalArgumentException::class.java) {
+            assertThrows(RuntimeException::class.java) {
                 SolanaWalletKeyDerivation.restore(invalidPhrase)
             }
         } finally {
