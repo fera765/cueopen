@@ -23,6 +23,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -51,7 +52,8 @@ fun WalletScreen(nav: NavController) {
     val context = LocalContext.current
     val repository = remember(context) { SolanaWalletRepository(context.applicationContext) }
     val walletPolicyStore = remember(context) { WalletAgentPolicyStore(context.applicationContext) }
-    val walletAgents = CueApp.instance.store.state.value.agents
+    val appState by CueApp.instance.store.state.collectAsState()
+    val walletAgents = appState.agents
     var permissionRefresh by remember { mutableStateOf(0) }
     val networkPrefs = remember(context) {
         context.applicationContext.getSharedPreferences("solana_wallet_settings", android.content.Context.MODE_PRIVATE)
