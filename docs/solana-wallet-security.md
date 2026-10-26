@@ -34,7 +34,7 @@ These are implementation features, not evidence that the entire wallet is releas
 2. Validate network, destination, balance and fees.
 3. Simulate before signing.
 4. Require user approval unless a separately reviewed policy explicitly authorizes autonomous execution.
-5. Sign locally and persist the exact signed bytes before any network broadcast. Immediately before broadcast, validate the serialized format and verify that its embedded signature matches the signature recorded in the ledger; quarantine mismatches and do not submit them.
+5. Sign locally and persist the exact signed bytes before any network broadcast. Immediately before broadcast, validate the serialized format and verify that its embedded signature matches the signature recorded in the ledger; quarantine mismatches and do not submit them. This check binds the recorded signature to the submitted bytes, but is not a full semantic parser for transaction instructions.
 6. Track signatures and blockhash expiry; never blindly rebuild or resend an ambiguous operation.
 7. Show pending, confirmed/finalized and failed distinctly.
 8. Persist non-secret audit records only.
