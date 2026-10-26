@@ -18,12 +18,15 @@ fun WalletReceiveQr(address: String) {
     val bitmap = remember(address) {
         runCatching {
             val matrix = QRCodeWriter().encode(address, BarcodeFormat.QR_CODE, QR_SIZE, QR_SIZE)
-            Bitmap.createBitmap(QR_SIZE, QR_SIZE, Bitmap.Config.ARGB_8888).apply {
-                for (y in 0 until QR_SIZE) {
-                    for (x in 0 until QR_SIZE) {
-                        setPixel(x, y, if (matrix.get(x, y)) 0xff000000.toInt() else 0xffffffff.toInt())
-                    }
+            val pixels = IntArray(QR_SIZE * QR_SIZE)
+            for (y in 0 until QR_SIZE) {
+                for (x in 0 until QR_SIZE) {
+                    pixels[y * QR_SIZE + x] =
+                        if (matrix.get(x, y)) 0xff000000.toInt() else 0xffffffff.toInt()
                 }
+            }
+            Bitmap.createBitmap(QR_SIZE, QR_SIZE, Bitmap.Config.ARGB_8888).apply {
+                setPixels(pixels, 0, QR_SIZE, 0, 0, QR_SIZE, QR_SIZE)
             }
         }.getOrNull()
     }
