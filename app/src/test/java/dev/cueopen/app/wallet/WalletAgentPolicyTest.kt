@@ -84,4 +84,55 @@ class WalletAgentPolicyTest {
             policy().authorize(WalletAction.TRANSFER, 101L, "recipient")
         )
     }
+
+    @Test
+    fun recipientOutsideExplicitAllowlistIsDenied() {
+        assertEquals(
+            PolicyDecision.Denied("Recipient is not allowlisted"),
+            policy(recipients = setOf("approved-recipient"))
+                .authorize(WalletAction.TRANSFER, 10L, "different-recipient")
+        )
+    }
+
+    @Test
+    fun transferPermissionIsRequired() {
+        assertEquals(
+            PolicyDecision.Denied("Transfers are not permitted"),
+            WalletAgentPolicy(
+                agentId = "read-only-agent",
+                enabled = true,
+                canReadBalance = true,
+                maxTransferLamports = 100L,
+                dailyLimitLamports = 150L
+            ).authorize(WalletAction.TRANSFER, 1L, "recipient")
+        )
+    }
+
+    @Test
+    fun spendingStateAboveDailyLimitIsDeniedWithoutOverflow() {
+        assertEquals(
+            PolicyDecision.Denied("Transfer exceeds the remaining daily limit"),
+            policy().authorize(
+                action = WalletAction.TRANSFER,
+                amountLamports = 1L,
+                recipient = "recipient",
+                spentTodayLamports = Long.MAX_VALUE
+            )
+        )
+    }
+
+    @Test
+    fun exactRemainingDailyLimitIsAllowedForAutonomousRecipient() {
+        assertEquals(
+            PolicyDecision.Allowed,
+            policy(autonomous = true, recipients = setOf("recipient"))
+                .authorize(
+                    action = WalletAction.TRANSFER,
+                    amountLamports = 50L,
+                    recipient = "recipient",
+                    spentTodayLamports = 100L
+                )
+        )
+    }
+
 }
