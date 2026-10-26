@@ -82,7 +82,14 @@ fun WalletTransferPanel(context: Context, repository: SolanaWalletRepository, ne
     val activePolicy = requestId?.let { id ->
         ledger.find(id)?.let { policyStore.transferPolicy(it.agentId, it.network) }
     }
-    LaunchedEffect(ledger) { refreshHistory() }
+    // Refresh the local ledger while the wallet screen is visible so agent-created
+    // requests appear without requiring the user to navigate away and back.
+    LaunchedEffect(ledger, network) {
+        while (true) {
+            refreshHistory()
+            kotlinx.coroutines.delay(3_000L)
+        }
+    }
 
     if (!repository.backupConfirmed()) {
         Text("Confirme o backup da frase de recuperação antes de habilitar transferências.")
