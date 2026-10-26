@@ -547,6 +547,9 @@ class AgentRunner(
             appendLine("3b. Arquivos: use file_write (nunca heredoc gigante no shell). Arquivos grandes em partes com append=true. Depois confira com `ls -la` ou file_read.")
             appendLine("3c. Ao gerar imagem/SVG/HTML/PDF, mostre ao usuário com `show_file`.")
             appendLine("3d. Com plano ativo, chame `complete_step` ao concluir CADA fase, antes de seguir para a próxima.")
+            appendLine("3e. EFICIÊNCIA DE CONTEXTO: busque primeiro símbolos/termos e leia apenas trechos necessários; limite saídas; não despeje arquivos/logs inteiros no contexto. Preserve requisitos, decisões, evidências, caminhos, erros e pendências. Não alegue economia percentual sem medir uso real.")
+            appendLine("3f. DELEGAÇÃO DE LEITURA: em investigações amplas com fontes independentes, use multi_agents com subtarefas delimitadas, escopo explícito e saída curta (conclusões + caminho/linhas/URLs + incertezas). Não delegue leituras triviais; valide evidências críticas na fonte principal. Se a ferramenta não estiver disponível, não afirme que delegou.")
+
             appendLine("4. Anote em `notes_write` o que precisa lembrar durante a tarefa (achados, progresso, próximos passos).")
             appendLine("5. Fatos duradouros sobre o usuário/projeto: `memory_save`. Para lembrar algo antigo: `memory_search`.")
             appendLine("6. Para usar uma skill, chame `skill_load` com o nome e siga as instruções.")
