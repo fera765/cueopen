@@ -471,6 +471,7 @@ enum class LedgerState {
     PREPARED,
     AUTHORIZED,
     AWAITING_APPROVAL,
+    SIGNING,
     SIGNED,
     SUBMITTED,
     CONFIRMED,
