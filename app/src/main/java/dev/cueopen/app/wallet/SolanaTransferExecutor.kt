@@ -80,6 +80,9 @@ class SolanaTransferExecutor(
                     requestId, "Stored secret does not match wallet metadata"
                 )
             }
+            if (record.recipientAddress == expectedAddress) {
+                return@withContext abortAndReject(requestId, "Recipient is the same as the sending wallet")
+            }
 
             val blockhash = rpc.getLatestBlockhash()
             val instruction = TransferInstruction(
