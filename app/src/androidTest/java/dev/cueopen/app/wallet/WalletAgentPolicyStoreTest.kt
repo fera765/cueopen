@@ -132,4 +132,54 @@ class WalletAgentPolicyStoreTest {
             ) is PolicyDecision.Denied
         )
     }
+
+    @Test
+    fun transferIntentParsesLamportsExactlyAndRejectsPrecisionLoss() {
+        val recipient = "HAgk14JpMQLgt6rVgv7cBQFJWFto5Dqxi472uT3DKpqk"
+        val intent = WalletTransferIntent.fromSol(
+            "request_1234567890", "agent-test", recipient, "0.000000001", 1L,
+            network = SolanaNetwork.DEVNET
+        )
+        org.junit.Assert.assertEquals(1L, intent.amountLamports)
+        org.junit.Assert.assertEquals(SolanaNetwork.DEVNET, intent.network)
+
+        org.junit.Assert.assertThrows(IllegalArgumentException::class.java) {
+            WalletTransferIntent.fromSol(
+                "request_1234567890", "agent-test", recipient, "0.0000000001", 1L
+            )
+        }
+    }
+
+    @Test
+    fun transferIntentRejectsZeroNegativeAndOverflowAmounts() {
+        val recipient = "HAgk14JpMQLgt6rVgv7cBQFJWFto5Dqxi472uT3DKpqk"
+        listOf("0", "-0.1", "9223372036.854775808").forEach { amount ->
+            org.junit.Assert.assertThrows(IllegalArgumentException::class.java) {
+                WalletTransferIntent.fromSol(
+                    "request_1234567890", "agent-test", recipient, amount, 1L
+                )
+            }
+        }
+    }
+
+    @Test
+    fun transferIntentRejectsInvalidRequestIdentityAndRecipient() {
+        val recipient = "HAgk14JpMQLgt6rVgv7cBQFJWFto5Dqxi472uT3DKpqk"
+        org.junit.Assert.assertThrows(IllegalArgumentException::class.java) {
+            WalletTransferIntent(
+                "short", "agent-test", recipient, 1L, 1L
+            )
+        }
+        org.junit.Assert.assertThrows(IllegalArgumentException::class.java) {
+            WalletTransferIntent(
+                "request_1234567890", " ", recipient, 1L, 1L
+            )
+        }
+        org.junit.Assert.assertThrows(IllegalArgumentException::class.java) {
+            WalletTransferIntent(
+                "request_1234567890", "agent-test", "not-a-solana-address", 1L, 1L
+            )
+        }
+    }
+
 }
