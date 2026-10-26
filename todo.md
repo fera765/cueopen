@@ -266,3 +266,6 @@ Estado honesto de release: **NÃO CONCLUÍDO**. A implementação do painel de c
 
 
 - 2026-10-26 — Extraída a validação de assinatura da transação persistida para `SolanaPersistedTransactionValidator` e adicionados testes unitários para correspondência, divergência, cabeçalho/formato, tamanho e assinatura esperada inválida. Commits: `389655954cae6a548095b5b58816688bb117e42d`, `8c7cc93bd981a755d93518374b8731d412980391`, `c1683c93f0b073dd19dad76f9839afb81a1f2a24`. **Testes apenas escritos; não foram executados. A verificação vincula a assinatura aos bytes persistidos, mas não substitui a validação semântica completa da transação.**
+
+
+- 2026-10-26 — Unificada a validação do envelope/assinatura na gravação do ledger e no broadcast usando `SolanaPersistedTransactionValidator`, reduzindo divergência entre os dois pontos críticos; removida a constante de tamanho duplicada. Commits: `5f11972679298406e07118ea666cae9525712013`, `0abead472a5ade029ece7cb22b12082c2949d3b5`. **Não compilado nem testado.**
