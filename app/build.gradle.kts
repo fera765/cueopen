@@ -16,6 +16,7 @@ android {
         // targetSdk 28 (igual ao build F-Droid do Acode) permite executar binários
         // do sandbox a partir de filesDir. Os .so do proot também vêm em jniLibs.
         targetSdk = 28
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         versionCode = 8
         versionName = "3.5.0"
         ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64") }
@@ -65,6 +66,9 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.3")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
     testImplementation("junit:junit:4.13.2")
+    androidTestImplementation("androidx.test.ext:junit:1.2.1")
+    androidTestImplementation("androidx.test:runner:1.6.2")
+    androidTestImplementation("androidx.test:core-ktx:1.6.1")
     debugImplementation("androidx.compose.ui:ui-tooling")
 }
 
