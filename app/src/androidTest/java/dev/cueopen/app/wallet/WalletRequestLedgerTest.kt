@@ -109,7 +109,7 @@ class WalletRequestLedgerTest {
                 "67rpwLCuS5DGA8KGZXKsVQ7dnPb9goRLoKfgGbLfQg9WoLUgNY77E2jT11fem3coV9nAkguBACzrU1iyZM4B8roQ")
             throw AssertionError("A policy-checked signing claim must use a dedicated signer persistence path")
         } catch (expected: IllegalArgumentException) {
-            assertTrue(expected.message.orEmpty().contains("Signature persistence"))
+            assertTrue(expected.message.orEmpty().contains("persistSignedTransaction"))
         }
     }
 
@@ -126,13 +126,14 @@ class WalletRequestLedgerTest {
             "request_12345678", transferPolicy(), now - 10_000L, now + 10_000L, now
         ) is LedgerSigningStartResult.Started)
         try {
-            ledger.transition("request_12345678", LedgerState.SIGNING, LedgerState.SIGNED)
-            throw AssertionError("Expected missing durable signature to be rejected")
+            ledger.transition("request_12345678", LedgerState.SIGNING, LedgerState.SIGNED, "67rpwLCuS5DGA8KGZXKsVQ7dnPb9goRLoKfgGbLfQg9WoLUgNY77E2jT11fem3coV9nAkguBACzrU1iyZM4B8roQ")
+            throw AssertionError("Generic transition must not persist a signature")
         } catch (expected: IllegalArgumentException) {
-            assertTrue(expected.message.orEmpty().contains("signature"))
+            assertTrue(expected.message.orEmpty().contains("persistSignedTransaction"))
         }
-        assertTrue(ledger.transition(
-            "request_12345678", LedgerState.SIGNING, LedgerState.SIGNED, "67rpwLCuS5DGA8KGZXKsVQ7dnPb9goRLoKfgGbLfQg9WoLUgNY77E2jT11fem3coV9nAkguBACzrU1iyZM4B8roQ"
+        assertTrue(ledger.persistSignedTransaction(
+            "request_12345678", "67rpwLCuS5DGA8KGZXKsVQ7dnPb9goRLoKfgGbLfQg9WoLUgNY77E2jT11fem3coV9nAkguBACzrU1iyZM4B8roQ",
+            serializedSignedTransaction("67rpwLCuS5DGA8KGZXKsVQ7dnPb9goRLoKfgGbLfQg9WoLUgNY77E2jT11fem3coV9nAkguBACzrU1iyZM4B8roQ")
         ))
         try {
             ledger.transition("request_12345678", LedgerState.SIGNED, LedgerState.SUBMITTED)
@@ -173,8 +174,8 @@ class WalletRequestLedgerTest {
             "request_12345678", transferPolicy(), now - 10_000L, now + 10_000L, now
         ) is LedgerSigningStartResult.Started)
         val signature = "4QuYxZ8wHiUWSRDBNgYuzbk6Bvj6nsHECYn7r4ZSc7mLsDz7v2QQV29y11SmWN5XzSBnAnw7mofZyg9ehu37kuXw"
-        assertTrue(ledger.transition(
-            "request_12345678", LedgerState.SIGNING, LedgerState.SIGNED, signature
+        assertTrue(ledger.persistSignedTransaction(
+            "request_12345678", signature, serializedSignedTransaction(signature)
         ))
         assertTrue(ledger.transition(
             "request_12345678", LedgerState.SIGNED, LedgerState.SUBMITTED, signature
@@ -337,6 +338,9 @@ class WalletRequestLedgerTest {
         }
     }
 
+    private fun serializedSignedTransaction(signature: String): ByteArray =
+        byteArrayOf(1) + org.sol4k.Base58.decode(signature) + byteArrayOf(1, 2, 3)
+
     private fun transferPolicy(
         dailyLimit: Long = 100L,
         autonomous: Boolean = false
@@ -393,8 +397,9 @@ class WalletRequestLedgerTest {
             "request_auto_0001", transferPolicy(autonomous = true),
             now - 10_000L, now + 10_000L, now
         ) is LedgerSigningStartResult.Started)
-        assertTrue(ledger.transition(
-            "request_auto_0001", LedgerState.SIGNING, LedgerState.SIGNED, "5n4yLmzWc14iDPJ3vZAszSSXTu1wWQzX5ZtZnVBcrAUHDKBNHEZmUdR9oQpg7JukPQfHqWWN5j8bZwounf3xrsM7"
+        assertTrue(ledger.persistSignedTransaction(
+            "request_auto_0001", "5n4yLmzWc14iDPJ3vZAszSSXTu1wWQzX5ZtZnVBcrAUHDKBNHEZmUdR9oQpg7JukPQfHqWWN5j8bZwounf3xrsM7",
+            serializedSignedTransaction("5n4yLmzWc14iDPJ3vZAszSSXTu1wWQzX5ZtZnVBcrAUHDKBNHEZmUdR9oQpg7JukPQfHqWWN5j8bZwounf3xrsM7")
         ))
         assertEquals(
             LedgerState.SIGNED,
