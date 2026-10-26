@@ -279,14 +279,58 @@ class WalletRequestLedgerTest {
     }
 
     @Test
+    fun humanSigningPathRequiresPersistedApprovalTimestamp() {
+        val now = System.currentTimeMillis()
+        val start = now - 10_000L
+        val end = now + 10_000L
+        val request = intent(requestId = "request_no_consent01", amountLamports = 20L)
+        val created = ledger.claimAndAuthorize(
+            request, transferPolicy(autonomous = true), start, end, now
+        )
+        assertTrue(created is LedgerAuthorizationResult.Created)
+        val result = ledger.beginSigningAfterHumanApproval(
+            request.requestId, transferPolicy(autonomous = true), start, end, now
+        )
+        assertTrue(result is LedgerSigningStartResult.AwaitingHumanApproval)
+        assertEquals(LedgerState.AWAITING_APPROVAL, ledger.find(request.requestId)?.state)
+        assertEquals(0L, ledger.find(request.requestId)?.humanApprovedAtEpochMs)
+    }
+
+    @Test
+    fun expiredHumanApprovalMustBeRepeatedBeforeSigning() {
+        val now = System.currentTimeMillis()
+        val start = now - 300_000L
+        val end = now + 10_000L
+        val request = intent(requestId = "request_old_consent01", amountLamports = 20L)
+        val created = ledger.claimAndAuthorize(
+            request, transferPolicy(), start, end, now
+        )
+        assertTrue(created is LedgerAuthorizationResult.Created)
+        val approval = ledger.approveForSigning(
+            request.requestId, transferPolicy(), start, end, now - 180_000L
+        )
+        assertTrue(approval is LedgerAuthorizationResult.Approved)
+        assertTrue((approval as LedgerAuthorizationResult.Approved).record.humanApprovedAtEpochMs > 0L)
+        val startResult = ledger.beginSigningAfterHumanApproval(
+            request.requestId, transferPolicy(), start, end, now
+        )
+        assertTrue(startResult is LedgerSigningStartResult.AwaitingHumanApproval)
+        assertEquals(LedgerState.AWAITING_APPROVAL, ledger.find(request.requestId)?.state)
+        assertEquals(0L, ledger.find(request.requestId)?.humanApprovedAtEpochMs)
+    }
+
+    @Test
     fun terminalStatesCannotBeReopened() {
         ledger.claim(intent())
         assertTrue(ledger.transition(
             "request_12345678", LedgerState.PREPARED, LedgerState.FAILED
         ))
-        assertFalse(ledger.transition(
-            "request_12345678", LedgerState.FAILED, LedgerState.PREPARED
-        ))
+        try {
+            ledger.transition("request_12345678", LedgerState.FAILED, LedgerState.PREPARED)
+            throw AssertionError("Terminal failed state cannot be reopened")
+        } catch (expected: IllegalArgumentException) {
+            assertTrue(expected.message.orEmpty().contains("Illegal transfer state transition"))
+        }
     }
 
     private fun transferPolicy(
