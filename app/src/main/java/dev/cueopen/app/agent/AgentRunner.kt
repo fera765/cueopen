@@ -943,20 +943,25 @@ class AgentRunner(
                                     )
                                     val policy = policies.transferPolicy(agentId, network)
                                     val ledger = dev.cueopen.app.wallet.WalletRequestLedger(ctx.applicationContext)
-                                    when (val claim = ledger.claimAndAuthorize(
-                                        intent, policy, windowStart, windowEnd, nowMs
-                                    )) {
-                                        is dev.cueopen.app.wallet.LedgerAuthorizationResult.Created ->
-                                            if (claim.record.state == dev.cueopen.app.wallet.LedgerState.AWAITING_APPROVAL)
-                                                "Pedido registrado e aguardando aprovação na tela Carteira. ID: ${intent.requestId}; rede: ${network.displayName}; destinatário: ${intent.recipientAddress}; valor: ${String.format(Locale.US, "%.9f SOL", intent.amountLamports / 1_000_000_000.0)}. Nenhuma assinatura ou transmissão foi realizada."
-                                            else
-                                                "Pedido criado, mas não será assinado automaticamente. Abra a Carteira para revisão humana. ID: ${intent.requestId}"
-                                        is dev.cueopen.app.wallet.LedgerAuthorizationResult.Rejected ->
-                                            "Pedido recusado pela política local: ${claim.decision.reason}"
-                                        is dev.cueopen.app.wallet.LedgerAuthorizationResult.Existing ->
-                                            "Pedido duplicado detectado; nenhuma nova autorização criada. ID: ${claim.record.requestId}; estado: ${claim.record.state}."
-                                        is dev.cueopen.app.wallet.LedgerAuthorizationResult.Approved ->
-                                            "Este pedido já foi aprovado anteriormente; nenhuma nova assinatura foi autorizada."
+                                    val duplicate = ledger.findRecentDuplicateIntent(intent, nowMs)
+                                    if (duplicate != null) {
+                                        "Pedido duplicado recente detectado; nenhum novo pedido criado. ID: ${duplicate.requestId}; estado: ${duplicate.state}. Revise o pedido existente na tela Carteira."
+                                    } else {
+                                        when (val claim = ledger.claimAndAuthorize(
+                                            intent, policy, windowStart, windowEnd, nowMs
+                                        )) {
+                                            is dev.cueopen.app.wallet.LedgerAuthorizationResult.Created ->
+                                                if (claim.record.state == dev.cueopen.app.wallet.LedgerState.AWAITING_APPROVAL)
+                                                    "Pedido registrado e aguardando aprovação na tela Carteira. ID: ${intent.requestId}; rede: ${network.displayName}; destinatário: ${intent.recipientAddress}; valor: ${String.format(Locale.US, "%.9f SOL", intent.amountLamports / 1_000_000_000.0)}. Nenhuma assinatura ou transmissão foi realizada."
+                                                else
+                                                    "Pedido criado, mas não será assinado automaticamente. Abra a Carteira para revisão humana. ID: ${intent.requestId}"
+                                            is dev.cueopen.app.wallet.LedgerAuthorizationResult.Rejected ->
+                                                "Pedido recusado pela política local: ${claim.decision.reason}"
+                                            is dev.cueopen.app.wallet.LedgerAuthorizationResult.Existing ->
+                                                "Pedido duplicado detectado; nenhuma nova autorização criada. ID: ${claim.record.requestId}; estado: ${claim.record.state}."
+                                            is dev.cueopen.app.wallet.LedgerAuthorizationResult.Approved ->
+                                                "Este pedido já foi aprovado anteriormente; nenhuma nova assinatura foi autorizada."
+                                        }
                                     }
                                 }.getOrElse { error ->
                                     "Pedido de transferência não criado: ${error.message ?: "erro de validação"}"
