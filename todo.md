@@ -251,3 +251,6 @@ Estado honesto de release: **NÃO CONCLUÍDO**. A implementação do painel de c
 
 
 - 2026-10-26 — Proteção contra repetição de chamadas da ferramenta de agente: o ledger agora procura uma solicitação recente idêntica (mesmo agente, rede, destinatário e valor) em janela de 2 minutos antes de criar novo pedido, mesmo quando o modelo gera outro request ID. Adicionado teste instrumentado para o caso. Commits: `0677e69d`, `dee3726c`, `04c5e7eb`. Teste escrito, **não executado**, conforme o plano de validação manual do usuário.
+
+
+- 2026-10-26 — Endurecida a proteção contra duplicatas: a deduplicação não depende mais apenas de uma consulta prévia; a mesma checagem agora ocorre dentro da transação SQLite de autorização/inserção, evitando que chamadas concorrentes com IDs novos criem pedidos idênticos em paralelo. A deduplicação se aplica a intenções sem memo, que é o formato aceito pela ferramenta de agente. Testes instrumentados adicionados para consulta e reserva atômica, **não executados**. Commits: `871c4d64`, `82fda88d`, `f7ff39f8`.
