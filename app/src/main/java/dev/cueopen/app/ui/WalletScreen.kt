@@ -276,7 +276,7 @@ fun WalletScreen(nav: NavController) {
                                     Column(Modifier.weight(1f)) {
                                         Text("Solicitar transferência SOL (sempre exige aprovação humana)")
                                         Text(
-                                            "Limite do agente: 0,05 SOL por pedido e 0,10 SOL por dia; sem assinatura ou envio autônomo.",
+                                            "Tetos de segurança: 0,05 SOL por pedido e 0,10 SOL por dia. Você pode reduzir esses limites; o agente nunca assina nem envia sozinho.",
                                             color = c.ink2
                                         )
                                     }
