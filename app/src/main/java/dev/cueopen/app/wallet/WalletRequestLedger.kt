@@ -31,7 +31,7 @@ class WalletRequestLedger(context: Context) : SQLiteOpenHelper(
         try {
             val existing = db.query(
                 TABLE,
-                arrayOf("agent_id", "recipient", "amount_lamports", "created_at_ms", "memo", "state", "signature", "human_approved_at_ms"),
+                arrayOf("agent_id", "recipient", "amount_lamports", "created_at_ms", "memo", "state", "signature", "human_approved_at_ms", "network"),
                 "request_id = ?",
                 arrayOf(intent.requestId),
                 null,
@@ -47,7 +47,8 @@ class WalletRequestLedger(context: Context) : SQLiteOpenHelper(
                     memo = if (cursor.isNull(4)) null else cursor.getString(4),
                     state = LedgerState.valueOf(cursor.getString(5)),
                     signature = if (cursor.isNull(6)) null else cursor.getString(6),
-                    humanApprovedAtEpochMs = cursor.getLong(7)
+                    humanApprovedAtEpochMs = cursor.getLong(7),
+                    network = SolanaNetwork.valueOf(cursor.getString(8))
                 )
             }
 
@@ -70,6 +71,7 @@ class WalletRequestLedger(context: Context) : SQLiteOpenHelper(
                 put("state", LedgerState.PREPARED.name)
                 put("signature", null as String?)
                 put("human_approved_at_ms", 0L)
+                put("network", intent.network.name)
                 put("updated_at_ms", System.currentTimeMillis())
             }
             val inserted = db.insertOrThrow(TABLE, null, values)
@@ -84,7 +86,8 @@ class WalletRequestLedger(context: Context) : SQLiteOpenHelper(
                     createdAtEpochMs = intent.createdAtEpochMs,
                     memo = intent.memo,
                     state = LedgerState.PREPARED,
-                    signature = null
+                    signature = null,
+                    network = intent.network
                 )
             )
         } finally {
@@ -212,6 +215,7 @@ class WalletRequestLedger(context: Context) : SQLiteOpenHelper(
                 put("state", initialState.name)
                 put("signature", null as String?)
                 put("human_approved_at_ms", 0L)
+                put("network", intent.network.name)
                 put("updated_at_ms", System.currentTimeMillis())
             }
             db.insertOrThrow(TABLE, null, values)
@@ -235,7 +239,7 @@ class WalletRequestLedger(context: Context) : SQLiteOpenHelper(
     private fun readRecord(db: SQLiteDatabase, requestId: String): LedgerRecord? =
         db.query(
             TABLE,
-            arrayOf("agent_id", "recipient", "amount_lamports", "created_at_ms", "memo", "state", "signature", "human_approved_at_ms"),
+            arrayOf("agent_id", "recipient", "amount_lamports", "created_at_ms", "memo", "state", "signature", "human_approved_at_ms", "network"),
             "request_id = ?",
             arrayOf(requestId),
             null, null, null
@@ -249,7 +253,8 @@ class WalletRequestLedger(context: Context) : SQLiteOpenHelper(
                 memo = if (cursor.isNull(4)) null else cursor.getString(4),
                 state = LedgerState.valueOf(cursor.getString(5)),
                 signature = if (cursor.isNull(6)) null else cursor.getString(6),
-                humanApprovedAtEpochMs = cursor.getLong(7)
+                humanApprovedAtEpochMs = cursor.getLong(7),
+                network = SolanaNetwork.valueOf(cursor.getString(8))
             )
         }
 
@@ -326,7 +331,8 @@ class WalletRequestLedger(context: Context) : SQLiteOpenHelper(
                 recipientAddress = record.recipientAddress,
                 amountLamports = record.amountLamports,
                 createdAtEpochMs = record.createdAtEpochMs,
-                memo = record.memo
+                memo = record.memo,
+                network = record.network
             )
             val spent = sumReservedSpend(
                 db, record.agentId, windowStartEpochMs, windowEndEpochMs,
@@ -775,7 +781,7 @@ class WalletRequestLedger(context: Context) : SQLiteOpenHelper(
         require(requestId.isNotBlank())
         return readableDatabase.query(
             TABLE,
-            arrayOf("agent_id", "recipient", "amount_lamports", "created_at_ms", "memo", "state", "signature", "human_approved_at_ms"),
+            arrayOf("agent_id", "recipient", "amount_lamports", "created_at_ms", "memo", "state", "signature", "human_approved_at_ms", "network"),
             "request_id = ?",
             arrayOf(requestId),
             null,
@@ -791,7 +797,8 @@ class WalletRequestLedger(context: Context) : SQLiteOpenHelper(
                 memo = if (cursor.isNull(4)) null else cursor.getString(4),
                 state = LedgerState.valueOf(cursor.getString(5)),
                 signature = if (cursor.isNull(6)) null else cursor.getString(6),
-                humanApprovedAtEpochMs = cursor.getLong(7)
+                humanApprovedAtEpochMs = cursor.getLong(7),
+                network = SolanaNetwork.valueOf(cursor.getString(8))
             )
         }
     }
@@ -810,6 +817,7 @@ class WalletRequestLedger(context: Context) : SQLiteOpenHelper(
                 signature TEXT,
                 human_approved_at_ms INTEGER NOT NULL DEFAULT 0,
                 signed_transaction BLOB,
+                network TEXT NOT NULL DEFAULT 'MAINNET',
                 updated_at_ms INTEGER NOT NULL
             )""".trimIndent()
         )
@@ -829,7 +837,10 @@ class WalletRequestLedger(context: Context) : SQLiteOpenHelper(
         if (oldVersion < 4) {
             db.execSQL("ALTER TABLE $TABLE ADD COLUMN signed_transaction BLOB")
         }
-        if (newVersion > 4) {
+        if (oldVersion < 5) {
+            db.execSQL("ALTER TABLE $TABLE ADD COLUMN network TEXT NOT NULL DEFAULT 'MAINNET'")
+        }
+        if (newVersion > 5) {
             error("Unsupported wallet ledger schema upgrade: $oldVersion -> $newVersion")
         }
     }
@@ -857,7 +868,7 @@ class WalletRequestLedger(context: Context) : SQLiteOpenHelper(
 
     companion object {
         private const val DATABASE_NAME = "cueopen_wallet_requests.db"
-        private const val DATABASE_VERSION = 4
+        private const val DATABASE_VERSION = 5
         private const val TABLE = "wallet_transfer_requests"
         private const val MAX_SIGNATURE_LENGTH = 128
         private const val MAX_SERIALIZED_TRANSACTION_BYTES = 1232
@@ -886,7 +897,8 @@ data class LedgerRecord(
     val memo: String?,
     val state: LedgerState,
     val signature: String?,
-    val humanApprovedAtEpochMs: Long = 0L
+    val humanApprovedAtEpochMs: Long = 0L,
+    val network: SolanaNetwork = SolanaNetwork.MAINNET
 )
 
 sealed interface LedgerClaim {
