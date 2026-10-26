@@ -32,7 +32,12 @@ class SolanaWalletRepository(context: Context) {
     @Synchronized
     fun repairMetadataFromRecoveryPhrase(phrase: CharArray): String {
         check(vault.hasSecret()) { "No local wallet secret exists to recover" }
-        val material = SolanaWalletKeyDerivation.restore(phrase)
+        val material = try {
+            SolanaWalletKeyDerivation.restore(phrase)
+        } catch (error: Throwable) {
+            phrase.fill(0.toChar())
+            throw error
+        }
         var storedSeed: ByteArray? = null
         try {
             storedSeed = vault.read()
