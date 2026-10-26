@@ -163,7 +163,10 @@ class WalletRequestLedger(context: Context) : SQLiteOpenHelper(
                         arrayOf(intent.requestId, LedgerState.AUTHORIZED.name)
                     )
                     check(changed == 1) { "Could not revoke authorization after policy change" }
-                    effectiveRecord = existing.copy(state = LedgerState.AWAITING_APPROVAL)
+                    effectiveRecord = existing.copy(
+                        state = LedgerState.AWAITING_APPROVAL,
+                        humanApprovedAtEpochMs = 0L
+                    )
                 }
                 // An already-started signing request is never allowed to return to approval;
                 // policy revocation must leave it quarantined for reconciliation.
@@ -349,7 +352,9 @@ class WalletRequestLedger(context: Context) : SQLiteOpenHelper(
             )
             check(changed == 1) { "Transfer state changed during approval" }
             db.setTransactionSuccessful()
-            return LedgerAuthorizationResult.Approved(record.copy(state = LedgerState.AUTHORIZED))
+            return LedgerAuthorizationResult.Approved(
+                record.copy(state = LedgerState.AUTHORIZED, humanApprovedAtEpochMs = approvalTimeEpochMs)
+            )
         } finally {
             db.endTransaction()
         }
