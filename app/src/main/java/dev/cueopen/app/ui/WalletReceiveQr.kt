@@ -28,7 +28,7 @@ fun WalletReceiveQr(address: String) {
         }.getOrNull()
     }
     Column {
-        Text("Receber SOL — QR da rede Solana")
+        Text("Receber SOL — QR do endereço público")
         if (bitmap != null) {
             Image(
                 bitmap = bitmap.asImageBitmap(),
@@ -38,7 +38,7 @@ fun WalletReceiveQr(address: String) {
         } else {
             Text("Não foi possível gerar o QR. Use o endereço público exibido acima.")
         }
-        Text("Este QR contém somente o endereço público; não contém frase de recuperação.")
+        Text("Este QR contém somente o endereço público, não a frase de recuperação, e não identifica a rede. Confirme mainnet/devnet no aplicativo remetente.")
     }
 }
 
