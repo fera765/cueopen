@@ -64,7 +64,7 @@ class SolanaTransferExecutor(
         var serialized: ByteArray? = null
         try {
             val expectedAddress = walletRepository.publicAddress()
-                ?: return@withContext TransferExecutionResult.Rejected("Wallet metadata is unavailable")
+                ?: return@withContext abortAndReject(requestId, "Wallet metadata is unavailable")
             seed = vault.read()
             require(seed.size == 32) { "Stored wallet seed has an unexpected length" }
             keypair = Keypair.fromSecretKey(seed)
@@ -82,13 +82,13 @@ class SolanaTransferExecutor(
             )
             val message = TransactionMessage.newMessage(keypair.publicKey, blockhash.blockhash, instruction)
             val fee = rpc.getFeeForMessageLamports(message.serialize())
-                ?: return@withContext TransferExecutionResult.Rejected("Network fee is unavailable")
+                ?: return@withContext abortAndReject(requestId, "Network fee is unavailable")
             val balance = rpc.getBalanceLamports(expectedAddress)
             if (record.amountLamports > Long.MAX_VALUE - fee ||
                 balance < record.amountLamports + fee
             ) {
-                return@withContext TransferExecutionResult.Rejected(
-                    "Insufficient SOL for transfer amount and network fee"
+                return@withContext abortAndReject(
+                    requestId, "Insufficient SOL for transfer amount and network fee"
                 )
             }
 
@@ -96,23 +96,23 @@ class SolanaTransferExecutor(
             transaction.sign(keypair)
             serialized = transaction.serialize()
             if (serialized.size !in 66..MAX_TRANSACTION_BYTES || serialized[0].toInt() != 1) {
-                return@withContext TransferExecutionResult.Rejected("Unsupported signed transaction format")
+                return@withContext abortAndReject(requestId, "Unsupported signed transaction format")
             }
             val signature = Base58.encode(serialized.copyOfRange(1, 65))
             if (!SolanaSignatureValidator.isValid(signature)) {
-                return@withContext TransferExecutionResult.Rejected("Signer returned an invalid signature")
+                return@withContext abortAndReject(requestId, "Signer returned an invalid signature")
             }
             if (!ledger.persistSignedTransaction(requestId, signature, serialized)) {
-                return@withContext TransferExecutionResult.Rejected(
-                    "Signed transaction could not be durably recorded; no broadcast was attempted"
+                return@withContext abortAndReject(
+                    requestId, "Signed transaction could not be durably recorded; no broadcast was attempted"
                 )
             }
             TransferExecutionResult.Signed(
                 requestId, signature, serialized.size, fee, blockhash.lastValidBlockHeight
             )
         } catch (error: Exception) {
-            // Never reset a request to AUTHORIZED after signing may have started.
-            TransferExecutionResult.Rejected(error.message ?: "Could not sign transfer")
+            // This executor never broadcasts before durable persistence; abort only if bytes were not stored.
+            abortAndReject(requestId, error.message ?: "Could not sign transfer")
         } finally {
             seed?.fill(0)
             keypair?.secret?.fill(0)
@@ -180,7 +180,9 @@ class SolanaTransferExecutor(
                 }
                 if (status.isFinalized) {
                     val current = ledger.find(requestId)
-                    if (current?.state == LedgerState.SUBMITTED || current?.state == LedgerState.UNKNOWN) {
+                    if (current != null &&
+                        current.state in setOf(LedgerState.SUBMITTED, LedgerState.UNKNOWN)
+                    ) {
                         ledger.transition(requestId, current.state, LedgerState.CONFIRMED, signature)
                     }
                     return@withContext TransferExecutionResult.Confirmed(requestId, signature, status.slot)
@@ -195,6 +197,11 @@ class SolanaTransferExecutor(
                 )
             }
         }
+
+    private fun abortAndReject(requestId: String, reason: String): TransferExecutionResult.Rejected {
+        ledger.abortSigningBeforePersistence(requestId)
+        return TransferExecutionResult.Rejected(reason)
+    }
 
     companion object {
         private const val MAX_TRANSACTION_BYTES = 1232
