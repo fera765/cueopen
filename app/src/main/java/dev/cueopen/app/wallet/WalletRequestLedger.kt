@@ -350,6 +350,17 @@ class WalletRequestLedger(context: Context) : SQLiteOpenHelper(
             throw IllegalArgumentException("A valid base58 Solana transaction signature is required")
         }
         if (signature != null) require(signature.length <= MAX_SIGNATURE_LENGTH) { "Signature is too long" }
+        if (expected == LedgerState.SIGNED && next == LedgerState.SUBMITTED &&
+            signature != readRecord(writableDatabase, requestId)?.signature
+        ) {
+            throw IllegalArgumentException("Submitted signature must match the signature persisted before network submission")
+        }
+        if (expected in setOf(LedgerState.SIGNED, LedgerState.SUBMITTED, LedgerState.UNKNOWN) &&
+            next == LedgerState.CONFIRMED &&
+            signature != readRecord(writableDatabase, requestId)?.signature
+        ) {
+            throw IllegalArgumentException("Confirmation signature must match the original transaction signature")
+        }
 
         val values = ContentValues().apply {
             put("state", next.name)
