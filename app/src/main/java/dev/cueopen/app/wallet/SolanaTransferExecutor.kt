@@ -36,6 +36,9 @@ class SolanaTransferExecutor(
         if (record.state != LedgerState.AUTHORIZED) {
             return@withContext TransferExecutionResult.Rejected("Transfer is not authorized")
         }
+        if (rpc.network != record.network) {
+            return@withContext TransferExecutionResult.Rejected("RPC network does not match the transfer request network")
+        }
         if (record.amountLamports <= 0L ||
             !SolanaAddressValidator.isValidAddress(record.recipientAddress)
         ) {
@@ -147,6 +150,9 @@ class SolanaTransferExecutor(
             if (record.agentId != expectedAgentId) {
                 return@withContext TransferExecutionResult.Rejected("Agent identity does not own this transfer request")
             }
+            if (rpc.network != record.network) {
+                return@withContext TransferExecutionResult.Rejected("RPC network does not match the transfer request network")
+            }
             if (record.state != LedgerState.SIGNED || record.signature.isNullOrBlank()) {
                 return@withContext TransferExecutionResult.Rejected(
                     "Only a durably signed transaction may be broadcast"
@@ -194,6 +200,9 @@ class SolanaTransferExecutor(
                 ?: return@withContext TransferExecutionResult.Rejected("Transfer request does not exist")
             if (record.agentId != expectedAgentId) {
                 return@withContext TransferExecutionResult.Rejected("Agent identity does not own this transfer request")
+            }
+            if (rpc.network != record.network) {
+                return@withContext TransferExecutionResult.Rejected("RPC network does not match the transfer request network")
             }
             val signature = record.signature
                 ?: return@withContext TransferExecutionResult.Rejected("No persisted signature to reconcile")
