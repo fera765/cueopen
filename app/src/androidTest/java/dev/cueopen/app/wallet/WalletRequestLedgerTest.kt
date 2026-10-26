@@ -93,9 +93,14 @@ class WalletRequestLedgerTest {
             "request_12345678", transferPolicy(), now - 10_000L, now + 10_000L, now
         )
         assertTrue(approved is LedgerAuthorizationResult.Approved)
-        assertFalse(ledger.transition(
-            "request_12345678", LedgerState.AUTHORIZED, LedgerState.SIGNED, "chain-signature-1"
-        ))
+        try {
+            ledger.transition(
+                "request_12345678", LedgerState.AUTHORIZED, LedgerState.SIGNED, "chain-signature-1"
+            )
+            throw AssertionError("Direct signing bypass should be rejected")
+        } catch (expected: IllegalArgumentException) {
+            assertTrue(expected.message.orEmpty().contains("Illegal transfer state transition"))
+        }
         assertTrue(ledger.transition(
             "request_12345678", LedgerState.AUTHORIZED, LedgerState.SIGNING
         ))
