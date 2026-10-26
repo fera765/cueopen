@@ -8,9 +8,10 @@ import android.database.sqlite.SQLiteOpenHelper
 /**
  * Durable, non-secret idempotency ledger for transfer intents.
  *
- * This records intent lifecycle only; it does not sign, send, or confirm a transaction,
- * and it does not yet reserve daily spend atomically with WalletAgentPolicy. Callers must
- * reconcile SUBMITTED/UNKNOWN entries with chain state before attempting any retry.
+ * This records intent lifecycle and atomically reserves spend in claimAndAuthorize; it
+ * does not sign, send, or confirm transactions. Only a newly Created authorization result
+ * may be considered for the next stage; Existing is idempotency information, never a new
+ * grant to sign or submit. Callers must reconcile SUBMITTED/UNKNOWN entries with chain state.
  */
 class WalletRequestLedger(context: Context) : SQLiteOpenHelper(
     context.applicationContext,
@@ -18,8 +19,13 @@ class WalletRequestLedger(context: Context) : SQLiteOpenHelper(
     null,
     DATABASE_VERSION
 ) {
+    /**
+     * Low-level ledger insertion for internal state-machine setup only.
+     * Never use this result as authorization to sign or submit a transaction.
+     * Production signing flow must start with claimAndAuthorize and proceed only for Created.
+     */
     @Synchronized
-    fun claim(intent: WalletTransferIntent): LedgerClaim {
+    internal fun claim(intent: WalletTransferIntent): LedgerClaim {
         val db = writableDatabase
         db.beginTransaction()
         try {
@@ -129,10 +135,6 @@ class WalletRequestLedger(context: Context) : SQLiteOpenHelper(
                     WalletAction.TRANSFER, intent.amountLamports, intent.recipientAddress,
                     spentExcludingThisRequest
                 )
-                if (decision is PolicyDecision.Denied) {
-                    db.setTransactionSuccessful()
-                    return LedgerAuthorizationResult.Rejected(decision)
-                }
                 if (existing.state == LedgerState.FAILED) {
                     db.setTransactionSuccessful()
                     return LedgerAuthorizationResult.Rejected(
@@ -141,10 +143,6 @@ class WalletRequestLedger(context: Context) : SQLiteOpenHelper(
                 }
                 // Re-evaluation must never silently bypass a previously required human approval.
                 var effectiveRecord = existing
-                var effectiveDecision = if (
-                    existing.state == LedgerState.PREPARED ||
-                    existing.state == LedgerState.AWAITING_APPROVAL
-                ) PolicyDecision.RequiresUserApproval else decision
                 if (existing.state == LedgerState.AUTHORIZED &&
                     decision == PolicyDecision.RequiresUserApproval
                 ) {
@@ -161,7 +159,7 @@ class WalletRequestLedger(context: Context) : SQLiteOpenHelper(
                     effectiveRecord = existing.copy(state = LedgerState.AWAITING_APPROVAL)
                 }
                 db.setTransactionSuccessful()
-                return LedgerAuthorizationResult.Existing(effectiveRecord, effectiveDecision)
+                return LedgerAuthorizationResult.Existing(effectiveRecord)
             }
 
             val spent = sumReservedSpend(db, intent.agentId, windowStartEpochMs, windowEndEpochMs)
@@ -394,6 +392,7 @@ sealed interface LedgerClaim {
 
 sealed interface LedgerAuthorizationResult {
     data class Created(val record: LedgerRecord, val decision: PolicyDecision) : LedgerAuthorizationResult
-    data class Existing(val record: LedgerRecord, val decision: PolicyDecision) : LedgerAuthorizationResult
+    /** Existing idempotency record only; this is never a new signing authorization. */
+    data class Existing(val record: LedgerRecord) : LedgerAuthorizationResult
     data class Rejected(val decision: PolicyDecision.Denied) : LedgerAuthorizationResult
 }
