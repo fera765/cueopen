@@ -79,7 +79,7 @@ fun WalletTransferPanel(context: Context, repository: SolanaWalletRepository, ne
     var confirmBroadcast by remember { mutableStateOf(false) }
     var message by remember { mutableStateOf<String?>(null) }
     var recentRecords by remember { mutableStateOf(emptyList<dev.cueopen.app.wallet.LedgerRecord>()) }
-    fun refreshHistory() { recentRecords = ledger.recentRecords() }
+    fun refreshHistory() { recentRecords = ledger.recentRecords(limit = 100) }
     val activePolicy = requestId?.let { id ->
         ledger.find(id)?.let { policyStore.transferPolicy(it.agentId, it.network) }
     }
