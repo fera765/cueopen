@@ -83,6 +83,28 @@ class WalletAgentPolicyStoreTest {
     }
 
     @Test
+    fun agentReadPermissionsDefaultToDeniedPersistAndRemainIsolated() {
+        val agentA = "agent-alpha"
+        val agentB = "agent-beta"
+        assertFalse(store.canAgentReadAddress(agentA))
+        assertFalse(store.canAgentReadBalance(agentA))
+        assertFalse(store.canAgentReadAddress(agentB))
+        assertFalse(store.canAgentReadBalance(agentB))
+
+        store.setAgentReadAddress(agentA, true)
+        store.setAgentReadBalance(agentA, true)
+        val recreated = WalletAgentPolicyStore(context)
+        assertTrue(recreated.canAgentReadAddress(agentA))
+        assertTrue(recreated.canAgentReadBalance(agentA))
+        assertFalse(recreated.canAgentReadAddress(agentB))
+        assertFalse(recreated.canAgentReadBalance(agentB))
+
+        recreated.setAgentReadBalance(agentA, false)
+        assertTrue(recreated.canAgentReadAddress(agentA))
+        assertFalse(WalletAgentPolicyStore(context).canAgentReadBalance(agentA))
+    }
+
+    @Test
     fun disablingPermissionImmediatelyMakesPreviouslyReadPolicyStale() {
         store.setManualTransferEnabled(SolanaNetwork.MAINNET, true)
         val previouslyEnabled = store.manualTransferPolicy(SolanaNetwork.MAINNET)
