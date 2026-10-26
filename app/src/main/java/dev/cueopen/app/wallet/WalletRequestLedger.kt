@@ -146,8 +146,10 @@ class WalletRequestLedger(context: Context) : SQLiteOpenHelper(
                 // If policy no longer grants fully autonomous execution, revoke the pending
                 // authorization even when the durable state has already moved toward signing.
                 var effectiveRecord = existing
-                val authorizationStates = setOf(LedgerState.AUTHORIZED, LedgerState.SIGNING)
-                if (existing.state in authorizationStates && decision != PolicyDecision.Allowed) {
+                // Only AUTHORIZED is safe to downgrade here. SIGNING may already have
+                // produced bytes in another call; it must become UNKNOWN and be reconciled,
+                // never returned to an approval queue that could sign it again.
+                if (existing.state == LedgerState.AUTHORIZED && decision != PolicyDecision.Allowed) {
                     val changed = db.update(
                         TABLE,
                         ContentValues().apply {
@@ -155,10 +157,23 @@ class WalletRequestLedger(context: Context) : SQLiteOpenHelper(
                             put("updated_at_ms", System.currentTimeMillis())
                         },
                         "request_id = ? AND state = ?",
-                        arrayOf(intent.requestId, existing.state.name)
+                        arrayOf(intent.requestId, LedgerState.AUTHORIZED.name)
                     )
                     check(changed == 1) { "Could not revoke authorization after policy change" }
                     effectiveRecord = existing.copy(state = LedgerState.AWAITING_APPROVAL)
+                }
+                if (existing.state == LedgerState.SIGNING && decision != PolicyDecision.Allowed) {
+                    val changed = db.update(
+                        TABLE,
+                        ContentValues().apply {
+                            put("state", LedgerState.UNKNOWN.name)
+                            put("updated_at_ms", System.currentTimeMillis())
+                        },
+                        "request_id = ? AND state = ?",
+                        arrayOf(intent.requestId, LedgerState.SIGNING.name)
+                    )
+                    check(changed == 1) { "Could not quarantine signing request after policy change" }
+                    effectiveRecord = existing.copy(state = LedgerState.UNKNOWN)
                 }
                 db.setTransactionSuccessful()
                 return LedgerAuthorizationResult.Existing(effectiveRecord)
