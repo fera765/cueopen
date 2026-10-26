@@ -362,23 +362,38 @@ class WalletRequestLedger(context: Context) : SQLiteOpenHelper(
             throw IllegalArgumentException("Confirmation signature must match the original transaction signature")
         }
 
-        val values = ContentValues().apply {
-            put("state", next.name)
-            put("updated_at_ms", System.currentTimeMillis())
-            if (signature != null) put("signature", signature)
+        // State change and signature invariants are enforced in one SQLite transaction.
+        val db = writableDatabase
+        db.beginTransaction()
+        try {
+            val current = readRecord(db, requestId) ?: return false
+            if (current.state != expected) return false
+            if (signature != null && current.signature != null && current.signature != signature) return false
+            if (expected == LedgerState.SIGNED && next == LedgerState.SUBMITTED &&
+                signature != current.signature
+            ) {
+                throw IllegalArgumentException("Submitted signature must match the signature persisted before network submission")
+            }
+            if (expected in setOf(LedgerState.SIGNED, LedgerState.SUBMITTED, LedgerState.UNKNOWN) &&
+                next == LedgerState.CONFIRMED && signature != current.signature
+            ) {
+                throw IllegalArgumentException("Confirmation signature must match the original transaction signature")
+            }
+            val values = ContentValues().apply {
+                put("state", next.name)
+                put("updated_at_ms", System.currentTimeMillis())
+                if (signature != null && current.signature == null) put("signature", signature)
+            }
+            val changed = db.update(
+                TABLE, values, "request_id = ? AND state = ?",
+                arrayOf(requestId, expected.name)
+            )
+            if (changed != 1) return false
+            db.setTransactionSuccessful()
+            return true
+        } finally {
+            db.endTransaction()
         }
-        // Once a chain signature has been recorded, a later caller may not replace it.
-        val where = if (signature == null) {
-            "request_id = ? AND state = ?"
-        } else {
-            "request_id = ? AND state = ? AND (signature IS NULL OR signature = ?)"
-        }
-        val args = if (signature == null) {
-            arrayOf(requestId, expected.name)
-        } else {
-            arrayOf(requestId, expected.name, signature)
-        }
-        return writableDatabase.update(TABLE, values, where, args) == 1
     }
 
     @Synchronized
