@@ -22,6 +22,13 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.padding
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.ContentCopy
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.Text
 import com.mikepenz.markdown.compose.components.markdownComponents
 import com.mikepenz.markdown.compose.elements.highlightedCodeBlock
 import com.mikepenz.markdown.compose.elements.highlightedCodeFence
@@ -40,23 +47,66 @@ private val mermaidFence = Regex("```mermaid\\s*\\n([\\s\\S]*?)```")
 @Composable
 fun CueMarkdown(text: String, modifier: Modifier = Modifier) {
     val parts = remember(text) {
-        val out = mutableListOf<Pair<Boolean, String>>() // (isMermaid, content)
+        val out = mutableListOf<Triple<String, String, String>>() // tipo, linguagem, conteúdo
         var last = 0
-        mermaidFence.findAll(text).forEach { m ->
-            if (m.range.first > last) out += false to text.substring(last, m.range.first)
-            out += true to m.groupValues[1]
+        fencedBlock.findAll(text).forEach { m ->
+            if (m.range.first > last) out += Triple("text", "", text.substring(last, m.range.first))
+            val language = m.groupValues[1].trim()
+            val code = m.groupValues[2].removeSuffix("\\n")
+            out += Triple(if (language.equals("mermaid", true)) "mermaid" else "code", language, code)
             last = m.range.last + 1
         }
-        if (last < text.length) out += false to text.substring(last)
-        out.filter { it.second.isNotBlank() }
+        if (last < text.length) out += Triple("text", "", text.substring(last))
+        out.filter { it.third.isNotBlank() }
     }
     Column(modifier, verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        parts.forEach { (mermaid, content) ->
-            when {
-                mermaid -> MermaidCard(content)
-                hasTable(content) -> renderWithTables(content)  // tabelas GFM nativas (sem WebView)
-                else -> MdBlock(content)
+        parts.forEach { (kind, language, content) ->
+            when (kind) {
+                "mermaid" -> MermaidCard(content)
+                "code" -> CodeFenceCard(language, content)
+                else -> if (hasTable(content)) renderWithTables(content) else MdBlock(content)
             }
+        }
+    }
+}
+
+/** Bloco de código com linguagem à esquerda e cópia explícita no cabeçalho à direita. */
+@Composable
+private fun CodeFenceCard(language: String, code: String) {
+    val c = Cue.c
+    val clipboard = LocalClipboardManager.current
+    Column(
+        Modifier.fillMaxWidth()
+            .clip(RoundedCornerShape(12.dp))
+            .border(1.dp, c.line, RoundedCornerShape(12.dp))
+            .background(c.surface2)
+    ) {
+        Row(
+            Modifier.fillMaxWidth().background(c.surface2).padding(start = 12.dp, end = 4.dp),
+            verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+        ) {
+            Text(
+                text = language.ifBlank { "Código" },
+                modifier = Modifier.weight(1f),
+                color = c.ink2,
+                fontSize = 12.sp,
+                fontWeight = FontWeight.SemiBold
+            )
+            IconButton(onClick = { clipboard.setText(AnnotatedString(code)) }) {
+                Icon(Icons.Rounded.ContentCopy, contentDescription = "Copiar código", tint = c.ink2)
+            }
+        }
+        androidx.compose.material3.HorizontalDivider(color = c.line)
+        SelectionContainer {
+            Text(
+                text = code,
+                modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(12.dp),
+                color = c.ink,
+                fontFamily = FontFamily.Monospace,
+                fontSize = 13.sp,
+                lineHeight = 18.sp,
+                softWrap = false
+            )
         }
     }
 }
