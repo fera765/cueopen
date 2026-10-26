@@ -71,5 +71,43 @@ object BuiltInSkills {
             depois chame a ferramenta create_skill com nome, descrição curta e instruções detalhadas.
         """.trimIndent(),
     )
-    val all = listOf(slides, website, wideResearch, playbook, mobileApp, image, skillCreator)
+
+    val contextEfficiency = Skill(
+        id = "skill-context-efficiency", builtIn = true, icon = "gauge",
+        name = "Context Efficiency",
+        description = "Reduz tokens e latência: contexto mínimo suficiente, leitura sob demanda, compactação segura e respostas enxutas sem perder requisitos.",
+        instructions = """
+            Objetivo: minimizar tokens de entrada/saída e chamadas sem sacrificar correção, segurança ou requisitos do usuário.
+            Regras operacionais:
+            1. Antes de ler ou chamar ferramentas, formule internamente a pergunta específica que precisa responder; não explore o repositório inteiro por padrão.
+            2. Prefira busca por símbolos/termos e trechos de arquivo relevantes. Leia intervalos pequenos; amplie somente se faltar contexto.
+            3. Para saídas grandes, use filtros, limites e resumos estruturados. Não repita no prompt conteúdo já presente; referencie caminho, símbolo e linhas quando possível.
+            4. Mantenha separados: requisitos, decisões, estado atual, evidências e pendências. Preserve nomes, caminhos, valores, erros e decisões que afetam a execução.
+            5. Use microcompactação para saídas antigas de ferramentas, mas nunca remova a única evidência necessária para uma decisão nem quebre pares tool_call/tool.
+            6. Antes de compactar, preserve a solicitação original, critérios de aceitação, decisões, alterações feitas, testes/resultados e próximos passos. Se o resumo falhar, informe a perda de fidelidade; não declare que o histórico foi preservado integralmente.
+            7. Não alegue economia percentual sem medir tokens reais. Diferencie estimativas locais de usage retornado pelo provedor.
+            8. Mantenha respostas finais concisas e completas; não descarte detalhes que o usuário explicitamente pediu.
+            9. Não carregue skills completas, arquivos, notas ou knowledge sem relevância para a tarefa. Use divulgação progressiva.
+            10. Para alterações de código, leia primeiro o trecho mínimo necessário, implemente a menor mudança coerente e execute testes direcionados antes de ampliar.
+        """.trimIndent(),
+    )
+    val delegateReading = Skill(
+        id = "skill-delegate-reading", builtIn = true, icon = "file-search",
+        name = "Delegate Reading",
+        description = "Delegação de leitura e pesquisa: divide inspeção de arquivos/fontes em subtarefas delimitadas e retorna apenas achados verificáveis.",
+        instructions = """
+            Use delegação de leitura quando houver vários arquivos, fontes independentes ou uma investigação ampla que possa ocorrer em paralelo. Não delegue uma leitura curta nem crie agentes apenas para parecer eficiente.
+            Para cada subtarefa, especifique: pergunta exata, escopo/arquivos permitidos, termos/símbolos a procurar, limites de leitura, formato de saída e o que não investigar.
+            Peça ao leitor delegado que:
+            - busque primeiro por símbolos, cabeçalhos e ocorrências exatas;
+            - leia apenas os intervalos necessários e expanda se houver dependências;
+            - retorne um resumo curto com conclusões, evidências (caminho e linhas/URLs), incertezas e perguntas não respondidas;
+            - não copie arquivos completos, logs inteiros nem conteúdo que não sustente a conclusão;
+            - não altere arquivos nem faça commits quando a tarefa é somente leitura.
+            Integre resultados removendo duplicatas e resolvendo contradições com leitura direta da fonte. Trate resultados delegados como pistas, não como verdade automática; verifique evidências importantes antes de modificar código.
+            Se não houver ferramenta de delegação disponível, aplique o mesmo protocolo sequencialmente e não afirme que um subagente foi executado.
+            Nunca delegue credenciais, segredos ou dados pessoais desnecessários. Escopo mínimo e saída limitada são obrigatórios.
+        """.trimIndent(),
+    )
+    val all = listOf(slides, website, wideResearch, playbook, mobileApp, image, skillCreator, contextEfficiency, delegateReading)
 }
