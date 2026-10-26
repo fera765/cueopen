@@ -105,6 +105,16 @@ class WalletAgentPolicyStoreTest {
     }
 
     @Test
+    fun agentReadGrantsRejectBlankAgentIdentity() {
+        org.junit.Assert.assertThrows(IllegalArgumentException::class.java) {
+            store.setAgentReadAddress(" ", true)
+        }
+        org.junit.Assert.assertThrows(IllegalArgumentException::class.java) {
+            store.setAgentReadBalance("", true)
+        }
+    }
+
+    @Test
     fun disablingPermissionImmediatelyMakesPreviouslyReadPolicyStale() {
         store.setManualTransferEnabled(SolanaNetwork.MAINNET, true)
         val previouslyEnabled = store.manualTransferPolicy(SolanaNetwork.MAINNET)
