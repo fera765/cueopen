@@ -486,6 +486,18 @@ fun WalletTransferPanel(context: Context, repository: SolanaWalletRepository, ne
                         },
                         modifier = Modifier.fillMaxWidth()
                     ) { Text(if (busy) "Processando..." else "Revisar, aprovar e assinar") }
+                    OutlinedButton(
+                        enabled = !busy,
+                        onClick = {
+                            if (ledger.cancelBeforeSigning(pending.requestId)) {
+                                message = "Pedido do agente cancelado; nenhuma assinatura foi criada."
+                                refreshHistory()
+                            } else {
+                                message = "O pedido não pôde ser cancelado; confira o estado atual no histórico."
+                            }
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    ) { Text("Recusar / cancelar pedido") }
                 }
             }
         }
