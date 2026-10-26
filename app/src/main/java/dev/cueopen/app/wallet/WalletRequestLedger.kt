@@ -190,6 +190,32 @@ class WalletRequestLedger(context: Context) : SQLiteOpenHelper(
                 return LedgerAuthorizationResult.Existing(effectiveRecord)
             }
 
+            // Repeat-intent deduplication is inside the same SQLite write transaction
+            // as authorization/insertion, so concurrent tool calls cannot both pass a
+            // process-local pre-check and reserve duplicate transfers.
+            if (intent.memo == null) {
+                val lowerBound = (authorizationTimeEpochMs - RECENT_INTENT_DEDUPE_WINDOW_MS).coerceAtLeast(1L)
+                val duplicateId = db.query(
+                    TABLE,
+                    arrayOf("request_id"),
+                    "request_id != ? AND agent_id = ? AND recipient = ? AND amount_lamports = ? AND network = ? AND memo IS NULL AND state != ? AND created_at_ms >= ?",
+                    arrayOf(
+                        intent.requestId, intent.agentId, intent.recipientAddress,
+                        intent.amountLamports.toString(), intent.network.name,
+                        LedgerState.FAILED.name, lowerBound.toString()
+                    ),
+                    null, null, "created_at_ms DESC", "1"
+                ).use { cursor ->
+                    if (cursor.moveToFirst()) cursor.getString(0) else null
+                }
+                if (duplicateId != null) {
+                    val duplicate = readRecord(db, duplicateId)
+                        ?: error("Duplicate transfer record disappeared during authorization")
+                    db.setTransactionSuccessful()
+                    return LedgerAuthorizationResult.Existing(duplicate)
+                }
+            }
+
             val spent = sumReservedSpend(db, intent.agentId, windowStartEpochMs, windowEndEpochMs)
             val decision = policy.authorize(
                 WalletAction.TRANSFER, intent.amountLamports, intent.recipientAddress, spent
@@ -967,6 +993,7 @@ class WalletRequestLedger(context: Context) : SQLiteOpenHelper(
         private const val TABLE = "wallet_transfer_requests"
         private const val MAX_SIGNATURE_LENGTH = 128
         private const val MAX_SERIALIZED_TRANSACTION_BYTES = 1232
+        private const val RECENT_INTENT_DEDUPE_WINDOW_MS = 120_000L
         private const val MAX_HUMAN_APPROVAL_AGE_MS = 120_000L
     }
 }
