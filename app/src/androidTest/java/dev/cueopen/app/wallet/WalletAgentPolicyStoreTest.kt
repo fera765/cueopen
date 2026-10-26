@@ -52,4 +52,52 @@ class WalletAgentPolicyStoreTest {
             ) is PolicyDecision.RequiresUserApproval
         )
     }
+
+    @Test
+    fun manualPolicyRequiresApprovalAndEnforcesPerTransferAndDailyLimits() {
+        val recipient = "HAgk14JpMQLgt6rVgv7cBQFJWFto5Dqxi472uT3DKpqk"
+        store.setManualTransferEnabled(SolanaNetwork.DEVNET, true)
+        val policy = store.manualTransferPolicy(SolanaNetwork.DEVNET)
+
+        assertFalse(policy.autonomousExecution)
+        assertTrue(
+            policy.authorize(
+                WalletAction.TRANSFER, 50_000_000L, recipient, 0L
+            ) is PolicyDecision.RequiresUserApproval
+        )
+        assertTrue(
+            policy.authorize(
+                WalletAction.TRANSFER, 50_000_001L, recipient, 0L
+            ) is PolicyDecision.Denied
+        )
+        assertTrue(
+            policy.authorize(
+                WalletAction.TRANSFER, 1L, recipient, 100_000_000L
+            ) is PolicyDecision.Denied
+        )
+        assertTrue(
+            policy.authorize(
+                WalletAction.TRANSFER, 1L, recipient, Long.MAX_VALUE
+            ) is PolicyDecision.Denied
+        )
+    }
+
+    @Test
+    fun disablingPermissionImmediatelyMakesPreviouslyReadPolicyStale() {
+        store.setManualTransferEnabled(SolanaNetwork.MAINNET, true)
+        val previouslyEnabled = store.manualTransferPolicy(SolanaNetwork.MAINNET)
+        store.setManualTransferEnabled(SolanaNetwork.MAINNET, false)
+        val current = store.manualTransferPolicy(SolanaNetwork.MAINNET)
+
+        assertTrue(previouslyEnabled.enabled)
+        assertFalse(current.enabled)
+        assertTrue(
+            current.authorize(
+                WalletAction.TRANSFER,
+                1L,
+                "HAgk14JpMQLgt6rVgv7cBQFJWFto5Dqxi472uT3DKpqk",
+                0L
+            ) is PolicyDecision.Denied
+        )
+    }
 }
