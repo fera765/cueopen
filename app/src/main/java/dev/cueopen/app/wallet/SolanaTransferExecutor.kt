@@ -137,10 +137,16 @@ class SolanaTransferExecutor(
         }
     }
 
-    suspend fun broadcastPersistedTransfer(requestId: String): TransferExecutionResult =
-        withContext(Dispatchers.IO) {
+    suspend fun broadcastPersistedTransfer(
+        requestId: String,
+        expectedAgentId: String
+    ): TransferExecutionResult = withContext(Dispatchers.IO) {
+            require(expectedAgentId.isNotBlank())
             val record = ledger.find(requestId)
                 ?: return@withContext TransferExecutionResult.Rejected("Transfer request does not exist")
+            if (record.agentId != expectedAgentId) {
+                return@withContext TransferExecutionResult.Rejected("Agent identity does not own this transfer request")
+            }
             if (record.state != LedgerState.SIGNED || record.signature.isNullOrBlank()) {
                 return@withContext TransferExecutionResult.Rejected(
                     "Only a durably signed transaction may be broadcast"
@@ -179,10 +185,16 @@ class SolanaTransferExecutor(
             }
         }
 
-    suspend fun reconcileSignature(requestId: String): TransferExecutionResult =
-        withContext(Dispatchers.IO) {
+    suspend fun reconcileSignature(
+        requestId: String,
+        expectedAgentId: String
+    ): TransferExecutionResult = withContext(Dispatchers.IO) {
+            require(expectedAgentId.isNotBlank())
             val record = ledger.find(requestId)
                 ?: return@withContext TransferExecutionResult.Rejected("Transfer request does not exist")
+            if (record.agentId != expectedAgentId) {
+                return@withContext TransferExecutionResult.Rejected("Agent identity does not own this transfer request")
+            }
             val signature = record.signature
                 ?: return@withContext TransferExecutionResult.Rejected("No persisted signature to reconcile")
             try {
