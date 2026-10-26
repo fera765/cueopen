@@ -239,8 +239,8 @@ sealed interface TransferExecutionResult {
         val requestId: String,
         val signature: String,
         val serializedBytes: Int,
-        val feeLamports: Long,
-        val lastValidBlockHeight: Long
+        val feeLamports: Long?,
+        val lastValidBlockHeight: Long?
     ) : TransferExecutionResult
     data class Submitted(val requestId: String, val signature: String) : TransferExecutionResult
     data class Confirmed(val requestId: String, val signature: String, val slot: Long) : TransferExecutionResult
