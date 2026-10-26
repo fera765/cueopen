@@ -193,7 +193,7 @@ class WalletRequestLedger(context: Context) : SQLiteOpenHelper(
             // Repeat-intent deduplication is inside the same SQLite write transaction
             // as authorization/insertion, so concurrent tool calls cannot both pass a
             // process-local pre-check and reserve duplicate transfers.
-            if (intent.memo == null) {
+            if (intent.memo == null && intent.agentId != WalletAgentPolicyStore.manualAgentId(intent.network)) {
                 val lowerBound = (authorizationTimeEpochMs - RECENT_INTENT_DEDUPE_WINDOW_MS).coerceAtLeast(1L)
                 val duplicateId = db.query(
                     TABLE,
@@ -879,7 +879,7 @@ class WalletRequestLedger(context: Context) : SQLiteOpenHelper(
     ): LedgerRecord? {
         require(nowEpochMs > 0L)
         require(dedupeWindowMs in 1L..3_600_000L)
-        if (intent.memo != null) return null
+        if (intent.memo != null || intent.agentId == WalletAgentPolicyStore.manualAgentId(intent.network)) return null
         val lowerBound = (nowEpochMs - dedupeWindowMs).coerceAtLeast(1L)
         val db = readableDatabase
         val requestId = db.query(
