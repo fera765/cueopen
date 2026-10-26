@@ -227,7 +227,8 @@ class WalletRequestLedger(context: Context) : SQLiteOpenHelper(
                 createdAtEpochMs = intent.createdAtEpochMs,
                 memo = intent.memo,
                 state = initialState,
-                signature = null
+                signature = null,
+                network = intent.network
             )
             db.setTransactionSuccessful()
             return LedgerAuthorizationResult.Created(record, decision)
