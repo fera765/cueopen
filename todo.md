@@ -53,3 +53,11 @@
 ## Regra para atualizar este arquivo
 
 Ao concluir uma tarefa, marcar sua caixa como `[x]`, anotar o commit que contém a implementação e registrar evidências dos testes. Não marcar tarefas parcialmente concluídas. A compilação final só pode ser reativada depois de todas as quatro tarefas estarem concluídas e revisadas.
+
+## Registro de progresso (não altera o estado das tarefas)
+
+- 2026-10-26 — Workflow de build alterado para execução manual; pushes/PRs não compilam o APK durante a implementação. Commit: `e2b89128ea1bed06224a2aed1e6b072d935d9cea`.
+- 2026-10-26 — Política de transferência passou a receber o gasto acumulado do dia e negar limites excedidos; execução autônoma exige allowlist explícita. Commit: `8ccab2d0c623d2b400c738d504f4f8f2cfea5b8e`.
+- 2026-10-26 — Dependências BIP-39 e Solana adicionadas, com derivação local e restauração para `m/44'/501'/0'/0'`. Commits: `6eec0b10cd56f43b4702e7e3ff16ebe7dba644fe`, `da58edc65c27c3ddd739bf3939f5040e15481d61`, `c14f8e58029f735f9190b945c03084ef8b180018`.
+- 2026-10-26 — Testes unitários adicionados para limites de política e fluxo geração/restauração. Commits: `4f15fc3dd1430c98d6315279f26841788dac6a41`, `255f0c8d0845cca4fe043d6b424d0a6dcb184583`.
+- **Validação pendente:** por decisão do projeto, nenhum teste ou build foi executado ainda. Não marcar a Tarefa 1 como concluída até validar compatibilidade com vetor independente de carteira Solana e executar os testes depois que as quatro tarefas estiverem implementadas.
