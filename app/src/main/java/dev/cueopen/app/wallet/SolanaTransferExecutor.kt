@@ -196,6 +196,22 @@ class SolanaTransferExecutor(
                     "Persisted transaction bytes are unavailable; refusing to rebuild or re-sign"
                 )
             try {
+                // Treat the local ledger as fallible storage: verify the serialized transaction
+                // still contains the exact signature recorded for this request before any RPC.
+                // A mismatch is quarantined and never submitted or silently re-signed.
+                val serializedSignature = if (
+                    bytes.size in 66..MAX_TRANSACTION_BYTES && bytes[0].toInt() == 1
+                ) Base58.encode(bytes.copyOfRange(1, 65)) else null
+                if (serializedSignature == null ||
+                    !SolanaSignatureValidator.isValid(serializedSignature) ||
+                    serializedSignature != record.signature
+                ) {
+                    ledger.transition(requestId, LedgerState.SIGNED, LedgerState.UNKNOWN, record.signature)
+                    return@withContext TransferExecutionResult.Unknown(
+                        requestId, record.signature,
+                        "Persisted transaction bytes do not match the recorded signature; broadcast blocked"
+                    )
+                }
                 val latestPolicy = policyStore.transferPolicy(record.agentId, record.network)
                 if (!latestPolicy.enabled || latestPolicy != persistedPolicy) {
                     return@withContext TransferExecutionResult.Rejected(
