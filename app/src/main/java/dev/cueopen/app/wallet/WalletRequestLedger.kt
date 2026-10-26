@@ -608,6 +608,43 @@ class WalletRequestLedger(context: Context) : SQLiteOpenHelper(
         }
     }
 
+    /**
+     * Release a transfer amount reservation only after RPC reports a finalized on-chain error
+     * for the exact signature persisted in this ledger. Non-final errors remain UNKNOWN.
+     */
+    @Synchronized
+    internal fun markFinalizedChainFailure(
+        requestId: String,
+        signature: String,
+        confirmationStatus: String,
+        chainError: String
+    ): Boolean {
+        require(confirmationStatus == "finalized") { "Only finalized chain failures may release a reservation" }
+        require(chainError.isNotBlank()) { "A chain error is required" }
+        val db = writableDatabase
+        db.beginTransaction()
+        try {
+            val record = readRecord(db, requestId) ?: return false
+            if (record.state !in setOf(LedgerState.SIGNED, LedgerState.SUBMITTED, LedgerState.UNKNOWN) ||
+                record.signature != signature
+            ) return false
+            val changed = db.update(
+                TABLE,
+                ContentValues().apply {
+                    put("state", LedgerState.FAILED.name)
+                    put("updated_at_ms", System.currentTimeMillis())
+                },
+                "request_id = ? AND state = ? AND signature = ?",
+                arrayOf(requestId, record.state.name, signature)
+            )
+            if (changed != 1) return false
+            db.setTransactionSuccessful()
+            return true
+        } finally {
+            db.endTransaction()
+        }
+    }
+
     /** Returns a defensive copy only for a durable signed transaction awaiting reconciliation. */
     @Synchronized
     internal fun signedTransaction(requestId: String): ByteArray? {
