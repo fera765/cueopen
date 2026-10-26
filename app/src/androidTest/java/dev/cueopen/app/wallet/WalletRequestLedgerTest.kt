@@ -210,6 +210,42 @@ class WalletRequestLedgerTest {
     }
 
     @Test
+    fun ambiguousOnChainStatesCannotBeMarkedFailedToReleaseDailyReservation() {
+        val now = System.currentTimeMillis()
+        val intent = intent(requestId = "request_ambiguous01", amountLamports = 40L)
+        val authorized = ledger.claimAndAuthorize(
+            intent, transferPolicy(autonomous = true),
+            now - 10_000L, now + 10_000L, now
+        )
+        assertTrue(authorized is LedgerAuthorizationResult.Created)
+        assertTrue(ledger.transition(
+            intent.requestId, LedgerState.AUTHORIZED, LedgerState.SIGNING
+        ))
+        try {
+            ledger.transition(intent.requestId, LedgerState.SIGNING, LedgerState.FAILED)
+            throw AssertionError("Signing state must remain reserved when outcome is ambiguous")
+        } catch (expected: IllegalArgumentException) {
+            assertTrue(expected.message.orEmpty().contains("Illegal transfer state transition"))
+        }
+        assertTrue(ledger.transition(
+            intent.requestId, LedgerState.SIGNING, LedgerState.UNKNOWN
+        ))
+        try {
+            ledger.transition(intent.requestId, LedgerState.UNKNOWN, LedgerState.FAILED)
+            throw AssertionError("Unknown chain outcome must not release reserved spend")
+        } catch (expected: IllegalArgumentException) {
+            assertTrue(expected.message.orEmpty().contains("Illegal transfer state transition"))
+        }
+        assertEquals(LedgerState.UNKNOWN, ledger.find(intent.requestId)?.state)
+        val second = ledger.claimAndAuthorize(
+            intent(requestId = "request_budget_left", amountLamports = 70L),
+            transferPolicy(autonomous = true),
+            now - 10_000L, now + 10_000L, now + 1L
+        )
+        assertTrue(second is LedgerAuthorizationResult.Rejected)
+    }
+
+    @Test
     fun terminalStatesCannotBeReopened() {
         ledger.claim(intent())
         assertTrue(ledger.transition(
