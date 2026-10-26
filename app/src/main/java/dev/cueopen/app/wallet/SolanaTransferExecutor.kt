@@ -69,8 +69,8 @@ class SolanaTransferExecutor(
             require(seed.size == 32) { "Stored wallet seed has an unexpected length" }
             keypair = Keypair.fromSecretKey(seed)
             if (keypair.publicKey.toBase58() != expectedAddress) {
-                return@withContext TransferExecutionResult.Rejected(
-                    "Stored secret does not match wallet metadata"
+                return@withContext abortAndReject(
+                    requestId, "Stored secret does not match wallet metadata"
                 )
             }
 
