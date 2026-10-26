@@ -1,5 +1,5 @@
 name: build-apk
-# Manual-only release validation. Do not build until wallet release gates are reviewed.
+# Manual-only release validation. Do not run release packaging until wallet release gates are reviewed.
 on:
   workflow_dispatch:
 permissions:
@@ -23,6 +23,14 @@ jobs:
         run: gradle testDebugUnitTest --stacktrace
       - name: Run Android lint
         run: gradle lintDebug --stacktrace
+      - name: Run Android instrumentation tests on emulator
+        uses: ReactiveCircus/android-emulator-runner@v2
+        with:
+          api-level: 35
+          target: google_apis
+          arch: x86_64
+          profile: pixel_2
+          script: gradle connectedDebugAndroidTest --stacktrace
       - name: Assemble release APK
         run: gradle assembleRelease --stacktrace
       - name: Verify APK and checksum
