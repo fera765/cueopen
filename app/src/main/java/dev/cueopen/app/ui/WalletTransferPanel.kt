@@ -24,6 +24,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.unit.dp
+import dev.cueopen.app.CueApp
 import dev.cueopen.app.wallet.LedgerAuthorizationResult
 import dev.cueopen.app.wallet.LedgerState
 import dev.cueopen.app.wallet.SolanaTransferExecutor
@@ -435,7 +436,7 @@ fun WalletTransferPanel(context: Context, repository: SolanaWalletRepository, ne
                     modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
                     verticalArrangement = Arrangement.spacedBy(4.dp)
                 ) {
-                    Text("Agente (ID local): " + pending.agentId)
+                    Text("Agente: " + (CueApp.instance.store.agent(pending.agentId)?.name ?: pending.agentId))
                     Text("Destinatário: " + pending.recipientAddress)
                     Text("Valor: " + String.format(Locale.US, "%.9f SOL", pending.amountLamports / LAMPORTS_PER_SOL))
                     Text("Estado: aguardando aprovação humana")
