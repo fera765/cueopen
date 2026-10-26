@@ -1,9 +1,7 @@
 name: build-apk
+# Builds are intentionally manual while the wallet implementation is in progress.
+# Run the APK build only after all four wallet tasks in todo.md are complete and reviewed.
 on:
-  push:
-    branches: [main]
-  pull_request:
-    branches: [main]
   workflow_dispatch:
 permissions:
   contents: write
