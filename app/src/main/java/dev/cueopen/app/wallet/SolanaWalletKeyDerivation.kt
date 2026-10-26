@@ -2,7 +2,7 @@ package dev.cueopen.app.wallet
 
 import cash.z.ecc.android.bip39.Mnemonics.MnemonicCode
 import cash.z.ecc.android.bip39.Mnemonics.WordCount
-import cash.z.ecc.android.bip39.Mnemonics.toSeed
+import cash.z.ecc.android.bip39.toSeed
 import org.sol4k.Keypair
 import java.nio.ByteBuffer
 import javax.crypto.Mac
