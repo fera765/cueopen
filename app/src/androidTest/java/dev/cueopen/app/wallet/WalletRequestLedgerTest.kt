@@ -485,6 +485,10 @@ class WalletRequestLedgerTest {
         val reconcile = executor.reconcileSignature(request.requestId, "other-agent")
         assertTrue(broadcast is TransferExecutionResult.Rejected)
         assertTrue(reconcile is TransferExecutionResult.Rejected)
+        val unknownNetworkBroadcast = executor.broadcastPersistedTransfer(request.requestId, "test-agent")
+        val unknownNetworkReconcile = executor.reconcileSignature(request.requestId, "test-agent")
+        assertTrue(unknownNetworkBroadcast is TransferExecutionResult.Rejected)
+        assertTrue(unknownNetworkReconcile is TransferExecutionResult.Rejected)
         assertEquals(LedgerState.SIGNED, ledger.find(request.requestId)?.state)
     }
 
