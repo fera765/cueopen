@@ -346,10 +346,10 @@ class WalletRequestLedger(context: Context) : SQLiteOpenHelper(
         if (next == LedgerState.SIGNING && expected != LedgerState.AUTHORIZED) {
             throw IllegalArgumentException("Only an authorized transfer may enter SIGNING")
         }
+        if (signature != null) require(signature.length <= MAX_SIGNATURE_LENGTH) { "Signature is too long" }
         if (next == LedgerState.SIGNED && !isValidSolanaSignature(signature)) {
             throw IllegalArgumentException("A valid base58 Solana transaction signature is required")
         }
-        if (signature != null) require(signature.length <= MAX_SIGNATURE_LENGTH) { "Signature is too long" }
         if (expected == LedgerState.SIGNED && next == LedgerState.SUBMITTED &&
             signature != readRecord(writableDatabase, requestId)?.signature
         ) {
