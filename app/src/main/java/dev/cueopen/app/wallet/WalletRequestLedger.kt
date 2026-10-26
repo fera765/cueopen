@@ -371,7 +371,7 @@ class WalletRequestLedger(context: Context) : SQLiteOpenHelper(
             throw IllegalArgumentException("Only an authorized transfer may enter SIGNING")
         }
         if (signature != null) require(signature.length <= MAX_SIGNATURE_LENGTH) { "Signature is too long" }
-        if (next == LedgerState.SIGNED && !isValidSolanaSignature(signature)) {
+        if (next == LedgerState.SIGNED && (signature == null || !SolanaSignatureValidator.isValid(signature))) {
             throw IllegalArgumentException("A valid base58 Solana transaction signature is required")
         }
         // State change and signature invariants are enforced in one SQLite transaction.
@@ -462,22 +462,6 @@ class WalletRequestLedger(context: Context) : SQLiteOpenHelper(
         }
     }
 
-    private fun isValidSolanaSignature(signature: String?): Boolean {
-        if (signature.isNullOrBlank() || signature.length !in 80..MAX_SIGNATURE_LENGTH) return false
-        return runCatching {
-            val alphabet = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
-            var value = java.math.BigInteger.ZERO
-            for (character in signature) {
-                val digit = alphabet.indexOf(character)
-                require(digit >= 0)
-                value = value.multiply(java.math.BigInteger.valueOf(58L))
-                    .add(java.math.BigInteger.valueOf(digit.toLong()))
-            }
-            val leadingZeros = signature.takeWhile { it == '1' }.length
-            val decodedBytes = (value.bitLength() + 7) / 8
-            leadingZeros + decodedBytes == 64
-        }.getOrDefault(false)
-    }
 
     private fun allowedNextStates(state: LedgerState): Set<LedgerState> = when (state) {
         LedgerState.PREPARED -> setOf(LedgerState.AWAITING_APPROVAL, LedgerState.FAILED)
