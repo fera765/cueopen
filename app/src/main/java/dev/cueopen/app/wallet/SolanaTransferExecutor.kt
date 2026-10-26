@@ -142,12 +142,16 @@ class SolanaTransferExecutor(
 
     suspend fun broadcastPersistedTransfer(
         requestId: String,
-        expectedAgentId: String
+        expectedAgentId: String,
+        policy: WalletAgentPolicy,
+        windowStartEpochMs: Long,
+        windowEndEpochMs: Long,
+        humanConfirmed: Boolean
     ): TransferExecutionResult = withContext(Dispatchers.IO) {
             require(expectedAgentId.isNotBlank())
             val record = ledger.find(requestId)
                 ?: return@withContext TransferExecutionResult.Rejected("Transfer request does not exist")
-            if (record.agentId != expectedAgentId) {
+            if (record.agentId != expectedAgentId || policy.agentId != expectedAgentId) {
                 return@withContext TransferExecutionResult.Rejected("Agent identity does not own this transfer request")
             }
             if (rpc.network != record.network) {
@@ -157,6 +161,15 @@ class SolanaTransferExecutor(
                 return@withContext TransferExecutionResult.Rejected(
                     "Only a durably signed transaction may be broadcast"
                 )
+            }
+            if (!humanConfirmed) {
+                return@withContext TransferExecutionResult.Rejected("Explicit human confirmation is required before broadcast")
+            }
+            val policyDecision = ledger.authorizeBroadcast(
+                requestId, policy, windowStartEpochMs, windowEndEpochMs
+            )
+            if (policyDecision is PolicyDecision.Denied) {
+                return@withContext TransferExecutionResult.Rejected(policyDecision.reason)
             }
             val bytes = ledger.signedTransaction(requestId)
                 ?: return@withContext TransferExecutionResult.Rejected(
