@@ -28,6 +28,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -55,7 +56,14 @@ fun WalletScreen(nav: NavController) {
     var confirmation by remember { mutableStateOf("") }
     var restoreMode by remember { mutableStateOf(false) }
     var revealPhrase by remember { mutableStateOf(false) }
-    var busy by remember { mutableStateOf(false) }
+    var refreshCounter by remember { mutableStateOf(0) }
+    val activeSetup by rememberUpdatedState(setup)
+
+    DisposableEffect(Unit) {
+        onDispose {
+            activeSetup?.close()
+        }
+    }
 
     DisposableEffect(revealPhrase) {
         val activity = context as? Activity
@@ -72,7 +80,7 @@ fun WalletScreen(nav: NavController) {
     }
 
     LaunchedEffect(Unit) { refreshAddress() }
-    LaunchedEffect(address) {
+    LaunchedEffect(address, refreshCounter) {
         val current = address ?: return@LaunchedEffect
         loading = true
         error = null
@@ -121,7 +129,6 @@ fun WalletScreen(nav: NavController) {
                             error = e.message ?: "Não foi possível iniciar a carteira"
                         }
                     },
-                    enabled = !busy,
                     modifier = Modifier.fillMaxWidth()
                 ) { Text(if (restoreMode) "Restaurar carteira" else "Criar carteira") }
 
@@ -153,7 +160,7 @@ fun WalletScreen(nav: NavController) {
                         androidx.compose.material3.Icon(Icons.Rounded.ContentCopy, contentDescription = null)
                         Text("Copiar endereço")
                     }
-                    OutlinedButton(onClick = { balance = null; error = null; refreshAddress() }) {
+                    OutlinedButton(onClick = { balance = null; error = null; refreshAddress(); refreshCounter++ }) {
                         androidx.compose.material3.Icon(Icons.Rounded.Refresh, contentDescription = null)
                         Text("Atualizar")
                     }
