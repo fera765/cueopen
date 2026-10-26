@@ -162,7 +162,7 @@ class WalletRequestLedger(context: Context) : SQLiteOpenHelper(
                     check(changed == 1) { "Could not revoke authorization after policy change" }
                     effectiveRecord = existing.copy(state = LedgerState.AWAITING_APPROVAL)
                 }
-                if (existing.state == LedgerState.SIGNING && decision != PolicyDecision.Allowed) {
+                if (existing.state == LedgerState.SIGNING && decision is PolicyDecision.Denied) {
                     val changed = db.update(
                         TABLE,
                         ContentValues().apply {
