@@ -115,7 +115,7 @@ fun WalletScreen(nav: NavController) {
                 Text("Carteira local", style = androidx.compose.material3.MaterialTheme.typography.titleLarge)
             }
             Text(
-                "A chave privada fica no dispositivo. Esta tela consulta apenas o saldo; envio e assinatura ainda não estão disponíveis.",
+                "A chave privada fica no dispositivo. Transferências exigem aprovação humana, assinatura local e confirmação separada antes da transmissão à mainnet.",
                 color = c.ink2
             )
             if (walletExists && address == null && setup == null) {
@@ -198,8 +198,10 @@ fun WalletScreen(nav: NavController) {
                 Text("Saldo (mainnet)", style = androidx.compose.material3.MaterialTheme.typography.titleMedium)
                 if (loading) CircularProgressIndicator()
                 else Text(balance ?: "Saldo ainda não disponível")
-                Text("O saldo é apenas informativo. Não envie fundos para esta carteira enquanto a assinatura e os testes de transação não estiverem concluídos.", color = c.ink2)
+                Text("Saldo e taxas podem mudar rapidamente. Transações transmitidas à mainnet não podem ser desfeitas.", color = c.ink2)
             }
+
+            if (address != null) WalletTransferPanel(context.applicationContext, repository)
 
             if (setup != null && revealPhrase) {
                 Text("Frase de recuperação", style = androidx.compose.material3.MaterialTheme.typography.titleMedium)
