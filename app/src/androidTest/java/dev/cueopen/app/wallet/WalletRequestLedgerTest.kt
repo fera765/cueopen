@@ -325,6 +325,56 @@ class WalletRequestLedgerTest {
     }
 
     @Test
+    fun signedTransactionBytesAreDurableAndSignatureBound() {
+        val now = System.currentTimeMillis()
+        val request = intent(requestId = "request_durable_tx01", amountLamports = 20L)
+        val created = ledger.claimAndAuthorize(
+            request, transferPolicy(autonomous = true),
+            now - 10_000L, now + 10_000L, now
+        )
+        assertTrue(created is LedgerAuthorizationResult.Created)
+        assertTrue(ledger.beginSigningAutonomously(
+            request.requestId, transferPolicy(autonomous = true),
+            now - 10_000L, now + 10_000L, now
+        ) is LedgerSigningStartResult.Started)
+
+        val signature = "67rpwLCuS5DGA8KGZXKsVQ7dnPb9goRLoKfgGbLfQg9WoLUgNY77E2jT11fem3coV9nAkguBACzrU1iyZM4B8roQ"
+        val bytes = serializedSignedTransaction(signature)
+        assertTrue(ledger.persistSignedTransaction(request.requestId, signature, bytes))
+        assertEquals(LedgerState.SIGNED, ledger.find(request.requestId)?.state)
+        assertTrue(bytes.contentEquals(ledger.signedTransaction(request.requestId)))
+        assertFalse(ledger.persistSignedTransaction(request.requestId, signature, bytes))
+        try {
+            ledger.persistSignedTransaction(
+                request.requestId,
+                "5n4yLmzWc14iDPJ3vZAszSSXTu1wWQzX5ZtZnVBcrAUHDKBNHEZmUdR9oQpg7JukPQfHqWWN5j8bZwounf3xrsM7",
+                bytes
+            )
+            throw AssertionError("A signature mismatch must be rejected")
+        } catch (expected: IllegalArgumentException) {
+            assertTrue(expected.message.orEmpty().contains("does not match"))
+        }
+    }
+
+    @Test
+    fun knownSigningFailureCanReleaseReservationOnlyBeforeSignaturePersistence() {
+        val now = System.currentTimeMillis()
+        val request = intent(requestId = "request_abort_sign01", amountLamports = 20L)
+        val created = ledger.claimAndAuthorize(
+            request, transferPolicy(autonomous = true),
+            now - 10_000L, now + 10_000L, now
+        )
+        assertTrue(created is LedgerAuthorizationResult.Created)
+        assertTrue(ledger.beginSigningAutonomously(
+            request.requestId, transferPolicy(autonomous = true),
+            now - 10_000L, now + 10_000L, now
+        ) is LedgerSigningStartResult.Started)
+        assertTrue(ledger.abortSigningBeforePersistence(request.requestId))
+        assertEquals(LedgerState.FAILED, ledger.find(request.requestId)?.state)
+        assertFalse(ledger.abortSigningBeforePersistence(request.requestId))
+    }
+
+    @Test
     fun terminalStatesCannotBeReopened() {
         ledger.claim(intent())
         assertTrue(ledger.transition(
