@@ -533,6 +533,70 @@ class WalletRequestLedger(context: Context) : SQLiteOpenHelper(
         }
     }
 
+    /**
+     * Atomically persists the signed transaction bytes and their signature before any network
+     * call. The signature must match the first signature in the serialized Solana transaction.
+     * This method is the only permitted SIGNING -> SIGNED transition.
+     */
+    @Synchronized
+    fun persistSignedTransaction(
+        requestId: String,
+        signature: String,
+        serializedTransaction: ByteArray
+    ): Boolean {
+        require(requestId.isNotBlank())
+        require(SolanaSignatureValidator.isValid(signature)) { "Invalid Solana transaction signature" }
+        require(serializedTransaction.size in 66..MAX_SERIALIZED_TRANSACTION_BYTES) {
+            "Serialized transaction size is invalid"
+        }
+        require((serializedTransaction[0].toInt() and 0xff) == 1) {
+            "Only single-signer Solana transfers are supported by this signer"
+        }
+        val encodedFirstSignature = org.sol4k.Base58.encode(serializedTransaction.copyOfRange(1, 65))
+        require(encodedFirstSignature == signature) {
+            "Serialized transaction signature does not match the supplied signature"
+        }
+
+        val db = writableDatabase
+        db.beginTransaction()
+        try {
+            val record = readRecord(db, requestId) ?: return false
+            if (record.state != LedgerState.SIGNING || record.signature != null) return false
+            val values = ContentValues().apply {
+                put("state", LedgerState.SIGNED.name)
+                put("signature", signature)
+                put("signed_transaction", serializedTransaction)
+                put("updated_at_ms", System.currentTimeMillis())
+            }
+            val changed = db.update(
+                TABLE, values, "request_id = ? AND state = ? AND signature IS NULL",
+                arrayOf(requestId, LedgerState.SIGNING.name)
+            )
+            if (changed != 1) return false
+            db.setTransactionSuccessful()
+            return true
+        } finally {
+            db.endTransaction()
+        }
+    }
+
+    /** Returns a defensive copy only for a durable signed transaction awaiting reconciliation. */
+    @Synchronized
+    fun signedTransaction(requestId: String): ByteArray? {
+        require(requestId.isNotBlank())
+        return readableDatabase.query(
+            TABLE, arrayOf("state", "signed_transaction"), "request_id = ?",
+            arrayOf(requestId), null, null, null
+        ).use { cursor ->
+            if (!cursor.moveToFirst()) return@use null
+            val state = LedgerState.valueOf(cursor.getString(0))
+            if (state !in setOf(LedgerState.SIGNED, LedgerState.SUBMITTED, LedgerState.UNKNOWN) ||
+                cursor.isNull(1)
+            ) return@use null
+            cursor.getBlob(1)?.copyOf()
+        }
+    }
+
     /** Compare-and-set transition prevents stale callers from overwriting a newer state. */
     @Synchronized
     fun transition(
@@ -548,8 +612,8 @@ class WalletRequestLedger(context: Context) : SQLiteOpenHelper(
         ) {
             throw IllegalArgumentException("A durable chain signature is required for $next")
         }
-        if (next == LedgerState.SIGNED && expected != LedgerState.SIGNING) {
-            throw IllegalArgumentException("A transfer must enter SIGNING before its signature can be persisted")
+        if (next == LedgerState.SIGNED) {
+            throw IllegalArgumentException("Use persistSignedTransaction to atomically store signed bytes and signature")
         }
         if (next == LedgerState.SIGNING) {
             throw IllegalArgumentException("Use a policy-checked signing claim to enter SIGNING")
@@ -631,6 +695,7 @@ class WalletRequestLedger(context: Context) : SQLiteOpenHelper(
                 state TEXT NOT NULL,
                 signature TEXT,
                 human_approved_at_ms INTEGER NOT NULL DEFAULT 0,
+                signed_transaction BLOB,
                 updated_at_ms INTEGER NOT NULL
             )""".trimIndent()
         )
@@ -647,7 +712,10 @@ class WalletRequestLedger(context: Context) : SQLiteOpenHelper(
             // Existing requests were not accompanied by a durable human-approval marker.
             db.execSQL("ALTER TABLE $TABLE ADD COLUMN human_approved_at_ms INTEGER NOT NULL DEFAULT 0")
         }
-        if (newVersion > 3) {
+        if (oldVersion < 4) {
+            db.execSQL("ALTER TABLE $TABLE ADD COLUMN signed_transaction BLOB")
+        }
+        if (newVersion > 4) {
             error("Unsupported wallet ledger schema upgrade: $oldVersion -> $newVersion")
         }
     }
@@ -675,9 +743,10 @@ class WalletRequestLedger(context: Context) : SQLiteOpenHelper(
 
     companion object {
         private const val DATABASE_NAME = "cueopen_wallet_requests.db"
-        private const val DATABASE_VERSION = 3
+        private const val DATABASE_VERSION = 4
         private const val TABLE = "wallet_transfer_requests"
         private const val MAX_SIGNATURE_LENGTH = 128
+        private const val MAX_SERIALIZED_TRANSACTION_BYTES = 1232
         private const val MAX_HUMAN_APPROVAL_AGE_MS = 120_000L
     }
 }
