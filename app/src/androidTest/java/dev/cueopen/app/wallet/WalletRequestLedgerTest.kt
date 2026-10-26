@@ -140,6 +140,9 @@ class WalletRequestLedgerTest {
         assertFalse(ledger.transition(
             "request_12345678", LedgerState.SUBMITTED, LedgerState.UNKNOWN, "6".repeat(88)
         ))
+        assertFalse(ledger.transition(
+            "request_12345678", LedgerState.SUBMITTED, LedgerState.UNKNOWN, "5".repeat(88)
+        ))
         try {
             ledger.transition(
                 "request_12345678", LedgerState.SIGNED, LedgerState.SUBMITTED, "6".repeat(88)
