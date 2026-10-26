@@ -48,7 +48,12 @@ object SolanaWalletKeyDerivation {
             // Generated phrases are valid by construction; restored phrases are checksum-validated.
             bip39Seed = mnemonic.toSeed(validate = !generated)
             keySeed = deriveSolanaSeed(bip39Seed)
-            val address = Keypair.fromSecretKey(keySeed).publicKey.toBase58()
+            val addressKeypair = Keypair.fromSecretKey(keySeed)
+            val address = try {
+                addressKeypair.publicKey.toBase58()
+            } finally {
+                addressKeypair.secret.fill(0)
+            }
             return WalletKeyMaterial(phraseForDisplay, keySeed, address).also {
                 keySeed = null // ownership transferred to WalletKeyMaterial
             }
