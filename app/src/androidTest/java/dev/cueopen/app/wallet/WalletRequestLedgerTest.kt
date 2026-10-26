@@ -204,6 +204,29 @@ class WalletRequestLedgerTest {
     }
 
     @Test
+    fun approvalRechecksDailyLimitBeforePromotingToSigningReady() {
+        val now = System.currentTimeMillis()
+        val start = now - 10_000L
+        val end = now + 10_000L
+        val first = ledger.claimAndAuthorize(
+            intent(requestId = "request_budget_001", amountLamports = 60L),
+            transferPolicy(), start, end, now
+        )
+        assertTrue(first is LedgerAuthorizationResult.Created)
+
+        val secondIntent = intent(requestId = "request_budget_002", amountLamports = 50L)
+        ledger.claim(secondIntent)
+        assertTrue(ledger.transition(
+            secondIntent.requestId, LedgerState.PREPARED, LedgerState.AWAITING_APPROVAL
+        ))
+        val approval = ledger.approveForSigning(
+            secondIntent.requestId, transferPolicy(), start, end, now + 1L
+        )
+        assertTrue(approval is LedgerAuthorizationResult.Rejected)
+        assertEquals(LedgerState.AWAITING_APPROVAL, ledger.find(secondIntent.requestId)?.state)
+    }
+
+    @Test
     fun callerCannotBackdateAuthorizationIntoAnOldSpendingWindow() {
         val now = System.currentTimeMillis()
         try {
