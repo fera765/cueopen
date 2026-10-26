@@ -755,6 +755,21 @@ class WalletRequestLedger(context: Context) : SQLiteOpenHelper(
     }
 
     @Synchronized
+    internal fun recentRecords(limit: Int = 20): List<LedgerRecord> {
+        require(limit in 1..100)
+        val db = readableDatabase
+        val requestIds = db.query(
+            TABLE, arrayOf("request_id"), null, null, null, null,
+            "updated_at_ms DESC", limit.toString()
+        ).use { cursor ->
+            buildList {
+                while (cursor.moveToNext()) add(cursor.getString(0))
+            }
+        }
+        return requestIds.mapNotNull { readRecord(db, it) }
+    }
+
+    @Synchronized
     fun find(requestId: String): LedgerRecord? {
         require(requestId.isNotBlank())
         return readableDatabase.query(
