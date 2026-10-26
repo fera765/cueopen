@@ -469,9 +469,7 @@ fun WalletTransferPanel(context: Context, repository: SolanaWalletRepository, ne
                                 LedgerState.UNKNOWN -> entry.signature?.let {
                                     TransferExecutionResult.Unknown(entry.requestId, it, "Resultado aguardando reconciliação")
                                 }
-                                LedgerState.CONFIRMED -> entry.signature?.let {
-                                    TransferExecutionResult.Confirmed(entry.requestId, it, 0L)
-                                }
+                                LedgerState.CONFIRMED -> null
                                 else -> null
                             }
                             message = "Pedido do agente recuperado do ledger local."
