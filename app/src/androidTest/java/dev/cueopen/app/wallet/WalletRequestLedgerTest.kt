@@ -140,7 +140,7 @@ class WalletRequestLedgerTest {
         assertFalse(ledger.transition(
             "request_12345678", LedgerState.SUBMITTED, LedgerState.UNKNOWN, "6".repeat(88)
         ))
-        assertEquals("chain-signature-1", ledger.find("request_12345678")?.signature)
+        assertEquals("5".repeat(88), ledger.find("request_12345678")?.signature)
     }
 
     @Test
