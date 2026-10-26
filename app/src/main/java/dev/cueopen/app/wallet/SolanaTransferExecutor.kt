@@ -63,6 +63,9 @@ class SolanaTransferExecutor(
         var keypair: Keypair? = null
         var serialized: ByteArray? = null
         try {
+            if (!walletRepository.backupConfirmed()) {
+                return@withContext abortAndReject(requestId, "Recovery phrase backup has not been confirmed")
+            }
             val expectedAddress = walletRepository.publicAddress()
                 ?: return@withContext abortAndReject(requestId, "Wallet metadata is unavailable")
             val secretSeed = vault.read()
