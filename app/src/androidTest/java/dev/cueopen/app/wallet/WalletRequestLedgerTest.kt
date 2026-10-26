@@ -411,6 +411,32 @@ class WalletRequestLedgerTest {
     }
 
     @Test
+    fun cancellationReleasesOnlyRequestsThatHaveNotStartedSigning() {
+        val now = System.currentTimeMillis()
+        val cancelRequest = intent(requestId = "request_cancel_001", amountLamports = 20L)
+        val created = ledger.claimAndAuthorize(
+            cancelRequest, transferPolicy(),
+            now - 10_000L, now + 10_000L, now
+        )
+        assertTrue(created is LedgerAuthorizationResult.Created)
+        assertTrue(ledger.cancelBeforeSigning(cancelRequest.requestId))
+        assertEquals(LedgerState.FAILED, ledger.find(cancelRequest.requestId)?.state)
+
+        val signingRequest = intent(requestId = "request_cancel_002", amountLamports = 20L)
+        val autoCreated = ledger.claimAndAuthorize(
+            signingRequest, transferPolicy(autonomous = true),
+            now - 10_000L, now + 10_000L, now
+        )
+        assertTrue(autoCreated is LedgerAuthorizationResult.Created)
+        assertTrue(ledger.beginSigningAutonomously(
+            signingRequest.requestId, transferPolicy(autonomous = true),
+            now - 10_000L, now + 10_000L, now
+        ) is LedgerSigningStartResult.Started)
+        assertFalse(ledger.cancelBeforeSigning(signingRequest.requestId))
+        assertEquals(LedgerState.SIGNING, ledger.find(signingRequest.requestId)?.state)
+    }
+
+    @Test
     fun terminalStatesCannotBeReopened() {
         ledger.claim(intent())
         assertTrue(ledger.transition(
