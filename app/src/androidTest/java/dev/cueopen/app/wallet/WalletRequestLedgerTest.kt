@@ -343,6 +343,7 @@ class WalletRequestLedgerTest {
         assertTrue(ledger.persistSignedTransaction(request.requestId, signature, bytes))
         assertEquals(LedgerState.SIGNED, ledger.find(request.requestId)?.state)
         assertTrue(bytes.contentEquals(ledger.signedTransaction(request.requestId)))
+        assertFalse(ledger.abortSigningBeforePersistence(request.requestId))
         assertFalse(ledger.persistSignedTransaction(request.requestId, signature, bytes))
         try {
             ledger.persistSignedTransaction(
