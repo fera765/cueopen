@@ -15,7 +15,7 @@ A wallet cannot guarantee recovery merely by storing its key in Android Keystore
 ## Agent boundary
 
 - `AgentRunner.tools(...)` now registers only two read-only wallet tools (`wallet_get_address`, `wallet_get_balance`) when the selected agent has the matching persisted capability grant. The tool dispatcher rechecks the grant at execution time.
-- The wallet screen exposes per-agent switches for public-address reads, balance reads and SOL transfer requests. All grants default to disabled and are stored locally under hash-derived preference keys.
+- The wallet screen exposes per-agent switches for public-address reads, balance reads and SOL transfer requests. All grants default to disabled and are stored locally under hash-derived preference keys. Each agent can have lower per-request/daily caps and an optional exact-match recipient allowlist; updates are validated and saved atomically, with hard caps of 0.05 SOL/request and 0.10 SOL/day.
 - Authorized agent sessions can call `wallet_request_transfer` with only a recipient and decimal SOL amount. The agent identity is taken from the local session, never from model arguments; network is read from the persisted wallet setting and fails closed when missing/invalid.
 - The request tool creates a typed intent in the SQLite ledger and never signs or broadcasts. Identical recent agent intents are deduplicated inside the SQLite authorization transaction to reduce duplicate requests during retries/concurrent tool calls. A wallet approval queue shows pending agent requests, lets the user reject them, or approve and sign locally. The final broadcast remains a separate explicit confirmation. Agent transfer policies are persisted, non-autonomous, limited to 0.05 SOL per request and 0.10 SOL per local day.
 - The signer and broadcaster re-read the persisted policy for the request's actual agent identity and network; revoked permissions or stale/forged policy objects are rejected. Temporary multi-agent workers do not receive wallet tool schemas. No wallet tool returns a seed, private key, recovery phrase, or signing material.
@@ -70,7 +70,7 @@ Use **Devnet only** for the first pass and a disposable test wallet. Do not past
 6. Create another small Devnet request. Approve/sign it in the wallet, then cancel the final broadcast dialog and confirm it is still not submitted.
 7. Repeat and explicitly confirm broadcast. Verify a signature is persisted, status can be reconciled, and the explorer link uses Devnet.
 8. Revoke the agent transfer grant before approval and verify the pending request cannot be approved/signed. Revoke after signing and verify broadcast is blocked.
-9. Attempt invalid addresses, zero/negative amounts, more than nine decimals, amounts above 0.05 SOL, and cumulative agent spend above 0.10 SOL/day; each should be rejected before signing.
+9. Attempt invalid addresses, zero/negative amounts, more than nine decimals, amounts above 0.05 SOL, cumulative agent spend above 0.10 SOL/day, and a recipient outside a configured allowlist; each should be rejected before signing.
 10. Reopen the app with a signed-but-not-broadcast or UNKNOWN request and verify the agent request history lets you recover it without blindly rebuilding/resending.
 11. Confirm neither recovery phrase nor private key appears in chat/tool output, agent history, logs, or the request ledger.
 
