@@ -40,6 +40,8 @@ import dev.cueopen.app.wallet.SolanaRpcClient
 import dev.cueopen.app.wallet.SolanaNetwork
 import dev.cueopen.app.wallet.SolanaWalletRepository
 import dev.cueopen.app.wallet.WalletSetupSession
+import dev.cueopen.app.wallet.WalletAgentPolicyStore
+import dev.cueopen.app.CueApp
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.util.Locale
@@ -48,6 +50,9 @@ import java.util.Locale
 fun WalletScreen(nav: NavController) {
     val context = LocalContext.current
     val repository = remember(context) { SolanaWalletRepository(context.applicationContext) }
+    val walletPolicyStore = remember(context) { WalletAgentPolicyStore(context.applicationContext) }
+    val walletAgents = CueApp.instance.store.state.value.agents
+    var permissionRefresh by remember { mutableStateOf(0) }
     val networkPrefs = remember(context) {
         context.applicationContext.getSharedPreferences("solana_wallet_settings", android.content.Context.MODE_PRIVATE)
     }
@@ -212,6 +217,60 @@ fun WalletScreen(nav: NavController) {
                 if (loading) CircularProgressIndicator()
                 else Text(balance ?: "Saldo ainda não disponível")
                 Text("Saldo e taxas podem mudar rapidamente. Transações transmitidas à " + selectedNetwork.displayName + " não podem ser desfeitas.", color = c.ink2)
+
+                Text("Permissões de leitura dos agentes", style = androidx.compose.material3.MaterialTheme.typography.titleMedium)
+                Text("Cada permissão é salva neste dispositivo e começa desativada. Isso permite apenas consultar o endereço público ou o saldo da rede selecionada; não autoriza transferências nem expõe chaves privadas.", color = c.ink2)
+                if (walletAgents.isEmpty()) {
+                    Text("Nenhum agente foi configurado.")
+                } else {
+                    walletAgents.forEach { agent ->
+                        key(agent.id, permissionRefresh) {
+                            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                Text(agent.name, style = androidx.compose.material3.MaterialTheme.typography.titleSmall)
+                                var addressPermission by remember(agent.id, permissionRefresh) {
+                                    mutableStateOf(walletPolicyStore.canAgentReadAddress(agent.id))
+                                }
+                                Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+                                    Column(Modifier.weight(1f)) {
+                                        Text("Consultar endereço público")
+                                    }
+                                    androidx.compose.material3.Switch(
+                                        checked = addressPermission,
+                                        onCheckedChange = { enabled ->
+                                            try {
+                                                walletPolicyStore.setAgentReadAddress(agent.id, enabled)
+                                                addressPermission = enabled
+                                                permissionRefresh++
+                                            } catch (e: Exception) {
+                                                error = e.message ?: "Não foi possível salvar a permissão."
+                                            }
+                                        }
+                                    )
+                                }
+                                var balancePermission by remember(agent.id, permissionRefresh) {
+                                    mutableStateOf(walletPolicyStore.canAgentReadBalance(agent.id))
+                                }
+                                Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+                                    Column(Modifier.weight(1f)) {
+                                        Text("Consultar saldo da rede selecionada")
+                                    }
+                                    androidx.compose.material3.Switch(
+                                        checked = balancePermission,
+                                        onCheckedChange = { enabled ->
+                                            try {
+                                                walletPolicyStore.setAgentReadBalance(agent.id, enabled)
+                                                balancePermission = enabled
+                                                permissionRefresh++
+                                            } catch (e: Exception) {
+                                                error = e.message ?: "Não foi possível salvar a permissão."
+                                            }
+                                        }
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
             }
 
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
