@@ -317,6 +317,46 @@ class WalletRequestLedger(context: Context) : SQLiteOpenHelper(
                     PolicyDecision.Denied("Agent identity does not match wallet policy")
                 )
             }
+            if (humanApprovalRecorded &&
+                (record.humanApprovedAtEpochMs <= 0L ||
+                    record.humanApprovedAtEpochMs !in windowStartEpochMs until windowEndEpochMs ||
+                    record.humanApprovedAtEpochMs > signingTimeEpochMs ||
+                    signingTimeEpochMs - record.humanApprovedAtEpochMs > MAX_HUMAN_APPROVAL_AGE_MS)
+            ) {
+                val changed = db.update(
+                    TABLE,
+                    ContentValues().apply {
+                        put("state", LedgerState.AWAITING_APPROVAL.name)
+                        put("human_approved_at_ms", 0L)
+                        put("updated_at_ms", System.currentTimeMillis())
+                    },
+                    "request_id = ? AND state = ?",
+                    arrayOf(requestId, LedgerState.AUTHORIZED.name)
+                )
+                check(changed == 1) { "Could not expire stale human approval" }
+                db.setTransactionSuccessful()
+                return LedgerSigningStartResult.AwaitingHumanApproval(
+                    record.copy(state = LedgerState.AWAITING_APPROVAL, humanApprovedAtEpochMs = 0L)
+                )
+            }
+            if (!humanApprovalRecorded && record.humanApprovedAtEpochMs > 0L) {
+                val changed = db.update(
+                    TABLE,
+                    ContentValues().apply {
+                        put("state", LedgerState.AWAITING_APPROVAL.name)
+                        put("human_approved_at_ms", 0L)
+                        put("updated_at_ms", System.currentTimeMillis())
+                    },
+                    "request_id = ? AND state = ?",
+                    arrayOf(requestId, LedgerState.AUTHORIZED.name)
+                )
+                check(changed == 1) { "Could not require the recorded human-approval path" }
+                db.setTransactionSuccessful()
+                return LedgerSigningStartResult.AwaitingHumanApproval(
+                    record.copy(state = LedgerState.AWAITING_APPROVAL, humanApprovedAtEpochMs = 0L)
+                )
+            }
+
             val intent = WalletTransferIntent(
                 requestId = record.requestId,
                 agentId = record.agentId,
@@ -442,6 +482,7 @@ class WalletRequestLedger(context: Context) : SQLiteOpenHelper(
                     TABLE,
                     ContentValues().apply {
                         put("state", LedgerState.FAILED.name)
+                        put("human_approved_at_ms", 0L)
                         put("updated_at_ms", System.currentTimeMillis())
                     },
                     "request_id = ? AND state = ?",
@@ -456,6 +497,7 @@ class WalletRequestLedger(context: Context) : SQLiteOpenHelper(
                     TABLE,
                     ContentValues().apply {
                         put("state", LedgerState.AWAITING_APPROVAL.name)
+                        put("human_approved_at_ms", 0L)
                         put("updated_at_ms", System.currentTimeMillis())
                     },
                     "request_id = ? AND state = ?",
@@ -631,6 +673,7 @@ class WalletRequestLedger(context: Context) : SQLiteOpenHelper(
         private const val DATABASE_VERSION = 3
         private const val TABLE = "wallet_transfer_requests"
         private const val MAX_SIGNATURE_LENGTH = 128
+        private const val MAX_HUMAN_APPROVAL_AGE_MS = 120_000L
     }
 }
 
