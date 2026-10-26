@@ -55,15 +55,22 @@ class WalletAgentPolicyStore(context: Context) {
             )
         }
 
-    fun agentMaxTransferLamports(agentId: String): Long =
-        prefs.getLong(agentCapabilityKey(agentId, "max_transfer_lamports"), MAX_AGENT_TRANSFER_LAMPORTS)
+    fun agentMaxTransferLamports(agentId: String): Long {
+        val value = prefs.getLong(agentCapabilityKey(agentId, "max_transfer_lamports"), MAX_AGENT_TRANSFER_LAMPORTS)
+        return value.takeIf { it in 1L..MAX_AGENT_TRANSFER_LAMPORTS } ?: 0L
+    }
 
-    fun agentDailyLimitLamports(agentId: String): Long =
-        prefs.getLong(agentCapabilityKey(agentId, "daily_limit_lamports"), DAILY_AGENT_TRANSFER_LIMIT_LAMPORTS)
+    fun agentDailyLimitLamports(agentId: String): Long {
+        val value = prefs.getLong(agentCapabilityKey(agentId, "daily_limit_lamports"), DAILY_AGENT_TRANSFER_LIMIT_LAMPORTS)
+        return value.takeIf { it in 1L..DAILY_AGENT_TRANSFER_LIMIT_LAMPORTS } ?: 0L
+    }
 
-    fun agentAllowedRecipients(agentId: String): Set<String> =
-        prefs.getStringSet(agentCapabilityKey(agentId, "allowed_recipients"), emptySet())
+    fun agentAllowedRecipients(agentId: String): Set<String> {
+        val recipients = prefs.getStringSet(agentCapabilityKey(agentId, "allowed_recipients"), emptySet())
             ?.toSet().orEmpty()
+        // Corrupt/edited allowlists fail closed instead of silently becoming unrestricted.
+        return if (recipients.all { SolanaAddressValidator.isValidAddress(it) }) recipients else setOf("")
+    }
 
     /** User-configurable lower limits; hard caps prevent accidental unlimited agent grants. */
     fun setAgentTransferLimits(agentId: String, maxPerTransferLamports: Long, dailyLimitLamports: Long) {
