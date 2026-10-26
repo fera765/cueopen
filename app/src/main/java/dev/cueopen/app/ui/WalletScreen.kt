@@ -221,7 +221,7 @@ fun WalletScreen(nav: NavController) {
                 Text("Saldo e taxas podem mudar rapidamente. Transações transmitidas à " + selectedNetwork.displayName + " não podem ser desfeitas.", color = c.ink2)
 
                 Text("Permissões de leitura dos agentes", style = androidx.compose.material3.MaterialTheme.typography.titleMedium)
-                Text("Cada permissão é salva neste dispositivo e começa desativada. Isso permite apenas consultar o endereço público ou o saldo da rede selecionada; não autoriza transferências nem expõe chaves privadas.", color = c.ink2)
+                Text("Cada permissão é salva neste dispositivo e começa desativada. Leitura permite consultar endereço/saldo; a permissão de transferência só permite criar pedidos tipados, sempre sujeitos à revisão, aprovação humana, assinatura local e confirmação separada antes do envio. Agentes nunca recebem chaves privadas.", color = c.ink2)
                 if (walletAgents.isEmpty()) {
                     Text("Nenhum agente foi configurado.")
                 } else {
