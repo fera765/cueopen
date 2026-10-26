@@ -56,6 +56,9 @@ Ao concluir uma tarefa, marcar sua caixa como `[x]`, anotar o commit que contém
 
 ## Registro de progresso (não altera o estado das tarefas)
 
+- 2026-10-26 — Adicionado `SolanaWalletRepository` e sessão temporária de configuração: criação/restauração fica em memória até o usuário confirmar a frase; a persistência local grava a seed no cofre e o endereço público/metadado de backup em preferências; falha ao salvar metadados tenta reverter o cofre. Commit: `3bec15e8b346cc439ef7ac98ae286d61824786cd`. **Ainda sem integração à interface e sem testes/build**. Revisão pendente: evitar cópias imutáveis da frase durante normalização da confirmação e cobrir recuperação/rollback com testes.
+
+
 - 2026-10-26 — Cofre local reforçado: gravação criptografada passa por arquivo temporário sincronizado antes da publicação; falhas limpam temporários; leitura valida tamanho e zera buffers temporários; exclusão falha explicitamente se não conseguir remover o arquivo. Commit: `47f740f088b03f8dffdecad08dcd7c62a8ceb8fc`. **Não compilado nem testado** (conforme regra de adiar build/testes até as quatro tarefas estarem implementadas).
 
 - 2026-10-26 — Workflow de build alterado para execução manual; pushes/PRs não compilam o APK durante a implementação. Commit: `e2b89128ea1bed06224a2aed1e6b072d935d9cea`.
