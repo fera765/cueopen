@@ -19,7 +19,12 @@ data class WalletAgentPolicy(
         require(dailyLimitLamports >= 0L)
     }
 
-    fun authorize(action: WalletAction, amountLamports: Long = 0L, recipient: String? = null): PolicyDecision {
+    fun authorize(
+        action: WalletAction,
+        amountLamports: Long = 0L,
+        recipient: String? = null,
+        spentTodayLamports: Long = 0L
+    ): PolicyDecision {
         if (!enabled) return PolicyDecision.Denied("Wallet access is disabled for this agent")
         return when (action) {
             WalletAction.READ_BALANCE ->
@@ -34,12 +39,18 @@ data class WalletAgentPolicy(
                 if (maxTransferLamports <= 0L || amountLamports > maxTransferLamports) {
                     return PolicyDecision.Denied("Transfer exceeds the per-transaction limit")
                 }
-                if (dailyLimitLamports <= 0L || amountLamports > dailyLimitLamports) {
-                    return PolicyDecision.Denied("Transfer exceeds the configured daily limit")
+                if (spentTodayLamports < 0L) return PolicyDecision.Denied("Invalid daily spending state")
+                // Subtraction avoids overflow from adding amount + spent.
+                if (dailyLimitLamports <= 0L || spentTodayLamports > dailyLimitLamports ||
+                    amountLamports > dailyLimitLamports - spentTodayLamports) {
+                    return PolicyDecision.Denied("Transfer exceeds the remaining daily limit")
                 }
                 if (recipient.isNullOrBlank()) return PolicyDecision.Denied("Recipient is required")
                 if (allowedRecipients.isNotEmpty() && recipient !in allowedRecipients) {
                     return PolicyDecision.Denied("Recipient is not allowlisted")
+                }
+                if (autonomousExecution && allowedRecipients.isEmpty()) {
+                    return PolicyDecision.Denied("Autonomous transfers require an explicit recipient allowlist")
                 }
                 if (!autonomousExecution) PolicyDecision.RequiresUserApproval else PolicyDecision.Allowed
             }
