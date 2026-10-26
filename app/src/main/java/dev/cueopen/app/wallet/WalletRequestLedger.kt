@@ -343,6 +343,12 @@ class WalletRequestLedger(context: Context) : SQLiteOpenHelper(
         if (next == LedgerState.SIGNED && expected != LedgerState.SIGNING) {
             throw IllegalArgumentException("A transfer must enter SIGNING before its signature can be persisted")
         }
+        if (next == LedgerState.SIGNING && expected != LedgerState.AUTHORIZED) {
+            throw IllegalArgumentException("Only an authorized transfer may enter SIGNING")
+        }
+        if (next == LedgerState.SIGNED && !isValidSolanaSignature(signature)) {
+            throw IllegalArgumentException("A valid base58 Solana transaction signature is required")
+        }
         if (signature != null) require(signature.length <= MAX_SIGNATURE_LENGTH) { "Signature is too long" }
 
         val values = ContentValues().apply {
@@ -416,6 +422,23 @@ class WalletRequestLedger(context: Context) : SQLiteOpenHelper(
         if (newVersion > 2) {
             error("Unsupported wallet ledger schema upgrade: $oldVersion -> $newVersion")
         }
+    }
+
+    private fun isValidSolanaSignature(signature: String?): Boolean {
+        if (signature.isNullOrBlank() || signature.length !in 80..MAX_SIGNATURE_LENGTH) return false
+        return runCatching {
+            val alphabet = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+            var value = java.math.BigInteger.ZERO
+            for (character in signature) {
+                val digit = alphabet.indexOf(character)
+                require(digit >= 0)
+                value = value.multiply(java.math.BigInteger.valueOf(58L))
+                    .add(java.math.BigInteger.valueOf(digit.toLong()))
+            }
+            val leadingZeros = signature.takeWhile { it == '1' }.length
+            val decodedBytes = (value.bitLength() + 7) / 8
+            leadingZeros + decodedBytes == 64
+        }.getOrDefault(false)
     }
 
     private fun allowedNextStates(state: LedgerState): Set<LedgerState> = when (state) {
