@@ -609,6 +609,39 @@ class WalletRequestLedger(context: Context) : SQLiteOpenHelper(
     }
 
     /**
+     * Cancels only requests that have not entered signing and have no signature or transaction
+     * bytes. The state predicate is checked atomically so a concurrent signer wins or cancel wins.
+     */
+    @Synchronized
+    internal fun cancelBeforeSigning(requestId: String): Boolean {
+        require(requestId.isNotBlank())
+        val db = writableDatabase
+        db.beginTransaction()
+        try {
+            val changed = db.update(
+                TABLE,
+                ContentValues().apply {
+                    put("state", LedgerState.FAILED.name)
+                    put("human_approved_at_ms", 0L)
+                    put("updated_at_ms", System.currentTimeMillis())
+                },
+                "request_id = ? AND state IN (?, ?, ?) AND signature IS NULL AND signed_transaction IS NULL",
+                arrayOf(
+                    requestId,
+                    LedgerState.PREPARED.name,
+                    LedgerState.AWAITING_APPROVAL.name,
+                    LedgerState.AUTHORIZED.name
+                )
+            )
+            if (changed != 1) return false
+            db.setTransactionSuccessful()
+            return true
+        } finally {
+            db.endTransaction()
+        }
+    }
+
+    /**
      * Release a transfer amount reservation only after RPC reports a finalized on-chain error
      * for the exact signature persisted in this ledger. Non-final errors remain UNKNOWN.
      */
