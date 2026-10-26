@@ -207,8 +207,8 @@ class WalletRequestLedgerTest {
             now - 10_000L, now + 10_000L, now
         ) is LedgerSigningStartResult.Started)
         try {
-            ledger.transition(
-                "request_valid_sig01", LedgerState.SIGNING, LedgerState.SIGNED, "not-a-signature"
+            ledger.persistSignedTransaction(
+                "request_valid_sig01", "not-a-signature", ByteArray(70) { 1 }
             )
             throw AssertionError("Malformed signature should be rejected")
         } catch (expected: IllegalArgumentException) {
