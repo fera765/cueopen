@@ -22,6 +22,7 @@ class SolanaTransferExecutor(
     private val rpc: SolanaRpcClient = SolanaRpcClient()
 ) {
     private val vault = WalletSecretVault(context.applicationContext)
+    private val policyStore = WalletAgentPolicyStore(context.applicationContext)
 
     suspend fun signAuthorizedTransfer(
         requestId: String,
@@ -39,6 +40,13 @@ class SolanaTransferExecutor(
         if (rpc.network != record.network) {
             return@withContext TransferExecutionResult.Rejected("RPC network does not match the transfer request network")
         }
+        if (record.agentId != WalletAgentPolicyStore.manualAgentId(record.network)) {
+            return@withContext TransferExecutionResult.Rejected("No persisted manual policy grants this agent signing access")
+        }
+        val persistedPolicy = policyStore.manualTransferPolicy(record.network)
+        if (!persistedPolicy.enabled || policy != persistedPolicy) {
+            return@withContext TransferExecutionResult.Rejected("Transfer permission is disabled or the supplied policy is stale")
+        }
         if (record.amountLamports <= 0L ||
             !SolanaAddressValidator.isValidAddress(record.recipientAddress)
         ) {
@@ -50,11 +58,11 @@ class SolanaTransferExecutor(
 
         val claim = if (humanApproval) {
             ledger.beginSigningAfterHumanApproval(
-                requestId, policy, windowStartEpochMs, windowEndEpochMs, signingTimeEpochMs
+                requestId, persistedPolicy, windowStartEpochMs, windowEndEpochMs, signingTimeEpochMs
             )
         } else {
             ledger.beginSigningAutonomously(
-                requestId, policy, windowStartEpochMs, windowEndEpochMs, signingTimeEpochMs
+                requestId, persistedPolicy, windowStartEpochMs, windowEndEpochMs, signingTimeEpochMs
             )
         }
         when (claim) {
@@ -151,8 +159,14 @@ class SolanaTransferExecutor(
             require(expectedAgentId.isNotBlank())
             val record = ledger.find(requestId)
                 ?: return@withContext TransferExecutionResult.Rejected("Transfer request does not exist")
-            if (record.agentId != expectedAgentId || policy.agentId != expectedAgentId) {
+            if (record.agentId != expectedAgentId || policy.agentId != expectedAgentId ||
+                expectedAgentId != WalletAgentPolicyStore.manualAgentId(record.network)
+            ) {
                 return@withContext TransferExecutionResult.Rejected("Agent identity does not own this transfer request")
+            }
+            val persistedPolicy = policyStore.manualTransferPolicy(record.network)
+            if (!persistedPolicy.enabled || policy != persistedPolicy) {
+                return@withContext TransferExecutionResult.Rejected("Transfer permission is disabled or the supplied policy is stale")
             }
             if (rpc.network != record.network) {
                 return@withContext TransferExecutionResult.Rejected("RPC network does not match the transfer request network")
@@ -166,7 +180,7 @@ class SolanaTransferExecutor(
                 return@withContext TransferExecutionResult.Rejected("Explicit human confirmation is required before broadcast")
             }
             val policyDecision = ledger.authorizeBroadcast(
-                requestId, policy, windowStartEpochMs, windowEndEpochMs
+                requestId, persistedPolicy, windowStartEpochMs, windowEndEpochMs
             )
             if (policyDecision is PolicyDecision.Denied) {
                 return@withContext TransferExecutionResult.Rejected(policyDecision.reason)
