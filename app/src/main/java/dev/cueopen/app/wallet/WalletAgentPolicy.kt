@@ -46,6 +46,9 @@ data class WalletAgentPolicy(
                     return PolicyDecision.Denied("Transfer exceeds the remaining daily limit")
                 }
                 if (recipient.isNullOrBlank()) return PolicyDecision.Denied("Recipient is required")
+                if (!SolanaAddressValidator.isValidAddress(recipient)) {
+                    return PolicyDecision.Denied("Recipient is not a valid Solana public address")
+                }
                 if (allowedRecipients.isNotEmpty() && recipient !in allowedRecipients) {
                     return PolicyDecision.Denied("Recipient is not allowlisted")
                 }
