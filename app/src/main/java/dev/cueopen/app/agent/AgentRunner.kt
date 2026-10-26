@@ -19,6 +19,10 @@ import dev.cueopen.app.llm.str
 import dev.cueopen.app.llm.strArray
 import dev.cueopen.app.llm.tool
 import dev.cueopen.app.sandbox.Sandbox
+import dev.cueopen.app.wallet.WalletAgentPolicyStore
+import dev.cueopen.app.wallet.SolanaWalletRepository
+import dev.cueopen.app.wallet.SolanaRpcClient
+import dev.cueopen.app.wallet.SolanaNetwork
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -666,6 +670,17 @@ class AgentRunner(
         if (allowMultiAgent) add(tool("set_schedule", "Faça o AGENTE trabalhar de forma autônoma e recorrente. Chame quando o usuário pedir para monitorar/acompanhar/repetir algo ao longo do tempo. Defina minutes = intervalo entre verificações (ex.: 20). Use minutes=0 para parar a autonomia.", buildJsonObject {
             put("minutes", int("Minutos entre verificações; 0 para parar")); put("mission", str("O que verificar/fazer a cada ciclo"))
         }, listOf("minutes")))
+        // Wallet tools are exposed only to the selected real agent and only for
+        // explicitly persisted read grants. No secrets or signing primitives enter LLM context.
+        if (allowMultiAgent && agent != null) {
+            val walletPolicies = WalletAgentPolicyStore(ctx.applicationContext)
+            if (walletPolicies.canAgentReadAddress(agent.id)) {
+                add(tool("wallet_get_address", "Consulta o endereço público da carteira Solana local. Não retorna chave privada nem frase de recuperação.", buildJsonObject {}))
+            }
+            if (walletPolicies.canAgentReadBalance(agent.id)) {
+                add(tool("wallet_get_balance", "Consulta o saldo SOL da rede selecionada na tela Carteira. A consulta é somente leitura.", buildJsonObject {}))
+            }
+        }
         // Capacidades do dispositivo liberadas para este agente
         val caps = if (allowMultiAgent) agent?.deviceCaps.orEmpty() else emptyList()
         if (dev.cueopen.app.device.DeviceCaps.NOTIF_READ in caps)
@@ -818,6 +833,40 @@ class AgentRunner(
         val out: String = try {
             when (call.name) {
                 "multi_agents" -> runMultiAgents(sessionId, s("tasks_json"), s("repo_path"), i("max_workers") ?: 3, i("budget_tokens") ?: 6000)
+                "wallet_get_address" -> {
+                    val agentId = store.session(sessionId)?.agentId
+                        ?: return ToolResult("ERRO: esta sessão não pertence a um agente.")
+                    val policies = WalletAgentPolicyStore(ctx.applicationContext)
+                    if (!policies.canAgentReadAddress(agentId)) {
+                        return ToolResult("Acesso negado: o usuário não concedeu a este agente permissão para consultar o endereço.")
+                    }
+                    val wallet = SolanaWalletRepository(ctx.applicationContext)
+                    if (!wallet.hasWallet() || !wallet.backupConfirmed()) {
+                        return ToolResult("Carteira indisponível ou backup ainda não confirmado.")
+                    }
+                    "Endereço público Solana: " + (wallet.publicAddress()
+                        ?: return ToolResult("Endereço público indisponível."))
+                }
+                "wallet_get_balance" -> {
+                    val agentId = store.session(sessionId)?.agentId
+                        ?: return ToolResult("ERRO: esta sessão não pertence a um agente.")
+                    val policies = WalletAgentPolicyStore(ctx.applicationContext)
+                    if (!policies.canAgentReadBalance(agentId)) {
+                        return ToolResult("Acesso negado: o usuário não concedeu a este agente permissão para consultar o saldo.")
+                    }
+                    val wallet = SolanaWalletRepository(ctx.applicationContext)
+                    if (!wallet.hasWallet() || !wallet.backupConfirmed()) {
+                        return ToolResult("Carteira indisponível ou backup ainda não confirmado.")
+                    }
+                    val prefs = ctx.applicationContext.getSharedPreferences("solana_wallet_settings", android.content.Context.MODE_PRIVATE)
+                    val network = runCatching {
+                        SolanaNetwork.valueOf(prefs.getString("network", SolanaNetwork.MAINNET.name) ?: SolanaNetwork.MAINNET.name)
+                    }.getOrDefault(SolanaNetwork.MAINNET)
+                    val address = wallet.publicAddress()
+                        ?: return ToolResult("Endereço público indisponível.")
+                    val lamports = SolanaRpcClient(endpoint = network.rpcEndpoint, network = network).getBalanceLamports(address)
+                    "Saldo " + network.displayName + ": " + String.format(Locale.US, "%.9f SOL", lamports / 1_000_000_000.0)
+                }
                 "shell" -> {
                     // Guardrail determinístico: recusa invocações diretas de scripts inexistentes,
                     // em vez de mandar bash executar um caminho alucinado e produzir ENOENT.
