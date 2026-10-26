@@ -24,6 +24,8 @@ import androidx.compose.ui.unit.dp
 import dev.cueopen.app.wallet.LedgerAuthorizationResult
 import dev.cueopen.app.wallet.LedgerState
 import dev.cueopen.app.wallet.SolanaTransferExecutor
+import dev.cueopen.app.wallet.SolanaNetwork
+import dev.cueopen.app.wallet.SolanaRpcClient
 import dev.cueopen.app.wallet.SolanaWalletRepository
 import dev.cueopen.app.wallet.TransferExecutionResult
 import dev.cueopen.app.wallet.WalletAgentPolicy
@@ -34,13 +36,15 @@ import java.util.Calendar
 import java.util.Locale
 import java.util.UUID
 
-private const val MANUAL_AGENT_ID = "manual-wallet-ui"
+private const val MANUAL_AGENT_PREFIX = "manual-wallet-ui-"
 private const val MAX_TRANSFER_LAMPORTS = 50_000_000L
 private const val DAILY_LIMIT_LAMPORTS = 100_000_000L
 private const val LAMPORTS_PER_SOL = 1_000_000_000.0
 
-private fun manualTransferPolicy() = WalletAgentPolicy(
-    agentId = MANUAL_AGENT_ID,
+private fun manualAgentId(network: SolanaNetwork): String = MANUAL_AGENT_PREFIX + network.name.lowercase()
+
+private fun manualTransferPolicy(network: SolanaNetwork) = WalletAgentPolicy(
+    agentId = manualAgentId(network),
     enabled = true,
     canTransfer = true,
     autonomousExecution = false,
@@ -64,10 +68,13 @@ private fun walletSpendingWindow(): Pair<Long, Long> {
 }
 
 @Composable
-fun WalletTransferPanel(context: Context, repository: SolanaWalletRepository) {
+fun WalletTransferPanel(context: Context, repository: SolanaWalletRepository, network: SolanaNetwork) {
     val ledger = remember(context) { WalletRequestLedger(context.applicationContext) }
-    val executor = remember(context, repository, ledger) {
-        SolanaTransferExecutor(context.applicationContext, repository, ledger)
+    val executor = remember(context, repository, ledger, network) {
+        SolanaTransferExecutor(
+            context.applicationContext, repository, ledger,
+            rpc = SolanaRpcClient(endpoint = network.rpcEndpoint, network = network)
+        )
     }
     val scope = rememberCoroutineScope()
     val uriHandler = LocalUriHandler.current
@@ -93,7 +100,7 @@ fun WalletTransferPanel(context: Context, repository: SolanaWalletRepository) {
     ) {
         Text("Enviar SOL")
         Text(
-            "Mainnet Solana. Limite manual: 0,05 SOL por transferência e 0,10 SOL por dia (taxas à parte). " +
+            network.displayName + " Solana. Limite manual: 0,05 SOL por transferência e 0,10 SOL por dia (taxas à parte). " +
                 "O envio exige aprovação e uma segunda confirmação explícita."
         )
         OutlinedTextField(
@@ -119,15 +126,16 @@ fun WalletTransferPanel(context: Context, repository: SolanaWalletRepository) {
                 message = null
                 scope.launch {
                     try {
-                        val policy = manualTransferPolicy()
+                        val policy = manualTransferPolicy(network)
                         val now = System.currentTimeMillis()
                         val window = walletSpendingWindow()
                         val intent = WalletTransferIntent.fromSol(
                             requestId = UUID.randomUUID().toString().replace("-", ""),
-                            agentId = MANUAL_AGENT_ID,
+                            agentId = manualAgentId(network),
                             recipientAddress = recipient.trim(),
                             amountSol = amountSol.trim(),
-                            createdAtEpochMs = now
+                            createdAtEpochMs = now,
+                            network = network
                         )
                         when (val claimed = ledger.claimAndAuthorize(
                             intent, policy, window.first, window.second, now
@@ -171,7 +179,7 @@ fun WalletTransferPanel(context: Context, repository: SolanaWalletRepository) {
                         busy = true
                         scope.launch {
                             try {
-                                val policy = manualTransferPolicy()
+                                val policy = manualTransferPolicy(network)
                                 val window = walletSpendingWindow()
                                 result = executor.signAuthorizedTransfer(
                                     id, policy, window.first, window.second,
@@ -216,7 +224,7 @@ fun WalletTransferPanel(context: Context, repository: SolanaWalletRepository) {
                         message = null
                         scope.launch {
                             try {
-                                val policy = manualTransferPolicy()
+                                val policy = manualTransferPolicy(network)
                                 val window = walletSpendingWindow()
                                 when (val approval = ledger.approveForSigning(
                                     id, policy, window.first, window.second, System.currentTimeMillis()
@@ -266,7 +274,7 @@ fun WalletTransferPanel(context: Context, repository: SolanaWalletRepository) {
                             busy = true
                             scope.launch {
                                 try {
-                                    result = executor.reconcileSignature(id, MANUAL_AGENT_ID)
+                                    result = executor.reconcileSignature(id, manualAgentId(network))
                                     message = result.toString()
                                 } finally {
                                     busy = false
@@ -286,7 +294,7 @@ fun WalletTransferPanel(context: Context, repository: SolanaWalletRepository) {
                             busy = true
                             scope.launch {
                                 try {
-                                    result = executor.reconcileSignature(id, MANUAL_AGENT_ID)
+                                    result = executor.reconcileSignature(id, manualAgentId(network))
                                     message = result.toString()
                                 } finally {
                                     busy = false
@@ -328,7 +336,7 @@ fun WalletTransferPanel(context: Context, repository: SolanaWalletRepository) {
             ) { Text("Limpar formulário") }
 
             Text("Transferências recentes")
-            recentRecords.filter { it.agentId == MANUAL_AGENT_ID }.forEach { entry ->
+            recentRecords.filter { it.agentId == manualAgentId(network) && it.network == network }.forEach { entry ->
                 Column(
                     modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
                     verticalArrangement = Arrangement.spacedBy(4.dp)
@@ -338,7 +346,7 @@ fun WalletTransferPanel(context: Context, repository: SolanaWalletRepository) {
                     Text(String.format(Locale.US, "%.9f SOL", entry.amountLamports / LAMPORTS_PER_SOL))
                     entry.signature?.let { signature ->
                         OutlinedButton(onClick = {
-                            uriHandler.openUri("https://solscan.io/tx/" + signature)
+                            uriHandler.openUri(network.transactionExplorerUrl(signature))
                         }) { Text("Ver assinatura no Solscan") }
                     }
                     if (entry.state in setOf(
@@ -386,10 +394,10 @@ fun WalletTransferPanel(context: Context, repository: SolanaWalletRepository) {
         val current = requestId?.let { ledger.find(it) }
         AlertDialog(
             onDismissRequest = { confirmBroadcast = false },
-            title = { Text("Confirmar envio à mainnet") },
+            title = { Text("Confirmar envio à " + network.displayName) },
             text = {
                 Text(
-                    "Você está prestes a transmitir uma transação Solana real.\n\n" +
+                    "Você está prestes a transmitir uma transação Solana à " + network.displayName + ".\n\n" +
                         "Destinatário: " + (current?.recipientAddress ?: "indisponível") +
                         "\nValor: " + (current?.amountLamports?.let {
                             String.format(Locale.US, "%.9f SOL", it / LAMPORTS_PER_SOL)
@@ -412,7 +420,7 @@ fun WalletTransferPanel(context: Context, repository: SolanaWalletRepository) {
                             busy = true
                             scope.launch {
                                 try {
-                                    result = executor.broadcastPersistedTransfer(id, MANUAL_AGENT_ID)
+                                    result = executor.broadcastPersistedTransfer(id, manualAgentId(network))
                                     message = result.toString()
                                 } finally {
                                     busy = false
