@@ -263,3 +263,6 @@ Estado honesto de release: **NÃO CONCLUÍDO**. A implementação do painel de c
 
 
 - 2026-10-26 — Reforçado o limite entre ledger local e broadcast: antes de qualquer chamada RPC, o executor valida o formato da transação serializada persistida e confirma que a assinatura nos bytes corresponde exatamente à assinatura registrada no pedido. Em caso de divergência, coloca o pedido em quarentena (`UNKNOWN`) e bloqueia o envio, sem reconstruir nem assinar novamente. Commit: `23cc44f41688fa2b024aade382e42b6240ed361b`. **Alteração não compilada nem testada; requer validação manual/automatizada antes de confiar em transações.**
+
+
+- 2026-10-26 — Extraída a validação de assinatura da transação persistida para `SolanaPersistedTransactionValidator` e adicionados testes unitários para correspondência, divergência, cabeçalho/formato, tamanho e assinatura esperada inválida. Commits: `389655954cae6a548095b5b58816688bb117e42d`, `8c7cc93bd981a755d93518374b8731d412980391`, `c1683c93f0b073dd19dad76f9839afb81a1f2a24`. **Testes apenas escritos; não foram executados. A verificação vincula a assinatura aos bytes persistidos, mas não substitui a validação semântica completa da transação.**
