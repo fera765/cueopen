@@ -641,16 +641,8 @@ class WalletRequestLedger(context: Context) : SQLiteOpenHelper(
         serializedTransaction: ByteArray
     ): Boolean {
         require(requestId.isNotBlank())
-        require(SolanaSignatureValidator.isValid(signature)) { "Invalid Solana transaction signature" }
-        require(serializedTransaction.size in 66..MAX_SERIALIZED_TRANSACTION_BYTES) {
-            "Serialized transaction size is invalid"
-        }
-        require((serializedTransaction[0].toInt() and 0xff) == 1) {
-            "Only single-signer Solana transfers are supported by this signer"
-        }
-        val encodedFirstSignature = org.sol4k.Base58.encode(serializedTransaction.copyOfRange(1, 65))
-        require(encodedFirstSignature == signature) {
-            "Serialized transaction signature does not match the supplied signature"
+        require(SolanaPersistedTransactionValidator.signatureMatches(serializedTransaction, signature)) {
+            "Serialized transaction envelope or first signature is invalid"
         }
 
         val db = writableDatabase
