@@ -105,7 +105,7 @@ class WalletRequestLedgerTest {
             "request_12345678", LedgerState.AUTHORIZED, LedgerState.SIGNING
         ))
         assertTrue(ledger.transition(
-            "request_12345678", LedgerState.SIGNING, LedgerState.SIGNED, "5".repeat(88)
+            "request_12345678", LedgerState.SIGNING, LedgerState.SIGNED, "67rpwLCuS5DGA8KGZXKsVQ7dnPb9goRLoKfgGbLfQg9WoLUgNY77E2jT11fem3coV9nAkguBACzrU1iyZM4B8roQ"
         ))
     }
 
@@ -126,7 +126,7 @@ class WalletRequestLedgerTest {
             assertTrue(expected.message.orEmpty().contains("signature"))
         }
         assertTrue(ledger.transition(
-            "request_12345678", LedgerState.SIGNING, LedgerState.SIGNED, "5".repeat(88)
+            "request_12345678", LedgerState.SIGNING, LedgerState.SIGNED, "67rpwLCuS5DGA8KGZXKsVQ7dnPb9goRLoKfgGbLfQg9WoLUgNY77E2jT11fem3coV9nAkguBACzrU1iyZM4B8roQ"
         ))
         try {
             ledger.transition("request_12345678", LedgerState.SIGNED, LedgerState.SUBMITTED)
@@ -135,23 +135,23 @@ class WalletRequestLedgerTest {
             assertTrue(expected.message.orEmpty().contains("signature"))
         }
         assertTrue(ledger.transition(
-            "request_12345678", LedgerState.SIGNED, LedgerState.SUBMITTED, "5".repeat(88)
+            "request_12345678", LedgerState.SIGNED, LedgerState.SUBMITTED, "67rpwLCuS5DGA8KGZXKsVQ7dnPb9goRLoKfgGbLfQg9WoLUgNY77E2jT11fem3coV9nAkguBACzrU1iyZM4B8roQ"
         ))
         assertFalse(ledger.transition(
-            "request_12345678", LedgerState.SUBMITTED, LedgerState.UNKNOWN, "6".repeat(88)
+            "request_12345678", LedgerState.SUBMITTED, LedgerState.UNKNOWN, "5n4yLmzWc14iDPJ3vZAszSSXTu1wWQzX5ZtZnVBcrAUHDKBNHEZmUdR9oQpg7JukPQfHqWWN5j8bZwounf3xrsM7"
         ))
         assertFalse(ledger.transition(
-            "request_12345678", LedgerState.SUBMITTED, LedgerState.UNKNOWN, "5".repeat(88)
+            "request_12345678", LedgerState.SUBMITTED, LedgerState.UNKNOWN, "67rpwLCuS5DGA8KGZXKsVQ7dnPb9goRLoKfgGbLfQg9WoLUgNY77E2jT11fem3coV9nAkguBACzrU1iyZM4B8roQ"
         ))
         try {
             ledger.transition(
-                "request_12345678", LedgerState.SIGNED, LedgerState.SUBMITTED, "6".repeat(88)
+                "request_12345678", LedgerState.SIGNED, LedgerState.SUBMITTED, "5n4yLmzWc14iDPJ3vZAszSSXTu1wWQzX5ZtZnVBcrAUHDKBNHEZmUdR9oQpg7JukPQfHqWWN5j8bZwounf3xrsM7"
             )
             throw AssertionError("Submitted signature must match the persisted signature")
         } catch (expected: IllegalArgumentException) {
             assertTrue(expected.message.orEmpty().contains("must match"))
         }
-        assertEquals("5".repeat(88), ledger.find("request_12345678")?.signature)
+        assertEquals("67rpwLCuS5DGA8KGZXKsVQ7dnPb9goRLoKfgGbLfQg9WoLUgNY77E2jT11fem3coV9nAkguBACzrU1iyZM4B8roQ", ledger.find("request_12345678")?.signature)
     }
 
     @Test
@@ -166,7 +166,7 @@ class WalletRequestLedgerTest {
         assertTrue(ledger.transition(
             "request_12345678", LedgerState.AUTHORIZED, LedgerState.SIGNING
         ))
-        val signature = "8".repeat(88)
+        val signature = "4QuYxZ8wHiUWSRDBNgYuzbk6Bvj6nsHECYn7r4ZSc7mLsDz7v2QQV29y11SmWN5XzSBnAnw7mofZyg9ehu37kuXw"
         assertTrue(ledger.transition(
             "request_12345678", LedgerState.SIGNING, LedgerState.SIGNED, signature
         ))
@@ -175,7 +175,7 @@ class WalletRequestLedgerTest {
         ))
         try {
             ledger.transition(
-                "request_12345678", LedgerState.SUBMITTED, LedgerState.CONFIRMED, "9".repeat(88)
+                "request_12345678", LedgerState.SUBMITTED, LedgerState.CONFIRMED, "5n4yLmzWc14iDPJ3vZAszSSXTu1wWQzX5ZtZnVBcrAUHDKBNHEZmUdR9oQpg7JukPQfHqWWN5j8bZwounf3xrsM7"
             )
             throw AssertionError("Confirmation must reference the original transaction signature")
         } catch (expected: IllegalArgumentException) {
@@ -340,7 +340,7 @@ class WalletRequestLedgerTest {
             "request_auto_0001", LedgerState.AUTHORIZED, LedgerState.SIGNING
         ))
         assertTrue(ledger.transition(
-            "request_auto_0001", LedgerState.SIGNING, LedgerState.SIGNED, "7".repeat(88)
+            "request_auto_0001", LedgerState.SIGNING, LedgerState.SIGNED, "5n4yLmzWc14iDPJ3vZAszSSXTu1wWQzX5ZtZnVBcrAUHDKBNHEZmUdR9oQpg7JukPQfHqWWN5j8bZwounf3xrsM7"
         ))
         assertEquals(
             LedgerState.SIGNED,
