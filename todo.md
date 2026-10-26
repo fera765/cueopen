@@ -56,6 +56,9 @@ Ao concluir uma tarefa, marcar sua caixa como `[x]`, anotar o commit que contém
 
 ## Registro de progresso (não altera o estado das tarefas)
 
+- 2026-10-26 — Criados testes unitários para o validador de endereços Solana, cobrindo endereço conhecido do System Program, comprimento incorreto, alfabeto inválido e entrada vazia. Commit: `0eb956822d8b16572c63c70d8ef363b9e7ce2d07`. Os testes estão escritos, mas **não foram executados**.
+
+
 - 2026-10-26 — Adicionada validação estrita de endereço Solana: além de Base58, exige que o texto decodifique para exatamente 32 bytes; `WalletTransferIntent` agora rejeita destinatários malformados antes de qualquer fluxo de transação. Commits: `750813fb7254d6704b7604812e17b32781fb2070`, `defbc6e0a83f8461025140fefffe0afc25b94241`. **Validação automatizada ainda pendente; não compilado/testado**.
 
 
