@@ -37,7 +37,7 @@ import com.mikepenz.markdown.m3.markdownTypography
 import dev.cueopen.app.ui.theme.Cue
 import androidx.compose.material3.MaterialTheme
 
-private val mermaidFence = Regex("```mermaid\\s*\\n([\\s\\S]*?)```")
+private val fencedBlock = Regex("```([a-zA-Z0-9_+.-]*)[ \\t]*\\n([\\s\\S]*?)```")
 
 /**
  * Markdown estilo GitHub no chat: títulos, listas, task lists, tabelas, citações, links e blocos de
@@ -52,7 +52,7 @@ fun CueMarkdown(text: String, modifier: Modifier = Modifier) {
         fencedBlock.findAll(text).forEach { m ->
             if (m.range.first > last) out += Triple("text", "", text.substring(last, m.range.first))
             val language = m.groupValues[1].trim()
-            val code = m.groupValues[2].removeSuffix("\\n")
+            val code = m.groupValues[2].removeSuffix("\n")
             out += Triple(if (language.equals("mermaid", true)) "mermaid" else "code", language, code)
             last = m.range.last + 1
         }
