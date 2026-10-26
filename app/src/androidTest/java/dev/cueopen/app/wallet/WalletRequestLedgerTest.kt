@@ -561,6 +561,19 @@ class WalletRequestLedgerTest {
         )
         assertTrue(broadcast is TransferExecutionResult.Rejected)
         assertEquals(LedgerState.SIGNED, ledger.find(manualRequest.requestId)?.state)
+
+        store.setManualTransferEnabled(SolanaNetwork.MAINNET, true)
+        val enabledPolicy = store.manualTransferPolicy(SolanaNetwork.MAINNET)
+        val unknownClusterExecutor = SolanaTransferExecutor(
+            context, SolanaWalletRepository(context), ledger,
+            SolanaRpcClient(endpoint = "https://rpc.test", client = OkHttpClient())
+        )
+        val wrongCluster = unknownClusterExecutor.broadcastPersistedTransfer(
+            manualRequest.requestId, manualAgentId, enabledPolicy,
+            now - 10_000L, now + 10_000L, humanConfirmed = true
+        )
+        assertTrue(wrongCluster is TransferExecutionResult.Rejected)
+        assertEquals(LedgerState.SIGNED, ledger.find(manualRequest.requestId)?.state)
     }
 
     @Test
