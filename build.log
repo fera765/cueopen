@@ -1,0 +1,171 @@
+> Task :app:downloadWebAssets UP-TO-DATE
+> Task :app:preBuild UP-TO-DATE
+> Task :app:preReleaseBuild UP-TO-DATE
+> Task :app:mergeReleaseJniLibFolders
+> Task :terminal-emulator:preBuild UP-TO-DATE
+> Task :terminal-emulator:preReleaseBuild UP-TO-DATE
+> Task :terminal-emulator:configureNdkBuildRelease[arm64-v8a]
+> Task :terminal-emulator:buildNdkBuildRelease[arm64-v8a]
+> Task :terminal-emulator:configureNdkBuildRelease[armeabi-v7a]
+> Task :terminal-emulator:buildNdkBuildRelease[armeabi-v7a]
+> Task :terminal-emulator:configureNdkBuildRelease[x86_64]
+> Task :terminal-emulator:buildNdkBuildRelease[x86_64]
+> Task :terminal-emulator:mergeReleaseJniLibFolders
+> Task :terminal-view:preBuild UP-TO-DATE
+> Task :terminal-view:preReleaseBuild UP-TO-DATE
+> Task :terminal-emulator:mergeReleaseNativeLibs
+> Task :terminal-view:mergeReleaseJniLibFolders
+> Task :terminal-view:mergeReleaseNativeLibs NO-SOURCE
+> Task :terminal-view:copyReleaseJniLibsProjectOnly
+> Task :terminal-emulator:copyReleaseJniLibsProjectOnly
+> Task :terminal-emulator:generateReleaseResValues
+> Task :terminal-emulator:generateReleaseResources
+> Task :terminal-emulator:packageReleaseResources
+> Task :app:mergeReleaseNativeLibs
+> Task :terminal-emulator:parseReleaseLocalResources
+> Task :terminal-emulator:generateReleaseRFile
+> Task :terminal-emulator:javaPreCompileRelease
+
+> Task :app:stripReleaseDebugSymbols
+Unable to strip the following libraries, packaging them as they are: libandroidx.graphics.path.so, libaxs.so, libproot-xed.so, libproot.so, libproot32.so, libtalloc.so, libtermux.so.
+
+> Task :terminal-emulator:compileReleaseJavaWithJavac
+Note: /home/runner/work/cueopen/cueopen/terminal-emulator/src/main/java/com/termux/terminal/TerminalSession.java uses or overrides a deprecated API.
+Note: Recompile with -Xlint:deprecation for details.
+
+> Task :app:extractReleaseNativeSymbolTables
+> Task :app:mergeReleaseNativeDebugMetadata NO-SOURCE
+> Task :terminal-emulator:bundleLibCompileToJarRelease
+> Task :terminal-view:generateReleaseResValues
+> Task :terminal-view:generateReleaseResources
+> Task :terminal-view:packageReleaseResources
+> Task :terminal-view:javaPreCompileRelease
+> Task :terminal-view:parseReleaseLocalResources
+> Task :terminal-emulator:mergeReleaseGeneratedProguardFiles
+> Task :terminal-view:generateReleaseRFile
+> Task :terminal-emulator:exportReleaseConsumerProguardFiles
+
+> Task :terminal-view:compileReleaseJavaWithJavac
+Note: /home/runner/work/cueopen/cueopen/terminal-view/src/main/java/com/termux/view/TerminalView.java uses or overrides a deprecated API.
+Note: Recompile with -Xlint:deprecation for details.
+
+> Task :terminal-view:mergeReleaseGeneratedProguardFiles
+> Task :terminal-view:exportReleaseConsumerProguardFiles
+> Task :app:buildKotlinToolingMetadata
+> Task :app:checkKotlinGradlePluginConfigurationErrors SKIPPED
+> Task :app:generateReleaseBuildConfig
+> Task :terminal-emulator:writeReleaseAarMetadata
+> Task :terminal-view:writeReleaseAarMetadata
+> Task :app:checkReleaseAarMetadata
+> Task :app:generateReleaseResValues
+> Task :app:checkReleaseDuplicateClasses
+> Task :app:mapReleaseSourceSetPaths
+> Task :app:generateReleaseResources
+> Task :app:createReleaseCompatibleScreenManifests
+> Task :app:extractDeepLinksRelease
+> Task :terminal-emulator:extractDeepLinksRelease
+> Task :terminal-emulator:processReleaseManifest
+> Task :terminal-view:extractDeepLinksRelease
+> Task :terminal-view:processReleaseManifest
+> Task :app:mergeReleaseResources
+
+> Task :app:processReleaseMainManifest
+/home/runner/work/cueopen/cueopen/app/src/main/AndroidManifest.xml:22:9-41 Warning:
+	android:extractNativeLibs should not be specified in this source AndroidManifest.xml file. See https://d.android.com/guide/topics/manifest/application-element#extractNativeLibs for more information.
+The AGP Upgrade Assistant can remove the attribute from the AndroidManifest.xml file and update the build file accordingly. See https://d.android.com/studio/build/agp-upgrade-assistant for more information.
+
+> Task :app:packageReleaseResources
+> Task :app:processReleaseManifest
+> Task :app:parseReleaseLocalResources
+> Task :app:processReleaseManifestForPackage
+> Task :terminal-view:bundleLibCompileToJarRelease
+> Task :app:javaPreCompileRelease
+> Task :terminal-emulator:prepareReleaseArtProfile
+> Task :terminal-view:prepareReleaseArtProfile
+> Task :app:mergeReleaseArtProfile
+> Task :terminal-emulator:bundleLibRuntimeToJarRelease
+> Task :terminal-view:bundleLibRuntimeToJarRelease
+> Task :app:extractProguardFiles
+> Task :terminal-emulator:processReleaseJavaRes NO-SOURCE
+> Task :terminal-view:processReleaseJavaRes NO-SOURCE
+> Task :app:mergeReleaseStartupProfile
+> Task :app:mergeReleaseShaders
+> Task :app:compileReleaseShaders NO-SOURCE
+> Task :app:generateReleaseAssets UP-TO-DATE
+> Task :terminal-emulator:mergeReleaseShaders
+> Task :terminal-emulator:compileReleaseShaders NO-SOURCE
+> Task :terminal-emulator:generateReleaseAssets UP-TO-DATE
+> Task :terminal-emulator:packageReleaseAssets
+> Task :terminal-view:mergeReleaseShaders
+> Task :terminal-view:compileReleaseShaders NO-SOURCE
+> Task :terminal-view:generateReleaseAssets UP-TO-DATE
+> Task :terminal-view:packageReleaseAssets
+> Task :app:mergeReleaseAssets
+> Task :app:processReleaseResources
+> Task :app:compressReleaseAssets
+> Task :app:extractReleaseVersionControlInfo
+> Task :app:convertLinkedResourcesToProtoRelease
+> Task :app:collectReleaseDependencies
+> Task :app:sdkReleaseDependencyData
+> Task :app:validateSigningRelease
+> Task :app:writeReleaseAppMetadata
+> Task :app:writeReleaseSigningConfigVersions
+> Task :terminal-emulator:stripReleaseDebugSymbols
+> Task :terminal-emulator:copyReleaseJniLibsProjectAndLocalJars
+> Task :terminal-emulator:extractDeepLinksForAarRelease
+> Task :terminal-emulator:extractReleaseAnnotations
+> Task :terminal-emulator:mergeReleaseConsumerProguardFiles
+> Task :terminal-emulator:prepareLintJarForPublish
+> Task :terminal-emulator:mergeReleaseJavaResource
+> Task :terminal-emulator:syncReleaseLibJars
+> Task :terminal-emulator:bundleReleaseAar
+> Task :terminal-emulator:mapReleaseSourceSetPaths
+> Task :terminal-emulator:mergeReleaseResources
+> Task :terminal-emulator:verifyReleaseResources
+> Task :terminal-emulator:assembleRelease
+> Task :terminal-view:stripReleaseDebugSymbols NO-SOURCE
+> Task :terminal-view:copyReleaseJniLibsProjectAndLocalJars
+> Task :terminal-view:extractDeepLinksForAarRelease
+> Task :terminal-view:extractReleaseAnnotations
+> Task :terminal-view:mergeReleaseConsumerProguardFiles
+> Task :terminal-view:prepareLintJarForPublish
+> Task :terminal-view:mergeReleaseJavaResource
+> Task :terminal-view:syncReleaseLibJars
+> Task :terminal-view:bundleReleaseAar
+> Task :terminal-emulator:compileReleaseLibraryResources
+> Task :terminal-view:mapReleaseSourceSetPaths
+> Task :terminal-view:mergeReleaseResources
+> Task :terminal-view:verifyReleaseResources
+> Task :terminal-view:assembleRelease
+> Task :app:compileReleaseKotlin
+w: file:///home/runner/work/cueopen/cueopen/app/src/main/java/dev/cueopen/app/browser/BrowserHost.kt:126:13 'var databaseEnabled: Boolean' is deprecated. Deprecated in Java.
+w: file:///home/runner/work/cueopen/cueopen/app/src/main/java/dev/cueopen/app/ui/Components.kt:156:29 'val Icons.Rounded.MenuBook: ImageVector' is deprecated. Use the AutoMirrored version at Icons.AutoMirrored.Rounded.MenuBook.
+w: file:///home/runner/work/cueopen/cueopen/app/src/main/java/dev/cueopen/app/ui/ComputerScreen.kt:266:59 'val Icons.Rounded.OpenInNew: ImageVector' is deprecated. Use the AutoMirrored version at Icons.AutoMirrored.Rounded.OpenInNew.
+w: file:///home/runner/work/cueopen/cueopen/app/src/main/java/dev/cueopen/app/ui/ComputerScreen.kt:508:27 'val Icons.Rounded.Article: ImageVector' is deprecated. Use the AutoMirrored version at Icons.AutoMirrored.Rounded.Article.
+w: file:///home/runner/work/cueopen/cueopen/app/src/main/java/dev/cueopen/app/ui/ComputerScreen.kt:513:72 'val Icons.Rounded.InsertDriveFile: ImageVector' is deprecated. Use the AutoMirrored version at Icons.AutoMirrored.Rounded.InsertDriveFile.
+w: file:///home/runner/work/cueopen/cueopen/app/src/main/java/dev/cueopen/app/ui/ConnectorsScreen.kt:111:118 'val Icons.Rounded.ArrowForward: ImageVector' is deprecated. Use the AutoMirrored version at Icons.AutoMirrored.Rounded.ArrowForward.
+w: file:///home/runner/work/cueopen/cueopen/app/src/main/java/dev/cueopen/app/ui/ConnectorsScreen.kt:190:98 Condition is always 'true'.
+w: file:///home/runner/work/cueopen/cueopen/app/src/main/java/dev/cueopen/app/ui/FileViewer.kt:77:159 'val Icons.Rounded.Article: ImageVector' is deprecated. Use the AutoMirrored version at Icons.AutoMirrored.Rounded.Article.
+w: file:///home/runner/work/cueopen/cueopen/app/src/main/java/dev/cueopen/app/ui/HomeScreen.kt:97:39 'val Icons.Rounded.MenuBook: ImageVector' is deprecated. Use the AutoMirrored version at Icons.AutoMirrored.Rounded.MenuBook.
+w: file:///home/runner/work/cueopen/cueopen/app/src/main/java/dev/cueopen/app/ui/HomeScreen.kt:501:34 'val Icons.Rounded.LibraryBooks: ImageVector' is deprecated. Use the AutoMirrored version at Icons.AutoMirrored.Rounded.LibraryBooks.
+w: file:///home/runner/work/cueopen/cueopen/app/src/main/java/dev/cueopen/app/ui/LibraryScreens.kt:354:73 'val Icons.Rounded.LibraryBooks: ImageVector' is deprecated. Use the AutoMirrored version at Icons.AutoMirrored.Rounded.LibraryBooks.
+w: file:///home/runner/work/cueopen/cueopen/app/src/main/java/dev/cueopen/app/ui/LibraryScreens.kt:422:100 'val Icons.Rounded.ArrowForward: ImageVector' is deprecated. Use the AutoMirrored version at Icons.AutoMirrored.Rounded.ArrowForward.
+w: file:///home/runner/work/cueopen/cueopen/app/src/main/java/dev/cueopen/app/ui/Splash.kt:69:72 'fun quadraticBezierTo(x1: Float, y1: Float, x2: Float, y2: Float): Unit' is deprecated. Use quadraticTo() for consistency with cubicTo().
+
+> Task :app:compileReleaseJavaWithJavac
+> Task :app:mergeReleaseGeneratedProguardFiles
+> Task :app:processReleaseJavaRes
+> Task :app:expandReleaseArtProfileWildcards
+> Task :app:mergeReleaseJavaResource
+> Task :app:minifyReleaseWithR8
+> Task :app:compileReleaseArtProfile
+> Task :app:shrinkReleaseRes
+> Task :app:convertShrunkResourcesToBinaryRelease
+> Task :app:optimizeReleaseResources
+> Task :app:packageRelease
+> Task :app:createReleaseApkListingFileRedirect
+> Task :app:assembleRelease
+gradle/actions: Writing build results to /home/runner/work/_temp/.gradle-actions/build-results/__run_2-1793031324345.json
+
+BUILD SUCCESSFUL in 3m 52s
+117 actionable tasks: 116 executed, 1 up-to-date
