@@ -28,6 +28,33 @@ class WalletAgentPolicyStore(context: Context) {
         setAgentCapability(agentId, CAPABILITY_READ_ADDRESS, enabled)
     }
 
+    /** Agent transfer requests are opt-in and always require a human approval in the wallet UI. */
+    fun canAgentRequestTransfer(agentId: String): Boolean =
+        prefs.getBoolean(agentCapabilityKey(agentId, CAPABILITY_REQUEST_TRANSFER), false)
+
+    fun setAgentRequestTransfer(agentId: String, enabled: Boolean) {
+        setAgentCapability(agentId, CAPABILITY_REQUEST_TRANSFER, enabled)
+    }
+
+    /**
+     * Returns the persisted policy for a transfer identity. Agent policies are strictly
+     * non-autonomous: a grant permits proposing a request, never signing or broadcasting it.
+     */
+    fun transferPolicy(agentId: String, network: SolanaNetwork): WalletAgentPolicy =
+        if (agentId == manualAgentId(network)) manualTransferPolicy(network)
+        else {
+            val enabled = canAgentRequestTransfer(agentId)
+            WalletAgentPolicy(
+                agentId = agentId,
+                enabled = enabled,
+                canTransfer = enabled,
+                autonomousExecution = false,
+                maxTransferLamports = MAX_AGENT_TRANSFER_LAMPORTS,
+                dailyLimitLamports = DAILY_AGENT_TRANSFER_LIMIT_LAMPORTS,
+                allowedRecipients = emptySet()
+            )
+        }
+
     /** Balance access is a separate, opt-in capability for each agent. */
     fun canAgentReadBalance(agentId: String): Boolean =
         prefs.getBoolean(agentCapabilityKey(agentId, CAPABILITY_READ_BALANCE), false)
@@ -63,6 +90,9 @@ class WalletAgentPolicyStore(context: Context) {
         private const val MANUAL_AGENT_PREFIX = "manual-wallet-ui-"
         private const val CAPABILITY_READ_ADDRESS = "read_address"
         private const val CAPABILITY_READ_BALANCE = "read_balance"
+        private const val CAPABILITY_REQUEST_TRANSFER = "request_transfer"
+        private const val MAX_AGENT_TRANSFER_LAMPORTS = 50_000_000L
+        private const val DAILY_AGENT_TRANSFER_LIMIT_LAMPORTS = 100_000_000L
 
         fun manualAgentId(network: SolanaNetwork): String =
             MANUAL_AGENT_PREFIX + network.name.lowercase()
