@@ -108,7 +108,7 @@ class BrowserHost(private val appCtx: Context) {
         // à sessão do agente e à UI; destruí-la durante uma navegação cancelava o carregamento
         // e fazia o site parecer travado até o usuário abrir o Browser.
         _view?.let { return it }
-        return createView(ctx, false).also { _view = it }
+        return createView(ctx, false).also { view -> _view = view; view.loadUrl(HOME) }
     }
 
     /**
