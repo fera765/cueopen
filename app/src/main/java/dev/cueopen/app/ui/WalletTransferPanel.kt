@@ -328,7 +328,7 @@ fun WalletTransferPanel(context: Context, repository: SolanaWalletRepository, ne
                             busy = true
                             scope.launch {
                                 try {
-                                    result = executor.reconcileSignature(id, WalletAgentPolicyStore.manualAgentId(network))
+                                    result = executor.reconcileSignature(id, ledger.find(id)?.agentId ?: WalletAgentPolicyStore.manualAgentId(network))
                                     message = result.toString()
                                 } catch (error: Exception) {
                                     message = error.message ?: "Não foi possível consultar o estado da transação."
