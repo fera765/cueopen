@@ -183,7 +183,7 @@ class SolanaTransferExecutor(
                 if (status.isFinalized) {
                     val current = ledger.find(requestId)
                     if (current != null &&
-                        current.state in setOf(LedgerState.SUBMITTED, LedgerState.UNKNOWN)
+                        current.state in setOf(LedgerState.SIGNED, LedgerState.SUBMITTED, LedgerState.UNKNOWN)
                     ) {
                         ledger.transition(requestId, current.state, LedgerState.CONFIRMED, signature)
                     }
