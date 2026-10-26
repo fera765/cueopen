@@ -335,8 +335,13 @@ class WalletRequestLedger(context: Context) : SQLiteOpenHelper(
     ): Boolean {
         require(requestId.isNotBlank())
         require(next in allowedNextStates(expected)) { "Illegal transfer state transition: $expected -> $next" }
-        if (next in setOf(LedgerState.SUBMITTED, LedgerState.CONFIRMED) && signature.isNullOrBlank()) {
-            throw IllegalArgumentException("A chain signature is required for $next")
+        if (next in setOf(LedgerState.SIGNED, LedgerState.SUBMITTED, LedgerState.CONFIRMED) &&
+            signature.isNullOrBlank()
+        ) {
+            throw IllegalArgumentException("A durable chain signature is required for $next")
+        }
+        if (next == LedgerState.SIGNED && expected != LedgerState.SIGNING) {
+            throw IllegalArgumentException("A transfer must enter SIGNING before its signature can be persisted")
         }
         if (signature != null) require(signature.length <= MAX_SIGNATURE_LENGTH) { "Signature is too long" }
 
@@ -415,8 +420,9 @@ class WalletRequestLedger(context: Context) : SQLiteOpenHelper(
 
     private fun allowedNextStates(state: LedgerState): Set<LedgerState> = when (state) {
         LedgerState.PREPARED -> setOf(LedgerState.AWAITING_APPROVAL, LedgerState.FAILED)
-        LedgerState.AUTHORIZED -> setOf(LedgerState.SIGNED, LedgerState.FAILED)
+        LedgerState.AUTHORIZED -> setOf(LedgerState.SIGNING, LedgerState.FAILED)
         LedgerState.AWAITING_APPROVAL -> setOf(LedgerState.FAILED)
+        LedgerState.SIGNING -> setOf(LedgerState.SIGNED, LedgerState.UNKNOWN, LedgerState.FAILED)
         LedgerState.SIGNED -> setOf(LedgerState.SUBMITTED, LedgerState.UNKNOWN, LedgerState.FAILED)
         LedgerState.SUBMITTED -> setOf(LedgerState.CONFIRMED, LedgerState.UNKNOWN, LedgerState.FAILED)
         LedgerState.UNKNOWN -> setOf(LedgerState.CONFIRMED, LedgerState.FAILED)
