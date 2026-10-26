@@ -285,7 +285,7 @@ fun WalletTransferPanel(context: Context, repository: SolanaWalletRepository, ne
                         enabled = !busy && transfersEnabled,
                         onClick = { confirmBroadcast = true },
                         modifier = Modifier.fillMaxWidth()
-                    ) { Text("Transmitir à mainnet…") }
+                    ) { Text("Transmitir à " + network.displayName + "…") }
                 }
                 is TransferExecutionResult.Submitted -> {
                     Text("Enviado. Assinatura: " + current.signature)
@@ -441,7 +441,16 @@ fun WalletTransferPanel(context: Context, repository: SolanaWalletRepository, ne
                             busy = true
                             scope.launch {
                                 try {
-                                    result = executor.broadcastPersistedTransfer(id, WalletAgentPolicyStore.manualAgentId(network))
+                                    val policy = policyStore.manualTransferPolicy(network)
+                                    val window = walletSpendingWindow()
+                                    result = executor.broadcastPersistedTransfer(
+                                        id,
+                                        WalletAgentPolicyStore.manualAgentId(network),
+                                        policy,
+                                        window.first,
+                                        window.second,
+                                        humanConfirmed = true
+                                    )
                                     message = result.toString()
                                 } finally {
                                     busy = false
