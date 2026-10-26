@@ -31,27 +31,26 @@ class SolanaWalletRepository(context: Context) {
      */
     @Synchronized
     fun repairMetadataFromRecoveryPhrase(phrase: CharArray): String {
-        check(vault.hasSecret()) { "No local wallet secret exists to recover" }
-        val material = try {
-            SolanaWalletKeyDerivation.restore(phrase)
-        } catch (error: Throwable) {
-            phrase.fill(0.toChar())
-            throw error
-        }
-        var storedSeed: ByteArray? = null
         try {
-            storedSeed = vault.read()
-            require(constantTimeEquals(storedSeed, material.secretSeed)) {
-                "Recovery phrase does not match the wallet stored on this device"
+            check(vault.hasSecret()) { "No local wallet secret exists to recover" }
+            val material = SolanaWalletKeyDerivation.restore(phrase)
+            var storedSeed: ByteArray? = null
+            try {
+                storedSeed = vault.read()
+                require(constantTimeEquals(storedSeed, material.secretSeed)) {
+                    "Recovery phrase does not match the wallet stored on this device"
+                }
+                check(prefs.edit()
+                    .putString("public_address", material.publicAddress)
+                    .putBoolean("backup_confirmed", true)
+                    .commit()) { "Could not repair wallet metadata" }
+                return material.publicAddress
+            } finally {
+                storedSeed?.fill(0)
+                material.close()
             }
-            check(prefs.edit()
-                .putString("public_address", material.publicAddress)
-                .putBoolean("backup_confirmed", true)
-                .commit()) { "Could not repair wallet metadata" }
-            return material.publicAddress
         } finally {
-            storedSeed?.fill(0)
-            material.close()
+            // Consume the caller's phrase even when the vault is missing or unreadable.
             phrase.fill(0.toChar())
         }
     }
