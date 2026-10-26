@@ -10,6 +10,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -452,6 +453,7 @@ fun FilesPane(root: File, guestRoot: String) {
 }
 
 /** Linha elegante do gerenciador: ícone colorido por tipo, nome, tamanho e extensão. */
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun FileRow(f: File, onClick: () -> Unit, onLongClick: () -> Unit, onShare: () -> Unit) {
     val c = Cue.c
