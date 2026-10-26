@@ -179,8 +179,17 @@ class SolanaTransferExecutor(
                         requestId, signature, "RPC has no status record; absence is not proof of failure"
                     )
                 if (status.failedOnChain) {
-                    return@withContext TransferExecutionResult.ChainFailed(
-                        requestId, signature, status.error ?: "Transaction failed on chain"
+                    val chainError = status.error ?: "Transaction failed on chain"
+                    if (status.confirmationStatus == "finalized") {
+                        ledger.markFinalizedChainFailure(
+                            requestId, signature, status.confirmationStatus, chainError
+                        )
+                        return@withContext TransferExecutionResult.ChainFailed(
+                            requestId, signature, chainError
+                        )
+                    }
+                    return@withContext TransferExecutionResult.Unknown(
+                        requestId, signature, "On-chain error is not finalized yet; reservation remains held"
                     )
                 }
                 if (status.isFinalized) {
