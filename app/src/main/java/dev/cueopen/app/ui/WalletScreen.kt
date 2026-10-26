@@ -48,6 +48,7 @@ fun WalletScreen(nav: NavController) {
     val repository = remember(context) { SolanaWalletRepository(context.applicationContext) }
     val c = Cue.c
     var address by remember { mutableStateOf<String?>(null) }
+    var walletExists by remember { mutableStateOf(false) }
     var balance by remember { mutableStateOf<String?>(null) }
     var loading by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
@@ -79,7 +80,10 @@ fun WalletScreen(nav: NavController) {
         }
     }
 
-    LaunchedEffect(Unit) { refreshAddress() }
+    LaunchedEffect(Unit) {
+        walletExists = repository.hasWallet()
+        refreshAddress()
+    }
     LaunchedEffect(address, refreshCounter) {
         val current = address ?: return@LaunchedEffect
         loading = true
@@ -111,7 +115,30 @@ fun WalletScreen(nav: NavController) {
                 "A chave privada fica no dispositivo. Esta tela consulta apenas o saldo; envio e assinatura ainda não estão disponíveis.",
                 color = c.ink2
             )
-            if (address == null && setup == null) {
+            if (walletExists && address == null && setup == null) {
+                Text("A carteira local existe, mas os metadados públicos não estão disponíveis. Confirme a frase de recuperação para reparar os metadados sem substituir a chave armazenada.")
+                OutlinedTextField(
+                    value = recoveryPhrase,
+                    onValueChange = { recoveryPhrase = it },
+                    label = { Text("Frase de recuperação") },
+                    modifier = Modifier.fillMaxWidth(),
+                    minLines = 3
+                )
+                Button(onClick = {
+                    val input = recoveryPhrase.toCharArray()
+                    recoveryPhrase = ""
+                    try {
+                        address = repository.repairMetadataFromRecoveryPhrase(input)
+                        walletExists = true
+                        revealPhrase = false
+                        error = null
+                    } catch (e: Exception) {
+                        error = e.message ?: "Não foi possível reparar os metadados"
+                    }
+                }, modifier = Modifier.fillMaxWidth()) { Text("Verificar frase e reparar carteira") }
+            }
+
+            if (address == null && setup == null && !walletExists) {
                 Button(
                     onClick = {
                         error = null
