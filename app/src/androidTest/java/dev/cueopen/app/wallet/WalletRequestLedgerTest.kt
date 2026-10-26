@@ -39,13 +39,14 @@ class WalletRequestLedgerTest {
         requestId: String = "request_12345678",
         recipientAddress: String = recipient,
         amountLamports: Long = 50L,
+        createdAtEpochMs: Long = 1L,
         memo: String? = "test"
     ) = WalletTransferIntent(
         requestId = requestId,
         agentId = "test-agent",
         recipientAddress = recipientAddress,
         amountLamports = amountLamports,
-        createdAtEpochMs = 1L,
+        createdAtEpochMs = createdAtEpochMs,
         memo = memo
     )
 
@@ -782,6 +783,27 @@ class WalletRequestLedgerTest {
         } catch (expected: IllegalArgumentException) {
             assertTrue(expected.message.orEmpty().contains("Authorization time"))
         }
+    }
+
+
+    @Test
+    fun recentDuplicateAgentIntentIsFoundEvenWithANewRequestId() {
+        val now = System.currentTimeMillis()
+        val original = intent(
+            requestId = "request_12345678",
+            createdAtEpochMs = now,
+            memo = null
+        )
+        ledger.claim(original)
+
+        val retry = intent(
+            requestId = "request_87654321",
+            createdAtEpochMs = now + 1L,
+            memo = null
+        )
+        val duplicate = ledger.findRecentDuplicateIntent(retry, now + 1L)
+        assertEquals(original.requestId, duplicate?.requestId)
+        assertEquals(LedgerState.PREPARED, duplicate?.state)
     }
 
 }
