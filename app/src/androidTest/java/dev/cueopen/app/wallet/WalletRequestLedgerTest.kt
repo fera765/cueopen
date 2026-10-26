@@ -257,8 +257,16 @@ class WalletRequestLedgerTest {
         assertTrue(ledger.transition(
             request.requestId, LedgerState.AUTHORIZED, LedgerState.SIGNING
         ))
+        val revokedPolicy = WalletAgentPolicy(
+            agentId = "test-agent",
+            enabled = false,
+            canTransfer = false,
+            maxTransferLamports = 100L,
+            dailyLimitLamports = 100L,
+            allowedRecipients = setOf(recipient)
+        )
         val replay = ledger.claimAndAuthorize(
-            request, transferPolicy(autonomous = false),
+            request, revokedPolicy,
             now - 10_000L, now + 10_000L, now + 1L
         )
         assertTrue(replay is LedgerAuthorizationResult.Existing)
