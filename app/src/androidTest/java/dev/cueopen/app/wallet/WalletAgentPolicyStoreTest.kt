@@ -5,6 +5,7 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import android.content.Context
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
+import org.junit.After
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -20,6 +21,12 @@ class WalletAgentPolicyStoreTest {
         context.getSharedPreferences("wallet_agent_policies", Context.MODE_PRIVATE)
             .edit().clear().commit()
         store = WalletAgentPolicyStore(context)
+    }
+
+    @After
+    fun tearDown() {
+        context.getSharedPreferences("wallet_agent_policies", Context.MODE_PRIVATE)
+            .edit().clear().commit()
     }
 
     @Test
