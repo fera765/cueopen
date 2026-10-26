@@ -134,3 +134,5 @@ Ao concluir uma tarefa, marcar sua caixa como `[x]`, anotar o commit que contém
 - 2026-10-26 — Adicionados testes instrumentados de `SolanaWalletRepository`: confirmação divergente não deve persistir carteira; confirmação válida deve persistir o endereço; restauração com a frase deve reproduzir o mesmo endereço. Commit: `03f26fb5c284064a8a08de08262940ffc1fa2795`. Testes escritos, não executados.
 
 - 2026-10-26 — Endurecido o ledger antes da integração do assinador: agora existe estado intermediário `SIGNING`; a transição direta `AUTHORIZED -> SIGNED` é proibida, e registrar `SIGNED` exige uma assinatura durável. Isso reduz o risco de um chamador marcar uma transação como assinada sem passar pela etapa explícita de assinatura. Commits: `ffce843d0a461443ae647a650175d61302c0b4aa`, `81a6699a80bf1f7b912a5f70e3e036895f82cc74`. **Testes apenas atualizados, não executados; nenhum assinador/transmissor de transações foi declarado pronto.**
+
+- 2026-10-26 — Revisado o caso de regressão do ledger e alinhada a expectativa do teste ao comportamento do método. Commit: `d5c889c3476423c7303be571cfaac88bf3bf955e`. Execução pendente.
