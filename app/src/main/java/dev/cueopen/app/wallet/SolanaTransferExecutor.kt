@@ -187,7 +187,7 @@ class SolanaTransferExecutor(
                     "Persisted transaction bytes are unavailable; refusing to rebuild or re-sign"
                 )
             try {
-                val latestPolicy = policyStore.manualTransferPolicy(record.network)
+                val latestPolicy = policyStore.transferPolicy(record.agentId, record.network)
                 if (!latestPolicy.enabled || latestPolicy != persistedPolicy) {
                     return@withContext TransferExecutionResult.Rejected(
                         "Transfer permission changed before broadcast; no network request was made"
