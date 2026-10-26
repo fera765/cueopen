@@ -840,6 +840,36 @@ class WalletRequestLedger(context: Context) : SQLiteOpenHelper(
         return requestIds.mapNotNull { readRecord(db, it) }
     }
 
+    /**
+     * Detects repeated agent intents created within a short window, even when the model
+     * generates a fresh request ID on every tool call. FAILED requests are excluded; all
+     * other states remain deduplicated to prevent duplicate sends during retries.
+     */
+    @Synchronized
+    fun findRecentDuplicateIntent(
+        intent: WalletTransferIntent,
+        nowEpochMs: Long = System.currentTimeMillis(),
+        dedupeWindowMs: Long = 120_000L
+    ): LedgerRecord? {
+        require(nowEpochMs > 0L)
+        require(dedupeWindowMs in 1L..3_600_000L)
+        val lowerBound = (nowEpochMs - dedupeWindowMs).coerceAtLeast(1L)
+        val db = readableDatabase
+        val requestId = db.query(
+            TABLE,
+            arrayOf("request_id"),
+            "agent_id = ? AND recipient = ? AND amount_lamports = ? AND network = ? AND memo IS NULL AND state != ? AND created_at_ms >= ?",
+            arrayOf(
+                intent.agentId, intent.recipientAddress, intent.amountLamports.toString(),
+                intent.network.name, LedgerState.FAILED.name, lowerBound.toString()
+            ),
+            null, null, "created_at_ms DESC", "1"
+        ).use { cursor ->
+            if (cursor.moveToFirst()) cursor.getString(0) else null
+        } ?: return null
+        return readRecord(db, requestId)
+    }
+
     @Synchronized
     fun find(requestId: String): LedgerRecord? {
         require(requestId.isNotBlank())
