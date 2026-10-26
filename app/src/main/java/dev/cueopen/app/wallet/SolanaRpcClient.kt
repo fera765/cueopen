@@ -78,9 +78,10 @@ class SolanaRpcClient(
             val result = rpc("getFeeForMessage", listOf(
                 JsonPrimitive(Base64.getEncoder().encodeToString(serializedMessage)),
                 buildJsonObject { put("commitment", "confirmed") }
-            ))
-            if (result == JsonNull) return@withContext null
-            result.jsonPrimitive.content.toLongOrNull()?.takeIf { it >= 0L }
+            )).jsonObject
+            val feeValue = result["value"] ?: throw IOException("Malformed getFeeForMessage response")
+            if (feeValue == JsonNull) return@withContext null
+            feeValue.jsonPrimitive.content.toLongOrNull()?.takeIf { it >= 0L }
                 ?: throw IOException("Malformed getFeeForMessage result")
         }
 
@@ -102,7 +103,8 @@ class SolanaRpcClient(
                     put("sigVerify", true)
                     put("replaceRecentBlockhash", false)
                 }
-            )).jsonObject
+            )).jsonObject["value"]?.jsonObject
+                ?: throw IOException("Malformed simulateTransaction response")
             val error = value["err"]
             val logs = value["logs"]?.takeUnless { it == JsonNull }?.jsonArray
                 ?.mapNotNull { element -> runCatching { element.jsonPrimitive.content }.getOrNull() }
@@ -215,4 +217,10 @@ data class SolanaSignatureStatus(
     val slot: Long,
     val confirmationStatus: String?,
     val error: String?
-)
+) {
+    val isFinalized: Boolean
+        get() = confirmationStatus == "finalized" && error == null
+
+    val failedOnChain: Boolean
+        get() = error != null
+}
