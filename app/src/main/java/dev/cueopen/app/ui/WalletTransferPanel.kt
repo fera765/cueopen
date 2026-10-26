@@ -297,6 +297,8 @@ fun WalletTransferPanel(context: Context, repository: SolanaWalletRepository, ne
                                 try {
                                     result = executor.reconcileSignature(id, WalletAgentPolicyStore.manualAgentId(network))
                                     message = result.toString()
+                                } catch (error: Exception) {
+                                    message = error.message ?: "Não foi possível consultar o estado da transação."
                                 } finally {
                                     busy = false
                                     refreshHistory()
@@ -317,6 +319,8 @@ fun WalletTransferPanel(context: Context, repository: SolanaWalletRepository, ne
                                 try {
                                     result = executor.reconcileSignature(id, WalletAgentPolicyStore.manualAgentId(network))
                                     message = result.toString()
+                                } catch (error: Exception) {
+                                    message = error.message ?: "Não foi possível consultar o estado da transação."
                                 } finally {
                                     busy = false
                                     refreshHistory()
@@ -452,6 +456,8 @@ fun WalletTransferPanel(context: Context, repository: SolanaWalletRepository, ne
                                         humanConfirmed = true
                                     )
                                     message = result.toString()
+                                } catch (error: Exception) {
+                                    message = error.message ?: "Não foi possível transmitir a transação."
                                 } finally {
                                     busy = false
                                     refreshHistory()
