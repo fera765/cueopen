@@ -223,3 +223,7 @@ Estado honesto de release: **NÃO CONCLUÍDO**. A implementação do painel de c
 - `todo.md` recebeu este relatório no commit registrado logo após a correção do workflow.
 - Testes encontrados em `main` são arquivos de teste; a existência deles não significa que passaram.
 - Uma execução antiga de CI em `efda70f4d8bd5bb4086e43bd2a924f3f9d3d48a5` foi concluída com sucesso antes dos commits posteriores da carteira e não comprova o estado atual.
+
+
+- 2026-10-26 — Em `work/solana-wallet-completion`, o workflow manual foi ampliado para executar também `connectedDebugAndroidTest` em emulador Android antes do APK de release (commit `72ebb17155ddffa0068697a27aacceddd1196e27`). A alteração adiciona cobertura automatizada ao gate, mas **nenhum teste foi executado por esta alteração**; o build permanece manual e bloqueado até que as quatro tarefas acima sejam implementadas, revisadas e validadas.
+- 2026-10-26 — Atualizado `docs/solana-wallet-security.md` no commit `5767493a7adaf51f0fcae84acf25f7cde38d377a` para descrever com precisão o código existente e explicitar bloqueios: integração de ferramentas de carteira aos agentes e concessão persistente por agente não implementadas; swaps de tokens não implementados; testes escritos mas não executados. Nenhuma caixa das quatro tarefas foi marcada como concluída.
