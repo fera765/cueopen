@@ -18,7 +18,9 @@ data class WalletTransferIntent(
     init {
         require(requestId.matches(Regex("[A-Za-z0-9_-]{12,96}"))) { "Invalid transfer request ID" }
         require(agentId.isNotBlank()) { "Agent ID is required" }
-        require(recipientAddress.isNotBlank()) { "Recipient is required" }
+        require(SolanaAddressValidator.isValidAddress(recipientAddress)) {
+            "Recipient must be a valid 32-byte Solana public address"
+        }
         require(amountLamports > 0L) { "Amount must be positive" }
         require(createdAtEpochMs > 0L) { "Creation time is required" }
         require(memo == null || memo.length <= 200) { "Memo is too long" }
