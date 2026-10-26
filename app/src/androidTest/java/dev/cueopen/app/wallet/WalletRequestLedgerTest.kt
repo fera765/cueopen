@@ -152,6 +152,39 @@ class WalletRequestLedgerTest {
     }
 
     @Test
+    fun confirmationMustPreserveTheOriginalSignature() {
+        ledger.claim(intent())
+        ledger.transition("request_12345678", LedgerState.PREPARED, LedgerState.AWAITING_APPROVAL)
+        val now = System.currentTimeMillis()
+        val approval = ledger.approveForSigning(
+            "request_12345678", transferPolicy(), now - 10_000L, now + 10_000L, now
+        )
+        assertTrue(approval is LedgerAuthorizationResult.Approved)
+        assertTrue(ledger.transition(
+            "request_12345678", LedgerState.AUTHORIZED, LedgerState.SIGNING
+        ))
+        val signature = "8".repeat(88)
+        assertTrue(ledger.transition(
+            "request_12345678", LedgerState.SIGNING, LedgerState.SIGNED, signature
+        ))
+        assertTrue(ledger.transition(
+            "request_12345678", LedgerState.SIGNED, LedgerState.SUBMITTED, signature
+        ))
+        try {
+            ledger.transition(
+                "request_12345678", LedgerState.SUBMITTED, LedgerState.CONFIRMED, "9".repeat(88)
+            )
+            throw AssertionError("Confirmation must reference the original transaction signature")
+        } catch (expected: IllegalArgumentException) {
+            assertTrue(expected.message.orEmpty().contains("must match"))
+        }
+        assertTrue(ledger.transition(
+            "request_12345678", LedgerState.SUBMITTED, LedgerState.CONFIRMED, signature
+        ))
+        assertEquals(LedgerState.CONFIRMED, ledger.find("request_12345678")?.state)
+    }
+
+    @Test
     fun terminalStatesCannotBeReopened() {
         ledger.claim(intent())
         assertTrue(ledger.transition(
