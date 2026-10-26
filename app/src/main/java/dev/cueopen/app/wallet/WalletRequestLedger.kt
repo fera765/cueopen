@@ -131,8 +131,35 @@ class WalletRequestLedger(context: Context) : SQLiteOpenHelper(
                     db.setTransactionSuccessful()
                     return LedgerAuthorizationResult.Rejected(decision)
                 }
+                if (existing.state == LedgerState.FAILED) {
+                    db.setTransactionSuccessful()
+                    return LedgerAuthorizationResult.Rejected(
+                        PolicyDecision.Denied("A failed request ID cannot be reused")
+                    )
+                }
+                // Re-evaluation must never silently bypass a previously required human approval.
+                var effectiveRecord = existing
+                var effectiveDecision = if (
+                    existing.state == LedgerState.PREPARED ||
+                    existing.state == LedgerState.AWAITING_APPROVAL
+                ) PolicyDecision.RequiresUserApproval else decision
+                if (existing.state == LedgerState.AUTHORIZED &&
+                    decision == PolicyDecision.RequiresUserApproval
+                ) {
+                    val changed = db.update(
+                        TABLE,
+                        ContentValues().apply {
+                            put("state", LedgerState.AWAITING_APPROVAL.name)
+                            put("updated_at_ms", System.currentTimeMillis())
+                        },
+                        "request_id = ? AND state = ?",
+                        arrayOf(intent.requestId, LedgerState.AUTHORIZED.name)
+                    )
+                    check(changed == 1) { "Could not downgrade authorization after policy change" }
+                    effectiveRecord = existing.copy(state = LedgerState.AWAITING_APPROVAL)
+                }
                 db.setTransactionSuccessful()
-                return LedgerAuthorizationResult.Existing(existing, decision)
+                return LedgerAuthorizationResult.Existing(effectiveRecord, effectiveDecision)
             }
 
             val spent = sumReservedSpend(db, intent.agentId, windowStartEpochMs, windowEndEpochMs)
