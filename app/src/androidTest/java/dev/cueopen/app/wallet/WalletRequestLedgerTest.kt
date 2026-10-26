@@ -481,11 +481,18 @@ class WalletRequestLedgerTest {
             ledger,
             SolanaRpcClient(endpoint = "https://rpc.test", client = OkHttpClient())
         )
-        val broadcast = executor.broadcastPersistedTransfer(request.requestId, "other-agent")
+        val policy = transferPolicy(autonomous = true)
+        val windowStart = now - 10_000L
+        val windowEnd = now + 10_000L
+        val broadcast = executor.broadcastPersistedTransfer(
+            request.requestId, "other-agent", policy, windowStart, windowEnd, humanConfirmed = false
+        )
         val reconcile = executor.reconcileSignature(request.requestId, "other-agent")
         assertTrue(broadcast is TransferExecutionResult.Rejected)
         assertTrue(reconcile is TransferExecutionResult.Rejected)
-        val unknownNetworkBroadcast = executor.broadcastPersistedTransfer(request.requestId, "test-agent")
+        val unknownNetworkBroadcast = executor.broadcastPersistedTransfer(
+            request.requestId, "test-agent", policy, windowStart, windowEnd, humanConfirmed = true
+        )
         val unknownNetworkReconcile = executor.reconcileSignature(request.requestId, "test-agent")
         assertTrue(unknownNetworkBroadcast is TransferExecutionResult.Rejected)
         assertTrue(unknownNetworkReconcile is TransferExecutionResult.Rejected)
