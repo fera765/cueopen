@@ -110,6 +110,12 @@ class SolanaTransferExecutor(
             if (!SolanaSignatureValidator.isValid(signature)) {
                 return@withContext abortAndReject(requestId, "Signer returned an invalid signature")
             }
+            val simulation = rpc.simulateSerializedTransaction(signedBytes)
+            if (!simulation.success) {
+                return@withContext abortAndReject(
+                    requestId, "Transaction simulation failed: " + (simulation.error ?: "unknown simulation error")
+                )
+            }
             if (!ledger.persistSignedTransaction(requestId, signature, signedBytes)) {
                 return@withContext abortAndReject(
                     requestId, "Signed transaction could not be durably recorded; no broadcast was attempted"
