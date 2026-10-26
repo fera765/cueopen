@@ -246,6 +246,26 @@ class WalletRequestLedgerTest {
     }
 
     @Test
+    fun replayRevokesSigningStateWhenPolicyNoLongerAllowsAutonomousExecution() {
+        val now = System.currentTimeMillis()
+        val request = intent(requestId = "request_revoke_001", amountLamports = 20L)
+        val initial = ledger.claimAndAuthorize(
+            request, transferPolicy(autonomous = true),
+            now - 10_000L, now + 10_000L, now
+        )
+        assertTrue(initial is LedgerAuthorizationResult.Created)
+        assertTrue(ledger.transition(
+            request.requestId, LedgerState.AUTHORIZED, LedgerState.SIGNING
+        ))
+        val replay = ledger.claimAndAuthorize(
+            request, transferPolicy(autonomous = false),
+            now - 10_000L, now + 10_000L, now + 1L
+        )
+        assertTrue(replay is LedgerAuthorizationResult.Existing)
+        assertEquals(LedgerState.AWAITING_APPROVAL, ledger.find(request.requestId)?.state)
+    }
+
+    @Test
     fun terminalStatesCannotBeReopened() {
         ledger.claim(intent())
         assertTrue(ledger.transition(
