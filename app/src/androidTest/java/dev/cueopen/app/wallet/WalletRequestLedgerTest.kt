@@ -212,7 +212,7 @@ class WalletRequestLedgerTest {
             )
             throw AssertionError("Malformed signature should be rejected")
         } catch (expected: IllegalArgumentException) {
-            assertTrue(expected.message.orEmpty().contains("base58"))
+            assertTrue(expected.message.orEmpty().contains("Invalid Solana transaction signature"))
         }
         assertEquals(LedgerState.SIGNING, ledger.find("request_valid_sig01")?.state)
     }
