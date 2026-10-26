@@ -25,6 +25,42 @@ class SolanaWalletRepository(context: Context) {
     fun backupConfirmed(): Boolean =
         vault.hasSecret() && prefs.getBoolean("backup_confirmed", false)
 
+    /**
+     * Repairs lost public metadata only after the supplied recovery phrase derives the
+     * exact secret already encrypted in this device's vault. Never replaces the vault.
+     */
+    @Synchronized
+    fun repairMetadataFromRecoveryPhrase(phrase: CharArray): String {
+        check(vault.hasSecret()) { "No local wallet secret exists to recover" }
+        val material = SolanaWalletKeyDerivation.restore(phrase)
+        var storedSeed: ByteArray? = null
+        try {
+            storedSeed = vault.read()
+            require(constantTimeEquals(storedSeed, material.secretSeed)) {
+                "Recovery phrase does not match the wallet stored on this device"
+            }
+            check(prefs.edit()
+                .putString("public_address", material.publicAddress)
+                .putBoolean("backup_confirmed", true)
+                .commit()) { "Could not repair wallet metadata" }
+            return material.publicAddress
+        } finally {
+            storedSeed?.fill(0)
+            material.close()
+            phrase.fill(0.toChar())
+        }
+    }
+
+    private fun constantTimeEquals(left: ByteArray, right: ByteArray): Boolean {
+        var difference = left.size xor right.size
+        for (index in 0 until maxOf(left.size, right.size)) {
+            val a = if (index < left.size) left[index].toInt() and 0xff else 0
+            val b = if (index < right.size) right[index].toInt() and 0xff else 0
+            difference = difference or (a xor b)
+        }
+        return difference == 0
+    }
+
     @Synchronized
     fun beginCreate(): WalletSetupSession {
         check(!vault.hasSecret()) { "Wallet already exists" }
