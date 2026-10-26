@@ -104,9 +104,13 @@ class WalletRequestLedgerTest {
         assertTrue(ledger.beginSigningAfterHumanApproval(
             "request_12345678", transferPolicy(), now - 10_000L, now + 10_000L, now
         ) is LedgerSigningStartResult.Started)
-        assertTrue(ledger.transition(
-            "request_12345678", LedgerState.SIGNING, LedgerState.SIGNED, "67rpwLCuS5DGA8KGZXKsVQ7dnPb9goRLoKfgGbLfQg9WoLUgNY77E2jT11fem3coV9nAkguBACzrU1iyZM4B8roQ"
-        ))
+        try {
+            ledger.transition("request_12345678", LedgerState.SIGNING, LedgerState.SIGNED,
+                "67rpwLCuS5DGA8KGZXKsVQ7dnPb9goRLoKfgGbLfQg9WoLUgNY77E2jT11fem3coV9nAkguBACzrU1iyZM4B8roQ")
+            throw AssertionError("A policy-checked signing claim must use a dedicated signer persistence path")
+        } catch (expected: IllegalArgumentException) {
+            assertTrue(expected.message.orEmpty().contains("Signature persistence"))
+        }
     }
 
     @Test
