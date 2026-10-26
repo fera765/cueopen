@@ -250,6 +250,81 @@ class WalletRequestLedger(context: Context) : SQLiteOpenHelper(
         }
     }
 
+    /**
+     * Called only after an explicit human approval action. Rechecks the current policy and
+     * spending window inside the same SQLite transaction before promoting the request to
+     * AUTHORIZED. A UI click alone is not enough: policy denial always fails closed.
+     */
+    @Synchronized
+    fun approveForSigning(
+        requestId: String,
+        policy: WalletAgentPolicy,
+        windowStartEpochMs: Long,
+        windowEndEpochMs: Long,
+        approvalTimeEpochMs: Long = System.currentTimeMillis()
+    ): LedgerAuthorizationResult {
+        require(requestId.isNotBlank())
+        require(windowStartEpochMs > 0L && windowEndEpochMs > windowStartEpochMs) {
+            "Invalid spending window"
+        }
+        require(approvalTimeEpochMs in windowStartEpochMs until windowEndEpochMs) {
+            "Approval time is outside the spending window"
+        }
+
+        val db = writableDatabase
+        db.beginTransaction()
+        try {
+            val record = readRecord(db, requestId)
+                ?: return LedgerAuthorizationResult.Rejected(
+                    PolicyDecision.Denied("Transfer request does not exist")
+                )
+            if (record.state != LedgerState.AWAITING_APPROVAL) {
+                return LedgerAuthorizationResult.Rejected(
+                    PolicyDecision.Denied("Transfer is not awaiting human approval")
+                )
+            }
+            if (record.agentId != policy.agentId) {
+                return LedgerAuthorizationResult.Rejected(
+                    PolicyDecision.Denied("Agent identity does not match wallet policy")
+                )
+            }
+            val intent = WalletTransferIntent(
+                requestId = record.requestId,
+                agentId = record.agentId,
+                recipientAddress = record.recipientAddress,
+                amountLamports = record.amountLamports,
+                createdAtEpochMs = record.createdAtEpochMs,
+                memo = record.memo
+            )
+            val spent = sumReservedSpend(
+                db, record.agentId, windowStartEpochMs, windowEndEpochMs,
+                excludeRequestId = requestId
+            )
+            val decision = policy.authorize(
+                WalletAction.TRANSFER, intent.amountLamports, intent.recipientAddress, spent
+            )
+            if (decision is PolicyDecision.Denied) {
+                db.setTransactionSuccessful()
+                return LedgerAuthorizationResult.Rejected(decision)
+            }
+            val changed = db.update(
+                TABLE,
+                ContentValues().apply {
+                    put("state", LedgerState.AUTHORIZED.name)
+                    put("reserved_at_ms", approvalTimeEpochMs)
+                    put("updated_at_ms", System.currentTimeMillis())
+                },
+                "request_id = ? AND state = ?",
+                arrayOf(requestId, LedgerState.AWAITING_APPROVAL.name)
+            )
+            check(changed == 1) { "Transfer state changed during approval" }
+            db.setTransactionSuccessful()
+            return LedgerAuthorizationResult.Approved(record.copy(state = LedgerState.AUTHORIZED))
+        } finally {
+            db.endTransaction()
+        }
+    }
+
     /** Compare-and-set transition prevents stale callers from overwriting a newer state. */
     @Synchronized
     fun transition(
@@ -341,7 +416,7 @@ class WalletRequestLedger(context: Context) : SQLiteOpenHelper(
     private fun allowedNextStates(state: LedgerState): Set<LedgerState> = when (state) {
         LedgerState.PREPARED -> setOf(LedgerState.AWAITING_APPROVAL, LedgerState.FAILED)
         LedgerState.AUTHORIZED -> setOf(LedgerState.SIGNED, LedgerState.FAILED)
-        LedgerState.AWAITING_APPROVAL -> setOf(LedgerState.SIGNED, LedgerState.FAILED)
+        LedgerState.AWAITING_APPROVAL -> setOf(LedgerState.FAILED)
         LedgerState.SIGNED -> setOf(LedgerState.SUBMITTED, LedgerState.UNKNOWN, LedgerState.FAILED)
         LedgerState.SUBMITTED -> setOf(LedgerState.CONFIRMED, LedgerState.UNKNOWN, LedgerState.FAILED)
         LedgerState.UNKNOWN -> setOf(LedgerState.CONFIRMED, LedgerState.FAILED)
@@ -394,5 +469,7 @@ sealed interface LedgerAuthorizationResult {
     data class Created(val record: LedgerRecord, val decision: PolicyDecision) : LedgerAuthorizationResult
     /** Existing idempotency record only; this is never a new signing authorization. */
     data class Existing(val record: LedgerRecord) : LedgerAuthorizationResult
+    /** Fresh human approval plus policy recheck; only this can promote approval to signing-ready. */
+    data class Approved(val record: LedgerRecord) : LedgerAuthorizationResult
     data class Rejected(val decision: PolicyDecision.Denied) : LedgerAuthorizationResult
 }
