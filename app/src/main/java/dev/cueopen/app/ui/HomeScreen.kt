@@ -37,7 +37,15 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.core.content.ContextCompat
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.OffsetMapping
+import androidx.compose.ui.text.input.TextFieldValue
+import androidx.compose.ui.text.input.TextRange
+import androidx.compose.ui.text.input.TransformedText
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -199,6 +207,35 @@ fun Composer(
     onSend: (String, List<Uri>) -> Unit,
 ) {
     val c = Cue.c
+    // Mantém cursor/seleção dentro do Composer; String isolada perde a posição do cursor
+    // quando uma sugestão @ é substituída.
+    var editor by remember { mutableStateOf(TextFieldValue(value, selection = TextRange(value.length))) }
+    var mentionRange by remember { mutableStateOf<TextRange?>(null) }
+    LaunchedEffect(value) {
+        if (value != editor.text) {
+            editor = TextFieldValue(value, selection = TextRange(value.length))
+            mentionRange = null
+        }
+    }
+    val mentionTransformation = remember(mentionRange, editor.text) {
+        val range = mentionRange
+        val expected = range?.takeIf { it.start >= 0 && it.end <= editor.text.length }
+            ?.let { editor.text.substring(it.start, it.end) }
+        VisualTransformation { source ->
+            val annotated = buildAnnotatedString {
+                append(source)
+                if (range != null && expected != null && range.end <= source.length &&
+                    source.text.substring(range.start, range.end) == expected) {
+                    addStyle(
+                        SpanStyle(color = Color.White, background = Color(0xFF246BCE), fontWeight = FontWeight.SemiBold),
+                        range.start,
+                        range.end
+                    )
+                }
+            }
+            TransformedText(annotated, OffsetMapping.Identity)
+        }
+    }
     var files by remember { mutableStateOf(listOf<Uri>()) }
     val ctx = LocalContext.current
     val pick = rememberLauncherForActivityResult(ActivityResultContracts.GetMultipleContents()) { files = files + it }
@@ -283,7 +320,7 @@ fun Composer(
         }
     }
     // Sugestões de comandos (/) e menções (@ skills e agents)
-    val token = value.substringAfterLast(' ').substringAfterLast('\n')
+    val token = editor.text.substringAfterLast(' ').substringAfterLast('\n')
     val stAll = CueApp.instance.store.state.collectAsStateWithLifecycle().value
     val suggestions: List<Triple<String, String, String>> = remember(token, stAll.skills, stAll.agents) {
         when {
@@ -300,7 +337,19 @@ fun Composer(
             .heightIn(max = 240.dp).verticalScroll(rememberScrollState())) {
             suggestions.forEach { (label, desc, insert) ->
                 Row(Modifier.fillMaxWidth().clickable {
-                    onChange(if (label.startsWith("/")) insert else value.dropLast(token.length) + insert)
+                    if (label.startsWith("/")) {
+                        editor = TextFieldValue(insert, selection = TextRange(insert.length))
+                        mentionRange = null
+                        onChange(insert)
+                    } else {
+                        val prefix = editor.text.dropLast(token.length)
+                        val selected = insert.trimEnd()
+                        val updated = prefix + insert
+                        val start = prefix.length
+                        editor = TextFieldValue(updated, selection = TextRange(updated.length))
+                        mentionRange = TextRange(start, start + selected.length)
+                        onChange(updated)
+                    }
                 }.padding(horizontal = 14.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
                     Icon(when { label.startsWith("/") -> Icons.Rounded.Terminal; desc == "Agent" -> Icons.Rounded.SmartToy; else -> Icons.Rounded.AutoAwesome },
                         null, Modifier.size(18.dp), tint = c.accent)
@@ -364,9 +413,26 @@ fun Composer(
             Spacer(Modifier.height(8.dp))
         }
         Box(Modifier.fillMaxWidth().heightIn(min = 28.dp, max = 160.dp).padding(horizontal = 4.dp)) {
-            if (value.isEmpty()) Text(placeholder, color = c.ink3, fontSize = 16.sp)
-            BasicTextField(value, onChange, textStyle = MaterialTheme.typography.bodyLarge.copy(color = c.ink),
-                cursorBrush = SolidColor(c.accent), modifier = Modifier.fillMaxWidth())
+            if (editor.text.isEmpty()) Text(placeholder, color = c.ink3, fontSize = 16.sp)
+            BasicTextField(
+                value = editor,
+                onValueChange = { next ->
+                    val oldRange = mentionRange
+                    val oldText = editor.text
+                    editor = next
+                    if (oldRange != null && (oldRange.end > next.text.length ||
+                            oldRange.end > oldText.length ||
+                            next.text.substring(oldRange.start, oldRange.end) != oldText.substring(oldRange.start, oldRange.end))) {
+                        // The selected token changed or was removed; stop styling a stale range.
+                        mentionRange = null
+                    }
+                    onChange(next.text)
+                },
+                textStyle = MaterialTheme.typography.bodyLarge.copy(color = c.ink),
+                cursorBrush = SolidColor(c.accent),
+                visualTransformation = mentionTransformation,
+                modifier = Modifier.fillMaxWidth()
+            )
         }
         Spacer(Modifier.height(8.dp))
         Row(verticalAlignment = Alignment.CenterVertically) {
