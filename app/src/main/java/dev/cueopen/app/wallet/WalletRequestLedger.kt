@@ -58,6 +58,7 @@ class WalletRequestLedger(context: Context) : SQLiteOpenHelper(
                 put("recipient", intent.recipientAddress)
                 put("amount_lamports", intent.amountLamports)
                 put("created_at_ms", intent.createdAtEpochMs)
+                put("reserved_at_ms", System.currentTimeMillis().coerceAtLeast(1L))
                 if (intent.memo == null) putNull("memo") else put("memo", intent.memo)
                 put("state", LedgerState.PREPARED.name)
                 put("signature", null as String?)
@@ -97,13 +98,14 @@ class WalletRequestLedger(context: Context) : SQLiteOpenHelper(
         intent: WalletTransferIntent,
         policy: WalletAgentPolicy,
         windowStartEpochMs: Long,
-        windowEndEpochMs: Long
+        windowEndEpochMs: Long,
+        authorizationTimeEpochMs: Long = System.currentTimeMillis()
     ): LedgerAuthorizationResult {
         require(windowStartEpochMs > 0L && windowEndEpochMs > windowStartEpochMs) {
             "Invalid spending window"
         }
-        require(intent.createdAtEpochMs in windowStartEpochMs until windowEndEpochMs) {
-            "Transfer timestamp is outside the spending window"
+        require(authorizationTimeEpochMs in windowStartEpochMs until windowEndEpochMs) {
+            "Authorization time is outside the spending window"
         }
         if (policy.agentId != intent.agentId) {
             return LedgerAuthorizationResult.Rejected(
@@ -182,6 +184,7 @@ class WalletRequestLedger(context: Context) : SQLiteOpenHelper(
                 put("recipient", intent.recipientAddress)
                 put("amount_lamports", intent.amountLamports)
                 put("created_at_ms", intent.createdAtEpochMs)
+                put("reserved_at_ms", authorizationTimeEpochMs)
                 if (intent.memo == null) putNull("memo") else put("memo", intent.memo)
                 put("state", initialState.name)
                 put("signature", null as String?)
@@ -233,7 +236,7 @@ class WalletRequestLedger(context: Context) : SQLiteOpenHelper(
         excludeRequestId: String? = null
     ): Long {
         val selection = buildString {
-            append("agent_id = ? AND created_at_ms >= ? AND created_at_ms < ? AND state != ?")
+            append("agent_id = ? AND reserved_at_ms >= ? AND reserved_at_ms < ? AND state != ?")
             if (excludeRequestId != null) append(" AND request_id != ?")
         }
         val args = mutableListOf(
@@ -316,6 +319,7 @@ class WalletRequestLedger(context: Context) : SQLiteOpenHelper(
                 recipient TEXT NOT NULL,
                 amount_lamports INTEGER NOT NULL CHECK(amount_lamports > 0),
                 created_at_ms INTEGER NOT NULL CHECK(created_at_ms > 0),
+                reserved_at_ms INTEGER NOT NULL CHECK(reserved_at_ms > 0),
                 memo TEXT,
                 state TEXT NOT NULL,
                 signature TEXT,
@@ -326,8 +330,14 @@ class WalletRequestLedger(context: Context) : SQLiteOpenHelper(
     }
 
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
-        // Keep transfer history intact; future schema changes must use explicit migrations.
-        error("Unsupported wallet ledger schema upgrade: $oldVersion -> $newVersion")
+        if (oldVersion < 2) {
+            // Conservatively preserve prior reservations when migrating existing records.
+            db.execSQL("ALTER TABLE $TABLE ADD COLUMN reserved_at_ms INTEGER NOT NULL DEFAULT 1")
+            db.execSQL("UPDATE $TABLE SET reserved_at_ms = created_at_ms")
+        }
+        if (newVersion > 2) {
+            error("Unsupported wallet ledger schema upgrade: $oldVersion -> $newVersion")
+        }
     }
 
     private fun allowedNextStates(state: LedgerState): Set<LedgerState> = when (state) {
@@ -349,7 +359,7 @@ class WalletRequestLedger(context: Context) : SQLiteOpenHelper(
 
     companion object {
         private const val DATABASE_NAME = "cueopen_wallet_requests.db"
-        private const val DATABASE_VERSION = 1
+        private const val DATABASE_VERSION = 2
         private const val TABLE = "wallet_transfer_requests"
         private const val MAX_SIGNATURE_LENGTH = 128
     }
