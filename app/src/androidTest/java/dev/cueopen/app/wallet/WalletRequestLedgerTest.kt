@@ -112,4 +112,102 @@ class WalletRequestLedgerTest {
             "request_12345678", LedgerState.FAILED, LedgerState.PREPARED
         ))
     }
+
+    private fun transferPolicy(
+        dailyLimit: Long = 100L,
+        autonomous: Boolean = false
+    ) = WalletAgentPolicy(
+        agentId = "test-agent",
+        enabled = true,
+        canTransfer = true,
+        autonomousExecution = autonomous,
+        maxTransferLamports = 100L,
+        dailyLimitLamports = dailyLimit,
+        allowedRecipients = if (autonomous) setOf(recipient) else emptySet()
+    )
+
+    @Test
+    fun authorizedClaimReservesPendingSpendAgainstDailyLimit() {
+        val now = System.currentTimeMillis()
+        val start = now - 10_000L
+        val end = now + 10_000L
+        val first = ledger.claimAndAuthorize(
+            intent(requestId = "request_first_001", amountLamports = 60L),
+            transferPolicy(), start, end, now
+        )
+        assertTrue(first is LedgerAuthorizationResult.Created)
+        assertEquals(
+            LedgerState.AWAITING_APPROVAL,
+            (first as LedgerAuthorizationResult.Created).record.state
+        )
+
+        val second = ledger.claimAndAuthorize(
+            intent(requestId = "request_second_02", amountLamports = 50L),
+            transferPolicy(), start, end, now + 1L
+        )
+        assertTrue(second is LedgerAuthorizationResult.Rejected)
+        assertTrue(
+            ((second as LedgerAuthorizationResult.Rejected).decision.reason)
+                .contains("daily limit")
+        )
+    }
+
+    @Test
+    fun autonomousAuthorizationCreatesAuthorizedStateOnlyWithAllowlist() {
+        val now = System.currentTimeMillis()
+        val result = ledger.claimAndAuthorize(
+            intent(requestId = "request_auto_0001", amountLamports = 25L),
+            transferPolicy(autonomous = true),
+            now - 10_000L, now + 10_000L, now
+        )
+        assertTrue(result is LedgerAuthorizationResult.Created)
+        assertEquals(
+            LedgerState.AUTHORIZED,
+            (result as LedgerAuthorizationResult.Created).record.state
+        )
+        assertTrue(ledger.transition(
+            "request_auto_0001", LedgerState.AUTHORIZED, LedgerState.SIGNED
+        ))
+    }
+
+    @Test
+    fun mismatchedAgentAndInvalidWindowAreRejected() {
+        val now = System.currentTimeMillis()
+        val start = now - 10_000L
+        val end = now + 10_000L
+        val mismatch = ledger.claimAndAuthorize(
+            intent(),
+            WalletAgentPolicy(agentId = "different-agent", enabled = true, canTransfer = true,
+                maxTransferLamports = 100L, dailyLimitLamports = 100L),
+            start, end, now
+        )
+        assertTrue(mismatch is LedgerAuthorizationResult.Rejected)
+        try {
+            ledger.claimAndAuthorize(
+                intent(requestId = "request_window_01"),
+                transferPolicy(), end, start, now
+            )
+            throw AssertionError("Expected invalid window to fail closed")
+        } catch (expected: IllegalArgumentException) {
+            assertTrue(expected.message.orEmpty().contains("window"))
+        }
+    }
+
+    @Test
+    fun callerCannotBackdateAuthorizationIntoAnOldSpendingWindow() {
+        val now = System.currentTimeMillis()
+        try {
+            ledger.claimAndAuthorize(
+                intent(requestId = "request_backdate01"),
+                transferPolicy(),
+                now - 100_000L,
+                now - 50_000L,
+                authorizationTimeEpochMs = now
+            )
+            throw AssertionError("Expected authorization outside window to be rejected")
+        } catch (expected: IllegalArgumentException) {
+            assertTrue(expected.message.orEmpty().contains("Authorization time"))
+        }
+    }
+
 }
