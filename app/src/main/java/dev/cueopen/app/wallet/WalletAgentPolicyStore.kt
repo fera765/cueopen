@@ -3,8 +3,9 @@ package dev.cueopen.app.wallet
 import android.content.Context
 
 /**
- * Local policy preferences for the manually operated wallet panel.
- * Missing values always mean disabled; no agent receives transfer access by default.
+ * Local wallet policy preferences. Per-agent read grants and manual transfer permission
+ * are persisted separately; every missing capability defaults to disabled. Agent read grants
+ * never authorize transaction creation, signing, or broadcast.
  */
 class WalletAgentPolicyStore(context: Context) {
     private val prefs = context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
