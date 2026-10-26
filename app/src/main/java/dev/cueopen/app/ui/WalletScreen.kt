@@ -26,6 +26,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
@@ -240,7 +241,11 @@ fun WalletScreen(nav: NavController) {
                     "Mainnet usa SOL real. Verifique a rede antes de enviar.",
                 color = c.ink2
             )
-            if (address != null) WalletTransferPanel(context.applicationContext, repository, selectedNetwork)
+            if (address != null) {
+                key(selectedNetwork) {
+                    WalletTransferPanel(context.applicationContext, repository, selectedNetwork)
+                }
+            }
 
             if (setup != null && revealPhrase) {
                 Text("Frase de recuperação", style = androidx.compose.material3.MaterialTheme.typography.titleMedium)
