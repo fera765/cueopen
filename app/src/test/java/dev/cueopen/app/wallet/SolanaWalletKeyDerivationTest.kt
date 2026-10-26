@@ -48,4 +48,26 @@ class SolanaWalletKeyDerivationTest {
         assertEquals(true, phrase.all { it == '\u0000' })
         assertEquals(true, seed.all { it == 0.toByte() })
     }
+    @Test
+    fun matchesIndependentSolanaDerivationVector() {
+        // Public test vector cross-checked by independent BIP-39/SLIP-0010 implementations.
+        val phrase = (
+            "abandon abandon abandon abandon abandon abandon " +
+                "abandon abandon abandon abandon abandon about"
+            ).toCharArray()
+        try {
+            val restored = SolanaWalletKeyDerivation.restore(phrase)
+            try {
+                assertEquals(
+                    "HAgk14JpMQLgt6rVgv7cBQFJWFto5Dqxi472uT3DKpqk",
+                    restored.publicAddress
+                )
+            } finally {
+                restored.close()
+            }
+        } finally {
+            phrase.fill('\\u0000')
+        }
+    }
+
 }
