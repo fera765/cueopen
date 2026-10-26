@@ -43,6 +43,9 @@ class WalletAgentPolicyStoreTest {
         store.setManualTransferEnabled(SolanaNetwork.MAINNET, true)
         assertTrue(store.isManualTransferEnabled(SolanaNetwork.MAINNET))
         assertFalse(store.isManualTransferEnabled(SolanaNetwork.DEVNET))
+        val recreatedStore = WalletAgentPolicyStore(context)
+        assertTrue(recreatedStore.isManualTransferEnabled(SolanaNetwork.MAINNET))
+        assertFalse(recreatedStore.isManualTransferEnabled(SolanaNetwork.DEVNET))
         assertTrue(
             store.manualTransferPolicy(SolanaNetwork.MAINNET).authorize(
                 WalletAction.TRANSFER, 1L, recipient, 0L
