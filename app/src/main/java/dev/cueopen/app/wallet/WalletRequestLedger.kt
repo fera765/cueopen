@@ -143,8 +143,8 @@ class WalletRequestLedger(context: Context) : SQLiteOpenHelper(
                 }
                 // Re-evaluation must never silently bypass a previously required human approval.
                 // Every replay after the first authorization is informational only.
-                // If policy no longer grants fully autonomous execution, revoke the pending
-                // authorization even when the durable state has already moved toward signing.
+                // Policy can be re-evaluated on replay, but an existing request is never a
+                // new authorization to sign. If a decision is needed, return Existing only.
                 var effectiveRecord = existing
                 // Only AUTHORIZED is safe to downgrade here. SIGNING may already have
                 // produced bytes in another call; it must become UNKNOWN and be reconciled,
