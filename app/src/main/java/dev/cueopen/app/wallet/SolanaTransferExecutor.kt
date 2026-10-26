@@ -65,9 +65,10 @@ class SolanaTransferExecutor(
         try {
             val expectedAddress = walletRepository.publicAddress()
                 ?: return@withContext abortAndReject(requestId, "Wallet metadata is unavailable")
-            seed = vault.read()
-            require(seed.size == 32) { "Stored wallet seed has an unexpected length" }
-            keypair = Keypair.fromSecretKey(seed)
+            val secretSeed = vault.read()
+            seed = secretSeed
+            require(secretSeed.size == 32) { "Stored wallet seed has an unexpected length" }
+            keypair = Keypair.fromSecretKey(secretSeed)
             if (keypair.publicKey.toBase58() != expectedAddress) {
                 return@withContext abortAndReject(
                     requestId, "Stored secret does not match wallet metadata"
@@ -94,15 +95,16 @@ class SolanaTransferExecutor(
 
             val transaction = VersionedTransaction(message)
             transaction.sign(keypair)
-            serialized = transaction.serialize()
-            if (serialized.size !in 66..MAX_TRANSACTION_BYTES || serialized[0].toInt() != 1) {
+            val signedBytes = transaction.serialize()
+            serialized = signedBytes
+            if (signedBytes.size !in 66..MAX_TRANSACTION_BYTES || signedBytes[0].toInt() != 1) {
                 return@withContext abortAndReject(requestId, "Unsupported signed transaction format")
             }
-            val signature = Base58.encode(serialized.copyOfRange(1, 65))
+            val signature = Base58.encode(signedBytes.copyOfRange(1, 65))
             if (!SolanaSignatureValidator.isValid(signature)) {
                 return@withContext abortAndReject(requestId, "Signer returned an invalid signature")
             }
-            if (!ledger.persistSignedTransaction(requestId, signature, serialized)) {
+            if (!ledger.persistSignedTransaction(requestId, signature, signedBytes)) {
                 return@withContext abortAndReject(
                     requestId, "Signed transaction could not be durably recorded; no broadcast was attempted"
                 )
