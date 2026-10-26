@@ -86,6 +86,8 @@ class WalletSetupSession internal constructor(
             }
             persist(material)
             completed = true
+            // The encrypted vault now owns the persisted copy; erase setup material immediately.
+            material.close()
         } finally {
             confirmation.fill('\u0000')
         }
