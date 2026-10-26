@@ -77,8 +77,13 @@ class WalletRequestLedgerTest {
         assertTrue(ledger.transition(
             "request_12345678", LedgerState.PREPARED, LedgerState.AWAITING_APPROVAL
         ))
+        val now = System.currentTimeMillis()
+        val approved = ledger.approveForSigning(
+            "request_12345678", transferPolicy(), now - 10_000L, now + 10_000L, now
+        )
+        assertTrue(approved is LedgerAuthorizationResult.Approved)
         assertTrue(ledger.transition(
-            "request_12345678", LedgerState.AWAITING_APPROVAL, LedgerState.SIGNED
+            "request_12345678", LedgerState.AUTHORIZED, LedgerState.SIGNED
         ))
     }
 
@@ -86,7 +91,12 @@ class WalletRequestLedgerTest {
     fun submittedAndConfirmedRequireSignature() {
         ledger.claim(intent())
         ledger.transition("request_12345678", LedgerState.PREPARED, LedgerState.AWAITING_APPROVAL)
-        ledger.transition("request_12345678", LedgerState.AWAITING_APPROVAL, LedgerState.SIGNED)
+        val now = System.currentTimeMillis()
+        val approved = ledger.approveForSigning(
+            "request_12345678", transferPolicy(), now - 10_000L, now + 10_000L, now
+        )
+        assertTrue(approved is LedgerAuthorizationResult.Approved)
+        ledger.transition("request_12345678", LedgerState.AUTHORIZED, LedgerState.SIGNED)
         try {
             ledger.transition("request_12345678", LedgerState.SIGNED, LedgerState.SUBMITTED)
             throw AssertionError("Expected missing signature to be rejected")
