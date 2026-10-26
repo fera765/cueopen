@@ -490,6 +490,20 @@ class WalletRequestLedgerTest {
         assertTrue(unknownNetworkBroadcast is TransferExecutionResult.Rejected)
         assertTrue(unknownNetworkReconcile is TransferExecutionResult.Rejected)
         assertEquals(LedgerState.SIGNED, ledger.find(request.requestId)?.state)
+
+        val authorizedRequest = intent(
+            requestId = "request_network_guard01", amountLamports = 10L, memo = null
+        )
+        assertTrue(ledger.claimAndAuthorize(
+            authorizedRequest, transferPolicy(autonomous = true),
+            now - 10_000L, now + 10_000L, now
+        ) is LedgerAuthorizationResult.Created)
+        val signResult = executor.signAuthorizedTransfer(
+            authorizedRequest.requestId, transferPolicy(autonomous = true),
+            now - 10_000L, now + 10_000L, humanApproval = false, signingTimeEpochMs = now
+        )
+        assertTrue(signResult is TransferExecutionResult.Rejected)
+        assertEquals(LedgerState.AUTHORIZED, ledger.find(authorizedRequest.requestId)?.state)
     }
 
     @Test
