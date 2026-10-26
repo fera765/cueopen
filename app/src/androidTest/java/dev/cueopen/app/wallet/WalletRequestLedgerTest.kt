@@ -31,6 +31,8 @@ class WalletRequestLedgerTest {
     fun tearDown() {
         ledger.close()
         context.deleteDatabase("cueopen_wallet_requests.db")
+        context.getSharedPreferences("wallet_agent_policies", Context.MODE_PRIVATE)
+            .edit().clear().commit()
     }
 
     private fun intent(
