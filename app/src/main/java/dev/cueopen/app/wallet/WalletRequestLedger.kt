@@ -103,12 +103,18 @@ class WalletRequestLedger(context: Context) : SQLiteOpenHelper(
             put("updated_at_ms", System.currentTimeMillis())
             if (signature != null) put("signature", signature)
         }
-        return writableDatabase.update(
-            TABLE,
-            values,
-            "request_id = ? AND state = ?",
+        // Once a chain signature has been recorded, a later caller may not replace it.
+        val where = if (signature == null) {
+            "request_id = ? AND state = ?"
+        } else {
+            "request_id = ? AND state = ? AND (signature IS NULL OR signature = ?)"
+        }
+        val args = if (signature == null) {
             arrayOf(requestId, expected.name)
-        ) == 1
+        } else {
+            arrayOf(requestId, expected.name, signature)
+        }
+        return writableDatabase.update(TABLE, values, where, args) == 1
     }
 
     @Synchronized
