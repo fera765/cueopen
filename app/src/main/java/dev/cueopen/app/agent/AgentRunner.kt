@@ -79,6 +79,7 @@ class AgentRunner(
         executions.cancelSession(sessionId)
         // Primeiro envia Ctrl+C ao PTY ativo; cancelar só a coroutine deixava o processo vivo.
         terminals.get(sessionId).cancelAgentCommand()
+        scope.launch { runCatching { browserFor(sessionId).cancelNavigation() } }
         jobs.remove(sessionId)?.cancel()
         synchronized(childJobsByParent) { childJobsByParent.remove(sessionId)?.forEach { it.cancel() } }
         store.state.value.agents.filter { it.homeSessionId == sessionId && it.autonomous }.forEach {
@@ -878,7 +879,9 @@ class AgentRunner(
                 }
                 "browser_navigate" -> {
                     val url = s("url").let { u -> if (u.startsWith("/root")) "file://" + sandbox.hostFile(u, sessionId).absolutePath else u }
-                    browserFor(sessionId).navigate(url); browserFor(sessionId).read(4000)
+                    val navigation = browserFor(sessionId).navigate(url)
+                    if (navigation.startsWith("ERROR:") || navigation.startsWith("TIMEOUT:")) navigation
+                    else navigation + "\\n\\n" + browserFor(sessionId).read(4000)
                 }
                 "browser_read", "browser_snapshot" -> browserFor(sessionId).read((i("max_chars") ?: 9000).coerceIn(1000, 20000))
                 "browser_click" -> browserFor(sessionId).click(i("index") ?: -1)
