@@ -78,6 +78,8 @@ fun SettingsScreen(nav: NavController) {
             Slider(s.contextBudget.toFloat(), { v -> app.store.updateSettings { it.copy(contextBudget = (v / 1000).toInt() * 1000) } }, valueRange = 8000f..120000f,
                 colors = SliderDefaults.colors(thumbColor = c.ink, activeTrackColor = c.ink))
             SettingsLink(Icons.Rounded.Psychology, "Memória de longo prazo", "${st.memories.size} itens") { nav.navigate("memory") }
+            SectionLabel("Carteira")
+            SettingsLink(Icons.Rounded.AccountBalanceWallet, "Carteira Solana", "Criar ou restaurar carteira local e consultar saldo") { nav.navigate("wallet") }
             SectionLabel("Aparência")
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 listOf(ThemeMode.SYSTEM to "Sistema", ThemeMode.LIGHT to "Claro", ThemeMode.DARK to "Escuro").forEach { (m, l) ->
