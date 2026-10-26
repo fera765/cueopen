@@ -2,6 +2,10 @@ package dev.cueopen.app.ui
 
 import com.google.zxing.BarcodeFormat
 import com.google.zxing.qrcode.QRCodeWriter
+import com.google.zxing.BinaryBitmap
+import com.google.zxing.MultiFormatReader
+import com.google.zxing.RGBLuminanceSource
+import com.google.zxing.common.HybridBinarizer
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -21,5 +25,14 @@ class WalletReceiveQrTest {
         }
         assertTrue(darkModules > 0)
         assertTrue(darkModules < matrix.width * matrix.height)
+
+        val pixels = IntArray(matrix.width * matrix.height) { index ->
+            val x = index % matrix.width
+            val y = index / matrix.width
+            if (matrix.get(x, y)) 0xff000000.toInt() else 0xffffffff.toInt()
+        }
+        val source = RGBLuminanceSource(matrix.width, matrix.height, pixels)
+        val decoded = MultiFormatReader().decode(BinaryBitmap(HybridBinarizer(source)))
+        assertEquals(publicAddress, decoded.text)
     }
 }
