@@ -56,6 +56,8 @@ Ao concluir uma tarefa, marcar sua caixa como `[x]`, anotar o commit que contém
 
 ## Registro de progresso (não altera o estado das tarefas)
 
+- 2026-10-26 — Cofre local reforçado: gravação criptografada passa por arquivo temporário sincronizado antes da publicação; falhas limpam temporários; leitura valida tamanho e zera buffers temporários; exclusão falha explicitamente se não conseguir remover o arquivo. Commit: `47f740f088b03f8dffdecad08dcd7c62a8ceb8fc`. **Não compilado nem testado** (conforme regra de adiar build/testes até as quatro tarefas estarem implementadas).
+
 - 2026-10-26 — Workflow de build alterado para execução manual; pushes/PRs não compilam o APK durante a implementação. Commit: `e2b89128ea1bed06224a2aed1e6b072d935d9cea`.
 - 2026-10-26 — Política de transferência passou a receber o gasto acumulado do dia e negar limites excedidos; execução autônoma exige allowlist explícita. Commit: `8ccab2d0c623d2b400c738d504f4f8f2cfea5b8e`.
 - 2026-10-26 — Dependências BIP-39 e Solana adicionadas, com derivação local e restauração para `m/44'/501'/0'/0'`. Commits: `6eec0b10cd56f43b4702e7e3ff16ebe7dba644fe`, `da58edc65c27c3ddd739bf3939f5040e15481d61`, `c14f8e58029f735f9190b945c03084ef8b180018`.
