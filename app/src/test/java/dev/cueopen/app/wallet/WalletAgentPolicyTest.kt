@@ -137,7 +137,6 @@ class WalletAgentPolicyTest {
         )
     }
 
-}
     @Test
     fun malformedRecipientIsDeniedBeforeAllowlistOrApproval() {
         assertEquals(
@@ -145,4 +144,4 @@ class WalletAgentPolicyTest {
             policy().authorize(WalletAction.TRANSFER, 10L, "not-a-solana-address")
         )
     }
-
+}
