@@ -14,9 +14,10 @@ A wallet cannot guarantee recovery merely by storing its key in Android Keystore
 
 ## Agent boundary
 
-- The current `AgentRunner.tools(...)` does not register wallet-specific tool schemas. This prevents the model from directly invoking the wallet signer today, but also means agent-wallet integration is **not implemented**.
-- The normal chat must not register or expose wallet tools.
-- Before wallet tools are added, implement an explicit, persisted per-agent capability grant and verify the real agent identity again at the local signing boundary.
+- `AgentRunner.tools(...)` now registers only two read-only wallet tools (`wallet_get_address`, `wallet_get_balance`) when the selected agent has the matching persisted capability grant. The tool dispatcher rechecks the grant at execution time.
+- The wallet screen now exposes per-agent switches for public-address and balance reads. Grants are stored locally under a hash-derived preference key and default to disabled.
+- The normal chat and temporary multi-agent workers do not receive wallet tool schemas. These tools never return a seed, private key, recovery phrase, or signing material.
+- **Transfer/sign/broadcast tools are not integrated with the agent runtime.** Per-agent financial transaction authorization, approval handoff, and signing-boundary identity verification remain unimplemented; the existing signer is still restricted to the manual wallet UI identity.
 - The signer must check action, network, asset, amount, destination, fees, cumulative spend limits and duplicate request ID on every operation.
 - Default policy is deny. Autonomous transfers require explicit opt-in, strict limits and an allowlisted destination; otherwise require user approval.
 - Treat LLM output as untrusted input. The LLM may propose typed intents; deterministic local code validates and signs.
@@ -51,6 +52,6 @@ These are implementation features, not evidence that the entire wallet is releas
 
 ## Current implementation status (2026-10-26)
 
-Implemented in the repository: local BIP-39/Solana key derivation and restore path; encrypted local secret vault; backup confirmation; public address and QR UI; read-only balance; mainnet/devnet selection; a manual SOL transfer UI; a typed transfer intent; deny-by-default policy; SQLite request ledger with spend reservations and idempotency; local transaction signing, simulation, signed-byte persistence, explicit broadcast confirmation and signature reconciliation; and unit/instrumentation tests authored for several components.
+Implemented in the repository: local BIP-39/Solana key derivation and restore path; encrypted local secret vault; backup confirmation; public address and QR UI; read-only balance; mainnet/devnet selection; manual SOL transfer UI; typed transfer intent; deny-by-default policy; SQLite request ledger with spend reservations and idempotency; local transaction signing, simulation, signed-byte persistence, explicit broadcast confirmation and signature reconciliation; persisted per-agent read permissions for public address and balance; and AgentRunner tools gated by those grants. Tests have been authored for several components, including the new per-agent read grants.
 
-Not verified yet: the repository TODO explicitly records that tests/build have not been run. The wallet must not be considered complete until the four TODO tasks have passed their acceptance criteria. Agent wallet tool integration and persisted per-agent capability management remain missing. Token swaps are not implemented. No release or mainnet readiness claim is justified until validation, review and the documented release gates are complete.
+Not verified yet: tests/build have not been run. The wallet must not be considered complete until the four TODO tasks pass their acceptance criteria. Agent-driven transfer request/approval integration, per-agent transaction authorization at the signing boundary, token swaps, and release validation remain incomplete. No release or mainnet readiness claim is justified until validation, review and the documented release gates are complete.
