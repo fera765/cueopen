@@ -12,6 +12,7 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -63,8 +64,6 @@ private fun walletSpendingWindow(): Pair<Long, Long> {
 
 @Composable
 fun WalletTransferPanel(context: Context, repository: SolanaWalletRepository) {
-    if (!repository.backupConfirmed()) return
-
     val ledger = remember(context) { WalletRequestLedger(context.applicationContext) }
     val executor = remember(context, repository, ledger) {
         SolanaTransferExecutor(context.applicationContext, repository, ledger)
@@ -77,8 +76,14 @@ fun WalletTransferPanel(context: Context, repository: SolanaWalletRepository) {
     var busy by remember { mutableStateOf(false) }
     var confirmBroadcast by remember { mutableStateOf(false) }
     var message by remember { mutableStateOf<String?>(null) }
-    var recentRecords by remember { mutableStateOf(ledger.recentRecords()) }
+    var recentRecords by remember { mutableStateOf(emptyList<dev.cueopen.app.wallet.LedgerRecord>()) }
     fun refreshHistory() { recentRecords = ledger.recentRecords() }
+    LaunchedEffect(ledger) { refreshHistory() }
+
+    if (!repository.backupConfirmed()) {
+        Text("Confirme o backup da frase de recuperação antes de habilitar transferências.")
+        return
+    }
 
     Column(
         modifier = Modifier.fillMaxWidth().padding(top = 12.dp),
