@@ -551,8 +551,8 @@ class WalletRequestLedger(context: Context) : SQLiteOpenHelper(
         if (next == LedgerState.SIGNED && expected != LedgerState.SIGNING) {
             throw IllegalArgumentException("A transfer must enter SIGNING before its signature can be persisted")
         }
-        if (next == LedgerState.SIGNING && expected != LedgerState.AUTHORIZED) {
-            throw IllegalArgumentException("Only an authorized transfer may enter SIGNING")
+        if (next == LedgerState.SIGNING) {
+            throw IllegalArgumentException("Use a policy-checked signing claim to enter SIGNING")
         }
         if (signature != null) require(signature.length <= MAX_SIGNATURE_LENGTH) { "Signature is too long" }
         if (next == LedgerState.SIGNED && (signature == null || !SolanaSignatureValidator.isValid(signature))) {
@@ -655,7 +655,7 @@ class WalletRequestLedger(context: Context) : SQLiteOpenHelper(
 
     private fun allowedNextStates(state: LedgerState): Set<LedgerState> = when (state) {
         LedgerState.PREPARED -> setOf(LedgerState.AWAITING_APPROVAL, LedgerState.FAILED)
-        LedgerState.AUTHORIZED -> setOf(LedgerState.FAILED)
+        LedgerState.AUTHORIZED -> emptySet()
         LedgerState.AWAITING_APPROVAL -> setOf(LedgerState.FAILED)
         // Once signing has started, failure is ambiguous unless chain state has been reconciled.
         // Keep the reservation for SIGNING/SIGNED/SUBMITTED/UNKNOWN; never release budget blindly.
