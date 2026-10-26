@@ -220,7 +220,7 @@ fun WalletScreen(nav: NavController) {
                 else Text(balance ?: "Saldo ainda não disponível")
                 Text("Saldo e taxas podem mudar rapidamente. Transações transmitidas à " + selectedNetwork.displayName + " não podem ser desfeitas.", color = c.ink2)
 
-                Text("Permissões de leitura dos agentes", style = androidx.compose.material3.MaterialTheme.typography.titleMedium)
+                Text("Permissões de carteira por agente", style = androidx.compose.material3.MaterialTheme.typography.titleMedium)
                 Text("Cada permissão é salva neste dispositivo e começa desativada. Leitura permite consultar endereço/saldo; a permissão de transferência só permite criar pedidos tipados, sempre sujeitos à revisão, aprovação humana, assinatura local e confirmação separada antes do envio. Agentes nunca recebem chaves privadas.", color = c.ink2)
                 if (walletAgents.isEmpty()) {
                     Text("Nenhum agente foi configurado.")
