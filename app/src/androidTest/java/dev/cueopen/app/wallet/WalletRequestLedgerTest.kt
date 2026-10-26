@@ -185,6 +185,34 @@ class WalletRequestLedgerTest {
     }
 
     @Test
+    fun signedTransitionRejectsInvalidBase58AndWrongLengthSignature() {
+        ledger.claim(intent())
+        val now = System.currentTimeMillis()
+        val result = ledger.claimAndAuthorize(
+            intent(), transferPolicy(autonomous = true), now - 10_000L, now + 10_000L, now
+        )
+        // Existing claim record is not a fresh authorization; prepare a separate valid request.
+        assertTrue(result is LedgerAuthorizationResult.Existing)
+        val fresh = ledger.claimAndAuthorize(
+            intent(requestId = "request_valid_sig01"),
+            transferPolicy(autonomous = true), now - 10_000L, now + 10_000L, now + 1L
+        )
+        assertTrue(fresh is LedgerAuthorizationResult.Created)
+        assertTrue(ledger.transition(
+            "request_valid_sig01", LedgerState.AUTHORIZED, LedgerState.SIGNING
+        ))
+        try {
+            ledger.transition(
+                "request_valid_sig01", LedgerState.SIGNING, LedgerState.SIGNED, "not-a-signature"
+            )
+            throw AssertionError("Malformed signature should be rejected")
+        } catch (expected: IllegalArgumentException) {
+            assertTrue(expected.message.orEmpty().contains("base58"))
+        }
+        assertEquals(LedgerState.SIGNING, ledger.find("request_valid_sig01")?.state)
+    }
+
+    @Test
     fun terminalStatesCannotBeReopened() {
         ledger.claim(intent())
         assertTrue(ledger.transition(
