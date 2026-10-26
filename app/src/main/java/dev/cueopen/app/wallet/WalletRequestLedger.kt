@@ -539,7 +539,7 @@ class WalletRequestLedger(context: Context) : SQLiteOpenHelper(
      * This method is the only permitted SIGNING -> SIGNED transition.
      */
     @Synchronized
-    fun persistSignedTransaction(
+    internal fun persistSignedTransaction(
         requestId: String,
         signature: String,
         serializedTransaction: ByteArray
@@ -610,7 +610,7 @@ class WalletRequestLedger(context: Context) : SQLiteOpenHelper(
 
     /** Returns a defensive copy only for a durable signed transaction awaiting reconciliation. */
     @Synchronized
-    fun signedTransaction(requestId: String): ByteArray? {
+    internal fun signedTransaction(requestId: String): ByteArray? {
         require(requestId.isNotBlank())
         return readableDatabase.query(
             TABLE, arrayOf("state", "signed_transaction"), "request_id = ?",
