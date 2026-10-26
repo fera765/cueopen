@@ -879,6 +879,7 @@ class WalletRequestLedger(context: Context) : SQLiteOpenHelper(
     ): LedgerRecord? {
         require(nowEpochMs > 0L)
         require(dedupeWindowMs in 1L..3_600_000L)
+        if (intent.memo != null) return null
         val lowerBound = (nowEpochMs - dedupeWindowMs).coerceAtLeast(1L)
         val db = readableDatabase
         val requestId = db.query(
