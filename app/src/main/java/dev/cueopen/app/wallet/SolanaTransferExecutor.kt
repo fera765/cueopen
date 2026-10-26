@@ -112,6 +112,15 @@ class SolanaTransferExecutor(
                 )
             }
 
+            // Re-read the persisted grant immediately before using the local signer.
+            // A revoked or changed grant must not be honored from a stale policy snapshot.
+            val latestSigningPolicy = policyStore.transferPolicy(record.agentId, record.network)
+            if (!latestSigningPolicy.enabled || latestSigningPolicy != persistedPolicy) {
+                return@withContext abortAndReject(
+                    requestId, "Transfer permission changed before signing; no signature was created"
+                )
+            }
+
             val transaction = VersionedTransaction(message)
             transaction.sign(keypair)
             val signedBytes = transaction.serialize()
