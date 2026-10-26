@@ -83,6 +83,145 @@ class WalletRequestLedger(context: Context) : SQLiteOpenHelper(
         }
     }
 
+
+    /**
+     * Atomically evaluates the local agent policy and reserves this request against the
+     * configured spending window. All non-failed requests count, including pending and
+     * UNKNOWN requests, so concurrent calls cannot overspend the same budget.
+     *
+     * The caller must supply the local calendar window (start inclusive, end exclusive).
+     * This is a reservation primitive, not a transaction signer or chain reconciler.
+     */
+    @Synchronized
+    fun claimAndAuthorize(
+        intent: WalletTransferIntent,
+        policy: WalletAgentPolicy,
+        windowStartEpochMs: Long,
+        windowEndEpochMs: Long
+    ): LedgerAuthorizationResult {
+        require(windowStartEpochMs > 0L && windowEndEpochMs > windowStartEpochMs) {
+            "Invalid spending window"
+        }
+        require(intent.createdAtEpochMs in windowStartEpochMs until windowEndEpochMs) {
+            "Transfer timestamp is outside the spending window"
+        }
+        if (policy.agentId != intent.agentId) {
+            return LedgerAuthorizationResult.Rejected(
+                PolicyDecision.Denied("Agent identity does not match wallet policy")
+            )
+        }
+
+        val db = writableDatabase
+        db.beginTransaction()
+        try {
+            val existing = readRecord(db, intent.requestId)
+            if (existing != null) {
+                check(existing.matches(intent)) {
+                    "Request ID already exists with a different transfer payload"
+                }
+                val spentExcludingThisRequest = sumReservedSpend(
+                    db, intent.agentId, windowStartEpochMs, windowEndEpochMs,
+                    excludeRequestId = intent.requestId
+                )
+                val decision = policy.authorize(
+                    WalletAction.TRANSFER, intent.amountLamports, intent.recipientAddress,
+                    spentExcludingThisRequest
+                )
+                if (decision is PolicyDecision.Denied) {
+                    db.setTransactionSuccessful()
+                    return LedgerAuthorizationResult.Rejected(decision)
+                }
+                db.setTransactionSuccessful()
+                return LedgerAuthorizationResult.Existing(existing, decision)
+            }
+
+            val spent = sumReservedSpend(db, intent.agentId, windowStartEpochMs, windowEndEpochMs)
+            val decision = policy.authorize(
+                WalletAction.TRANSFER, intent.amountLamports, intent.recipientAddress, spent
+            )
+            if (decision is PolicyDecision.Denied) {
+                db.setTransactionSuccessful()
+                return LedgerAuthorizationResult.Rejected(decision)
+            }
+
+            val initialState = if (decision == PolicyDecision.Allowed) {
+                LedgerState.AUTHORIZED
+            } else {
+                LedgerState.AWAITING_APPROVAL
+            }
+            val values = ContentValues().apply {
+                put("request_id", intent.requestId)
+                put("agent_id", intent.agentId)
+                put("recipient", intent.recipientAddress)
+                put("amount_lamports", intent.amountLamports)
+                put("created_at_ms", intent.createdAtEpochMs)
+                if (intent.memo == null) putNull("memo") else put("memo", intent.memo)
+                put("state", initialState.name)
+                put("signature", null as String?)
+                put("updated_at_ms", System.currentTimeMillis())
+            }
+            db.insertOrThrow(TABLE, null, values)
+            val record = LedgerRecord(
+                requestId = intent.requestId,
+                agentId = intent.agentId,
+                recipientAddress = intent.recipientAddress,
+                amountLamports = intent.amountLamports,
+                createdAtEpochMs = intent.createdAtEpochMs,
+                memo = intent.memo,
+                state = initialState,
+                signature = null
+            )
+            db.setTransactionSuccessful()
+            return LedgerAuthorizationResult.Created(record, decision)
+        } finally {
+            db.endTransaction()
+        }
+    }
+
+    private fun readRecord(db: SQLiteDatabase, requestId: String): LedgerRecord? =
+        db.query(
+            TABLE,
+            arrayOf("agent_id", "recipient", "amount_lamports", "created_at_ms", "memo", "state", "signature"),
+            "request_id = ?",
+            arrayOf(requestId),
+            null, null, null
+        ).use { cursor ->
+            if (!cursor.moveToFirst()) null else LedgerRecord(
+                requestId = requestId,
+                agentId = cursor.getString(0),
+                recipientAddress = cursor.getString(1),
+                amountLamports = cursor.getLong(2),
+                createdAtEpochMs = cursor.getLong(3),
+                memo = if (cursor.isNull(4)) null else cursor.getString(4),
+                state = LedgerState.valueOf(cursor.getString(5)),
+                signature = if (cursor.isNull(6)) null else cursor.getString(6)
+            )
+        }
+
+    private fun sumReservedSpend(
+        db: SQLiteDatabase,
+        agentId: String,
+        windowStartEpochMs: Long,
+        windowEndEpochMs: Long,
+        excludeRequestId: String? = null
+    ): Long {
+        val selection = buildString {
+            append("agent_id = ? AND created_at_ms >= ? AND created_at_ms < ? AND state != ?")
+            if (excludeRequestId != null) append(" AND request_id != ?")
+        }
+        val args = mutableListOf(
+            agentId, windowStartEpochMs.toString(), windowEndEpochMs.toString(), LedgerState.FAILED.name
+        )
+        if (excludeRequestId != null) args.add(excludeRequestId)
+        return db.rawQuery(
+            "SELECT COALESCE(SUM(amount_lamports), 0) FROM $TABLE WHERE $selection",
+            args.toTypedArray()
+        ).use { cursor ->
+            check(cursor.moveToFirst())
+            cursor.getLong(0)
+        }
+    }
+
     /** Compare-and-set transition prevents stale callers from overwriting a newer state. */
     @Synchronized
     fun transition(
@@ -166,6 +305,7 @@ class WalletRequestLedger(context: Context) : SQLiteOpenHelper(
 
     private fun allowedNextStates(state: LedgerState): Set<LedgerState> = when (state) {
         LedgerState.PREPARED -> setOf(LedgerState.AWAITING_APPROVAL, LedgerState.FAILED)
+        LedgerState.AUTHORIZED -> setOf(LedgerState.SIGNED, LedgerState.FAILED)
         LedgerState.AWAITING_APPROVAL -> setOf(LedgerState.SIGNED, LedgerState.FAILED)
         LedgerState.SIGNED -> setOf(LedgerState.SUBMITTED, LedgerState.UNKNOWN, LedgerState.FAILED)
         LedgerState.SUBMITTED -> setOf(LedgerState.CONFIRMED, LedgerState.UNKNOWN, LedgerState.FAILED)
@@ -190,6 +330,7 @@ class WalletRequestLedger(context: Context) : SQLiteOpenHelper(
 
 enum class LedgerState {
     PREPARED,
+    AUTHORIZED,
     AWAITING_APPROVAL,
     SIGNED,
     SUBMITTED,
@@ -212,4 +353,10 @@ data class LedgerRecord(
 sealed interface LedgerClaim {
     data class Created(val record: LedgerRecord) : LedgerClaim
     data class Existing(val record: LedgerRecord) : LedgerClaim
+}
+
+sealed interface LedgerAuthorizationResult {
+    data class Created(val record: LedgerRecord, val decision: PolicyDecision) : LedgerAuthorizationResult
+    data class Existing(val record: LedgerRecord, val decision: PolicyDecision) : LedgerAuthorizationResult
+    data class Rejected(val decision: PolicyDecision.Denied) : LedgerAuthorizationResult
 }
