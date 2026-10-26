@@ -147,7 +147,7 @@ class TerminalManager(private val ctx: Context, private val sandbox: Sandbox) {
                         val invocation = if (simple) cmd else "bash $gcue/run_$id.sh"
                         // Captura stdout/stderr num arquivo no filesystem do Android. A saída
                         // não depende do tamanho da tela, do scrollback ou de parsing do transcript.
-                        "$invocation > $gcue/out_$id.log 2>&1; __cue_exit=\$?; printf '\\033]777;cue;done;%s\\007' \"\$__cue_exit\""
+                        "$invocation > $gcue/out_$id.log 2>&1; __cue_exit=\$?; printf '\033]777;cue;done;%s\007' \"\$__cue_exit\""
                     }
                 }
                 val waiter = kotlinx.coroutines.CompletableDeferred<Int>()
