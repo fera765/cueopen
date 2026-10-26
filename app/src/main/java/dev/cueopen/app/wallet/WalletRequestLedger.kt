@@ -581,8 +581,9 @@ class WalletRequestLedger(context: Context) : SQLiteOpenHelper(
     }
 
     /**
-     * Releases a signing reservation only when this process knows no signed bytes were
-     * persisted. A process crash cannot call this method and therefore remains quarantined.
+     * Releases a signing reservation only when no signature or transaction bytes were
+     * durably persisted. This also recovers a quarantined UNKNOWN row with no signature:
+     * the executor's invariant is that no network broadcast happens before persistence.
      */
     @Synchronized
     internal fun abortSigningBeforePersistence(requestId: String): Boolean {
@@ -597,8 +598,8 @@ class WalletRequestLedger(context: Context) : SQLiteOpenHelper(
                     put("human_approved_at_ms", 0L)
                     put("updated_at_ms", System.currentTimeMillis())
                 },
-                "request_id = ? AND state = ? AND signature IS NULL AND signed_transaction IS NULL",
-                arrayOf(requestId, LedgerState.SIGNING.name)
+                "request_id = ? AND state IN (?, ?) AND signature IS NULL AND signed_transaction IS NULL",
+                arrayOf(requestId, LedgerState.SIGNING.name, LedgerState.UNKNOWN.name)
             )
             if (changed != 1) return false
             db.setTransactionSuccessful()
