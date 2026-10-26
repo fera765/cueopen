@@ -864,15 +864,22 @@ class AgentRunner(
                                 "Carteira indisponível ou backup ainda não confirmado."
                             } else {
                                 val prefs = ctx.applicationContext.getSharedPreferences("solana_wallet_settings", android.content.Context.MODE_PRIVATE)
-                                val network = runCatching {
-                                    SolanaNetwork.valueOf(prefs.getString("network", SolanaNetwork.MAINNET.name) ?: SolanaNetwork.MAINNET.name)
-                                }.getOrDefault(SolanaNetwork.MAINNET)
-                                val address = wallet.publicAddress()
-                                if (address == null) {
-                                    "Endereço público indisponível."
+                                val networkResult = runCatching {
+                                    val storedNetwork = prefs.getString("network", null)
+                                        ?: error("A rede da carteira não foi configurada.")
+                                    SolanaNetwork.valueOf(storedNetwork)
+                                }
+                                if (networkResult.isFailure) {
+                                    "Consulta bloqueada: a rede salva da carteira está ausente ou inválida. Abra a carteira e selecione a rede novamente."
                                 } else {
-                                    val lamports = SolanaRpcClient(endpoint = network.rpcEndpoint, network = network).getBalanceLamports(address)
-                                    "Saldo " + network.displayName + ": " + String.format(Locale.US, "%.9f SOL", lamports / 1_000_000_000.0)
+                                    val network = networkResult.getOrThrow()
+                                    val address = wallet.publicAddress()
+                                    if (address == null) {
+                                        "Endereço público indisponível."
+                                    } else {
+                                        val lamports = SolanaRpcClient(endpoint = network.rpcEndpoint, network = network).getBalanceLamports(address)
+                                        "Saldo " + network.displayName + ": " + String.format(Locale.US, "%.9f SOL", lamports / 1_000_000_000.0)
+                                    }
                                 }
                             }
                         }
