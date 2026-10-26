@@ -159,8 +159,8 @@ class WalletRequestLedger(context: Context) : SQLiteOpenHelper(
     }
 
     private fun allowedNextStates(state: LedgerState): Set<LedgerState> = when (state) {
-        LedgerState.PREPARED -> setOf(LedgerState.AWAITING_APPROVAL, LedgerState.SIGNED, LedgerState.FAILED)
-        LedgerState.AWAITING_APPROVAL -> setOf(LedgerState.PREPARED, LedgerState.SIGNED, LedgerState.FAILED)
+        LedgerState.PREPARED -> setOf(LedgerState.AWAITING_APPROVAL, LedgerState.FAILED)
+        LedgerState.AWAITING_APPROVAL -> setOf(LedgerState.SIGNED, LedgerState.FAILED)
         LedgerState.SIGNED -> setOf(LedgerState.SUBMITTED, LedgerState.UNKNOWN, LedgerState.FAILED)
         LedgerState.SUBMITTED -> setOf(LedgerState.CONFIRMED, LedgerState.UNKNOWN, LedgerState.FAILED)
         LedgerState.UNKNOWN -> setOf(LedgerState.CONFIRMED, LedgerState.FAILED)
