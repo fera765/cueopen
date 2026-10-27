@@ -159,14 +159,18 @@ fun WalletScreen(nav: NavController) {
             Modifier.padding(padding).verticalScroll(rememberScrollState()).padding(20.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
-            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                androidx.compose.material3.Icon(Icons.Rounded.AccountBalanceWallet, contentDescription = null)
-                Text("Carteira local", style = androidx.compose.material3.MaterialTheme.typography.titleLarge)
+            Card(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(24.dp), colors = androidx.compose.material3.CardDefaults.cardColors(containerColor = c.surface)) {
+                Row(Modifier.fillMaxWidth().padding(18.dp), verticalAlignment = androidx.compose.ui.Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+                    androidx.compose.material3.Surface(shape = RoundedCornerShape(16.dp), color = c.surface2) {
+                        androidx.compose.material3.Icon(Icons.Rounded.AccountBalanceWallet, contentDescription = null, modifier = Modifier.padding(13.dp), tint = c.ink)
+                    }
+                    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Text("Sua carteira", style = androidx.compose.material3.MaterialTheme.typography.titleLarge)
+                        Text("Solana · autocustódia", color = c.ink2, style = androidx.compose.material3.MaterialTheme.typography.bodySmall)
+                    }
+                }
             }
-            Text(
-                "A chave privada fica no dispositivo. Transferências exigem aprovação humana, assinatura local e confirmação separada antes da transmissão à rede selecionada.",
-                color = c.ink2
-            )
+            Text("Suas chaves permanecem no dispositivo. Transferências exigem aprovação humana e assinatura local.", color = c.ink2, style = androidx.compose.material3.MaterialTheme.typography.bodyMedium)
             if (walletExists && address == null && setup == null) {
                 Text("A carteira local existe, mas os metadados públicos não estão disponíveis. Confirme a frase de recuperação para reparar os metadados sem substituir a chave armazenada.")
                 OutlinedTextField(
@@ -239,7 +243,12 @@ fun WalletScreen(nav: NavController) {
                         Modifier.fillMaxWidth().padding(20.dp),
                         verticalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        Text("SALDO DISPONÍVEL", style = androidx.compose.material3.MaterialTheme.typography.labelMedium, color = c.ink2)
+                        Row(Modifier.fillMaxWidth(), verticalAlignment = androidx.compose.ui.Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
+                            Text("Saldo disponível", style = androidx.compose.material3.MaterialTheme.typography.labelLarge, color = c.ink2)
+                            androidx.compose.material3.Surface(shape = RoundedCornerShape(50), color = c.surface) {
+                                Text(selectedNetwork.displayName, modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp), style = androidx.compose.material3.MaterialTheme.typography.labelSmall, color = c.ink2)
+                            }
+                        }
                         if (loading) {
                             CircularProgressIndicator()
                         } else {
@@ -250,12 +259,15 @@ fun WalletScreen(nav: NavController) {
                                 fontWeight = androidx.compose.ui.text.font.FontWeight.Bold
                             )
                         }
-                        Text(selectedNetwork.displayName + " · Solana", color = c.ink2)
+                        Text("SOL · Saldo na rede selecionada", color = c.ink2, style = androidx.compose.material3.MaterialTheme.typography.bodySmall)
                         if (error != null) Text(error!!, color = c.err, style = androidx.compose.material3.MaterialTheme.typography.bodySmall)
                     }
                 }
-                Text("Endereço público", style = androidx.compose.material3.MaterialTheme.typography.titleMedium)
-                Text(address!!, color = c.ink2)
+                Text("Receber", style = androidx.compose.material3.MaterialTheme.typography.titleLarge)
+                Text("Seu endereço público", color = c.ink2, style = androidx.compose.material3.MaterialTheme.typography.bodyMedium)
+                Card(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(16.dp), colors = androidx.compose.material3.CardDefaults.cardColors(containerColor = c.surface)) {
+                    Text(address!!, modifier = Modifier.fillMaxWidth().padding(14.dp), color = c.ink, style = androidx.compose.material3.MaterialTheme.typography.bodySmall)
+                }
                 WalletReceiveQr(address!!, selectedNetwork)
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     OutlinedButton(onClick = {
@@ -272,8 +284,8 @@ fun WalletScreen(nav: NavController) {
                 }
                 Text("Os saldos e taxas podem mudar rapidamente. Transações transmitidas à " + selectedNetwork.displayName + " não podem ser desfeitas.", color = c.ink2)
 
-                Text("Atividade on-chain", style = androidx.compose.material3.MaterialTheme.typography.titleMedium)
-                Text("Assinaturas recentes registradas pela rede para este endereço. Isso não inclui detalhes completos de tokens ou valores de cada transação.", color = c.ink2)
+                Text("Atividade", style = androidx.compose.material3.MaterialTheme.typography.titleLarge)
+                Text("Movimentações registradas diretamente na rede. Detalhes de tokens e valores por transação podem não estar disponíveis.", color = c.ink2, style = androidx.compose.material3.MaterialTheme.typography.bodySmall)
                 if (historyLoading) {
                     CircularProgressIndicator()
                 } else if (historyError != null) {
@@ -285,9 +297,10 @@ fun WalletScreen(nav: NavController) {
                     recentOnChain.forEach { tx ->
                         androidx.compose.material3.Card(
                             modifier = Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(18.dp),
                             colors = androidx.compose.material3.CardDefaults.cardColors(containerColor = c.surface)
                         ) {
-                            Column(Modifier.fillMaxWidth().padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                            Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                                 Text(
                                     if (tx.error == null) "Transação registrada" else "Transação com falha on-chain",
                                     color = if (tx.error == null) c.ok else c.err,
@@ -311,7 +324,7 @@ fun WalletScreen(nav: NavController) {
                     }
                 }
 
-                Text("Permissões de carteira por agente", style = androidx.compose.material3.MaterialTheme.typography.titleMedium)
+                Text("Acesso dos agentes", style = androidx.compose.material3.MaterialTheme.typography.titleLarge)
                 Text("Cada permissão é salva neste dispositivo e começa desativada. Leitura permite consultar endereço/saldo; a permissão de transferência só permite criar pedidos tipados, sempre sujeitos à revisão, aprovação humana, assinatura local e confirmação separada antes do envio. Agentes nunca recebem chaves privadas.", color = c.ink2)
                 if (walletAgents.isEmpty()) {
                     Text("Nenhum agente foi configurado.")
@@ -447,8 +460,10 @@ fun WalletScreen(nav: NavController) {
                 }
             }
 
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("Rede Solana", style = androidx.compose.material3.MaterialTheme.typography.titleLarge)
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                 Button(
+                    modifier = Modifier.weight(1f),
                     enabled = selectedNetwork != SolanaNetwork.MAINNET,
                     onClick = {
                         selectedNetwork = SolanaNetwork.MAINNET
@@ -458,6 +473,7 @@ fun WalletScreen(nav: NavController) {
                     }
                 ) { Text("Mainnet") }
                 OutlinedButton(
+                    modifier = Modifier.weight(1f),
                     enabled = selectedNetwork != SolanaNetwork.DEVNET,
                     onClick = {
                         selectedNetwork = SolanaNetwork.DEVNET
