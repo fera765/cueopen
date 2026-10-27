@@ -115,7 +115,7 @@ class SolanaRpcClientTest {
     }
 
     @Test
-    fun latestBlockhashParsesExpiryAndRejectsMalformedBlockhash() = runBlocking {
+    fun latestBlockhashParsesExpiryAndRejectsMalformedBlockhash(): Unit = runBlocking {
         val blockhash = "11111111111111111111111111111111"
         val rpc = client(
             """{"jsonrpc":"2.0","id":1,"result":{"context":{"slot":99},"value":{"blockhash":"$blockhash","lastValidBlockHeight":1234}}}"""
