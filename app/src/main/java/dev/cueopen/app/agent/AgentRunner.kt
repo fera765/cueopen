@@ -895,10 +895,10 @@ class AgentRunner(
                             } else {
                                 val prefs = ctx.applicationContext.getSharedPreferences("solana_wallet_settings", android.content.Context.MODE_PRIVATE)
                                 val networkResult = runCatching {
-                                    // A tela da carteira já usa Mainnet como padrão. Agentes devem aplicar o mesmo
-                                    // padrão se a preferência ainda não tiver sido persistida em uma instalação nova.
-                                    val storedNetwork = prefs.getString("network", SolanaNetwork.MAINNET.name)
-                                    SolanaNetwork.valueOf(storedNetwork ?: SolanaNetwork.MAINNET.name)
+                                    // Fail closed: never silently route an agent wallet operation to Mainnet.
+                                    val storedNetwork = prefs.getString("network", null)
+                                        ?: error("A rede da carteira não foi configurada. Abra a tela Carteira e selecione explicitamente Mainnet ou Devnet.")
+                                    SolanaNetwork.valueOf(storedNetwork)
                                 }
                                 if (networkResult.isFailure) {
                                     "Consulta bloqueada: a rede salva da carteira está ausente ou inválida. Abra a carteira e selecione a rede novamente."
@@ -936,8 +936,9 @@ class AgentRunner(
                             "solana_wallet_settings", android.content.Context.MODE_PRIVATE
                         )
                         val networkResult = runCatching {
-                            val stored = networkPrefs.getString("network", SolanaNetwork.MAINNET.name)
-                            SolanaNetwork.valueOf(stored ?: SolanaNetwork.MAINNET.name)
+                            val stored = networkPrefs.getString("network", null)
+                                ?: error("A rede da carteira não foi configurada. Abra a tela Carteira e selecione explicitamente Mainnet ou Devnet.")
+                            SolanaNetwork.valueOf(stored)
                         }
                         if (networkResult.isFailure) {
                             "Pedido bloqueado: abra a carteira e selecione Mainnet ou Devnet antes de solicitar uma transferência."
