@@ -26,6 +26,7 @@ import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.material.icons.rounded.GridView
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.SwapHoriz
+import androidx.compose.material.icons.rounded.TrendingUp
 import androidx.compose.material.icons.rounded.Visibility
 import androidx.compose.material.icons.rounded.VisibilityOff
 import androidx.compose.material3.Button
@@ -236,6 +237,12 @@ fun WalletScreen(nav: NavController) {
                     WalletActionButton("Receber", Icons.Rounded.ArrowDownward, false, Modifier.weight(1f)) { nav.navigate("wallet/receive") }
                     WalletActionButton("Trocar", Icons.Rounded.SwapHoriz, false, Modifier.weight(1f)) { nav.navigate("wallet/swap") }
                     WalletActionButton("Mais", Icons.Rounded.GridView, false, Modifier.weight(1f)) { nav.navigate("wallet/more") }
+                }
+
+                // ---- Market discovery ----
+                OutlinedButton(onClick = { nav.navigate("wallet/market") }, modifier = Modifier.fillMaxWidth()) {
+                    Icon(Icons.Rounded.TrendingUp, null, Modifier.size(18.dp)); Spacer(Modifier.width(8.dp))
+                    Text("Mercado — descobrir criptos (novas → antigas)")
                 }
 
                 // ---- Assets ----

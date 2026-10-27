@@ -98,6 +98,45 @@ fun SettingsScreen(nav: NavController) {
                 Text(crash.take(3000), Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(Color(0xFF0F1115)).padding(12.dp),
                     color = Color(0xFFFF8A8A), fontFamily = FontFamily.Monospace, fontSize = 10.sp)
             }
+            SectionLabel("Logs de erros")
+            var logRefresh by remember { mutableStateOf(0) }
+            val logBytes = remember(logRefresh) { dev.cueopen.app.diag.ErrorLog.sizeBytes(nav.context) }
+            val logTail = remember(logRefresh) { dev.cueopen.app.diag.ErrorLog.readAll(nav.context).takeLast(2500) }
+            Text(
+                "Guarda as FALHAS reais do app (ferramentas do agente, browser, terminal, swaps, mercado, crashes) — nunca o conteúdo das conversas. Baixe e envie aqui no Claude para eu corrigir.",
+                fontSize = 12.sp, color = c.ink2
+            )
+            if (logBytes <= 0L) {
+                CueCard { Text("Nenhum erro registrado até agora. 🎉", color = c.ink2, fontSize = 13.sp) }
+            } else {
+                Text("${logBytes / 1024 + 1} KB registrados", fontSize = 12.sp, color = c.ink3)
+                if (logTail.isNotBlank()) Text(
+                    logTail, Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(Color(0xFF0F1115)).padding(12.dp),
+                    color = Color(0xFFFFB38A), fontFamily = FontFamily.Monospace, fontSize = 10.sp
+                )
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedButton(modifier = Modifier.weight(1f), onClick = {
+                        runCatching {
+                            val f = dev.cueopen.app.diag.ErrorLog.file(nav.context)
+                            val uri = androidx.core.content.FileProvider.getUriForFile(nav.context, nav.context.packageName + ".files", f)
+                            val send = android.content.Intent(android.content.Intent.ACTION_SEND).apply {
+                                type = "text/plain"
+                                putExtra(android.content.Intent.EXTRA_STREAM, uri)
+                                putExtra(android.content.Intent.EXTRA_SUBJECT, "CueOpen — log de erros")
+                                addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                            }
+                            nav.context.startActivity(android.content.Intent.createChooser(send, "Baixar / enviar log de erros").addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK))
+                        }
+                    }) { Icon(Icons.Rounded.Download, null, Modifier.size(16.dp)); Spacer(Modifier.width(6.dp)); Text("Baixar / enviar") }
+                    OutlinedButton(modifier = Modifier.weight(1f), onClick = {
+                        val clip = nav.context.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                        clip.setPrimaryClip(android.content.ClipData.newPlainText("CueOpen log de erros", dev.cueopen.app.diag.ErrorLog.readAll(nav.context)))
+                    }) { Icon(Icons.Rounded.ContentCopy, null, Modifier.size(16.dp)); Spacer(Modifier.width(6.dp)); Text("Copiar") }
+                }
+                TextButton(onClick = { dev.cueopen.app.diag.ErrorLog.clear(nav.context); logRefresh++ }) {
+                    Text("Limpar log", color = c.err)
+                }
+            }
             SectionLabel("Dados")
             SettingsLink(Icons.Rounded.DeleteSweep, "Apagar todas as tarefas", "Agents, skills e knowledge são mantidos", tint = c.err) { confirmClear = true }
             Spacer(Modifier.height(12.dp))

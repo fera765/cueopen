@@ -24,10 +24,12 @@ class CueApp : Application() {
     override fun onCreate() {
         super.onCreate()
         instance = this
-        // registra falhas para diagnóstico (Configurações > Último erro)
+        dev.cueopen.app.diag.ErrorLog.init(this)
+        // registra falhas para diagnóstico (Configurações > Último erro / Logs de erros)
         val prev = Thread.getDefaultUncaughtExceptionHandler()
         Thread.setDefaultUncaughtExceptionHandler { t, e ->
             runCatching { java.io.File(filesDir, "last_crash.txt").writeText("${java.util.Date()}\n${t.name}\n${e.stackTraceToString()}") }
+            runCatching { dev.cueopen.app.diag.ErrorLog.log("crash", "${t.name}: ${e.stackTraceToString()}") }
             prev?.uncaughtException(t, e)
         }
         store = Store(this)

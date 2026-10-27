@@ -264,6 +264,7 @@ class AgentRunner(
                 } catch (c: kotlinx.coroutines.CancellationException) {
                     throw c
                 } catch (t: Throwable) {
+                    runCatching { dev.cueopen.app.diag.ErrorLog.log(errorSource(call.name), "${t.javaClass.simpleName}: ${t.message.orEmpty()}", sessionId, call.name) }
                     ToolResult(output = "ERRO ao executar a ferramenta \"${call.name}\": ${t.message?.take(300) ?: t.javaClass.simpleName}. Diagnostique a causa, ajuste os argumentos/abordagem e tente de outra forma; não repita a mesma chamada. Se estiver bloqueado, chame finish explicando.")
                 }
                 val ctxOut = ctxMgr.storeToolOutput(sessionId, call.id, result.output)
@@ -631,8 +632,8 @@ class AgentRunner(
                 if (agent != null && walletPolicyForPrompt.canAgentDayTrade(agent.id)) {
                     appendLine()
                     appendLine("## Day trade (capacidade habilitada)")
-                    appendLine("- Dados de mercado são 100% reais: market_price (preço USD ao vivo), market_candles (OHLCV real do pool de maior liquidez), market_liquidity (impacto real por tamanho — AMM não tem order book central). Nunca invente preços, velas ou profundidade; se uma ferramenta retornar MARKET_ERROR, relate o erro e não contorne com shell/curl.")
-                    appendLine("- FLUXO recomendado: (1) analise preço/tendência com market_candles; (2) meça liquidez/impacto com market_liquidity antes de entrar; (3) entre com wallet_swap; (4) proteja a posição com trade_set_rule (stop-loss price_below e/ou take-profit price_above); (5) a cada ciclo chame trade_list para avaliar e disparar os gatilhos no preço real.")
+                    appendLine("- Dados de mercado são 100% reais (sem API key): market_discover (tokens de todo o ecossistema Solana, novos→velhos ou em alta, com liquidez e volume), market_token_info (preço/liquidez/volume/market cap de um token), market_price (preço USD ao vivo), market_candles (OHLCV real do pool de maior liquidez), market_liquidity (impacto real por tamanho — AMM não tem order book central). Nunca invente preços, velas ou profundidade; se uma ferramenta retornar MARKET_ERROR, relate o erro e não contorne com shell/curl.")
+                    appendLine("- FLUXO recomendado: (1) descubra oportunidades com market_discover e cheque market_token_info; (2) analise preço/tendência com market_candles; (3) meça liquidez/impacto com market_liquidity antes de entrar (confirme que dá para comprar E vender); (4) entre com wallet_swap; (5) proteja a posição com trade_set_rule (stop-loss price_below e/ou take-profit price_above); (6) a cada ciclo chame trade_list para avaliar e disparar os gatilhos no preço real.")
                     appendLine("- wallet_swap executa troca REAL e assinada localmente; entradas em SOL respeitam o limite por operação autorizado pelo usuário. Só diga 'enviado/executado' com base na assinatura retornada (Explorer); jamais afirme lucro ou execução sem a assinatura.")
                     appendLine("- Para monitorar o mercado de forma contínua, use set_schedule (ex.: a cada 5-15 min) e, a cada ciclo, reavalie com market_* e trade_list. Seja econômico e honesto sobre risco: day trade pode gerar perdas; nunca prometa retorno.")
                 }
@@ -778,6 +779,13 @@ class AgentRunner(
                     put("input_mint", str("Mint de entrada")); put("output_mint", str("Mint de saída"))
                     put("probe_amounts_raw", strArray("Tamanhos de entrada em unidades mínimas (lamports/unidades do token), ex.: [\"100000000\",\"1000000000\"]"))
                 }, listOf("input_mint", "output_mint", "probe_amounts_raw")))
+                add(tool("market_discover", "Descobre tokens de TODO o ecossistema Solana (dados reais, GeckoTerminal, sem API key). sort=new lista os recém-lançados do mais novo ao mais velho; sort=trending os em alta. Traz preço, liquidez (reserva) e volume 24h para achar oportunidades e validar se há liquidez para operar.", buildJsonObject {
+                    put("sort", str("new (mais novos→mais velhos) ou trending (em alta). Padrão new"))
+                    put("limit", int("Quantidade de tokens (1-100; padrão 30)"))
+                }))
+                add(tool("market_token_info", "Informações reais de UM token pelo mint: preço USD, liquidez total, volume 24h e market cap. Use para validar a possibilidade de comprar/vender (liquidez) antes de operar.", buildJsonObject {
+                    put("mint", str("Endereço de mint do token"))
+                }, listOf("mint")))
                 add(tool("wallet_list_tokens", "Lista os tokens SPL que a carteira realmente possui (mint, saldo, decimais). Somente leitura.", buildJsonObject {}))
                 add(tool("wallet_swap", "Executa uma TROCA REAL token→token via Jupiter, assinada localmente (a chave nunca entra no contexto). Só na Mainnet. Entradas em SOL respeitam o limite por operação autorizado. Relate 'enviado' só com a assinatura retornada.", buildJsonObject {
                     put("input_mint", str("Mint de entrada (o que você vende)"))
@@ -877,6 +885,18 @@ class AgentRunner(
             else ->
                 "Transferência automática não concluída. ID: ${intent.requestId}"
         }
+    }
+
+    /** Classifica a origem da falha pelo nome da ferramenta, para o log de erros. */
+    private fun errorSource(toolName: String): String = when {
+        toolName.startsWith("browser_") -> "browser"
+        toolName == "shell" -> "terminal"
+        toolName.startsWith("wallet_") || toolName.startsWith("trade_") -> "wallet"
+        toolName.startsWith("market_") -> "market"
+        toolName.startsWith("file_") -> "file"
+        toolName.startsWith("device_") -> "device"
+        toolName.startsWith("mcp_") -> "connector"
+        else -> "tool"
     }
 
     private suspend fun runTool(sessionId: String, call: ToolCall): ToolResult {
@@ -1156,8 +1176,8 @@ class AgentRunner(
                         }
                     }
                 }
-                "market_price", "market_candles", "market_liquidity", "wallet_list_tokens",
-                "wallet_swap", "trade_set_rule", "trade_list", "trade_cancel" -> {
+                "market_price", "market_candles", "market_liquidity", "market_discover", "market_token_info",
+                "wallet_list_tokens", "wallet_swap", "trade_set_rule", "trade_list", "trade_cancel" -> {
                     val agentId = store.session(sessionId)?.agentId
                     val policies = WalletAgentPolicyStore(ctx.applicationContext)
                     if (agentId.isNullOrBlank() || store.agent(agentId) == null) {
@@ -1167,9 +1187,39 @@ class AgentRunner(
                     } else {
                         val wallet = SolanaWalletRepository(ctx.applicationContext)
                         val market = dev.cueopen.app.wallet.SolanaMarketDataClient()
-                        if (call.name == "market_price" || call.name == "market_candles" || call.name == "market_liquidity") {
+                        if (call.name.startsWith("market_")) {
                             // Dados de mercado são somente leitura (não tocam a carteira).
                             when (call.name) {
+                                "market_discover" -> {
+                                    val sort = s("sort").ifBlank { "new" }
+                                    runCatching { market.discoverTokens(sort, i("limit") ?: 30) }.fold({ tokens ->
+                                        if (tokens.isEmpty()) "Nenhum token retornado agora para sort=$sort."
+                                        else buildString {
+                                            appendLine("Tokens Solana (${if (sort.lowercase().startsWith("trend") || sort.lowercase() == "hot" || sort.lowercase() == "gainers") "em alta" else "mais novos → mais velhos"}), dados reais:")
+                                            tokens.forEach { t ->
+                                                val price = t.priceUsd?.let { "US$ " + String.format(Locale.US, if (it < 1.0) "%.8f" else "%.4f", it) } ?: "s/preço"
+                                                val liq = t.liquidityUsd?.let { "liq US$ " + String.format(Locale.US, "%,.0f", it) } ?: "liq ?"
+                                                val vol = t.volume24hUsd?.let { "vol24h US$ " + String.format(Locale.US, "%,.0f", it) } ?: "vol ?"
+                                                val chg = t.priceChange24hPct?.let { " | 24h ${String.format(Locale.US, "%+.1f", it)}%" } ?: ""
+                                                appendLine("${t.symbol} (${t.mint}): $price | $liq | $vol$chg${t.poolCreatedAt?.let { " | criado $it" } ?: ""}")
+                                            }
+                                        }.trim()
+                                    }, { "MARKET_ERROR ao descobrir tokens: ${(it.message ?: it.javaClass.simpleName).take(200)}." })
+                                }
+                                "market_token_info" -> {
+                                    val mint = s("mint")
+                                    runCatching { market.tokenInfo(mint) }.fold({ t ->
+                                        if (t == null) "Sem informações para este mint."
+                                        else buildString {
+                                            appendLine("${t.symbol} — ${t.name} ($mint)")
+                                            t.priceUsd?.let { appendLine("Preço: US$ " + String.format(Locale.US, if (it < 1.0) "%.8f" else "%.4f", it)) }
+                                            t.liquidityUsd?.let { appendLine("Liquidez total: US$ " + String.format(Locale.US, "%,.0f", it)) }
+                                            t.volume24hUsd?.let { appendLine("Volume 24h: US$ " + String.format(Locale.US, "%,.0f", it)) }
+                                            t.marketCapUsd?.let { appendLine("Market cap/FDV: US$ " + String.format(Locale.US, "%,.0f", it)) }
+                                            appendLine("Liquidez e volume reais permitem avaliar se é possível comprar e vender; valide o impacto com market_liquidity antes de entrar.")
+                                        }.trim()
+                                    }, { "MARKET_ERROR ao consultar token: ${(it.message ?: it.javaClass.simpleName).take(200)}." })
+                                }
                                 "market_price" -> {
                                     val mints = sl("mints")
                                     if (mints.isEmpty()) "Informe ao menos um mint em 'mints'."
@@ -1428,14 +1478,22 @@ class AgentRunner(
             throw c
         } catch (t: Throwable) {
             executions.fail(executionId, t.message.orEmpty())
+            runCatching { dev.cueopen.app.diag.ErrorLog.log(errorSource(call.name), "${t.javaClass.simpleName}: ${t.message.orEmpty()}", sessionId, call.name) }
             store.replaceItem(sessionId, step.copy(result = t.message.orEmpty(), status = StepStatus.ERROR))
             return ToolResult("Erro: ${t.message}")
         }
         val commandFailed = Regex("""\[exit ([1-9]\d*)\]""").containsMatchIn(out)
-        if (out.startsWith("ERROR:") || out.startsWith("TIMEOUT:") || out.startsWith("ERRO:") || commandFailed) {
+        val isError = out.startsWith("ERROR:") || out.startsWith("TIMEOUT:") || out.startsWith("ERRO:") || commandFailed
+        // Marcadores de falha específicos de ferramentas (não começam com ERRO:) também viram log.
+        val markerError = Regex("""(MARKET_ERROR|WALLET_RPC_ERROR|GUARDRAIL|No such file|not found|não encontrad|Recusado|Acesso negado)""")
+            .containsMatchIn(out.take(400))
+        if (isError) {
             executions.fail(executionId, out)
         } else {
             executions.finish(executionId, out)
+        }
+        if (isError || markerError) {
+            runCatching { dev.cueopen.app.diag.ErrorLog.log(errorSource(call.name), out.take(1000), sessionId, call.name) }
         }
         store.replaceItem(sessionId, step.copy(result = out.take(4000), status = if (commandFailed || out.startsWith("ERROR:") || out.startsWith("TIMEOUT:") || out.startsWith("ERRO:")) StepStatus.ERROR else StepStatus.OK))
         return ToolResult(out)

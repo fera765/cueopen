@@ -6,6 +6,7 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.doubleOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonPrimitive
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -159,12 +160,110 @@ class SolanaMarketDataClient(
         }
     }
 
+    /**
+     * Descobre tokens de TODO o ecossistema Solana via GeckoTerminal (keyless), ordenados.
+     * [sort] = "new" (pools mais novos → tokens recém-lançados, do mais novo ao mais velho),
+     * "trending" (em alta agora). Traz preço, liquidez (reserva do pool) e volume 24h REAIS,
+     * para o agente achar oportunidades e validar se dá para comprar/vender com liquidez.
+     */
+    suspend fun discoverTokens(sort: String = "new", limit: Int = 30): List<TokenMarket> = withContext(Dispatchers.IO) {
+        val endpoint = when (sort.lowercase()) {
+            "trending", "hot", "gainers" -> "trending_pools"
+            else -> "new_pools"
+        }
+        val safeLimit = limit.coerceIn(1, 100)
+        val out = LinkedHashMap<String, TokenMarket>()
+        // GeckoTerminal pagina de 20 em 20; busca páginas até preencher o limite.
+        var page = 1
+        while (out.size < safeLimit && page <= 5) {
+            val url = geckoBase.trimEnd('/') + "/networks/solana/$endpoint?page=$page"
+            val req = Request.Builder().url(url).header("Accept", "application/json").get().build()
+            val data = runCatching {
+                client.newCall(req).execute().use { resp ->
+                    if (!resp.isSuccessful) throw IOException("Discover HTTP ${resp.code}")
+                    val body = resp.body?.string().orEmpty()
+                    if (body.length > MAX_RESPONSE_CHARS) throw IOException("Resposta de descoberta excede o limite")
+                    json.parseToJsonElement(body).jsonObject["data"]?.jsonArray
+                }
+            }.getOrNull()
+            if (data.isNullOrEmpty()) break
+            for (pool in data) {
+                if (out.size >= safeLimit) break
+                runCatching {
+                    val attr = pool.jsonObject["attributes"]?.jsonObject ?: return@runCatching
+                    val baseId = pool.jsonObject["relationships"]?.jsonObject
+                        ?.get("base_token")?.jsonObject?.get("data")?.jsonObject
+                        ?.get("id")?.jsonPrimitive?.contentOrNull ?: return@runCatching
+                    val mint = baseId.removePrefix("solana_")
+                    if (!SolanaAddressValidator.isValidAddress(mint) || out.containsKey(mint)) return@runCatching
+                    val poolName = attr["name"]?.jsonPrimitive?.contentOrNull.orEmpty()
+                    val symbol = poolName.substringBefore(" / ").trim().ifBlank { mint.take(6) }
+                    out[mint] = TokenMarket(
+                        mint = mint,
+                        symbol = symbol,
+                        name = poolName,
+                        priceUsd = attr["base_token_price_usd"]?.jsonPrimitive?.contentOrNull?.toDoubleOrNull(),
+                        liquidityUsd = attr["reserve_in_usd"]?.jsonPrimitive?.contentOrNull?.toDoubleOrNull(),
+                        volume24hUsd = (attr["volume_usd"] as? kotlinx.serialization.json.JsonObject)?.get("h24")?.jsonPrimitive?.contentOrNull?.toDoubleOrNull(),
+                        priceChange24hPct = (attr["price_change_percentage"] as? kotlinx.serialization.json.JsonObject)?.get("h24")?.jsonPrimitive?.contentOrNull?.toDoubleOrNull(),
+                        poolCreatedAt = attr["pool_created_at"]?.jsonPrimitive?.contentOrNull,
+                        poolAddress = pool.jsonObject["id"]?.jsonPrimitive?.contentOrNull?.removePrefix("solana_"),
+                        marketCapUsd = attr["market_cap_usd"]?.jsonPrimitive?.contentOrNull?.toDoubleOrNull()
+                            ?: attr["fdv_usd"]?.jsonPrimitive?.contentOrNull?.toDoubleOrNull()
+                    )
+                }
+            }
+            page++
+        }
+        out.values.take(safeLimit).toList()
+    }
+
+    /** Informações REAIS de um token (preço, liquidez total, volume 24h, market cap) via GeckoTerminal. */
+    suspend fun tokenInfo(mint: String): TokenMarket? = withContext(Dispatchers.IO) {
+        require(SolanaAddressValidator.isValidAddress(mint)) { "Mint inválido" }
+        val url = geckoBase.trimEnd('/') + "/networks/solana/tokens/$mint"
+        val req = Request.Builder().url(url).header("Accept", "application/json").get().build()
+        client.newCall(req).execute().use { resp ->
+            if (!resp.isSuccessful) throw IOException("Token info HTTP ${resp.code}")
+            val body = resp.body?.string().orEmpty()
+            if (body.length > MAX_RESPONSE_CHARS) throw IOException("Resposta de token excede o limite")
+            val attr = json.parseToJsonElement(body).jsonObject["data"]?.jsonObject
+                ?.get("attributes")?.jsonObject ?: return@use null
+            TokenMarket(
+                mint = mint,
+                symbol = attr["symbol"]?.jsonPrimitive?.contentOrNull ?: mint.take(6),
+                name = attr["name"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+                priceUsd = attr["price_usd"]?.jsonPrimitive?.contentOrNull?.toDoubleOrNull(),
+                liquidityUsd = attr["total_reserve_in_usd"]?.jsonPrimitive?.contentOrNull?.toDoubleOrNull(),
+                volume24hUsd = (attr["volume_usd"] as? kotlinx.serialization.json.JsonObject)?.get("h24")?.jsonPrimitive?.contentOrNull?.toDoubleOrNull(),
+                priceChange24hPct = null,
+                poolCreatedAt = null,
+                poolAddress = null,
+                marketCapUsd = attr["market_cap_usd"]?.jsonPrimitive?.contentOrNull?.toDoubleOrNull()
+                    ?: attr["fdv_usd"]?.jsonPrimitive?.contentOrNull?.toDoubleOrNull()
+            )
+        }
+    }
+
     companion object {
         const val JUP_PRICE_BASE = "https://lite-api.jup.ag"
         const val GECKO_BASE = "https://api.geckoterminal.com/api/v2"
         private const val MAX_RESPONSE_CHARS = 2 * 1024 * 1024
     }
 }
+
+data class TokenMarket(
+    val mint: String,
+    val symbol: String,
+    val name: String,
+    val priceUsd: Double?,
+    val liquidityUsd: Double?,
+    val volume24hUsd: Double?,
+    val priceChange24hPct: Double?,
+    val poolCreatedAt: String?,
+    val poolAddress: String?,
+    val marketCapUsd: Double?
+)
 
 data class Candle(
     val tsEpochSeconds: Long,

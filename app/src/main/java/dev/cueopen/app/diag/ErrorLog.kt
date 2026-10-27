@@ -1,0 +1,57 @@
+package dev.cueopen.app.diag
+
+import android.content.Context
+import java.io.File
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+
+/**
+ * Registro de falhas do aplicativo, gravado em disco para o usuário baixar nas Configurações
+ * e enviar para diagnóstico. Captura erros REAIS (ferramentas do agente, browser, terminal,
+ * swaps, mercado, crashes) — nunca o conteúdo das conversas. Thread-safe e com tamanho limitado.
+ */
+object ErrorLog {
+    private const val FILE = "error_log.txt"
+    private const val MAX_BYTES = 512 * 1024L
+    private val lock = Any()
+    @Volatile private var filesDir: File? = null
+    private val stamp = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US)
+
+    fun init(context: Context) { filesDir = context.applicationContext.filesDir }
+
+    fun file(context: Context): File = File(context.applicationContext.filesDir, FILE)
+
+    /**
+     * Acrescenta uma entrada de erro. [source] é a origem (ex.: "tool", "browser", "terminal",
+     * "swap", "market", "crash"); [detail] a mensagem real da falha.
+     */
+    fun log(source: String, detail: String, sessionId: String? = null, tool: String? = null) {
+        val dir = filesDir ?: return
+        if (detail.isBlank()) return
+        runCatching {
+            synchronized(lock) {
+                val f = File(dir, FILE)
+                val header = buildString {
+                    append('[').append(stamp.format(Date())).append("] ").append(source)
+                    if (!tool.isNullOrBlank()) append(" · tool=").append(tool)
+                    if (!sessionId.isNullOrBlank()) append(" · sess=").append(sessionId.take(8))
+                }
+                val body = detail.trim().take(2000).replace("\n", "\n    ")
+                f.appendText("$header\n    $body\n")
+                if (f.length() > MAX_BYTES) {
+                    val tail = f.readText().takeLast((MAX_BYTES / 2).toInt())
+                    f.writeText("[log truncado — mantidas as entradas mais recentes]\n$tail")
+                }
+            }
+        }
+    }
+
+    fun readAll(context: Context): String =
+        runCatching { file(context).takeIf { it.exists() }?.readText() }.getOrNull().orEmpty()
+
+    fun sizeBytes(context: Context): Long =
+        runCatching { file(context).takeIf { it.exists() }?.length() ?: 0L }.getOrDefault(0L)
+
+    fun clear(context: Context) { runCatching { file(context).delete() } }
+}
