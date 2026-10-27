@@ -566,6 +566,22 @@ class AgentRunner(
             if (caps.isNotEmpty()) appendLine("6c. Você tem acesso ao aparelho: " + caps.joinToString(", ") { dev.cueopen.app.device.DeviceCaps.all.firstOrNull { d -> d.id == it }?.title ?: it } + ". Use as ferramentas device_* quando fizer sentido.")
             appendLine("7. MODO CONTÍNUO: se o usuário pedir para monitorar, acompanhar, repetir ou rodar por horas/dias, NÃO finalize. Faça a verificação, registre em notes_write e chame `sleep` (minutos até a próxima verificação). Repita até o usuário pausar.")
             appendLine("8. Fora do modo contínuo, termine com `finish` (resumo curto + arquivos). `ask_user` só se for ambíguo ou irreversível. Responda no idioma do usuário.")
+            val walletPolicyForPrompt = agent?.let { WalletAgentPolicyStore(ctx.applicationContext) }
+            val walletHasGrants = agent != null && walletPolicyForPrompt != null && (
+                walletPolicyForPrompt.canAgentReadAddress(agent.id) ||
+                    walletPolicyForPrompt.canAgentReadBalance(agent.id) ||
+                    walletPolicyForPrompt.canAgentRequestTransfer(agent.id)
+                )
+            if (walletHasGrants) {
+                appendLine()
+                appendLine("## Política obrigatória da carteira Solana")
+                appendLine("- Use exclusivamente as ferramentas wallet_* disponibilizadas nesta sessão para consultar endereço, saldo ou solicitar transferência.")
+                appendLine("- Nunca use shell, terminal, browser, curl, Solscan ou ferramentas externas como fallback para operações da carteira, mesmo se uma ferramenta falhar.")
+                appendLine("- Se wallet_get_balance retornar WALLET_RPC_ERROR, rede não configurada ou carteira indisponível, explique exatamente essa falha e peça ao usuário para verificar a tela Carteira; não invente saldo nem afirme que a conta/chave é inválida.")
+                appendLine("- Um saldo RPC de 0 SOL não prova que a carteira é inválida; informe que a conta pode não ter saldo on-chain nessa rede.")
+                appendLine("- Nunca peça, leia, copie, transmita ou revele frase de recuperação, chave privada ou material de assinatura. Não tente assinar nem transmitir transações por terminal.")
+                appendLine("- wallet_request_transfer apenas cria uma solicitação pendente; não diga que fundos foram enviados até a aprovação humana e a confirmação on-chain.")
+            }
             if (!agent?.instructions.isNullOrBlank()) { appendLine(); appendLine("## Instruções do Agent"); appendLine(agent!!.instructions) }
             if (skills.isNotEmpty()) {
                 appendLine(); appendLine("## Skills disponíveis (carregue com skill_load)")
