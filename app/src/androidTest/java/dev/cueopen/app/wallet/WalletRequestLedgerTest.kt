@@ -554,15 +554,15 @@ class WalletRequestLedgerTest {
             manualRequest.requestId, forgedPolicy,
             now - 10_000L, now + 10_000L, now
         ) is LedgerSigningStartResult.Started)
-        val signature = "67rpwLCuS5DGA8KGZXKsVQ7dnPb9goRLoKfgGbLfQg9WoLUgNY77E2jT11fem3coV9nAkguBACzrU1iyZM4B8roQ"
+        val forgedSignature = "67rpwLCuS5DGA8KGZXKsVQ7dnPb9goRLoKfgGbLfQg9WoLUgNY77E2jT11fem3coV9nAkguBACzrU1iyZM4B8roQ"
         assertTrue(ledger.persistSignedTransaction(
-            manualRequest.requestId, signature, serializedSignedTransaction(signature)
+            manualRequest.requestId, forgedSignature, serializedSignedTransaction(forgedSignature)
         ))
-        val broadcast = mainnetExecutor.broadcastPersistedTransfer(
+        val forgedBroadcast = mainnetExecutor.broadcastPersistedTransfer(
             manualRequest.requestId, manualAgentId, forgedPolicy,
             now - 10_000L, now + 10_000L, humanConfirmed = true
         )
-        assertTrue(broadcast is TransferExecutionResult.Rejected)
+        assertTrue(forgedBroadcast is TransferExecutionResult.Rejected)
         assertEquals(LedgerState.SIGNED, ledger.find(manualRequest.requestId)?.state)
 
         store.setManualTransferEnabled(SolanaNetwork.MAINNET, true)

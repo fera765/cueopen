@@ -158,6 +158,10 @@ class AgentRunner(
         var steps = 0
         var repeats = 0
         var lastContent = ""
+        // Detecção de loop de ferramentas: mesma chamada (nome+args) repetida sem progresso.
+        val toolSigWindow = ArrayDeque<String>()
+        var toolLoopNudges = 0
+        val controlTools = setOf("sleep", "set_schedule", "ask_user", "finish", "complete_step", "notes_write", "notes_read")
         while (scope.isActive) {
             val workerUsed = if (tokenBudgetOverride != null) {
                 ((store.session(sessionId)?.let { it.tokensIn + it.tokensOut } ?: startingTokens) - startingTokens).coerceAtLeast(0)
@@ -261,6 +265,28 @@ class AgentRunner(
                 if (result.stop != null) stopLoop = result.stop
                 if (result.sleepMinutes != null) sleepReq = result.sleepMinutes to result.output
             }
+            // Loop de ferramentas: mesma ação repetida sem progresso → corrige e, se insistir, interrompe.
+            run {
+                var tripped: String? = null
+                for (call in reply.toolCalls) {
+                    if (call.name in controlTools) continue
+                    val sig = call.name + "|" + call.argsJson.trim()
+                    toolSigWindow.addLast(sig)
+                    while (toolSigWindow.size > 10) toolSigWindow.removeFirst()
+                    if (toolSigWindow.count { it == sig } >= 3) tripped = call.name
+                }
+                if (tripped != null) {
+                    if (++toolLoopNudges >= 2) {
+                        store.addItem(sessionId, ChatItem.Error(text = "O agente repetiu a mesma ação ($tripped) várias vezes sem progresso. Interrompi para evitar um loop de baixa qualidade. Ajuste o pedido/abordagem ou troque de modelo."))
+                        store.editSession(sessionId) { it.copy(status = SessionStatus.WAITING_USER) }
+                        return
+                    }
+                    store.editSession(sessionId) {
+                        it.copy(llm = it.llm + LlmMessage("user", "[Sistema] Você chamou \"$tripped\" com os mesmos argumentos repetidamente e obteve o mesmo resultado. PARE de repetir: releia o resultado anterior, mude a abordagem (outro caminho/comando/argumento) ou, se a tarefa estiver concluída ou bloqueada, chame finish explicando o motivo. Não repita a mesma chamada."))
+                    }
+                }
+            }
+
             val finalStatus = stopLoop
             if (finalStatus != null) {
                 store.editSession(sessionId) { it.copy(status = finalStatus, continuous = if (finalStatus == SessionStatus.DONE) false else it.continuous) }
