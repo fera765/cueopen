@@ -132,6 +132,21 @@ class WalletAgentPolicyStore(context: Context) {
         setAgentCapability(agentId, CAPABILITY_READ_BALANCE, enabled)
     }
 
+    /** Atomically persist the complete per-agent wallet access grant/revocation. */
+    fun setAgentCapabilities(
+        agentId: String,
+        readAddress: Boolean,
+        readBalance: Boolean,
+        requestTransfer: Boolean
+    ) {
+        require(agentId.isNotBlank()) { "Agent ID is required" }
+        check(prefs.edit()
+            .putBoolean(agentCapabilityKey(agentId, CAPABILITY_READ_ADDRESS), readAddress)
+            .putBoolean(agentCapabilityKey(agentId, CAPABILITY_READ_BALANCE), readBalance)
+            .putBoolean(agentCapabilityKey(agentId, CAPABILITY_REQUEST_TRANSFER), requestTransfer)
+            .commit()) { "Could not persist wallet agent permissions" }
+    }
+
     private fun setAgentCapability(agentId: String, capability: String, enabled: Boolean) {
         require(agentId.isNotBlank()) { "Agent ID is required" }
         check(prefs.edit().putBoolean(agentCapabilityKey(agentId, capability), enabled).commit()) {
