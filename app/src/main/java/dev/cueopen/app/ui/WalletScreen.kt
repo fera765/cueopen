@@ -42,6 +42,8 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.positionInParent
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.unit.dp
@@ -55,6 +57,7 @@ import dev.cueopen.app.wallet.WalletSetupSession
 import dev.cueopen.app.wallet.WalletAgentPolicyStore
 import dev.cueopen.app.CueApp
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.util.Locale
 
@@ -95,6 +98,11 @@ fun WalletScreen(nav: NavController) {
     var refreshCounter by remember { mutableStateOf(0) }
     var hideBalance by remember { mutableStateOf(false) }
     var quickAction by remember { mutableStateOf<String?>(null) }
+    val walletScrollState = rememberScrollState()
+    val walletScope = rememberCoroutineScope()
+    var receiveOffset by remember { mutableStateOf(0) }
+    var sendOffset by remember { mutableStateOf(0) }
+    var settingsOffset by remember { mutableStateOf(0) }
     val activeSetup by rememberUpdatedState(setup)
 
     DisposableEffect(Unit) {
@@ -171,7 +179,18 @@ fun WalletScreen(nav: NavController) {
                 "Trocar" -> "A troca de tokens ainda não está integrada. Nenhuma cotação ou troca simulada será apresentada como real."
                 else -> "As configurações da carteira incluem rede Mainnet/Devnet, permissões dos agentes, limites de transferência e destinatários autorizados."
             }) },
-            confirmButton = { TextButton(onClick = { quickAction = null }) { Text("Entendi") } },
+            confirmButton = {
+                TextButton(onClick = {
+                    val target = when (quickAction) {
+                        "Enviar" -> sendOffset
+                        "Receber" -> receiveOffset
+                        "Mais" -> settingsOffset
+                        else -> null
+                    }
+                    quickAction = null
+                    if (target != null) walletScope.launch { walletScrollState.animateScrollTo(target.coerceIn(0, walletScrollState.maxValue)) }
+                }) { Text(if (quickAction == "Trocar") "Entendi" else "Abrir seção") }
+            },
             dismissButton = { TextButton(onClick = { quickAction = null }) { Text("Fechar") } }
         )
     }
@@ -181,7 +200,7 @@ fun WalletScreen(nav: NavController) {
         topBar = { CueTopBar("Carteira Solana", { nav.popBackStack() }) }
     ) { padding ->
         Column(
-            Modifier.padding(padding).verticalScroll(rememberScrollState()).padding(20.dp),
+            Modifier.padding(padding).verticalScroll(walletScrollState).padding(20.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
             Card(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(24.dp), colors = androidx.compose.material3.CardDefaults.cardColors(containerColor = c.surface)) {
@@ -337,7 +356,7 @@ fun WalletScreen(nav: NavController) {
                         if (error != null) Text(error!!, color = c.err, style = androidx.compose.material3.MaterialTheme.typography.bodySmall)
                     }
                 }
-                Text("Receber", style = androidx.compose.material3.MaterialTheme.typography.titleLarge)
+                Text("Receber", modifier = Modifier.onGloballyPositioned { receiveOffset = it.positionInParent().y.toInt() }, style = androidx.compose.material3.MaterialTheme.typography.titleLarge)
                 Text("Seu endereço público", color = c.ink2, style = androidx.compose.material3.MaterialTheme.typography.bodyMedium)
                 Card(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(16.dp), colors = androidx.compose.material3.CardDefaults.cardColors(containerColor = c.surface)) {
                     Text(address!!, modifier = Modifier.fillMaxWidth().padding(14.dp), color = c.ink, style = androidx.compose.material3.MaterialTheme.typography.bodySmall)
@@ -398,7 +417,7 @@ fun WalletScreen(nav: NavController) {
                     }
                 }
 
-                Text("Acesso dos agentes", style = androidx.compose.material3.MaterialTheme.typography.titleLarge)
+                Text("Acesso dos agentes", modifier = Modifier.onGloballyPositioned { settingsOffset = it.positionInParent().y.toInt() }, style = androidx.compose.material3.MaterialTheme.typography.titleLarge)
                 Text("Cada permissão é salva neste dispositivo e começa desativada. Leitura permite consultar endereço/saldo; a permissão de transferência só permite criar pedidos tipados, sempre sujeitos à revisão, aprovação humana, assinatura local e confirmação separada antes do envio. Agentes nunca recebem chaves privadas.", color = c.ink2)
                 if (walletAgents.isEmpty()) {
                     Text("Nenhum agente foi configurado.")
@@ -534,7 +553,7 @@ fun WalletScreen(nav: NavController) {
                 }
             }
 
-            Text("Rede Solana", style = androidx.compose.material3.MaterialTheme.typography.titleLarge)
+            Text("Rede Solana", modifier = Modifier.onGloballyPositioned { sendOffset = it.positionInParent().y.toInt() }, style = androidx.compose.material3.MaterialTheme.typography.titleLarge)
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                 Button(
                     modifier = Modifier.weight(1f),
