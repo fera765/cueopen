@@ -714,6 +714,7 @@ class AgentRunner(
                     appendLine("- NUNCA execute wallet_swap ou trade_set_rule sem antes validar o sinal com typesafe_jev_check. A acurácia vem de dados reais; não invente probabilidades.")
                     appendLine("- Se market_candles retornar 'tendência real alternativa' (DexScreener: variações m5/h1/h6/h24, volume, fluxo compra/venda), isso é dado REAL e suficiente para analisar a tendência — use-o normalmente, não repita a chamada em loop.")
                     appendLine("- STOP-LOSS / TAKE-PROFIT são AUTOMÁTICOS: ao abrir uma posição, arme imediatamente trade_set_rule para o stop-loss (price_below) e para o take-profit (price_above). O sistema monitora o preço real sozinho (a cada ~20s) e FECHA a operação automaticamente quando o alvo é atingido — mesmo entre os seus ciclos. Você NÃO precisa ficar acordando para fechar; só arme as regras uma vez.")
+                    appendLine("- TRAILING STOP: a cada ciclo, se o preço subiu bem acima da sua entrada, use trade_update_rule para MOVER o stop-loss (regra price_below) para cima e travar lucro. Ex.: entrada US$ 0,55, preço foi a US$ 0,58 → mova o stop-loss para US$ 0,56; se cair, a operação fecha sozinha no lucro. Nunca mova o stop-loss para baixo (isso aumenta a perda). Vale para uma ou várias posições abertas.")
                     appendLine("- wallet_swap executa troca REAL e assinada localmente; entradas em SOL respeitam o limite por operação autorizado pelo usuário. Só diga 'enviado/executado' com base na assinatura retornada (Explorer); jamais afirme lucro ou execução sem a assinatura.")
                     appendLine("- Para monitorar o mercado de forma contínua, use set_schedule (ex.: a cada 5-15 min) e, a cada ciclo, reavalie com market_* e trade_list. Seja econômico e honesto sobre risco: day trade pode gerar perdas; nunca prometa retorno.")
                 }
@@ -889,6 +890,11 @@ class AgentRunner(
                 add(tool("trade_cancel", "Cancela uma regra de day trade armada deste agente.", buildJsonObject {
                     put("rule_id", str("ID da regra"))
                 }, listOf("rule_id")))
+                add(tool("trade_update_rule", "Ajusta (move) uma regra de day trade ARMADA deste agente — use para TRAILING STOP: quando o preço sobe, mova o stop-loss para cima para travar lucro. Ex.: entrada 0,55, preço foi a 0,58 → mova o stop-loss para 0,56; se cair, sai no lucro. Só muda o preço-alvo (e opcionalmente o gatilho); a regra continua monitorada e executa sozinha.", buildJsonObject {
+                    put("rule_id", str("ID da regra armada a ajustar"))
+                    put("target_price_usd", str("Novo preço-alvo em USD (decimal)"))
+                    put("trigger", str("Opcional: price_below ou price_above, caso precise mudar o sentido"))
+                }, listOf("rule_id", "target_price_usd")))
                 add(tool("typesafe_jev_check", "OBRIGATÓRIO antes de operar: avalia a ACURÁCIA de cada sinal de trade usando o modelo avaliador TypeSafe Jev (OpenRouter). Envie os dados REAIS que você já coletou (preço, velas, liquidez, volume, direção) de CADA sinal; retorna acurácia (0-100) e confiança por sinal. Entre apenas nos sinais de maior acurácia. Não invente números: baseie-se só nos dados fornecidos.", buildJsonObject {
                     put("signals_json", str("JSON array de sinais, cada um: {\"id\":\"SOL\",\"direction\":\"buy|sell\",\"data\":\"resumo com preço, velas OHLCV, liquidez, volume, tendência\"}"))
                     put("min_accuracy", int("Acurácia mínima (0-100) para considerar o sinal operável (padrão 70)"))
@@ -1298,7 +1304,7 @@ class AgentRunner(
                     }
                 }
                 "market_price", "market_candles", "market_liquidity", "market_discover", "market_token_info",
-                "typesafe_jev_check", "wallet_list_tokens", "wallet_swap", "trade_set_rule", "trade_list", "trade_cancel" -> {
+                "typesafe_jev_check", "wallet_list_tokens", "wallet_swap", "trade_set_rule", "trade_list", "trade_cancel", "trade_update_rule" -> {
                     val agentId = store.session(sessionId)?.agentId
                     val policies = WalletAgentPolicyStore(ctx.applicationContext)
                     if (agentId.isNullOrBlank() || store.agent(agentId) == null) {
@@ -1466,6 +1472,27 @@ class AgentRunner(
                                 "trade_cancel" -> {
                                     val ok = dev.cueopen.app.wallet.DayTradeStore(ctx.applicationContext).cancel(s("rule_id"), agentId)
                                     if (ok) "Regra ${s("rule_id")} cancelada." else "Nenhuma regra armada com esse ID para este agente."
+                                }
+                                "trade_update_rule" -> {
+                                    val newTarget = s("target_price_usd").toDoubleOrNull()
+                                    val newTrig = when (s("trigger").lowercase()) {
+                                        "price_below", "below" -> dev.cueopen.app.wallet.DayTradeStore.Trigger.PRICE_BELOW
+                                        "price_above", "above" -> dev.cueopen.app.wallet.DayTradeStore.Trigger.PRICE_ABOVE
+                                        else -> null
+                                    }
+                                    when {
+                                        newTarget == null || newTarget <= 0.0 -> "target_price_usd deve ser um decimal positivo."
+                                        else -> {
+                                            val updated = dev.cueopen.app.wallet.DayTradeStore(ctx.applicationContext)
+                                                .updateTarget(s("rule_id"), agentId, newTarget, newTrig)
+                                            if (updated == null) "Nenhuma regra ARMADA com esse ID para este agente (só é possível mover regras ainda não executadas/canceladas)."
+                                            else {
+                                                runCatching { dev.cueopen.app.sandbox.SandboxService.start(ctx, "Monitorando stop-loss/take-profit") }
+                                                val dir = if (updated.trigger == dev.cueopen.app.wallet.DayTradeStore.Trigger.PRICE_BELOW) "≤" else "≥"
+                                                "Regra ${updated.id} (${updated.label}) AJUSTADA: novo alvo $dir US$ ${updated.targetPriceUsd}. Continua sendo monitorada e executa sozinha ao atingir."
+                                            }
+                                        }
+                                    }
                                 }
                                 else -> { // trade_list (+ avaliação)
                                     val dtStore = dev.cueopen.app.wallet.DayTradeStore(ctx.applicationContext)

@@ -60,6 +60,19 @@ class DayTradeStore(context: Context) {
         persist(next)
     }
 
+    /**
+     * Ajusta o preço-alvo (e opcionalmente o gatilho) de uma regra ARMADA deste agente — usado pelo
+     * trailing stop: ao subir o preço, o agente move o stop-loss para cima para travar lucro.
+     * Só altera regras ARMADAS do próprio agente. Retorna a regra atualizada ou null.
+     */
+    fun updateTarget(id: String, agentId: String, newTargetUsd: Double, newTrigger: Trigger? = null): Rule? {
+        val rule = load().firstOrNull { it.id == id && it.agentId == agentId } ?: return null
+        if (rule.status != Status.ARMED) return null
+        val updated = rule.copy(targetPriceUsd = newTargetUsd, trigger = newTrigger ?: rule.trigger)
+        upsert(updated)
+        return updated
+    }
+
     /** Cancels an ARMED rule owned by [agentId]. Returns true if a rule was actually cancelled. */
     fun cancel(id: String, agentId: String): Boolean {
         val rule = load().firstOrNull { it.id == id && it.agentId == agentId } ?: return false
