@@ -33,6 +33,7 @@ import dev.cueopen.app.data.*
 import dev.cueopen.app.scheduler.Scheduler
 import kotlinx.coroutines.launch
 import dev.cueopen.app.ui.theme.Cue
+import dev.cueopen.app.wallet.WalletAgentPolicyStore
 import java.text.SimpleDateFormat
 import java.util.Calendar
 import java.util.Date
@@ -89,6 +90,17 @@ fun AgentEditScreen(nav: NavController, id: String) {
     val existing = st.agents.firstOrNull { it.id == id }
     var a by remember { mutableStateOf(existing ?: AgentProfile(name = "")) }
     val c = Cue.c
+    val walletPolicies = remember { WalletAgentPolicyStore(app.applicationContext) }
+    var walletAccess by remember(a.id) {
+        mutableStateOf(
+            walletPolicies.canAgentReadAddress(a.id) ||
+                walletPolicies.canAgentReadBalance(a.id) ||
+                walletPolicies.canAgentRequestTransfer(a.id)
+        )
+    }
+    var walletReadAddress by remember(a.id) { mutableStateOf(walletPolicies.canAgentReadAddress(a.id)) }
+    var walletReadBalance by remember(a.id) { mutableStateOf(walletPolicies.canAgentReadBalance(a.id)) }
+    var walletRequestTransfer by remember(a.id) { mutableStateOf(walletPolicies.canAgentRequestTransfer(a.id)) }
     Scaffold(containerColor = c.bg, topBar = {
         CueTopBar(if (existing == null) "Criar Agent" else a.name, { nav.popBackStack() }) {
             if (existing != null) IconButton({ app.store.deleteAgent(id); nav.popBackStack() }) { Icon(Icons.Rounded.Delete, "Excluir", tint = c.err) }
@@ -127,6 +139,27 @@ fun AgentEditScreen(nav: NavController, id: String) {
             SectionLabel("Ferramentas")
             ToggleRow("Terminal Linux", "Executar comandos no sandbox", a.useTerminal) { a = a.copy(useTerminal = it) }
             ToggleRow("Browser", "Navegar e interagir com sites", a.useBrowser) { a = a.copy(useBrowser = it) }
+            SectionLabel("Carteira Solana")
+            ToggleRow(
+                "Permitir acesso à carteira",
+                "Ative para este agente apenas as capacidades selecionadas abaixo. Chaves privadas e frase de recuperação nunca são disponibilizadas.",
+                walletAccess
+            ) { walletAccess = it }
+            if (walletAccess) {
+                Column(
+                    Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(c.panel).padding(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    ToggleRow("Consultar endereço público", "Permite ler o endereço público da carteira local.", walletReadAddress) { walletReadAddress = it }
+                    ToggleRow("Consultar saldo SOL", "Permite consultar o saldo on-chain da rede selecionada.", walletReadBalance) { walletReadBalance = it }
+                    ToggleRow("Solicitar transferência", "Permite criar uma solicitação para revisão humana. Não permite assinatura ou envio automático.", walletRequestTransfer) { walletRequestTransfer = it }
+                    Text(
+                        "As transferências continuam sujeitas aos limites locais e à aprovação explícita do usuário.",
+                        fontSize = 12.sp,
+                        color = c.ink2
+                    )
+                }
+            }
             SectionLabel("Skills (vazio = todas ativas)")
             FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 st.skills.forEach { s ->
@@ -149,7 +182,12 @@ fun AgentEditScreen(nav: NavController, id: String) {
             }
             Spacer(Modifier.height(8.dp))
             PillButton("Salvar", Icons.Rounded.Check, modifier = Modifier.fillMaxWidth(), enabled = a.name.isNotBlank()) {
-                app.store.upsertAgent(a); if (a.autonomous) app.agent.startAutonomy(); nav.popBackStack()
+                app.store.upsertAgent(a)
+                walletPolicies.setAgentReadAddress(a.id, walletAccess && walletReadAddress)
+                walletPolicies.setAgentReadBalance(a.id, walletAccess && walletReadBalance)
+                walletPolicies.setAgentRequestTransfer(a.id, walletAccess && walletRequestTransfer)
+                if (a.autonomous) app.agent.startAutonomy()
+                nav.popBackStack()
             }
             Spacer(Modifier.height(24.dp))
         }
