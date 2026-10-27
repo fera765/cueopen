@@ -71,6 +71,7 @@ import dev.cueopen.app.wallet.SolanaSwapClient
 import dev.cueopen.app.wallet.TokenDisplay
 import coil.compose.AsyncImage
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.draw.clip
 import dev.cueopen.app.wallet.WalletSetupSession
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
