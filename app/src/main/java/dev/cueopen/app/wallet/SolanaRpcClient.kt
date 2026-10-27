@@ -152,21 +152,19 @@ class SolanaRpcClient(
                     put("commitment", "confirmed")
                 }
             ))
-            result.jsonArray.mapNotNull { element ->
-                runCatching {
-                    val fields = element.jsonObject
-                    val signature = fields["signature"]?.jsonPrimitive?.content
-                        ?: throw IOException("RPC signature item omitted signature")
-                    if (!SolanaSignatureValidator.isValid(signature)) {
-                        throw IOException("RPC returned invalid transaction signature")
-                    }
-                    val slot = fields["slot"]?.jsonPrimitive?.content?.toLongOrNull()
-                        ?: throw IOException("RPC signature item omitted slot")
-                    val blockTime = fields["blockTime"]?.takeUnless { it == JsonNull }
-                        ?.jsonPrimitive?.content?.toLongOrNull()
-                    val error = fields["err"]?.takeUnless { it == JsonNull }?.toString()
-                    SolanaRecentSignature(signature, slot, blockTime, error)
-                }.getOrNull()
+            result.jsonArray.map { element ->
+                val fields = element.jsonObject
+                val signature = fields["signature"]?.jsonPrimitive?.content
+                    ?: throw IOException("RPC signature item omitted signature")
+                if (!SolanaSignatureValidator.isValid(signature)) {
+                    throw IOException("RPC returned invalid transaction signature")
+                }
+                val slot = fields["slot"]?.jsonPrimitive?.content?.toLongOrNull()
+                    ?: throw IOException("RPC signature item omitted slot")
+                val blockTime = fields["blockTime"]?.takeUnless { it == JsonNull }
+                    ?.jsonPrimitive?.content?.toLongOrNull()
+                val error = fields["err"]?.takeUnless { it == JsonNull }?.toString()
+                SolanaRecentSignature(signature, slot, blockTime, error)
             }
         }
 
