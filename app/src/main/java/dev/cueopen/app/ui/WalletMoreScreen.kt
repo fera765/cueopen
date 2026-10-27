@@ -155,6 +155,15 @@ fun WalletMoreScreen(nav: NavController) {
                                     }.onFailure { e -> error = e.message ?: "Limites ou destinatários inválidos." }
                                 }
                             }
+                            var dayTrade by remember(agent.id, permissionRefresh) { mutableStateOf(policyStore.canAgentDayTrade(agent.id)) }
+                            PermissionRow("Day trade (mercado + swaps + regras)", dayTrade) {
+                                runCatching { policyStore.setAgentDayTrade(agent.id, it); dayTrade = it; permissionRefresh++ }
+                                    .onFailure { e -> error = e.message }
+                            }
+                            if (dayTrade) Text(
+                                "Dados de mercado reais (preço, velas, liquidez), trocas e regras de stop-loss/take-profit. Entradas em SOL respeitam o limite por operação acima. Não concede envio de SOL a terceiros.",
+                                color = c.ink2, fontSize = 12.sp
+                            )
                         }
                     }
                 }

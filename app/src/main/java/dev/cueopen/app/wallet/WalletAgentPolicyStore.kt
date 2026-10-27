@@ -50,6 +50,19 @@ class WalletAgentPolicyStore(context: Context) {
     }
 
     /**
+     * Opt-in day-trade capability: lets the agent read live market data (price/candles/liquidity),
+     * list SPL holdings, execute swaps, and arm stop-loss/take-profit rules. Swaps funded with SOL
+     * stay bounded by the per-transfer SOL limit. Default: disabled. Granting it does not grant
+     * SOL transfers to third parties (that is a separate capability).
+     */
+    fun canAgentDayTrade(agentId: String): Boolean =
+        prefs.getBoolean(agentCapabilityKey(agentId, CAPABILITY_DAY_TRADE), false)
+
+    fun setAgentDayTrade(agentId: String, enabled: Boolean) {
+        setAgentCapability(agentId, CAPABILITY_DAY_TRADE, enabled)
+    }
+
+    /**
      * Returns the persisted policy for a transfer identity. Autonomous execution is only turned on
      * when the user explicitly enabled both request-transfer and autonomous-transfer for this agent;
      * the policy gate still requires a non-empty allowlist before allowing an autonomous signature.
@@ -153,7 +166,8 @@ class WalletAgentPolicyStore(context: Context) {
         readAddress: Boolean,
         readBalance: Boolean,
         requestTransfer: Boolean,
-        autonomousTransfer: Boolean = false
+        autonomousTransfer: Boolean = false,
+        dayTrade: Boolean = false
     ) {
         require(agentId.isNotBlank()) { "Agent ID is required" }
         // Autonomous execution can never be on without the base request-transfer grant.
@@ -163,6 +177,7 @@ class WalletAgentPolicyStore(context: Context) {
             .putBoolean(agentCapabilityKey(agentId, CAPABILITY_READ_BALANCE), readBalance)
             .putBoolean(agentCapabilityKey(agentId, CAPABILITY_REQUEST_TRANSFER), requestTransfer)
             .putBoolean(agentCapabilityKey(agentId, CAPABILITY_AUTONOMOUS_TRANSFER), autonomous)
+            .putBoolean(agentCapabilityKey(agentId, CAPABILITY_DAY_TRADE), dayTrade)
             .commit()) { "Could not persist wallet agent permissions" }
     }
 
@@ -195,6 +210,7 @@ class WalletAgentPolicyStore(context: Context) {
         private const val CAPABILITY_READ_BALANCE = "read_balance"
         private const val CAPABILITY_REQUEST_TRANSFER = "request_transfer"
         private const val CAPABILITY_AUTONOMOUS_TRANSFER = "autonomous_transfer"
+        private const val CAPABILITY_DAY_TRADE = "day_trade"
         private const val MAX_AGENT_TRANSFER_LAMPORTS = 50_000_000L
         private const val DAILY_AGENT_TRANSFER_LIMIT_LAMPORTS = 100_000_000L
 

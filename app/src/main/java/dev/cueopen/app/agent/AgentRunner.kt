@@ -611,7 +611,8 @@ class AgentRunner(
             val walletHasGrants = agent != null && (
                 walletPolicyForPrompt.canAgentReadAddress(agent.id) ||
                     walletPolicyForPrompt.canAgentReadBalance(agent.id) ||
-                    walletPolicyForPrompt.canAgentRequestTransfer(agent.id)
+                    walletPolicyForPrompt.canAgentRequestTransfer(agent.id) ||
+                    walletPolicyForPrompt.canAgentDayTrade(agent.id)
                 )
             appendLine()
             appendLine("## Segurança da carteira Solana (regra obrigatória)")
@@ -626,6 +627,14 @@ class AgentRunner(
                     appendLine("- Transferência automática está ATIVADA para este agente: wallet_request_transfer pode assinar e transmitir sozinho, dentro dos limites e da allowlist. Só relate 'enviado'/'confirmado' com base no retorno real da ferramenta (assinatura/Explorer); nunca invente confirmação.")
                 } else {
                     appendLine("- wallet_request_transfer apenas cria uma solicitação pendente; nunca diga que os fundos foram enviados antes da aprovação humana e confirmação on-chain.")
+                }
+                if (agent != null && walletPolicyForPrompt.canAgentDayTrade(agent.id)) {
+                    appendLine()
+                    appendLine("## Day trade (capacidade habilitada)")
+                    appendLine("- Dados de mercado são 100% reais: market_price (preço USD ao vivo), market_candles (OHLCV real do pool de maior liquidez), market_liquidity (impacto real por tamanho — AMM não tem order book central). Nunca invente preços, velas ou profundidade; se uma ferramenta retornar MARKET_ERROR, relate o erro e não contorne com shell/curl.")
+                    appendLine("- FLUXO recomendado: (1) analise preço/tendência com market_candles; (2) meça liquidez/impacto com market_liquidity antes de entrar; (3) entre com wallet_swap; (4) proteja a posição com trade_set_rule (stop-loss price_below e/ou take-profit price_above); (5) a cada ciclo chame trade_list para avaliar e disparar os gatilhos no preço real.")
+                    appendLine("- wallet_swap executa troca REAL e assinada localmente; entradas em SOL respeitam o limite por operação autorizado pelo usuário. Só diga 'enviado/executado' com base na assinatura retornada (Explorer); jamais afirme lucro ou execução sem a assinatura.")
+                    appendLine("- Para monitorar o mercado de forma contínua, use set_schedule (ex.: a cada 5-15 min) e, a cada ciclo, reavalie com market_* e trade_list. Seja econômico e honesto sobre risco: day trade pode gerar perdas; nunca prometa retorno.")
                 }
             } else {
                 appendLine("- Este agente não possui permissões de carteira concedidas. Não tente consultar nem movimentar fundos; peça ao usuário para habilitar somente as capacidades necessárias nas configurações do agente.")
@@ -755,6 +764,44 @@ class AgentRunner(
                     listOf("recipient", "amount_sol")
                 ))
             }
+            if (walletPolicies.canAgentDayTrade(agent.id)) {
+                add(tool("market_price", "Consulta o PREÇO em USD (dados reais, ao vivo) de um ou mais tokens Solana pelo mint. Somente leitura.", buildJsonObject {
+                    put("mints", strArray("Lista de endereços de mint (ex.: SOL=So111...112, USDC=EPjF...Dt1v)"))
+                }, listOf("mints")))
+                add(tool("market_candles", "Histórico OHLCV real (velas) do token no pool de maior liquidez na Solana (GeckoTerminal). Use para analisar tendência antes de operar.", buildJsonObject {
+                    put("mint", str("Endereço de mint do token"))
+                    put("timeframe", str("day, hour ou minute (padrão hour)"))
+                    put("aggregate", int("Agrupa unidades base, ex.: hour+4 = velas de 4h (padrão 1)"))
+                    put("limit", int("Quantidade de velas (1-1000; padrão 60)"))
+                }, listOf("mint")))
+                add(tool("market_liquidity", "Mede a PROFUNDIDADE/impacto de preço real de um par cotando tamanhos crescentes no agregador Jupiter. Em AMMs da Solana não existe order book central; esta é a medida honesta de liquidez.", buildJsonObject {
+                    put("input_mint", str("Mint de entrada")); put("output_mint", str("Mint de saída"))
+                    put("probe_amounts_raw", strArray("Tamanhos de entrada em unidades mínimas (lamports/unidades do token), ex.: [\"100000000\",\"1000000000\"]"))
+                }, listOf("input_mint", "output_mint", "probe_amounts_raw")))
+                add(tool("wallet_list_tokens", "Lista os tokens SPL que a carteira realmente possui (mint, saldo, decimais). Somente leitura.", buildJsonObject {}))
+                add(tool("wallet_swap", "Executa uma TROCA REAL token→token via Jupiter, assinada localmente (a chave nunca entra no contexto). Só na Mainnet. Entradas em SOL respeitam o limite por operação autorizado. Relate 'enviado' só com a assinatura retornada.", buildJsonObject {
+                    put("input_mint", str("Mint de entrada (o que você vende)"))
+                    put("output_mint", str("Mint de saída (o que você compra)"))
+                    put("amount_raw", str("Valor de entrada em unidades mínimas (lamports para SOL)"))
+                    put("slippage_bps", int("Slippage em basis points (1-5000; padrão 100 = 1%)"))
+                }, listOf("input_mint", "output_mint", "amount_raw")))
+                add(tool("trade_set_rule", "Arma uma regra de day trade (stop-loss/take-profit/ordem limite): quando o preço USD do token observado cruzar o alvo, a troca é executada automaticamente dentro dos limites. Dados de preço 100% reais.", buildJsonObject {
+                    put("label", str("Rótulo curto da estratégia"))
+                    put("input_mint", str("Mint de entrada (o que será vendido ao disparar)"))
+                    put("output_mint", str("Mint de saída (o que será comprado ao disparar)"))
+                    put("amount_raw", str("Valor de entrada em unidades mínimas"))
+                    put("watch_mint", str("Mint cujo preço USD é observado (normalmente o token da posição)"))
+                    put("trigger", str("price_below (dispara quando cai até o alvo) ou price_above (quando sobe até o alvo)"))
+                    put("target_price_usd", str("Preço-alvo em USD (decimal)"))
+                    put("slippage_bps", int("Slippage em bps (padrão 100)"))
+                }, listOf("label", "input_mint", "output_mint", "amount_raw", "watch_mint", "trigger", "target_price_usd")))
+                add(tool("trade_list", "Lista as regras de day trade deste agente e o estado atual (armada/executada/falhou/cancelada), com último preço observado. Também AVALIA as regras armadas agora contra o preço real e dispara as que atingiram o alvo.", buildJsonObject {
+                    put("evaluate", bool("true (padrão) = checar preços agora e disparar gatilhos atingidos; false = só listar"))
+                }))
+                add(tool("trade_cancel", "Cancela uma regra de day trade armada deste agente.", buildJsonObject {
+                    put("rule_id", str("ID da regra"))
+                }, listOf("rule_id")))
+            }
         }
         // Capacidades do dispositivo liberadas para este agente
         val caps = if (allowMultiAgent) agent?.deviceCaps.orEmpty() else emptyList()
@@ -843,6 +890,16 @@ class AgentRunner(
         fun s(k: String) = a[k]?.jsonPrimitive?.contentOrNull.orEmpty()
         fun i(k: String) = a[k]?.jsonPrimitive?.intOrNull
         fun b(k: String) = a[k]?.jsonPrimitive?.booleanOrNull ?: false
+        fun sl(k: String): List<String> = runCatching {
+            (a[k] as? kotlinx.serialization.json.JsonArray)?.mapNotNull { it.jsonPrimitive.contentOrNull } ?: emptyList()
+        }.getOrDefault(emptyList())
+        // Rede salva da carteira (fail-closed: nunca roteia silenciosamente para a Mainnet).
+        fun walletNetwork(): SolanaNetwork? = runCatching {
+            val stored = ctx.applicationContext
+                .getSharedPreferences("solana_wallet_settings", android.content.Context.MODE_PRIVATE)
+                .getString("network", null) ?: return null
+            SolanaNetwork.valueOf(stored)
+        }.getOrNull()
         val cwd = sandbox.guestPath(sessionId)
 
         // Ferramentas "silenciosas" com card próprio
@@ -1094,6 +1151,163 @@ class AgentRunner(
                                     }
                                 }.getOrElse { error ->
                                     "Pedido de transferência não criado: ${error.message ?: "erro de validação"}"
+                                }
+                            }
+                        }
+                    }
+                }
+                "market_price", "market_candles", "market_liquidity", "wallet_list_tokens",
+                "wallet_swap", "trade_set_rule", "trade_list", "trade_cancel" -> {
+                    val agentId = store.session(sessionId)?.agentId
+                    val policies = WalletAgentPolicyStore(ctx.applicationContext)
+                    if (agentId.isNullOrBlank() || store.agent(agentId) == null) {
+                        "Recusado: esta sessão não está vinculada a um agente local válido."
+                    } else if (!policies.canAgentDayTrade(agentId)) {
+                        "Acesso negado: o usuário não habilitou a capacidade de day trade para este agente. Peça para ativar nas configurações do agente."
+                    } else {
+                        val wallet = SolanaWalletRepository(ctx.applicationContext)
+                        val market = dev.cueopen.app.wallet.SolanaMarketDataClient()
+                        if (call.name == "market_price" || call.name == "market_candles" || call.name == "market_liquidity") {
+                            // Dados de mercado são somente leitura (não tocam a carteira).
+                            when (call.name) {
+                                "market_price" -> {
+                                    val mints = sl("mints")
+                                    if (mints.isEmpty()) "Informe ao menos um mint em 'mints'."
+                                    else runCatching { market.pricesUsd(mints) }.fold({ prices ->
+                                        if (prices.isEmpty()) "Nenhum preço disponível agora para os mints informados."
+                                        else prices.entries.joinToString("\n") { (m, p) ->
+                                            val sym = SolanaRpcClient.knownSymbol(m) ?: m.take(6)
+                                            "$sym ($m): US$ " + String.format(Locale.US, if (p < 1.0) "%.6f" else "%.4f", p)
+                                        }
+                                    }, { "MARKET_ERROR ao consultar preço: ${(it.message ?: it.javaClass.simpleName).take(200)}. Não contorne com shell/curl." })
+                                }
+                                "market_candles" -> {
+                                    val mint = s("mint")
+                                    runCatching {
+                                        market.candles(mint, s("timeframe").ifBlank { "hour" }, i("aggregate") ?: 1, i("limit") ?: 60)
+                                    }.fold({ candles ->
+                                        if (candles.isEmpty()) "Sem velas disponíveis para este token."
+                                        else buildString {
+                                            appendLine("OHLCV real (${candles.size} velas, ts unix | O H L C | volume USD):")
+                                            candles.takeLast(60).forEach { c ->
+                                                appendLine("${c.tsEpochSeconds} | ${c.open} ${c.high} ${c.low} ${c.close} | ${String.format(Locale.US, "%.0f", c.volumeUsd)}")
+                                            }
+                                        }.trim()
+                                    }, { "MARKET_ERROR ao consultar velas: ${(it.message ?: it.javaClass.simpleName).take(200)}." })
+                                }
+                                else -> { // market_liquidity
+                                    val input = s("input_mint"); val output = s("output_mint")
+                                    val probes = sl("probe_amounts_raw").mapNotNull { it.toLongOrNull() }
+                                    if (probes.isEmpty()) "Informe 'probe_amounts_raw' com ao menos um tamanho em unidades mínimas."
+                                    else runCatching { market.depthCurve(input, output, probes) }.fold({ curve ->
+                                        if (curve.isEmpty()) "Nenhuma rota de liquidez retornada para este par."
+                                        else buildString {
+                                            appendLine("Profundidade real (impacto por tamanho; AMM, sem order book central):")
+                                            curve.forEach { d ->
+                                                appendLine("entrada ${d.inAmountRaw} → saída ${d.outAmountRaw} | impacto ${d.priceImpactPct}% | rota ${d.routeLabels.joinToString("+").ifBlank { "direta" }}")
+                                            }
+                                        }.trim()
+                                    }, { "MARKET_ERROR ao medir liquidez: ${(it.message ?: it.javaClass.simpleName).take(200)}." })
+                                }
+                            }
+                        } else if (!wallet.hasWallet() || !wallet.backupConfirmed()) {
+                            "Carteira indisponível ou backup ainda não confirmado."
+                        } else {
+                            val network = walletNetwork()
+                            if (network == null) "Rede da carteira não configurada. Abra a tela Carteira e selecione Mainnet ou Devnet."
+                            else when (call.name) {
+                                "wallet_list_tokens" -> {
+                                    val address = wallet.publicAddress()
+                                    if (address == null) "Endereço público indisponível."
+                                    else runCatching { SolanaRpcClient.tokenAccountsWithFallback(network, address) }.fold({ tokens ->
+                                        if (tokens.isEmpty()) "Nenhum token SPL encontrado nesta carteira (${network.displayName})."
+                                        else tokens.joinToString("\n") { t ->
+                                            val sym = SolanaRpcClient.knownSymbol(t.mint) ?: t.mint.take(6)
+                                            "$sym: ${t.uiAmount} (mint ${t.mint}, raw ${t.amountRaw}, dec ${t.decimals})"
+                                        }
+                                    }, { "WALLET_RPC_ERROR ao listar tokens: ${(it.message ?: it.javaClass.simpleName).take(200)}." })
+                                }
+                                "wallet_swap" -> {
+                                    val amount = s("amount_raw").toLongOrNull()
+                                    if (amount == null || amount <= 0L) "amount_raw deve ser um inteiro positivo em unidades mínimas."
+                                    else {
+                                        val input = s("input_mint"); val output = s("output_mint")
+                                        val slippage = (i("slippage_bps") ?: 100).coerceIn(1, 5000)
+                                        val cap = policies.agentMaxTransferLamports(agentId)
+                                        if (input == dev.cueopen.app.wallet.SolanaSwapClient.SOL_MINT && amount > cap) {
+                                            "Recusado: entrada de ${String.format(Locale.US, "%.9f", amount / 1e9)} SOL excede o limite autorizado por operação (${String.format(Locale.US, "%.9f", cap / 1e9)} SOL). Reduza o valor ou ajuste o limite na tela Carteira."
+                                        } else {
+                                            val rpc = SolanaRpcClient(endpoint = network.rpcEndpoint, network = network)
+                                            val exec = dev.cueopen.app.wallet.SolanaSwapExecutor(ctx.applicationContext, wallet, rpc)
+                                            when (val r = exec.executeSwap(input, output, amount, slippage, network)) {
+                                                is dev.cueopen.app.wallet.SwapResult.Submitted ->
+                                                    "Swap ENVIADO na ${network.displayName}. Saída estimada: ${r.outAmountRaw} (unidades mínimas). Impacto: ${r.priceImpactPct}%. Rota: ${r.routeLabels.joinToString("+").ifBlank { "direta" }}. Assinatura: ${r.signature}. Explorer: ${network.transactionExplorerUrl(r.signature)}"
+                                                is dev.cueopen.app.wallet.SwapResult.Rejected ->
+                                                    "Swap recusado: ${r.reason}"
+                                            }
+                                        }
+                                    }
+                                }
+                                "trade_set_rule" -> {
+                                    val triggerRaw = s("trigger").lowercase()
+                                    val trig = when (triggerRaw) {
+                                        "price_below", "below" -> dev.cueopen.app.wallet.DayTradeStore.Trigger.PRICE_BELOW
+                                        "price_above", "above" -> dev.cueopen.app.wallet.DayTradeStore.Trigger.PRICE_ABOVE
+                                        else -> null
+                                    }
+                                    val amount = s("amount_raw").toLongOrNull()
+                                    val target = s("target_price_usd").toDoubleOrNull()
+                                    when {
+                                        trig == null -> "trigger deve ser price_below ou price_above."
+                                        amount == null || amount <= 0L -> "amount_raw deve ser inteiro positivo em unidades mínimas."
+                                        target == null || target <= 0.0 -> "target_price_usd deve ser um decimal positivo."
+                                        !dev.cueopen.app.wallet.SolanaAddressValidator.isValidAddress(s("input_mint")) -> "input_mint inválido."
+                                        !dev.cueopen.app.wallet.SolanaAddressValidator.isValidAddress(s("output_mint")) -> "output_mint inválido."
+                                        !dev.cueopen.app.wallet.SolanaAddressValidator.isValidAddress(s("watch_mint")) -> "watch_mint inválido."
+                                        else -> {
+                                            val rule = dev.cueopen.app.wallet.DayTradeStore.Rule(
+                                                id = java.util.UUID.randomUUID().toString().take(8),
+                                                agentId = agentId,
+                                                label = s("label").ifBlank { "regra" }.take(60),
+                                                network = network.name,
+                                                inputMint = s("input_mint"),
+                                                outputMint = s("output_mint"),
+                                                amountRaw = amount,
+                                                watchMint = s("watch_mint"),
+                                                trigger = trig,
+                                                targetPriceUsd = target,
+                                                slippageBps = (i("slippage_bps") ?: 100).coerceIn(1, 5000)
+                                            )
+                                            dev.cueopen.app.wallet.DayTradeStore(ctx.applicationContext).upsert(rule)
+                                            "Regra de day trade armada. ID: ${rule.id}. Avalie com trade_list a cada ciclo; o gatilho dispara quando o preço real cruzar o alvo."
+                                        }
+                                    }
+                                }
+                                "trade_cancel" -> {
+                                    val ok = dev.cueopen.app.wallet.DayTradeStore(ctx.applicationContext).cancel(s("rule_id"), agentId)
+                                    if (ok) "Regra ${s("rule_id")} cancelada." else "Nenhuma regra armada com esse ID para este agente."
+                                }
+                                else -> { // trade_list (+ avaliação)
+                                    val dtStore = dev.cueopen.app.wallet.DayTradeStore(ctx.applicationContext)
+                                    val evaluate = a["evaluate"]?.jsonPrimitive?.booleanOrNull ?: true
+                                    val evalLines = if (evaluate) {
+                                        val engine = dev.cueopen.app.wallet.DayTradeEngine(ctx.applicationContext, wallet, market)
+                                        runCatching {
+                                            engine.evaluateAgentRules(agentId, network, policies.agentMaxTransferLamports(agentId))
+                                        }.getOrDefault(emptyList()).map { it.message }
+                                    } else emptyList()
+                                    val rules = dtStore.allForAgent(agentId)
+                                    buildString {
+                                        if (evalLines.isNotEmpty()) { appendLine("== Avaliação agora =="); evalLines.forEach { appendLine(it) }; appendLine() }
+                                        if (rules.isEmpty()) append("Nenhuma regra de day trade para este agente.")
+                                        else {
+                                            appendLine("== Regras ==")
+                                            rules.forEach { r ->
+                                                val sym = SolanaRpcClient.knownSymbol(r.watchMint) ?: r.watchMint.take(6)
+                                                appendLine("${r.id} [${r.status}] ${r.label}: $sym ${if (r.trigger == dev.cueopen.app.wallet.DayTradeStore.Trigger.PRICE_BELOW) "≤" else "≥"} US$ ${r.targetPriceUsd}; últ. preço US$ ${r.lastPriceUsd}${if (r.resultSignature.isNotBlank()) "; sig ${r.resultSignature}" else ""}")
+                                            }
+                                        }
+                                    }.trim()
                                 }
                             }
                         }

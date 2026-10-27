@@ -57,6 +57,22 @@ class SolanaSwapExecutor(
                     return@withContext SwapResult.Rejected("Saldo de SOL insuficiente: a troca precisa do valor trocado mais ~0,003 SOL de taxa/rent. Reduza o valor ou deposite mais SOL.")
                 }
             }
+        } else {
+            // Token->token (ou token->SOL): precheck real do saldo do token de entrada para
+            // mensagem clara em vez de um "AccountNotFound"/"InsufficientFunds" cru no preflight.
+            // Também exige um mínimo de SOL para a taxa de rede e eventual rent da conta de destino.
+            val tokens = runCatching { SolanaRpcClient.tokenAccountsWithFallback(network, expectedAddress) }.getOrNull()
+            val held = tokens?.filter { it.mint == inputMint }?.sumOf { it.amountRaw } ?: -1L
+            if (held == 0L) {
+                return@withContext SwapResult.Rejected("Sua carteira não possui esse token. Verifique seus ativos antes de trocar.")
+            }
+            if (held in 1 until amountRaw) {
+                return@withContext SwapResult.Rejected("Saldo do token insuficiente para a troca solicitada. Reduza o valor da troca.")
+            }
+            val solBalance = runCatching { SolanaRpcClient.balanceWithFallback(network, expectedAddress) }.getOrNull()
+            if (solBalance != null && solBalance < FEE_AND_RENT_BUFFER_LAMPORTS) {
+                return@withContext SwapResult.Rejected("SOL insuficiente para pagar a taxa de rede/rent da troca (~0,003 SOL). Deposite um pouco de SOL e tente de novo.")
+            }
         }
 
         val quote = try {

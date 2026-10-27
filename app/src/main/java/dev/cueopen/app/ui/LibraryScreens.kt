@@ -102,6 +102,7 @@ fun AgentEditScreen(nav: NavController, id: String) {
     var walletReadBalance by remember(a.id) { mutableStateOf(walletPolicies.canAgentReadBalance(a.id)) }
     var walletRequestTransfer by remember(a.id) { mutableStateOf(walletPolicies.canAgentRequestTransfer(a.id)) }
     var walletAutonomousTransfer by remember(a.id) { mutableStateOf(walletPolicies.canAgentAutonomousTransfer(a.id)) }
+    var walletDayTrade by remember(a.id) { mutableStateOf(walletPolicies.canAgentDayTrade(a.id)) }
     Scaffold(containerColor = c.bg, topBar = {
         CueTopBar(if (existing == null) "Criar Agent" else a.name, { nav.popBackStack() }) {
             if (existing != null) IconButton({ app.store.deleteAgent(id); nav.popBackStack() }) { Icon(Icons.Rounded.Delete, "Excluir", tint = c.err) }
@@ -168,6 +169,18 @@ fun AgentEditScreen(nav: NavController, id: String) {
                             )
                         }
                     }
+                    ToggleRow(
+                        "Day trade (mercado + swaps + regras)",
+                        "Libera dados de mercado reais (preço, velas, liquidez), listar tokens, executar trocas e armar stop-loss/take-profit. Entradas em SOL respeitam o limite por operação. Não concede envio de SOL a terceiros.",
+                        walletDayTrade
+                    ) { walletDayTrade = it }
+                    if (walletDayTrade) {
+                        Text(
+                            "⚠ Day trade envolve risco de perda. O agente opera com dados 100% reais e só relata execução com a assinatura on-chain; nunca promete lucro. O teto por operação (em SOL) limita cada entrada.",
+                            fontSize = 12.sp,
+                            color = c.warn
+                        )
+                    }
                     Text(
                         "Chaves privadas e a frase de recuperação nunca são expostas ao agente. Os limites locais são sempre aplicados no assinador.",
                         fontSize = 12.sp,
@@ -203,7 +216,8 @@ fun AgentEditScreen(nav: NavController, id: String) {
                     readAddress = walletAccess && walletReadAddress,
                     readBalance = walletAccess && walletReadBalance,
                     requestTransfer = walletAccess && walletRequestTransfer,
-                    autonomousTransfer = walletAccess && walletRequestTransfer && walletAutonomousTransfer
+                    autonomousTransfer = walletAccess && walletRequestTransfer && walletAutonomousTransfer,
+                    dayTrade = walletAccess && walletDayTrade
                 )
                 if (a.autonomous) app.agent.startAutonomy()
                 nav.popBackStack()
