@@ -85,7 +85,9 @@ class WalletSecretVaultTest {
                 unexpected.fill(0)
                 throw AssertionError("Expected AES-GCM authentication to reject tampering")
             } catch (expected: Exception) {
-                assertTrue("Tampered ciphertext must fail closed", expected !is AssertionError)
+                // Expected: tampered ciphertext fails AEAD authentication and reads fail closed.
+                // (If read() did NOT throw, the AssertionError above — an Error, not an Exception —
+                // propagates past this catch and correctly fails the test.)
             }
         } finally {
             secret.fill(0)
