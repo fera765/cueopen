@@ -15,6 +15,12 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.AccountBalanceWallet
 import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.material.icons.rounded.Refresh
+import androidx.compose.material.icons.rounded.ArrowDownward
+import androidx.compose.material.icons.rounded.ArrowUpward
+import androidx.compose.material.icons.rounded.SwapHoriz
+import androidx.compose.material.icons.rounded.GridView
+import androidx.compose.material.icons.rounded.Visibility
+import androidx.compose.ui.graphics.Color
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -86,6 +92,8 @@ fun WalletScreen(nav: NavController) {
     var revealPhrase by remember { mutableStateOf(false) }
     var showRecoveryWords by remember { mutableStateOf(false) }
     var refreshCounter by remember { mutableStateOf(0) }
+    var hideBalance by remember { mutableStateOf(false) }
+    var quickAction by remember { mutableStateOf<String?>(null) }
     val activeSetup by rememberUpdatedState(setup)
 
     DisposableEffect(Unit) {
@@ -151,6 +159,22 @@ fun WalletScreen(nav: NavController) {
         }
     }
 
+
+    if (quickAction != null) {
+        AlertDialog(
+            onDismissRequest = { quickAction = null },
+            title = { Text(when (quickAction) { "Enviar" -> "Enviar SOL"; "Receber" -> "Receber SOL"; "Trocar" -> "Trocar ativos"; else -> "Mais opções da carteira" }) },
+            text = { Text(when (quickAction) {
+                "Enviar" -> "O formulário de transferência segura fica nesta tela. Revise endereço, rede, taxa e valor; a assinatura e o envio exigem confirmação explícita."
+                "Receber" -> "Use o endereço público e o QR Code na seção Receber abaixo. Compartilhe somente o endereço público, nunca a frase de recuperação."
+                "Trocar" -> "A troca de tokens ainda não está integrada. Nenhuma cotação ou troca simulada será apresentada como real."
+                else -> "As configurações da carteira incluem rede Mainnet/Devnet, permissões dos agentes, limites de transferência e destinatários autorizados."
+            }) },
+            confirmButton = { TextButton(onClick = { quickAction = null }) { Text("Entendi") } },
+            dismissButton = { TextButton(onClick = { quickAction = null }) { Text("Fechar") } }
+        )
+    }
+
     Scaffold(
         containerColor = c.bg,
         topBar = { CueTopBar("Carteira Solana", { nav.popBackStack() }) }
@@ -171,6 +195,55 @@ fun WalletScreen(nav: NavController) {
                 }
             }
             Text("Suas chaves permanecem no dispositivo. Transferências exigem aprovação humana e assinatura local.", color = c.ink2, style = androidx.compose.material3.MaterialTheme.typography.bodyMedium)
+
+            if (address != null) {
+                Card(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(26.dp), colors = androidx.compose.material3.CardDefaults.cardColors(containerColor = Color(0xFF17110F))) {
+                    Column(Modifier.fillMaxWidth().padding(20.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Row(Modifier.fillMaxWidth(), verticalAlignment = androidx.compose.ui.Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
+                            Text("Saldo total", color = Color(0xFFD6D0CE), style = androidx.compose.material3.MaterialTheme.typography.titleMedium)
+                            androidx.compose.material3.IconButton(onClick = { hideBalance = !hideBalance }) {
+                                androidx.compose.material3.Icon(Icons.Rounded.Visibility, contentDescription = if (hideBalance) "Mostrar saldo" else "Ocultar saldo", tint = Color(0xFFEDE7E5))
+                            }
+                        }
+                        Text(if (hideBalance) "••••••" else (balance ?: "— SOL"), color = Color.White, style = androidx.compose.material3.MaterialTheme.typography.headlineLarge, fontWeight = androidx.compose.ui.text.font.FontWeight.Bold)
+                        Text(if (hideBalance) "•••• SOL" else "Saldo on-chain · " + selectedNetwork.displayName, color = Color(0xFFBDB4B0), style = androidx.compose.material3.MaterialTheme.typography.bodyMedium)
+                        Text("A cotação em moeda fiduciária não está disponível sem uma fonte de preços.", color = Color(0xFFE7A080), style = androidx.compose.material3.MaterialTheme.typography.bodySmall)
+                    }
+                }
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    WalletQuickAction("Enviar", Icons.Rounded.ArrowUpward, true, Modifier.weight(1f)) { quickAction = "Enviar" }
+                    WalletQuickAction("Receber", Icons.Rounded.ArrowDownward, false, Modifier.weight(1f)) { quickAction = "Receber" }
+                    WalletQuickAction("Trocar", Icons.Rounded.SwapHoriz, false, Modifier.weight(1f)) { quickAction = "Trocar" }
+                    WalletQuickAction("Mais", Icons.Rounded.GridView, false, Modifier.weight(1f)) { quickAction = "Mais" }
+                }
+                Card(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(22.dp), colors = androidx.compose.material3.CardDefaults.cardColors(containerColor = c.surface)) {
+                    Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                        Row(Modifier.fillMaxWidth(), verticalAlignment = androidx.compose.ui.Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
+                            Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                                Text("Meus ativos", style = androidx.compose.material3.MaterialTheme.typography.titleLarge)
+                                Text("Ativos confirmados nesta carteira", color = c.ink2, style = androidx.compose.material3.MaterialTheme.typography.bodySmall)
+                            }
+                            androidx.compose.material3.Surface(shape = RoundedCornerShape(50), color = Color(0xFF2A1B16)) {
+                                Text("1 ativo", modifier = Modifier.padding(horizontal = 11.dp, vertical = 7.dp), color = Color(0xFFFF966A), style = androidx.compose.material3.MaterialTheme.typography.labelMedium)
+                            }
+                        }
+                        Row(Modifier.fillMaxWidth(), verticalAlignment = androidx.compose.ui.Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                            androidx.compose.material3.Surface(shape = RoundedCornerShape(50), color = Color(0xFF17110F)) {
+                                androidx.compose.material3.Icon(Icons.Rounded.AccountBalanceWallet, contentDescription = null, modifier = Modifier.padding(12.dp), tint = Color(0xFFFF966A))
+                            }
+                            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                                Text("Solana", style = androidx.compose.material3.MaterialTheme.typography.titleMedium)
+                                Text("SOL", color = c.ink2, style = androidx.compose.material3.MaterialTheme.typography.bodyMedium)
+                            }
+                            Column(horizontalAlignment = androidx.compose.ui.Alignment.End, verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                                Text(if (hideBalance) "••••" else (balance?.removeSuffix(" SOL") ?: "—"), style = androidx.compose.material3.MaterialTheme.typography.titleMedium)
+                                Text("Saldo da rede", color = c.ink2, style = androidx.compose.material3.MaterialTheme.typography.bodySmall)
+                            }
+                        }
+                        Text("Tokens SPL e valores em moeda fiduciária serão exibidos quando a consulta de tokens e a fonte de preços estiverem integradas.", color = c.ink2, style = androidx.compose.material3.MaterialTheme.typography.bodySmall)
+                    }
+                }
+            }
             if (walletExists && address == null && setup == null) {
                 Text("A carteira local existe, mas os metadados públicos não estão disponíveis. Confirme a frase de recuperação para reparar os metadados sem substituir a chave armazenada.")
                 OutlinedTextField(
@@ -550,5 +623,20 @@ fun WalletScreen(nav: NavController) {
 
             error?.let { Text(it, color = c.ink2) }
         }
+    }
+}
+
+@Composable
+private fun WalletQuickAction(label: String, icon: androidx.compose.ui.graphics.vector.ImageVector, primary: Boolean, modifier: Modifier = Modifier, onClick: () -> Unit) {
+    Column(modifier, horizontalAlignment = androidx.compose.ui.Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(7.dp)) {
+        androidx.compose.material3.Surface(onClick = onClick, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(22.dp),
+            color = if (primary) Color(0xFFFF895B) else Color(0xFF1C1A19),
+            contentColor = if (primary) Color(0xFF17110F) else Color(0xFFF3EFED),
+            border = androidx.compose.foundation.BorderStroke(1.dp, if (primary) Color(0xFFFFA27E) else Color(0xFF38302D)) {
+            androidx.compose.foundation.layout.Box(Modifier.padding(vertical = 14.dp), contentAlignment = androidx.compose.ui.Alignment.Center) {
+                androidx.compose.material3.Icon(icon, contentDescription = label, modifier = Modifier.size(26.dp))
+            }
+        }
+        Text(label, style = androidx.compose.material3.MaterialTheme.typography.labelMedium, color = Cue.c.ink)
     }
 }
