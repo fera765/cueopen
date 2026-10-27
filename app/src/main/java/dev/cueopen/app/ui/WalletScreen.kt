@@ -104,6 +104,10 @@ fun WalletScreen(nav: NavController) {
     }
 
     LaunchedEffect(Unit) {
+        // Persist the same default network used by the UI and agent tools on first launch.
+        if (!networkPrefs.contains("network")) {
+            networkPrefs.edit().putString("network", SolanaNetwork.MAINNET.name).commit()
+        }
         walletExists = repository.hasWallet()
         refreshAddress()
     }
