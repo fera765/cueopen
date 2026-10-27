@@ -68,7 +68,7 @@ fun UiConnectorsSection(nav: NavController) {
                 }
                 Spacer(Modifier.width(12.dp))
                 Column(Modifier.weight(1f)) {
-                    Text(uc.spec.name, fontWeight = FontWeight.SemiBold, fontSize = 16.sp)
+                    Text(uc.spec.name + if (hub.isCustom(uc.spec.id)) "  ·  Personalizado" else "", fontWeight = FontWeight.SemiBold, fontSize = 16.sp)
                     Text(uc.spec.description, fontSize = 12.sp, color = c.ink2, maxLines = 2, overflow = TextOverflow.Ellipsis)
                     Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 4.dp)) {
                         Box(Modifier.size(7.dp).clip(CircleShape).background(status.second))
@@ -80,6 +80,10 @@ fun UiConnectorsSection(nav: NavController) {
                 Icon(Icons.Rounded.ChevronRight, null, tint = c.ink3)
             }
         }
+        OutlinedButton(
+            onClick = { nav.navigate("uiconnector/edit/new") },
+            modifier = Modifier.fillMaxWidth().height(46.dp), shape = RoundedCornerShape(14.dp),
+        ) { Icon(Icons.Rounded.Add, null); Spacer(Modifier.width(8.dp)); Text("Criar conector (SDK)") }
     }
 }
 
@@ -193,6 +197,12 @@ fun UiConnectorScreen(nav: NavController, id: String) {
                     modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(14.dp),
                 ) { Text("Sair e esquecer credenciais", color = c.err) }
             }
+            if (hub.isCustom(id)) item {
+                OutlinedButton(
+                    onClick = { nav.navigate("uiconnector/edit/$id") },
+                    modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(14.dp),
+                ) { Text("Editar definição do conector") }
+            }
             item {
                 Text(
                     "Ferramentas para o agente: " + connector.spec.tools.joinToString { "uic_${connector.spec.id}_${it.name}" },
@@ -204,7 +214,7 @@ fun UiConnectorScreen(nav: NavController, id: String) {
 }
 
 @Composable
-private fun LoginCard(
+internal fun LoginCard(
     connector: UiConnector, fields: MutableMap<String, String>,
     keepCredentials: Boolean, onKeepChange: (Boolean) -> Unit,
     busy: Boolean, error: String?, onLogin: () -> Unit,
@@ -251,7 +261,7 @@ private fun LoginCard(
 
 /** Renderiza um [UiBlock] — genérico para qualquer conector. */
 @Composable
-private fun UiBlockView(b: UiBlock, onAction: (String, Map<String, String>) -> Unit) {
+internal fun UiBlockView(b: UiBlock, onAction: (String, Map<String, String>) -> Unit) {
     val c = Cue.c
     val card = Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).background(c.surface).border(1.dp, c.line, RoundedCornerShape(16.dp))
     when (b) {

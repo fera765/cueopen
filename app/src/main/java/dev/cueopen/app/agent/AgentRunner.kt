@@ -19,6 +19,8 @@ import dev.cueopen.app.llm.str
 import dev.cueopen.app.llm.strArray
 import dev.cueopen.app.llm.tool
 import dev.cueopen.app.sandbox.Sandbox
+import dev.cueopen.app.trading.TradeCoordinator
+import kotlinx.coroutines.sync.withLock
 import dev.cueopen.app.wallet.WalletAgentPolicyStore
 import dev.cueopen.app.wallet.SolanaWalletRepository
 import dev.cueopen.app.wallet.SolanaRpcClient
@@ -745,8 +747,8 @@ class AgentRunner(
                     appendLine()
                     appendLine("## Day trade (capacidade habilitada)")
                     appendLine("- Dados de mercado são 100% reais (sem API key): market_discover (tokens de todo o ecossistema Solana, novos→velhos ou em alta, com liquidez e volume), market_token_info (preço/liquidez/volume/market cap de um token), market_price (preço USD ao vivo), market_candles (OHLCV real do pool de maior liquidez), market_liquidity (impacto real por tamanho — AMM não tem order book central). Nunca invente preços, velas ou profundidade; se uma ferramenta retornar MARKET_ERROR, relate o erro e não contorne com shell/curl.")
-                    appendLine("- FLUXO OBRIGATÓRIO: (1) descubra oportunidades com market_discover e cheque market_token_info; (2) analise preço/tendência com market_candles; (3) meça liquidez/impacto com market_liquidity (confirme que dá para comprar E vender); (4) SEMPRE chame typesafe_jev_check com os dados reais dos sinais ANTES de operar e entre APENAS nos sinais com acurácia suficiente (✅ OPERAR); (5) entre com wallet_swap só nos sinais aprovados; (6) proteja a posição com trade_set_rule (stop-loss price_below e/ou take-profit price_above); (7) a cada ciclo chame trade_list para avaliar e disparar os gatilhos no preço real.")
-                    appendLine("- NUNCA execute wallet_swap ou trade_set_rule sem antes validar o sinal com typesafe_jev_check. A acurácia vem de dados reais; não invente probabilidades.")
+                    appendLine("- FLUXO OBRIGATÓRIO: (1) descubra oportunidades com market_discover e cheque market_token_info; (2) analise preço/tendência com market_candles; (3) meça liquidez/impacto com market_liquidity (confirme que dá para comprar E vender); (4) SEMPRE chame typesafe_jev_check (venue "solana", direction buy ou sell) com os dados reais ANTES de CADA compra e CADA venda e entre APENAS nos sinais ✅ OPERAR; (5) execute com wallet_swap — o app RECUSA qualquer swap sem aprovação válida (uso único, 5 min, mesmo lado); (6) proteja a posição com trade_set_rule (stop-loss price_below e/ou take-profit price_above: regras automáticas são só de SAÍDA); (7) a cada ciclo chame trade_list para avaliar e disparar os gatilhos no preço real.")
+                    appendLine("- A validação typesafe_jev_check é IMPOSTA pelo app (não é opcional) para compra e venda manuais via wallet_swap. As saídas automáticas de stop-loss/take-profit e o trailing stop (trade_update_rule) são proteção e dispensam nova validação. A acurácia vem de dados reais; não invente probabilidades.")
                     appendLine("- Se market_candles retornar 'tendência real alternativa' (DexScreener: variações m5/h1/h6/h24, volume, fluxo compra/venda), isso é dado REAL e suficiente para analisar a tendência — use-o normalmente, não repita a chamada em loop.")
                     appendLine("- STOP-LOSS / TAKE-PROFIT são AUTOMÁTICOS: ao abrir uma posição, arme imediatamente trade_set_rule para o stop-loss (price_below) e para o take-profit (price_above). O sistema monitora o preço real sozinho (a cada ~20s) e FECHA a operação automaticamente quando o alvo é atingido — mesmo entre os seus ciclos. Você NÃO precisa ficar acordando para fechar; só arme as regras uma vez.")
                     appendLine("- TRAILING STOP: a cada ciclo, se o preço subiu bem acima da sua entrada, use trade_update_rule para MOVER o stop-loss (regra price_below) para cima e travar lucro. Ex.: entrada US$ 0,55, preço foi a US$ 0,58 → mova o stop-loss para US$ 0,56; se cair, a operação fecha sozinha no lucro. Nunca mova o stop-loss para baixo (isso aumenta a perda). Vale para uma ou várias posições abertas.")
@@ -763,6 +765,10 @@ class AgentRunner(
                     appendLine()
                     appendLine("## UI Connectors disponíveis")
                     usable.forEach { appendLine("- ${it.spec.name}: ferramentas uic_${it.spec.id}_* (${it.spec.description})") }
+                    if (hub.hasTradingTools(agent)) {
+                        appendLine("- ORDENS (ex.: IQ Option buy): ANTES de CADA compra e CADA venda chame typesafe_jev_check (venue = id do conector, id = ticker, direction call/put) e só opere com ✅ OPERAR; o app recusa ordens sem validação (uso único, 5 min). Operações CURTAS usam compra (call) e venda (put); operações LONGAS (acima do limite de minutos curtos do conector) só de COMPRA (call).")
+                        appendLine("- Solana day trade e conectores de trading têm capital e posições independentes: não use um para cobrir o outro. Se a resposta disser que outro agente está operando o ativo, aguarde ou escolha outro; faça uma ordem por vez.")
+                    }
                     appendLine("- A sessão e as credenciais são gerenciadas pelo app; você nunca vê nem pede senha. Se uma ferramenta responder que é preciso fazer login, avise o usuário.")
                     appendLine("- Respostas começando com RECUSADO são limites de segurança definidos pelo usuário: respeite-os, não tente contornar (nem trocar de conta/valor para burlar) e explique ao usuário. Operar envolve risco de perda; nunca prometa lucro.")
                 }
@@ -941,11 +947,15 @@ class AgentRunner(
                     put("target_price_usd", str("Novo preço-alvo em USD (decimal)"))
                     put("trigger", str("Opcional: price_below ou price_above, caso precise mudar o sentido"))
                 }, listOf("rule_id", "target_price_usd")))
-                add(tool("typesafe_jev_check", "OBRIGATÓRIO antes de operar: avalia a ACURÁCIA de cada sinal de trade usando o modelo avaliador TypeSafe Jev (OpenRouter). Envie os dados REAIS que você já coletou (preço, velas, liquidez, volume, direção) de CADA sinal; retorna acurácia (0-100) e confiança por sinal. Entre apenas nos sinais de maior acurácia. Não invente números: baseie-se só nos dados fornecidos.", buildJsonObject {
-                    put("signals_json", str("JSON array de sinais, cada um: {\"id\":\"SOL\",\"direction\":\"buy|sell\",\"data\":\"resumo com preço, velas OHLCV, liquidez, volume, tendência\"}"))
-                    put("min_accuracy", int("Acurácia mínima (0-100) para considerar o sinal operável (padrão 70)"))
-                }, listOf("signals_json")))
             }
+        }
+        // Validação TypeSafe Jev: obrigatória antes de QUALQUER ordem (day trade Solana e conectores de trading).
+        if (allowMultiAgent && (agent?.let { WalletAgentPolicyStore(ctx.applicationContext).canAgentDayTrade(it.id) } == true ||
+                runCatching { dev.cueopen.app.CueApp.instance.uiConnectors.hasTradingTools(agent) }.getOrDefault(false))) {
+            add(tool("typesafe_jev_check", "OBRIGATÓRIO antes de QUALQUER ordem de COMPRA ou VENDA (Solana day trade e IQ Option): avalia a ACURÁCIA de cada sinal com o avaliador TypeSafe Jev. Só com ✅ OPERAR a ordem é liberada, e a aprovação vale para UMA ordem (5 min). Sem ela, wallet_swap e as ferramentas de ordem dos conectores são RECUSADOS. Envie dados REAIS (preço, velas, tendência, liquidez). Não invente números.", buildJsonObject {
+                put("signals_json", str("JSON array de sinais: {\"id\":\"<mint Solana ou ticker, ex.: EURUSD>\",\"venue\":\"solana|iqoption\",\"direction\":\"buy|sell (Solana) ou call|put (IQ Option)\",\"horizon_minutes\":5,\"data\":\"resumo com preço, velas OHLCV, tendência, liquidez\"}"))
+                put("min_accuracy", int("Acurácia mínima (0-100); o piso de 70 não pode ser rebaixado"))
+            }, listOf("signals_json")))
         }
         // Capacidades do dispositivo liberadas para este agente
         val caps = if (allowMultiAgent) agent?.deviceCaps.orEmpty() else emptyList()
@@ -1042,36 +1052,38 @@ class AgentRunner(
      * Avalia a acurácia de sinais de trade com o modelo TypeSafe Jev (ou o configurado) via OpenRouter.
      * Usa SOMENTE os dados reais enviados pelo agente; retorna acurácia/confiança por sinal.
      */
-    private suspend fun jevAccuracyCheck(signalsJson: String, minAccuracy: Int): String {
+    private suspend fun jevAccuracyCheck(signalsJson: String, minAccuracy: Int, agentKey: String): String {
         if (signalsJson.isBlank()) return "Informe 'signals_json' com os sinais e seus dados reais."
+        val inputs = dev.cueopen.app.trading.SignalIO.parseInputs(signalsJson)
+        if (inputs.isEmpty()) return "signals_json inválido: envie um array JSON com {id, venue, direction, data} por sinal."
         val model = store.settings.accuracyModel.ifBlank { "typesafe/jev-router" }
+        val effective = maxOf(minAccuracy, TradeCoordinator.gate.floor)
         val sys = LlmMessage("system",
-            "Você é um avaliador de ACURÁCIA de sinais de day trade cripto. Avalie cada sinal usando EXCLUSIVAMENTE os dados reais fornecidos (preço, velas OHLCV, liquidez, volume, tendência). " +
-            "Não invente dados. Para cada sinal, estime a probabilidade (0-100) de o trade ser lucrativo no curto prazo e uma confiança (0-100) baseada na qualidade/suficiência dos dados. " +
+            "Você é um avaliador de ACURÁCIA de sinais de trading (cripto Solana, opções binárias/turbo e forex). Avalie cada sinal usando EXCLUSIVAMENTE os dados reais fornecidos (preço, velas OHLCV, liquidez, volume, tendência) e a direção pedida (buy/call = alta; sell/put = queda) no horizonte informado (horizon_minutes; se ausente, curto prazo). " +
+            "Não invente dados. Para cada sinal, estime a probabilidade (0-100) de a direção pedida ser lucrativa e uma confiança (0-100) baseada na qualidade/suficiência dos dados. " +
             "Responda SOMENTE com um array JSON, sem texto fora dele: [{\"id\":\"...\",\"accuracy\":NN,\"confidence\":NN,\"reason\":\"curto\"}].")
         val user = LlmMessage("user", "Sinais (JSON):\n$signalsJson\n\nAvalie e retorne o array JSON.")
-        val reply = runCatching { llm.chat(listOf(sys, user), tools = null, model = model, maxTokens = 1200) }
-            .getOrElse { return "ACCURACY_ERROR ao consultar o avaliador ($model): ${(it.message ?: it.javaClass.simpleName).take(200)}. Ajuste o modelo avaliador em Configurações se necessário." }
+        val reply = TradeCoordinator.validationMutex.withLock {
+            runCatching { llm.chat(listOf(sys, user), tools = null, model = model, maxTokens = 1200) }
+        }.getOrElse { return "ACCURACY_ERROR ao consultar o avaliador ($model): ${(it.message ?: it.javaClass.simpleName).take(200)}. Nenhuma ordem foi liberada. Ajuste o modelo avaliador em Configurações se necessário." }
         val content = reply.content?.trim().orEmpty()
-        val arr = runCatching {
-            val start = content.indexOf('['); val end = content.lastIndexOf(']')
-            val jsonText = if (start >= 0 && end > start) content.substring(start, end + 1) else content
-            json.parseToJsonElement(jsonText).jsonArray
-        }.getOrNull()
-            ?: return "Avaliador ($model) respondeu, mas não em JSON válido. Resposta: ${content.take(500)}"
+        val results = dev.cueopen.app.trading.SignalIO.parseResults(content)
+            ?: return "Avaliador ($model) respondeu, mas não em JSON válido; nenhuma ordem foi liberada. Resposta: ${content.take(500)}"
+        val byId = results.associateBy { dev.cueopen.app.trading.AssetKeys.norm(it.id) }
         return buildString {
-            appendLine("Acurácia dos sinais (modelo $model; opere só ≥ $minAccuracy%):")
-            arr.forEach { el ->
-                val o = el.jsonObject
-                val id = o["id"]?.jsonPrimitive?.contentOrNull ?: "?"
-                val acc = o["accuracy"]?.jsonPrimitive?.doubleOrNull ?: 0.0
-                val conf = o["confidence"]?.jsonPrimitive?.doubleOrNull ?: 0.0
-                val reason = o["reason"]?.jsonPrimitive?.contentOrNull.orEmpty()
-                val ok = if (acc >= minAccuracy) "✅ OPERAR" else "⛔ PULAR"
-                appendLine("$id: acurácia ${acc.toInt()}% · confiança ${conf.toInt()}% · $ok${if (reason.isNotBlank()) " — $reason" else ""}")
+            appendLine("Acurácia dos sinais (modelo $model; opere só ≥ $effective%):")
+            var approved = 0
+            inputs.forEach { sig ->
+                val r = byId[dev.cueopen.app.trading.AssetKeys.norm(sig.id)]
+                val side = dev.cueopen.app.trading.Sides.parse(sig.direction)
+                if (r == null) { appendLine("${sig.id}: sem avaliação do modelo · ⛔ PULAR"); return@forEach }
+                if (side == null) { appendLine("${sig.id}: direção inválida (use buy/sell ou call/put) · ⛔ PULAR"); return@forEach }
+                val ok = TradeCoordinator.gate.approve(agentKey, sig.venue, sig.id, side, r.accuracy, minAccuracy)
+                if (ok) approved++
+                appendLine("${sig.id} ${side.name}: acurácia ${r.accuracy.toInt()}% · confiança ${r.confidence.toInt()}% · ${if (ok) "✅ OPERAR" else "⛔ PULAR"}${if (r.reason.isNotBlank()) " — ${r.reason}" else ""}")
             }
             appendLine()
-            append("Regra: entre APENAS nos sinais marcados ✅ OPERAR. Para os demais, não execute wallet_swap nem trade_set_rule.")
+            append("Regra (imposta pelo app): só os sinais ✅ OPERAR foram liberados — UMA ordem cada, válida por ${TradeCoordinator.gate.ttlSeconds / 60} min, no mesmo lado (compra/venda) validado. Ordens sem aprovação são RECUSADAS.")
         }.trim()
     }
 
@@ -1355,8 +1367,15 @@ class AgentRunner(
                         }
                     }
                 }
+                "typesafe_jev_check" -> {
+                    val ag = store.agent(store.session(sessionId)?.agentId)
+                    val allowed = ag != null && (WalletAgentPolicyStore(ctx.applicationContext).canAgentDayTrade(ag.id) ||
+                        dev.cueopen.app.CueApp.instance.uiConnectors.hasTradingTools(ag))
+                    if (!allowed) "Acesso negado: nenhum recurso de trading (day trade ou conector de trading) está habilitado para este agente."
+                    else jevAccuracyCheck(s("signals_json"), i("min_accuracy") ?: 70, ag!!.id)
+                }
                 "market_price", "market_candles", "market_liquidity", "market_discover", "market_token_info",
-                "typesafe_jev_check", "wallet_list_tokens", "wallet_swap", "trade_set_rule", "trade_list", "trade_cancel", "trade_update_rule" -> {
+                "wallet_list_tokens", "wallet_swap", "trade_set_rule", "trade_list", "trade_cancel", "trade_update_rule" -> {
                     val agentId = store.session(sessionId)?.agentId
                     val policies = WalletAgentPolicyStore(ctx.applicationContext)
                     if (agentId.isNullOrBlank() || store.agent(agentId) == null) {
@@ -1366,10 +1385,9 @@ class AgentRunner(
                     } else {
                         val wallet = SolanaWalletRepository(ctx.applicationContext)
                         val market = dev.cueopen.app.wallet.SolanaMarketDataClient()
-                        if (call.name.startsWith("market_") || call.name == "typesafe_jev_check") {
+                        if (call.name.startsWith("market_")) {
                             // Leitura/análise: não tocam a carteira nem a chave.
                             when (call.name) {
-                                "typesafe_jev_check" -> jevAccuracyCheck(s("signals_json"), i("min_accuracy") ?: 70)
                                 "market_discover" -> {
                                     val sort = s("sort").ifBlank { "new" }
                                     runCatching { market.discoverTokens(sort, i("limit") ?: 30) }.fold({ tokens ->
@@ -1473,13 +1491,39 @@ class AgentRunner(
                                         if (input == dev.cueopen.app.wallet.SolanaSwapClient.SOL_MINT && amount > cap) {
                                             "Recusado: entrada de ${String.format(Locale.US, "%.9f", amount / 1e9)} SOL excede o limite autorizado por operação (${String.format(Locale.US, "%.9f", cap / 1e9)} SOL). Reduza o valor ou ajuste o limite na tela Carteira."
                                         } else {
-                                            val rpc = SolanaRpcClient(endpoint = network.rpcEndpoint, network = network)
-                                            val exec = dev.cueopen.app.wallet.SolanaSwapExecutor(ctx.applicationContext, wallet, rpc)
-                                            when (val r = exec.executeSwap(input, output, amount, slippage, network)) {
-                                                is dev.cueopen.app.wallet.SwapResult.Submitted ->
-                                                    "Swap ENVIADO na ${network.displayName}. Saída estimada: ${r.outAmountRaw} (unidades mínimas). Impacto: ${r.priceImpactPct}%. Rota: ${r.routeLabels.joinToString("+").ifBlank { "direta" }}. Assinatura: ${r.signature}. Explorer: ${network.transactionExplorerUrl(r.signature)}"
-                                                is dev.cueopen.app.wallet.SwapResult.Rejected ->
-                                                    "Swap recusado: ${r.reason}"
+                                            val legs = dev.cueopen.app.trading.SwapLegs.legs(input, output)
+                                            val symbols = runCatching { market.tokenDisplays(legs.map { it.mint }) }.getOrDefault(emptyMap())
+                                            val consumed = ArrayList<dev.cueopen.app.trading.SignalGate.Approval>()
+                                            var refusal: String? = null
+                                            if (legs.isEmpty()) {
+                                                refusal = "Recusado: troca entre moedas-base (SOL/USDC/USDT) sem ativo de risco não é uma operação de trade."
+                                            } else for (leg in legs) {
+                                                val keys = setOf(leg.mint, SolanaRpcClient.knownSymbol(leg.mint).orEmpty(), symbols[leg.mint]?.symbol.orEmpty())
+                                                val ap = TradeCoordinator.gate.consume(agentId, "solana", keys, leg.side)
+                                                if (ap == null) {
+                                                    refusal = "RECUSADO: falta a validação TypeSafe Jev para ${leg.side} de ${symbols[leg.mint]?.symbol ?: leg.mint}. Chame typesafe_jev_check com signals_json=[{\"id\":\"${leg.mint}\",\"venue\":\"solana\",\"direction\":\"${if (leg.side == dev.cueopen.app.trading.Side.BUY) "buy" else "sell"}\",\"data\":\"<dados reais>\"}] e execute só se vier ✅ OPERAR. A aprovação vale ${TradeCoordinator.gate.ttlSeconds / 60} min e serve para UMA ordem."
+                                                    break
+                                                }
+                                                consumed.add(ap)
+                                                val holder = TradeCoordinator.claim("solana", leg.mint, agentId)
+                                                if (holder != null) { refusal = "RECUSADO: outro agente já está operando este token agora. Aguarde ou escolha outro."; break }
+                                            }
+                                            if (refusal != null) {
+                                                consumed.forEach { TradeCoordinator.gate.restore(it) }
+                                                legs.forEach { TradeCoordinator.release("solana", it.mint, agentId) }
+                                                refusal!!
+                                            } else {
+                                                val rpc = SolanaRpcClient(endpoint = network.rpcEndpoint, network = network)
+                                                val exec = dev.cueopen.app.wallet.SolanaSwapExecutor(ctx.applicationContext, wallet, rpc)
+                                                when (val r = TradeCoordinator.walletMutex.withLock { exec.executeSwap(input, output, amount, slippage, network) }) {
+                                                    is dev.cueopen.app.wallet.SwapResult.Submitted ->
+                                                        "Swap ENVIADO na ${network.displayName}. Saída estimada: ${r.outAmountRaw} (unidades mínimas). Impacto: ${r.priceImpactPct}%. Rota: ${r.routeLabels.joinToString("+").ifBlank { "direta" }}. Assinatura: ${r.signature}. Explorer: ${network.transactionExplorerUrl(r.signature)}"
+                                                    is dev.cueopen.app.wallet.SwapResult.Rejected -> {
+                                                        consumed.forEach { TradeCoordinator.gate.restore(it) }
+                                                        legs.forEach { TradeCoordinator.release("solana", it.mint, agentId) }
+                                                        "Swap recusado: ${r.reason}"
+                                                    }
+                                                }
                                             }
                                         }
                                     }
@@ -1497,6 +1541,8 @@ class AgentRunner(
                                         trig == null -> "trigger deve ser price_below ou price_above."
                                         amount == null || amount <= 0L -> "amount_raw deve ser inteiro positivo em unidades mínimas."
                                         target == null || target <= 0.0 -> "target_price_usd deve ser um decimal positivo."
+                                        dev.cueopen.app.trading.SwapLegs.legs(s("input_mint"), s("output_mint")).any { it.side == dev.cueopen.app.trading.Side.BUY } ->
+                                            "Recusado: regras automáticas só podem ser de SAÍDA (stop-loss/take-profit: vender o token para SOL/USDC). Para COMPRAR, valide com typesafe_jev_check e use wallet_swap."
                                         !dev.cueopen.app.wallet.SolanaAddressValidator.isValidAddress(s("input_mint")) -> "input_mint inválido."
                                         !dev.cueopen.app.wallet.SolanaAddressValidator.isValidAddress(s("output_mint")) -> "output_mint inválido."
                                         !dev.cueopen.app.wallet.SolanaAddressValidator.isValidAddress(s("watch_mint")) -> "watch_mint inválido."
@@ -1684,7 +1730,7 @@ class AgentRunner(
                 else -> if (call.name.startsWith("mcp_")) dev.cueopen.app.connectors.Connectors.callTool(store, call.name, a)
                         else if (call.name.startsWith("uic_")) {
                             val ag = store.agent(store.session(sessionId)?.agentId)
-                            dev.cueopen.app.CueApp.instance.uiConnectors.callTool(ag, call.name, a).also { out ->
+                            dev.cueopen.app.CueApp.instance.uiConnectors.callTool(ag, ag?.id ?: sessionId, call.name, a).also { out ->
                                 // Falhas reais do conector entram no log de erros (sem expor segredos: já redigido).
                                 if (out.startsWith("ERRO") || out.startsWith("RECUSAD"))
                                     runCatching { dev.cueopen.app.diag.ErrorLog.log("uiconnector", out.take(600), sessionId, call.name) }

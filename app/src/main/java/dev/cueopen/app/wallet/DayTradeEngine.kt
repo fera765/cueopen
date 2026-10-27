@@ -1,5 +1,6 @@
 package dev.cueopen.app.wallet
 
+import kotlinx.coroutines.sync.withLock
 import android.content.Context
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -85,7 +86,9 @@ class DayTradeEngine(
         }
         val rpc = SolanaRpcClient(endpoint = network.rpcEndpoint, network = network)
         val executor = SolanaSwapExecutor(context.applicationContext, repository, rpc)
-        when (val r = executor.executeSwap(rule.inputMint, rule.outputMint, rule.amountRaw, rule.slippageBps, network)) {
+        when (val r = dev.cueopen.app.trading.TradeCoordinator.walletMutex.withLock {
+            executor.executeSwap(rule.inputMint, rule.outputMint, rule.amountRaw, rule.slippageBps, network)
+        }) {
             is SwapResult.Submitted -> {
                 val link = network.transactionExplorerUrl(r.signature)
                 val note = "Gatilho atingido a ${usd(observedPriceUsd)}. Swap enviado. Assinatura: ${r.signature}. Explorer: $link"

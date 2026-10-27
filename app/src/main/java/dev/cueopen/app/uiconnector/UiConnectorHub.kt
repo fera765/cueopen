@@ -3,7 +3,14 @@ package dev.cueopen.app.uiconnector
 import android.content.Context
 import dev.cueopen.app.data.AgentProfile
 import dev.cueopen.app.diag.ErrorLog
+import dev.cueopen.app.trading.Side
+import dev.cueopen.app.trading.SignalGate
+import dev.cueopen.app.trading.TradeCoordinator
+import dev.cueopen.app.uiconnector.custom.CustomConnector
+import dev.cueopen.app.uiconnector.custom.CustomConnectorStore
+import dev.cueopen.app.uiconnector.custom.CustomDef
 import dev.cueopen.app.uiconnector.iqoption.IqOptionConnector
+import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -19,21 +26,58 @@ import kotlinx.serialization.json.put
  *  2. se "Agent required?" estiver LIGADO (padrão), só agentes com o conector ativado no perfil usam;
  *     se estiver DESLIGADO, qualquer conversa pode usar.
  * Toda saída de ferramenta passa por [Redactor] — segredos nunca chegam ao LLM.
+ *
+ * Ferramentas que abrem ordens (`requiresSignal`) só executam com uma validação prévia do avaliador
+ * (portão em [TradeCoordinator.gate]), uma ordem por vez por conector, sem colisão entre agentes.
  */
 class UiConnectorHub(context: Context) {
     private val ctx = context.applicationContext
     private val prefs = ctx.getSharedPreferences("uic_prefs", Context.MODE_PRIVATE)
     val vault = CredentialVault(ctx)
+    private val customStore = CustomConnectorStore(ctx)
 
-    /** Para adicionar um conector novo ao app: crie a classe e acrescente aqui. */
-    val connectors: List<UiConnector> = listOf<UiConnector>(IqOptionConnector()).also { list ->
-        list.forEach { c ->
-            val problems = SpecValidator.validate(c.spec)
-            if (problems.isNotEmpty()) ErrorLog.log("uiconnector", "spec inválido (${c.spec.id}): " + problems.joinToString("; "))
-        }
-    }.filter { SpecValidator.validate(it.spec).isEmpty() }
+    /** Conectores que vêm com o app. Para adicionar um novo em Kotlin: crie a classe e acrescente aqui. */
+    private val builtin: List<UiConnector> = listOf<UiConnector>(IqOptionConnector()).filter { c ->
+        val problems = SpecValidator.validate(c.spec)
+        if (problems.isNotEmpty()) ErrorLog.log("uiconnector", "spec inválido (${c.spec.id}): " + problems.joinToString("; "))
+        problems.isEmpty()
+    }
+
+    @Volatile private var custom: List<UiConnector> = loadCustom(emptyList())
+
+    /** Built-in + criados pelo usuário na página de Conectores. */
+    val connectors: List<UiConnector> get() = builtin + custom
 
     fun get(id: String): UiConnector? = connectors.firstOrNull { it.spec.id == id }
+    fun isCustom(id: String): Boolean = custom.any { it.spec.id == id }
+
+    // ------------------------------------------------------------------ conectores do usuário
+    private fun loadCustom(previous: List<UiConnector>): List<UiConnector> =
+        customStore.loadAll().mapNotNull { def ->
+            // definição idêntica → mantém a instância (e a sessão logada)
+            previous.firstOrNull { it is CustomConnector && it.def == def } ?: runCatching { CustomConnector(def) }.getOrNull()
+        }
+
+    fun customJson(id: String): String? = customStore.rawJson(id)
+
+    /** Valida e grava a definição. Se mudou, a sessão/credenciais antigas deixam de valer. */
+    suspend fun saveCustom(jsonText: String): Result<CustomDef> {
+        val r = customStore.save(jsonText, builtin.map { it.spec.id }.toSet())
+        r.onSuccess { def ->
+            val previous = custom
+            val old = previous.firstOrNull { it.spec.id == def.id } as? CustomConnector
+            if (old != null && old.def != def) { old.logout(); vault.clear(def.id) }
+            custom = loadCustom(previous)
+        }
+        return r
+    }
+
+    suspend fun deleteCustom(id: String) {
+        (custom.firstOrNull { it.spec.id == id })?.logout()
+        vault.clear(id)
+        customStore.delete(id)
+        custom = loadCustom(custom)
+    }
 
     // ------------------------------------------------------------------ toggles e configurações
     fun enabled(id: String): Boolean = prefs.getBoolean("enabled_$id", true)
@@ -86,6 +130,10 @@ class UiConnectorHub(context: Context) {
         return agentOptedIn || !agentRequired(id)
     }
 
+    /** Este agente tem algum conector que abre ordens (precisa do avaliador de acurácia)? */
+    fun hasTradingTools(agent: AgentProfile?): Boolean =
+        connectors.any { c -> usableBy(c, agent) && c.spec.tools.any { it.requiresSignal } }
+
     /** Definições de ferramenta (formato OpenAI/OpenRouter) dos conectores que este agente pode usar. */
     fun toolDefinitions(agent: AgentProfile?): List<JsonObject> =
         connectors.filter { usableBy(it, agent) }.flatMap { c ->
@@ -115,16 +163,19 @@ class UiConnectorHub(context: Context) {
 
     fun isUiConnectorTool(name: String) = name.startsWith("uic_")
 
-    /** Executa a ferramenta `uic_<id>_<tool>` para o agente. Nunca lança: devolve texto (erros viram texto). */
-    suspend fun callTool(agent: AgentProfile?, fullName: String, args: JsonObject): String {
+    /**
+     * Executa a ferramenta `uic_<id>_<tool>` para o agente. Nunca lança: devolve texto (erros viram texto).
+     * [agentKey] identifica quem opera (id do agente, ou da sessão) — base do portão e das reservas.
+     */
+    suspend fun callTool(agent: AgentProfile?, agentKey: String, fullName: String, args: JsonObject): String {
         val (id, tool) = SpecValidator.parseToolName(fullName) ?: return "Ferramenta inválida: $fullName"
         val c = get(id) ?: return "Conector desconhecido: $id"
         if (!usableBy(c, agent)) return "Este agente não tem acesso ao conector ${c.spec.name}. Ative-o no perfil do agente (UI Conectores)."
-        if (c.spec.tools.none { it.name == tool }) return "Ferramenta desconhecida: $fullName"
+        val ts = c.spec.tools.firstOrNull { it.name == tool } ?: return "Ferramenta desconhecida: $fullName"
         val strArgs = args.entries.associate { (k, v) -> k to ((v as? JsonPrimitive)?.contentOrNull ?: v.toString()) }
         val out = try {
             ensureLoggedIn(id).getOrThrow()
-            c.callTool(tool, strArgs, settings(c))
+            if (ts.requiresSignal) guardedCall(c, tool, agentKey, strArgs) else c.callTool(tool, strArgs, settings(c))
         } catch (t: kotlinx.coroutines.CancellationException) {
             throw t
         } catch (t: Throwable) {
@@ -132,5 +183,54 @@ class UiConnectorHub(context: Context) {
             "ERRO em ${c.spec.name}: ${t.message ?: t.javaClass.simpleName}"
         }
         return Redactor.redact(out, c.secrets())
+    }
+
+    /**
+     * Portão de uma ordem: (1) uma ordem por vez neste conector (evita estourar "máx. de operações
+     * abertas" com agentes concorrentes); (2) exige validação prévia do avaliador para CADA ativo/lado;
+     * (3) reserva o ativo para este agente (outro agente não opera o mesmo ativo ao mesmo tempo);
+     * (4) se a ordem não saiu (recusada/erro), devolve a aprovação para não gastar uma validação à toa.
+     */
+    private suspend fun guardedCall(c: UiConnector, tool: String, agentKey: String, args: Map<String, String>): String {
+        val venue = c.spec.id
+        val intents = c.orderIntents(tool, args)
+        if (intents.isEmpty()) return "RECUSADO: não foi possível identificar o ativo e o lado (compra/venda) da ordem. Confira os argumentos."
+        return TradeCoordinator.venueLock(venue).withLock {
+            val gate = TradeCoordinator.gate
+            val consumed = ArrayList<SignalGate.Approval>()
+            fun undo() { consumed.forEach { gate.restore(it) } }
+            for (intent in intents) {
+                val approval = gate.consume(agentKey, venue, setOf(intent.asset), intent.side)
+                if (approval == null) {
+                    undo()
+                    return@withLock missingValidation(venue, intent, gate)
+                }
+                consumed.add(approval)
+                val holder = TradeCoordinator.claim(venue, intent.asset, agentKey)
+                if (holder != null) {
+                    undo()
+                    return@withLock "RECUSADO: outro agente já está operando ${intent.asset} agora. Aguarde ou escolha outro ativo."
+                }
+            }
+            val out = try {
+                c.callTool(tool, args, settings(c))
+            } catch (t: Throwable) {
+                undo()
+                intents.forEach { TradeCoordinator.release(venue, it.asset, agentKey) }
+                throw t
+            }
+            if (out.startsWith("RECUSAD") || out.startsWith("ERRO")) {
+                undo()
+                intents.forEach { TradeCoordinator.release(venue, it.asset, agentKey) }
+            }
+            out
+        }
+    }
+
+    private fun missingValidation(venue: String, intent: OrderIntent, gate: SignalGate): String {
+        val dir = if (intent.side == Side.BUY) "buy" else "sell"
+        return "RECUSADO: falta a validação TypeSafe Jev para ${intent.side} ${intent.asset}. Antes de qualquer ordem chame typesafe_jev_check com " +
+            "signals_json=[{\"id\":\"${intent.asset}\",\"venue\":\"$venue\",\"direction\":\"$dir\",\"data\":\"<dados reais: velas, preço, tendência>\"}] " +
+            "e opere somente se vier ✅ OPERAR (acurácia ≥ ${gate.floor}%). A aprovação vale ${gate.ttlSeconds / 60} min e serve para UMA ordem."
     }
 }

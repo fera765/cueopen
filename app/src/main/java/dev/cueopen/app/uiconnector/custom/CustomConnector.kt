@@ -1,0 +1,226 @@
+package dev.cueopen.app.uiconnector.custom
+
+import dev.cueopen.app.trading.Sides
+import dev.cueopen.app.uiconnector.ConnectorSettings
+import dev.cueopen.app.uiconnector.OrderIntent
+import dev.cueopen.app.uiconnector.Redactor
+import dev.cueopen.app.uiconnector.Stat
+import dev.cueopen.app.uiconnector.Tone
+import dev.cueopen.app.uiconnector.UiBlock
+import dev.cueopen.app.uiconnector.UiConnector
+import dev.cueopen.app.uiconnector.FieldType
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import java.net.URLEncoder
+
+/**
+ * Conector genérico movido por uma [CustomDef] (JSON). Faz só requisições HTTPS ao host declarado,
+ * com [UrlGuard]; senhas e valores extraídos no login são tratados como segredo (nunca vão ao LLM).
+ */
+class CustomConnector(
+    val def: CustomDef,
+    private val http: HttpExec = OkHttpExec(),
+    private val permissive: Boolean = false,
+) : UiConnector {
+    override val spec = def.toSpec()
+
+    private val parser = Json { isLenient = true; ignoreUnknownKeys = true }
+
+    @Volatile private var creds: Map<String, String>? = null
+    @Volatile private var extracted: Map<String, String> = emptyMap()
+
+    override val isLoggedIn: Boolean get() = creds != null
+
+    private class Reply(val code: Int, val body: String, val json: JsonElement?, val headers: Map<String, List<String>>)
+
+    private fun sessionVars(): Map<String, String> = (creds ?: emptyMap()) + extracted
+
+    private fun settingVars(st: ConnectorSettings): Map<String, String> =
+        def.settings.associate { "s.${it.id}" to st.text(it.id).ifEmpty { it.default } }
+
+    private fun buildUrl(r: ReqDef, ctx: Template.Ctx): String {
+        val path = Template.render(r.path, ctx)
+        val q = r.query.entries.joinToString("&") { (k, v) ->
+            URLEncoder.encode(k, "UTF-8") + "=" + URLEncoder.encode(Template.render(v, ctx), "UTF-8")
+        }
+        return def.baseUrl + (if (path.startsWith("/")) path else "/$path") + (if (q.isEmpty()) "" else (if (path.contains('?')) "&" else "?") + q)
+    }
+
+    private suspend fun send(r: ReqDef, vars: Map<String, String>, withGlobalHeaders: Boolean, jsonCtx: JsonElement? = null): Reply {
+        val ctx = Template.Ctx(vars, jsonCtx)
+        val url = buildUrl(r, ctx)
+        UrlGuard.check(url, def.host, permissive)?.let { throw IllegalStateException("Requisição bloqueada: $it") }
+        val headers = LinkedHashMap<String, String>()
+        if (withGlobalHeaders) def.headers.forEach { (k, v) -> headers[k] = Template.render(v, ctx) }
+        r.headers.forEach { (k, v) -> headers[k] = Template.render(v, ctx) }
+        headers.putIfAbsent("Accept", "application/json")
+        val body = if (r.method == "GET" || r.body == null) null else Template.renderJson(r.body, ctx).toString()
+        val res = http.exec(HttpReq(r.method, url, headers, body))
+        val parsed = runCatching { parser.parseToJsonElement(res.body) }.getOrNull()
+        return Reply(res.code, res.body, parsed, res.headers)
+    }
+
+    /** Requisição autenticada com 1 re-login automático se a sessão expirou (401). */
+    private suspend fun authed(r: ReqDef, extra: Map<String, String>, withJson: JsonElement? = null): Reply {
+        var reply = send(r, sessionVars() + extra, true, withJson)
+        if ((reply.code == 401) && creds != null && def.login.request != null) {
+            val again = login(creds!!)
+            if (again.isSuccess) reply = send(r, sessionVars() + extra, true, withJson)
+        }
+        return reply
+    }
+
+    override suspend fun login(credentials: Map<String, String>): Result<Unit> {
+        return try {
+            val lr = def.login.request
+            val ex = LinkedHashMap<String, String>()
+            if (lr != null) {
+                val reply = send(lr, credentials, false)
+                if (reply.code !in 200..299) return Result.failure(IllegalStateException("Login recusado pelo servidor (HTTP ${reply.code})."))
+                val hdrs = reply.headers
+                for ((name, src) in def.login.extract) {
+                    val v: String? = when {
+                        src.startsWith("$") -> reply.json?.let { JsonPath.first(it, src) }?.let { JsonPath.text(it) }?.ifEmpty { null }
+                        src.startsWith("header:") -> hdrs[src.removePrefix("header:").lowercase()]?.firstOrNull()
+                        else -> {
+                            val cn = src.removePrefix("cookie:")
+                            hdrs["set-cookie"].orEmpty().firstNotNullOfOrNull { c ->
+                                val first = c.substringBefore(';')
+                                if (first.substringBefore('=').trim() == cn) first.substringAfter('=', "").trim() else null
+                            }
+                        }
+                    }
+                    if (v.isNullOrEmpty()) return Result.failure(IllegalStateException("Login sem '$name' na resposta (confira o caminho \"$src\")."))
+                    ex[name] = v
+                }
+            }
+            creds = credentials
+            extracted = ex
+            val ver = def.login.verify
+            if (ver != null) {
+                val vr = send(ver, sessionVars(), true)
+                if (vr.code !in 200..299) {
+                    creds = null
+                    extracted = emptyMap()
+                    return Result.failure(IllegalStateException("Credenciais não aceitas (verificação HTTP ${vr.code})."))
+                }
+            }
+            Result.success(Unit)
+        } catch (t: kotlinx.coroutines.CancellationException) {
+            throw t
+        } catch (t: Throwable) {
+            Result.failure(IllegalStateException(Redactor.redact(t.message ?: t.javaClass.simpleName, secrets())))
+        }
+    }
+
+    override suspend fun logout() {
+        creds = null
+        extracted = emptyMap()
+    }
+
+    override suspend fun snapshot(settings: ConnectorSettings): List<UiBlock> {
+        val out = ArrayList<UiBlock>()
+        val base = settingVars(settings)
+        for (p in def.panels) {
+            try {
+                val reply = if (p.request != null) authed(p.request, base) else null
+                if (reply != null && reply.code !in 200..299) {
+                    out.add(UiBlock.Note("${p.title.ifBlank { p.type }}: servidor respondeu HTTP ${reply.code}.", Tone.BAD))
+                    continue
+                }
+                val ctx = Template.Ctx(sessionVars() + base, reply?.json)
+                fun r(t: String) = Template.render(t, ctx)
+                when (p.type) {
+                    "header" -> out.add(UiBlock.Header(r(p.title), r(p.subtitle), r(p.badge), p.tone))
+                    "note" -> out.add(UiBlock.Note(r(p.text), p.tone))
+                    "stats" -> out.add(UiBlock.Stats(p.stats.map { Stat(r(it.label), r(it.value), it.tone) }))
+                    "table" -> {
+                        val rows = reply?.json?.let { JsonPath.select(it, p.rows) }.orEmpty().take(100).map { row ->
+                            val rc = Template.Ctx(ctx.vars, row)
+                            p.columns.map { c -> Template.render(c.value, rc) }
+                        }
+                        out.add(UiBlock.Table(r(p.title), p.columns.map { it.title }, rows, r(p.empty)))
+                    }
+                }
+            } catch (t: kotlinx.coroutines.CancellationException) {
+                throw t
+            } catch (t: Throwable) {
+                out.add(UiBlock.Note("${p.title.ifBlank { p.type }}: ${Redactor.redact(t.message ?: t.javaClass.simpleName, secrets())}", Tone.BAD))
+            }
+        }
+        def.actions.forEach { out.add(UiBlock.Button(it.id, it.label, it.risky)) }
+        return out
+    }
+
+    override suspend fun onAction(actionId: String, args: Map<String, String>, settings: ConnectorSettings): Result<String> {
+        val a = def.actions.firstOrNull { it.id == actionId } ?: return Result.failure(IllegalArgumentException("Ação desconhecida: $actionId"))
+        return try {
+            val reply = authed(a.request, settingVars(settings) + args)
+            if (reply.code !in 200..299) Result.failure(IllegalStateException("HTTP ${reply.code}: ${Redactor.redact(reply.body.take(200), secrets())}"))
+            else Result.success(if (a.message.isBlank()) "OK (HTTP ${reply.code})" else Template.render(a.message, Template.Ctx(sessionVars() + settingVars(settings) + args, reply.json)))
+        } catch (t: kotlinx.coroutines.CancellationException) {
+            throw t
+        } catch (t: Throwable) {
+            Result.failure(IllegalStateException(Redactor.redact(t.message ?: t.javaClass.simpleName, secrets())))
+        }
+    }
+
+    /** Valida argumentos do agente contra o esquema da ferramenta. null = ok; senão o motivo. */
+    private fun checkArgs(t: ToolDef, args: Map<String, String>): String? {
+        for (p in t.params) {
+            val v = args[p.name]
+            if (v.isNullOrBlank()) {
+                if (p.required) return "parâmetro '${p.name}' é obrigatório."
+                continue
+            }
+            if (p.allowed.isNotEmpty() && v !in p.allowed) return "parâmetro '${p.name}' deve ser um de: ${p.allowed.joinToString()}."
+            when (p.type) {
+                "integer" -> if (v.trim().toLongOrNull() == null) return "parâmetro '${p.name}' deve ser inteiro."
+                "number" -> if (v.trim().replace(',', '.').toDoubleOrNull() == null) return "parâmetro '${p.name}' deve ser numérico."
+                "boolean" -> if (v.trim().lowercase() !in setOf("true", "false")) return "parâmetro '${p.name}' deve ser true/false."
+            }
+        }
+        return null
+    }
+
+    override suspend fun callTool(name: String, args: Map<String, String>, settings: ConnectorSettings): String {
+        val t = def.tools.firstOrNull { it.name == name } ?: return "Ferramenta desconhecida: $name"
+        checkArgs(t, args)?.let { return "ERRO: $it" }
+        for (l in t.limits) {
+            val raw = args[l.param]?.trim()?.replace(',', '.') ?: continue
+            val v = raw.toDoubleOrNull() ?: return "ERRO: parâmetro '${l.param}' inválido."
+            if (v <= 0.0) return "RECUSADO: '${l.param}' deve ser maior que zero."
+            val max = settings.num(l.maxSetting, def.settings.firstOrNull { it.id == l.maxSetting }?.default?.toDoubleOrNull() ?: 0.0)
+            if (v > max) return "RECUSADO: '${l.param}' = $raw excede o limite definido pelo usuário ($max). Reduza o valor."
+        }
+        return try {
+            val vars = settingVars(settings) + args.filterValues { it.isNotEmpty() }
+            val reply = authed(t.request, vars)
+            if (reply.code !in 200..299) return "ERRO HTTP ${reply.code}: ${reply.body.take(300)}"
+            if (t.response.isNotBlank()) Template.render(t.response, Template.Ctx(sessionVars() + vars, reply.json))
+            else reply.body.take(4000)
+        } catch (c: kotlinx.coroutines.CancellationException) {
+            throw c
+        } catch (e: Throwable) {
+            "ERRO: ${e.message ?: e.javaClass.simpleName}"
+        }
+    }
+
+    override fun orderIntents(tool: String, args: Map<String, String>): List<OrderIntent> {
+        val t = def.tools.firstOrNull { it.name == tool } ?: return emptyList()
+        val i = t.intent ?: return emptyList()
+        if (checkArgs(t, args) != null) return emptyList()
+        val ctx = Template.Ctx(args)
+        val asset = Template.render(i.asset, ctx).trim()
+        val side = Sides.parse(Template.render(i.direction, ctx)) ?: return emptyList()
+        return if (asset.isEmpty()) emptyList() else listOf(OrderIntent(asset, side))
+    }
+
+    override fun secrets(): List<String> {
+        val c = creds ?: return emptyList()
+        val pw = def.login.fields.filter { it.type == FieldType.PASSWORD }.mapNotNull { c[it.id] }
+        return (pw + extracted.values).filter { it.length >= 4 }
+    }
+}

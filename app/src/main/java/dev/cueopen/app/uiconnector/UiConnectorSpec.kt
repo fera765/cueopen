@@ -55,7 +55,16 @@ data class ToolSpec(
     val params: List<ParamSpec> = emptyList(),
     /** Ferramenta que move dinheiro/dados sensíveis; sempre passa pelos limites do conector. */
     val risky: Boolean = false,
+    /**
+     * Ferramenta que ABRE uma ordem de compra/venda. O hub exige uma validação prévia do avaliador
+     * (typesafe_jev_check) para o ativo e o lado antes de executá-la. Exige [risky] e que o
+     * conector implemente [UiConnector.orderIntents].
+     */
+    val requiresSignal: Boolean = false,
 )
+
+/** Ativo + lado de uma ordem que uma ferramenta vai abrir (para o portão de validação). */
+data class OrderIntent(val asset: String, val side: dev.cueopen.app.trading.Side)
 
 data class UiConnectorSpec(
     /** Só [a-z0-9], começa com letra, 2–20 chars (vira parte do nome das ferramentas). */
@@ -117,6 +126,12 @@ interface UiConnector {
     /** Ferramenta chamada pelo AGENTE: sempre sujeita aos limites de segurança do conector. */
     suspend fun callTool(name: String, args: Map<String, String>, settings: ConnectorSettings): String
 
+    /**
+     * Para ferramentas com `requiresSignal`: quais ordens (ativo + lado) a chamada abriria.
+     * Lista vazia = argumentos inválidos (o hub recusa). Padrão: nenhuma.
+     */
+    fun orderIntents(tool: String, args: Map<String, String>): List<OrderIntent> = emptyList()
+
     /** Valores sensíveis que NUNCA podem aparecer em saídas para o LLM (são redigidos pelo hub). */
     fun secrets(): List<String>
 }
@@ -165,6 +180,7 @@ object SpecValidator {
             if (!NAME.matches(t.name)) p += "ferramenta '${t.name}' com nome inválido."
             if ("uic_${s.id}_${t.name}".length > 64) p += "ferramenta '${t.name}': nome completo excede 64 caracteres."
             if (t.description.isBlank()) p += "ferramenta '${t.name}' sem description (o LLM precisa dela)."
+            if (t.requiresSignal && !t.risky) p += "ferramenta '${t.name}': requiresSignal exige risky = true."
             t.params.groupBy { it.name }.filter { it.value.size > 1 }.keys.forEach { p += "ferramenta '${t.name}': parâmetro duplicado $it" }
             t.params.forEach { a ->
                 if (a.name.isBlank()) p += "ferramenta '${t.name}': parâmetro sem nome."

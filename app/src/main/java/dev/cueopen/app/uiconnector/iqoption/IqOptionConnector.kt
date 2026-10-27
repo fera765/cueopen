@@ -70,6 +70,11 @@ class IqOptionConnector : UiConnector {
             ),
             SettingSpec("max_amount", "Valor máximo por operação (agente)", "Teto do valor de cada operação aberta pelo agente, na moeda da conta.", SettingType.NUMBER, "1"),
             SettingSpec("max_open", "Máx. de operações abertas (agente)", "O agente não abre novas operações acima deste número.", SettingType.NUMBER, "3"),
+            SettingSpec(
+                "short_max_minutes", "Duração máxima de operação CURTA (min)",
+                "Até este tempo a operação é curta: o agente pode comprar (call) e vender (put). Acima disso é LONGA: só compra (call).",
+                SettingType.NUMBER, "5",
+            ),
         ),
         tools = listOf(
             ToolSpec("balance", "Saldo das contas DEMO e REAL e qual está ativa."),
@@ -82,12 +87,14 @@ class IqOptionConnector : UiConnector {
                 ParamSpec("timeframe", "Tamanho da vela em segundos (60=1min, 300=5min…) ou 1m/5m/1h. Padrão 60.", required = false),
                 ParamSpec("count", "Quantidade de velas (1–200). Padrão 30.", "integer", required = false),
             )),
-            ToolSpec("buy", "Abre uma operação (call = sobe, put = desce) na conta ativa, respeitando os limites do usuário.", listOf(
+            ToolSpec("buy", "Abre uma operação (call = compra/sobe, put = venda/desce) na conta ativa, respeitando os limites do usuário. " +
+                "EXIGE validação prévia com typesafe_jev_check (venue=iqoption, id=ticker, direction=call|put). " +
+                "Curta (até o limite do usuário): call e put. Longa: somente call.", listOf(
                 ParamSpec("asset", "Ticker do ativo, ex.: EURUSD"),
-                ParamSpec("direction", "call (sobe) ou put (desce)", allowed = listOf("call", "put")),
+                ParamSpec("direction", "call (compra/sobe) ou put (venda/desce)", allowed = listOf("call", "put")),
                 ParamSpec("amount", "Valor da operação na moeda da conta", "number"),
                 ParamSpec("minutes", "Expiração em minutos (1–60). Padrão 1.", "integer", required = false),
-            ), risky = true),
+            ), risky = true, requiresSignal = true),
             ToolSpec("positions", "Operações em execução e as últimas fechadas (abertas por este app)."),
         ),
     )
@@ -360,6 +367,9 @@ class IqOptionConnector : UiConnector {
             if (amount > maxAmount) return "RECUSADO: valor $amount excede o máximo permitido por operação ($maxAmount). Reduza o valor."
             val maxOpen = settings.num("max_open", 3.0).toInt()
             if (openCount() >= maxOpen) return "RECUSADO: já existem ${openCount()} operações abertas (máximo $maxOpen). Aguarde fechar."
+            val shortMax = settings.num("short_max_minutes", 5.0).toInt().coerceAtLeast(1)
+            if (minutes > shortMax && dir != "call")
+                return "RECUSADO: operação LONGA (mais de $shortMax min) só pode ser de COMPRA (call). Venda (put) só em operações curtas (até $shortMax min)."
         }
         val a = IqProtocol.resolveAsset(loadAssets(), asset) ?: return "Ativo '$asset' não encontrado. Use open_assets."
         if (!a.open) return "O ativo ${a.ticker} está fechado/suspenso agora."
@@ -458,6 +468,15 @@ class IqOptionConnector : UiConnector {
         if (t is kotlinx.coroutines.CancellationException) throw t
         err("ação $actionId falhou: ${t.message}")
         Result.failure(IllegalStateException(friendly(t)))
+    }
+
+    // ------------------------------------------------------------------ portão de validação
+    override fun orderIntents(tool: String, args: Map<String, String>): List<dev.cueopen.app.uiconnector.OrderIntent> {
+        if (tool != "buy") return emptyList()
+        val asset = args["asset"].orEmpty().trim()
+        val side = dev.cueopen.app.trading.Sides.parse(args["direction"])
+        if (asset.isEmpty() || side == null) return emptyList()
+        return listOf(dev.cueopen.app.uiconnector.OrderIntent(asset, side))
     }
 
     // ------------------------------------------------------------------ ferramentas do agente

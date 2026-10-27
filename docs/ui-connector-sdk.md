@@ -89,3 +89,60 @@ log de erros com os nomes das últimas mensagens recebidas, para diagnóstico.
 Limites do agente: conta **REAL** só se liberada nas configurações; valor máximo por operação;
 máximo de operações abertas. "Operações em execução" lista as operações abertas por este app,
 fechadas por eventos reais do servidor.
+
+---
+
+## Criar conectores na própria app (definição JSON)
+
+Em **Conectores → UI Conectores → Criar conector (SDK)** o usuário escreve (ou pede à IA) uma definição JSON.
+O editor valida ao vivo, permite **testar** login/painéis/ferramentas e só então salva. Nada é executado no
+aparelho: a definição só faz requisições **HTTPS** ao host de `baseUrl` (porta 443, sem IP/localhost/rede privada,
+sem redirecionamentos, resposta ≤ 256 KB, 20 s). Protocolos que não são REST (WebSocket, SDKs) usam a API Kotlin
+acima (como o conector IQ Option).
+
+```json
+{
+  "id": "minhaapi", "name": "Minha API", "description": "…", "version": "1.0", "accent": "#FF6B3D",
+  "baseUrl": "https://api.exemplo.com",
+  "headers": { "Authorization": "Bearer {{token}}" },
+  "login": {
+    "fields": [ { "id": "email", "type": "email", "label": "E-mail" }, { "id": "password", "type": "password", "label": "Senha" } ],
+    "request": { "method": "POST", "path": "/auth/login", "body": { "email": "{{email}}", "password": "{{password}}" } },
+    "extract": { "token": "$.token" },
+    "verify": { "path": "/me" }
+  },
+  "settings": [ { "id": "maxValor", "label": "…", "description": "…", "type": "number", "default": "10", "risky": true } ],
+  "panels": [
+    { "type": "header", "title": "{{$.name}}", "request": { "path": "/me" } },
+    { "type": "stats", "request": { "path": "/summary" }, "items": [ { "label": "Total", "value": "{{$.total|num:2}}", "tone": "good" } ] },
+    { "type": "table", "title": "Itens", "request": { "path": "/items" }, "rows": "$.items[*]", "columns": [ { "title": "Nome", "value": "{{$.name}}" } ] },
+    { "type": "note", "text": "Texto", "tone": "warn" }
+  ],
+  "actions": [ { "id": "refresh", "label": "Atualizar", "request": { "path": "/refresh" } } ],
+  "tools": [
+    { "name": "enviar", "description": "…", "risky": true,
+      "params": [ { "name": "valor", "description": "…", "type": "number" } ],
+      "limits": [ { "param": "valor", "maxSetting": "maxValor" } ],
+      "request": { "method": "POST", "path": "/send", "body": { "amount": "{{valor|num}}" } },
+      "response": "Enviado: {{$.id}}" }
+  ]
+}
+```
+
+* **Variáveis** `{{x}}`: campos de login, valores de `extract` (`$.caminho`, `header:Nome`, `cookie:Nome`),
+  parâmetros da ferramenta e `{{s.<setting>}}`. `{{$.a.b[0]}}` lê a resposta JSON atual (só `.nome`, `['nome']`, `[n]`, `[-1]`, `[*]`).
+* **Filtros**: `url`, `json`, `num[:N]`, `int`, `upper`, `lower`, `trim`, `default:X`, `date`, `pct:N`, `bool`, `raw`.
+  Um valor único `"{{v|num}}"` no corpo vira número JSON.
+* **Segurança**: senhas e valores extraídos nunca vão ao LLM (redigidos); métodos ≠ GET exigem `"risky": true`;
+  `limits` impõe teto numérico vindo das configurações do usuário; `login.request` é opcional (API key); o agente só
+  usa o conector se o usuário ativar (“Agent required ?” + perfil do agente).
+* **Ordens**: ferramenta com `"requiresSignal": true` + `"orderIntent": {"asset": "{{par}}", "direction": "{{lado}}"}`
+  só executa após validação TypeSafe Jev do ativo/lado (uso único, 5 min) — igual ao IQ Option.
+
+## Validação TypeSafe Jev e coordenação (imposto em código)
+
+`typesafe_jev_check` grava aprovações (piso 70, uso único, 5 min, por agente/venue/ativo/lado). `wallet_swap` (compra e venda)
+e as ferramentas `requiresSignal` consomem a aprovação; sem ela a ordem é recusada. Regras automáticas (`trade_set_rule`) são só de saída
+(SL/TP) e dispensam validação, assim como o trailing stop. Execuções na carteira Solana são serializadas (`walletMutex`),
+cada conector tem uma ordem por vez (`venueLock`) e um ativo não é operado por dois agentes ao mesmo tempo (`claim`).
+Solana e IQ Option têm capital independente.
