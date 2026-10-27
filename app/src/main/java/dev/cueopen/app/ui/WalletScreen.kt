@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -632,7 +633,7 @@ private fun WalletQuickAction(label: String, icon: androidx.compose.ui.graphics.
         androidx.compose.material3.Surface(onClick = onClick, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(22.dp),
             color = if (primary) Color(0xFFFF895B) else Color(0xFF1C1A19),
             contentColor = if (primary) Color(0xFF17110F) else Color(0xFFF3EFED),
-            border = androidx.compose.foundation.BorderStroke(1.dp, if (primary) Color(0xFFFFA27E) else Color(0xFF38302D)) {
+            border = androidx.compose.foundation.BorderStroke(1.dp, if (primary) Color(0xFFFFA27E) else Color(0xFF38302D))) {
             androidx.compose.foundation.layout.Box(Modifier.padding(vertical = 14.dp), contentAlignment = androidx.compose.ui.Alignment.Center) {
                 androidx.compose.material3.Icon(icon, contentDescription = label, modifier = Modifier.size(26.dp))
             }
