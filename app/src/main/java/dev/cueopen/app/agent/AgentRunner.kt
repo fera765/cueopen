@@ -1387,7 +1387,10 @@ class AgentRunner(
                     val r = terminals.get(sessionId, cwd).runAgentCommand(command, (i("timeout") ?: 180).toLong(), b("background"))
                     run {
                         buildString {
-                            append(r.output.takeLast(10_000))
+                            val body = r.output.takeLast(10_000)
+                            // Deixa explícito quando o comando terminou sem imprimir nada, para a LLM
+                            // não interpretar "sem saída" como falha de execução e repetir o comando.
+                            append(if (body.isBlank()) "(sem saída)" else body)
                             if (r.timedOut) append("\n[timeout]")
                             append("\n[exit ${r.exitCode}]")
                         }

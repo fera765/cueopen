@@ -154,7 +154,11 @@ class TerminalManager(private val ctx: Context, private val sandbox: Sandbox) {
                 }
                 val waiter = kotlinx.coroutines.CompletableDeferred<Int>()
                 pending = waiter
-                write("\u0015\n$typed\r") // limpa a linha anterior e começa o comando em uma linha nova
+                // IMPORTANTE: apenas \u0015 (mata a linha) + o comando + \r. NÃO enviar '\n' antes
+                // do comando: um '\n' submete uma linha vazia, o bash retorna o prompt e dispara o
+                // OSC de fim (cue;done;0) ANTES do comando rodar — completando o waiter com exit 0 e
+                // saída vazia. Era a causa de "executou mas não retornou saída".
+                write("\u0015$typed\r")
                 val exit = try {
                     withTimeoutOrNull(timeoutSec * 1000) { waiter.await() }
                 } finally {
@@ -169,8 +173,12 @@ class TerminalManager(private val ctx: Context, private val sandbox: Sandbox) {
                 }
                 if (exit == null) { write("\u0003"); delay(500) }
                 val out = if (background) {
-                    "Iniciado em segundo plano (log: $gcue/bg_$id.log)"
+                    "Iniciado em segundo plano (log: $gcue/bg_$id.log). Use 'cat $gcue/bg_$id.log' para ver a saída quando precisar."
                 } else {
+                    // O out.log é escrito no filesystem do Android via bind-mount do proot; aguarda
+                    // brevemente a visibilidade do arquivo antes de ler (evita leitura prematura vazia).
+                    var waited = 0
+                    while (!outputFile.isFile && waited < 500) { delay(40); waited += 40 }
                     runCatching { outputFile.takeIf { it.isFile }?.readText()?.takeLast(12_000).orEmpty() }
                         .getOrElse { "Erro ao ler a saída capturada: ${it.message}" }
                 }

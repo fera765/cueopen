@@ -145,7 +145,7 @@ fun ChatScreen(nav: NavController, sessionId: String) {
                     InfoRow(Icons.Rounded.Bedtime, "Modo contínuo: próxima verificação às $t. Toque em ■ ou envie uma mensagem para interromper.")
                 }
                 if (session.status == SessionStatus.STOPPED) item { InfoRow(Icons.Rounded.StopCircle, "Tarefa interrompida. Envie uma mensagem para continuar.") }
-                if (session.status == SessionStatus.DONE) item { DoneRow(onCopy = { copyText(ctx, lastAnswer(session)) }, onShare = { shareSession(ctx, session) }) }
+                if (session.status == SessionStatus.DONE) item { DoneRow(onCopy = { copyText(ctx, lastAnswer(session)) }, onShare = { shareText(ctx, lastAnswer(session)) }) }
             }
             if (!follow) {
                 SmallFloatingActionButton({ follow = true }, Modifier.align(Alignment.BottomEnd).padding(16.dp), containerColor = c.ink, contentColor = c.bg) {
@@ -184,17 +184,25 @@ fun ChatScreen(nav: NavController, sessionId: String) {
                         draft = ""
                         when (cmd) {
                             "/compact" -> cmdScope.launch {
+                                val step = ChatItem.Step(tool = "compact", title = "Compactando contexto…", args = "", status = StepStatus.RUNNING)
+                                app.store.addItem(sessionId, step)
                                 val msg = app.agent.compactNow(sessionId)
-                                app.store.addItem(sessionId, ChatItem.Assistant(text = "🗜️ $msg", final = false))
+                                app.store.replaceItem(sessionId, step.copy(title = "Contexto compactado", args = msg.substringAfter(":").trim().ifBlank { "memória reduzida" }, status = StepStatus.OK))
                             }
-                            "/autocompact" -> {
+                            "/autocompact" -> cmdScope.launch {
                                 val on = !(app.store.session(sessionId)?.autoCompact ?: true)
+                                val step = ChatItem.Step(tool = "autocompact", title = "Ajustando compactação automática…", args = "", status = StepStatus.RUNNING)
+                                app.store.addItem(sessionId, step)
                                 app.store.editSession(sessionId) { it.copy(autoCompact = on) }
-                                app.store.addItem(sessionId, ChatItem.Assistant(text = "Compactação automática ${if (on) "ligada" else "desligada"}.", final = false))
+                                kotlinx.coroutines.delay(450)
+                                app.store.replaceItem(sessionId, step.copy(title = if (on) "Compactação automática habilitada" else "Compactação automática desligada", args = if (on) "ligada" else "desligada", status = StepStatus.OK))
                             }
-                            "/clear" -> {
+                            "/clear" -> cmdScope.launch {
+                                val step = ChatItem.Step(tool = "clear", title = "Limpando contexto…", args = "", status = StepStatus.RUNNING)
+                                app.store.addItem(sessionId, step)
                                 app.store.editSession(sessionId) { it.copy(llm = emptyList(), summary = "") }
-                                app.store.addItem(sessionId, ChatItem.Assistant(text = "Contexto do modelo limpo. O histórico continua visível.", final = false))
+                                kotlinx.coroutines.delay(450)
+                                app.store.replaceItem(sessionId, step.copy(title = "Contexto do modelo limpo", args = "histórico mantido na tela", status = StepStatus.OK))
                             }
                             "/stop" -> app.agent.stop(sessionId)
                             "/usage" -> usage = true
@@ -355,6 +363,9 @@ fun toolIcon(tool: String): ImageVector = when {
     tool == "remember" -> Icons.Rounded.Psychology
     tool == "create_skill" -> Icons.Rounded.AutoAwesome
     tool == "multi_agent_worker" -> Icons.Rounded.CheckCircle
+    tool == "clear" -> Icons.Rounded.CleaningServices
+    tool == "compact" -> Icons.Rounded.Compress
+    tool == "autocompact" -> Icons.Rounded.AutoMode
     else -> Icons.Rounded.Bolt
 }
 
@@ -477,6 +488,14 @@ fun copyText(ctx: android.content.Context, text: String) {
     val cm = ctx.getSystemService(android.content.ClipboardManager::class.java)
     cm.setPrimaryClip(android.content.ClipData.newPlainText("CueOpen", text))
     android.widget.Toast.makeText(ctx, "Copiado", android.widget.Toast.LENGTH_SHORT).show()
+}
+
+/** Compartilha SOMENTE o texto da resposta do agente (Markdown), sem anexar arquivos. */
+fun shareText(ctx: android.content.Context, text: String) {
+    val i = android.content.Intent(android.content.Intent.ACTION_SEND)
+        .setType("text/plain")
+        .putExtra(android.content.Intent.EXTRA_TEXT, text)
+    ctx.startActivity(android.content.Intent.createChooser(i, "Compartilhar resposta"))
 }
 
 /**
