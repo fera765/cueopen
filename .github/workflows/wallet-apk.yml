@@ -161,7 +161,25 @@ jobs:
           force-avd-creation: false
           emulator-options: -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
           disable-animations: true
-          script: gradle connectedDebugAndroidTest --stacktrace
+          script: set -o pipefail; gradle connectedDebugAndroidTest --stacktrace 2>&1 | tee /tmp/at-run.log
+
+      - name: Publish instrumented test run log + results
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p diagrun
+          cp /tmp/at-run.log diagrun/at-run.log 2>/dev/null || echo "no run log" > diagrun/at-run.log
+          # Collect per-test XML results (compact, parseable) if present.
+          find app/build/outputs/androidTest-results -name '*.xml' -exec cp {} diagrun/ \; 2>/dev/null || true
+          cd diagrun
+          git init -q
+          git checkout -q -b wallet-testrun
+          git config user.email "actions@github.com"
+          git config user.name "github-actions"
+          git add -A
+          git commit -q -m "instrumented test run #${{ github.run_number }}"
+          git push -q --force "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git" wallet-testrun
 
       - name: Upload instrumented test reports
         if: always()
