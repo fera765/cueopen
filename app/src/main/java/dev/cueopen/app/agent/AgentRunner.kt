@@ -636,6 +636,7 @@ class AgentRunner(
                     appendLine("- Dados de mercado são 100% reais (sem API key): market_discover (tokens de todo o ecossistema Solana, novos→velhos ou em alta, com liquidez e volume), market_token_info (preço/liquidez/volume/market cap de um token), market_price (preço USD ao vivo), market_candles (OHLCV real do pool de maior liquidez), market_liquidity (impacto real por tamanho — AMM não tem order book central). Nunca invente preços, velas ou profundidade; se uma ferramenta retornar MARKET_ERROR, relate o erro e não contorne com shell/curl.")
                     appendLine("- FLUXO OBRIGATÓRIO: (1) descubra oportunidades com market_discover e cheque market_token_info; (2) analise preço/tendência com market_candles; (3) meça liquidez/impacto com market_liquidity (confirme que dá para comprar E vender); (4) SEMPRE chame typesafe_jev_check com os dados reais dos sinais ANTES de operar e entre APENAS nos sinais com acurácia suficiente (✅ OPERAR); (5) entre com wallet_swap só nos sinais aprovados; (6) proteja a posição com trade_set_rule (stop-loss price_below e/ou take-profit price_above); (7) a cada ciclo chame trade_list para avaliar e disparar os gatilhos no preço real.")
                     appendLine("- NUNCA execute wallet_swap ou trade_set_rule sem antes validar o sinal com typesafe_jev_check. A acurácia vem de dados reais; não invente probabilidades.")
+                    appendLine("- Se market_candles retornar 'tendência real alternativa' (DexScreener: variações m5/h1/h6/h24, volume, fluxo compra/venda), isso é dado REAL e suficiente para analisar a tendência — use-o normalmente, não repita a chamada em loop.")
                     appendLine("- wallet_swap executa troca REAL e assinada localmente; entradas em SOL respeitam o limite por operação autorizado pelo usuário. Só diga 'enviado/executado' com base na assinatura retornada (Explorer); jamais afirme lucro ou execução sem a assinatura.")
                     appendLine("- Para monitorar o mercado de forma contínua, use set_schedule (ex.: a cada 5-15 min) e, a cada ciclo, reavalie com market_* e trade_list. Seja econômico e honesto sobre risco: day trade pode gerar perdas; nunca prometa retorno.")
                 }
@@ -1287,7 +1288,13 @@ class AgentRunner(
                                                 appendLine("${c.tsEpochSeconds} | ${c.open} ${c.high} ${c.low} ${c.close} | ${String.format(Locale.US, "%.0f", c.volumeUsd)}")
                                             }
                                         }.trim()
-                                    }, { "MARKET_ERROR ao consultar velas: ${(it.message ?: it.javaClass.simpleName).take(200)}." })
+                                    }, { e ->
+                                        // Velas indisponíveis (429/timeout/sem pool): cai para a tendência REAL do
+                                        // DexScreener (keyless) — o agente nunca fica sem dado de mercado.
+                                        val trend = runCatching { market.dexTrend(mint) }.getOrNull()
+                                        if (trend != null) "Velas OHLCV indisponíveis agora (${(e.message ?: "erro").take(80)}). Usando tendência real alternativa:\n\n$trend"
+                                        else "MARKET_ERROR ao consultar velas: ${(e.message ?: e.javaClass.simpleName).take(200)}."
+                                    })
                                 }
                                 else -> { // market_liquidity
                                     val input = s("input_mint"); val output = s("output_mint")

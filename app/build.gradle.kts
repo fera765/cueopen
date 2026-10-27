@@ -17,9 +17,22 @@ android {
         // do sandbox a partir de filesDir. Os .so do proot também vêm em jniLibs.
         targetSdk = 28
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
-        versionCode = 18
-        versionName = "4.7.0"
+        versionCode = 19
+        versionName = "4.7.1"
         ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64") }
+    }
+    signingConfigs {
+        // Chave de assinatura estável opcional: lida de variáveis de ambiente no CI (sem credenciais
+        // commitadas). Quando presentes, garante assinatura fixa para atualizar o APK sem desinstalar.
+        create("cueopen") {
+            val ksPath = System.getenv("CUEOPEN_KEYSTORE")
+            if (!ksPath.isNullOrBlank() && file(ksPath).exists()) {
+                storeFile = file(ksPath)
+                storePassword = System.getenv("CUEOPEN_STORE_PASSWORD")
+                keyAlias = System.getenv("CUEOPEN_KEY_ALIAS")
+                keyPassword = System.getenv("CUEOPEN_KEY_PASSWORD")
+            }
+        }
     }
     buildTypes {
         release {
@@ -27,7 +40,9 @@ android {
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
-            signingConfig = signingConfigs.getByName("debug")
+            // Usa a chave estável se configurada por env (CI secret); senão cai para a debug.
+            signingConfig = if (!System.getenv("CUEOPEN_KEYSTORE").isNullOrBlank())
+                signingConfigs.getByName("cueopen") else signingConfigs.getByName("debug")
         }
     }
     packaging { jniLibs { useLegacyPackaging = true } } // extrai .so para nativeLibraryDir

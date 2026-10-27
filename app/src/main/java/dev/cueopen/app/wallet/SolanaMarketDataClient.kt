@@ -6,7 +6,9 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.doubleOrNull
+import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.contentOrNull
@@ -33,9 +35,9 @@ class SolanaMarketDataClient(
     private val priceBase: String = JUP_PRICE_BASE,
     private val geckoBase: String = GECKO_BASE,
     private val client: OkHttpClient = OkHttpClient.Builder()
-        .callTimeout(15, TimeUnit.SECONDS)
-        .connectTimeout(6, TimeUnit.SECONDS)
-        .readTimeout(10, TimeUnit.SECONDS)
+        .callTimeout(25, TimeUnit.SECONDS)
+        .connectTimeout(8, TimeUnit.SECONDS)
+        .readTimeout(18, TimeUnit.SECONDS)
         .build()
 ) {
     private val json = Json { ignoreUnknownKeys = true }
@@ -53,7 +55,9 @@ class SolanaMarketDataClient(
         val url = base + pathAndQuery
         var attempt = 0
         var lastErr = "limite de requisições (HTTP 429)"
-        while (attempt < 4) {
+        // Poucas tentativas: em caso de 429/erro, falhamos rápido para o chamador cair na fonte
+        // alternativa confiável (DexScreener) em vez de prender o agente em backoffs longos.
+        while (attempt < 2) {
             geckoThrottle(key != null)
             val reqB = Request.Builder().url(url).header("Accept", "application/json").get()
             if (key != null) reqB.header("x-cg-demo-api-key", key)
@@ -68,7 +72,7 @@ class SolanaMarketDataClient(
                     resp.code == 429 -> {
                         lastErr = "limite de requisições (HTTP 429)"
                         val retryMs = (resp.header("Retry-After")?.toLongOrNull()?.times(1000)
-                            ?: (1500L * (attempt + 1))).coerceAtMost(6000L)
+                            ?: 1200L).coerceAtMost(2500L)
                         delay(retryMs)
                     }
                     else -> throw IOException("HTTP ${resp.code}")
@@ -93,7 +97,8 @@ class SolanaMarketDataClient(
      * de token_info/preço para tirar carga do GeckoTerminal e evitar 429. Escolhe o par de maior
      * liquidez. Resiliente: devolve null em falha (o chamador tenta outra fonte).
      */
-    private suspend fun dexScreenerToken(mint: String): TokenMarket? = withContext(Dispatchers.IO) {
+    /** Melhor par (maior liquidez) do token na Solana via DexScreener, em cache. */
+    private suspend fun bestDexPair(mint: String): JsonObject? = withContext(Dispatchers.IO) {
         val cacheKey = "dex:$mint"
         val body = cacheGet(cacheKey) ?: runCatching {
             val req = Request.Builder().url("$DEXSCREENER_BASE/latest/dex/tokens/$mint")
@@ -105,24 +110,67 @@ class SolanaMarketDataClient(
             }
         }.getOrNull() ?: return@withContext null
         val pairs = runCatching { json.parseToJsonElement(body).jsonObject["pairs"]?.jsonArray }.getOrNull() ?: return@withContext null
-        val solPairs = pairs.filter { (it.jsonObject["chainId"]?.jsonPrimitive?.contentOrNull) == "solana" }
-        val best = solPairs.maxByOrNull {
-            (it.jsonObject["liquidity"] as? kotlinx.serialization.json.JsonObject)?.get("usd")?.jsonPrimitive?.doubleOrNull ?: 0.0
-        } ?: return@withContext null
-        val o = best.jsonObject
+        pairs.filter { (it.jsonObject["chainId"]?.jsonPrimitive?.contentOrNull) == "solana" }
+            .maxByOrNull { (it.jsonObject["liquidity"] as? JsonObject)?.get("usd")?.jsonPrimitive?.doubleOrNull ?: 0.0 }
+            ?.jsonObject
+    }
+
+    private suspend fun dexScreenerToken(mint: String): TokenMarket? {
+        val o = bestDexPair(mint) ?: return null
         val baseTok = o["baseToken"]?.jsonObject
-        TokenMarket(
+        return TokenMarket(
             mint = mint,
             symbol = baseTok?.get("symbol")?.jsonPrimitive?.contentOrNull ?: mint.take(6),
             name = baseTok?.get("name")?.jsonPrimitive?.contentOrNull.orEmpty(),
             priceUsd = o["priceUsd"]?.jsonPrimitive?.contentOrNull?.toDoubleOrNull(),
-            liquidityUsd = (o["liquidity"] as? kotlinx.serialization.json.JsonObject)?.get("usd")?.jsonPrimitive?.doubleOrNull,
-            volume24hUsd = (o["volume"] as? kotlinx.serialization.json.JsonObject)?.get("h24")?.jsonPrimitive?.doubleOrNull,
-            priceChange24hPct = (o["priceChange"] as? kotlinx.serialization.json.JsonObject)?.get("h24")?.jsonPrimitive?.doubleOrNull,
+            liquidityUsd = (o["liquidity"] as? JsonObject)?.get("usd")?.jsonPrimitive?.doubleOrNull,
+            volume24hUsd = (o["volume"] as? JsonObject)?.get("h24")?.jsonPrimitive?.doubleOrNull,
+            priceChange24hPct = (o["priceChange"] as? JsonObject)?.get("h24")?.jsonPrimitive?.doubleOrNull,
             poolCreatedAt = o["pairCreatedAt"]?.jsonPrimitive?.contentOrNull,
             poolAddress = o["pairAddress"]?.jsonPrimitive?.contentOrNull,
             marketCapUsd = o["marketCap"]?.jsonPrimitive?.doubleOrNull ?: o["fdv"]?.jsonPrimitive?.doubleOrNull
         )
+    }
+
+    /**
+     * Endereço do pool do token, descoberto de forma confiável pelo DexScreener (keyless) e só
+     * então pelo GeckoTerminal. Resultado em cache longo (pools não mudam) — remove as falhas
+     * "Nenhum pool" e tira uma chamada do GeckoTerminal por consulta de velas.
+     */
+    private suspend fun poolForMint(mint: String): String? {
+        cacheGet("pool:$mint")?.let { return it }
+        val fromDex = runCatching { bestDexPair(mint)?.get("pairAddress")?.jsonPrimitive?.contentOrNull }.getOrNull()
+        val pool = fromDex ?: runCatching { topPoolFor(mint) }.getOrNull()
+        if (!pool.isNullOrBlank()) cachePut("pool:$mint", pool)
+        return pool
+    }
+
+    /**
+     * Resumo de TENDÊNCIA real do DexScreener (keyless): preço e variações m5/h1/h6/h24, volume e
+     * compras/vendas. NÃO é OHLCV — é usado como alternativa confiável quando as velas falham,
+     * sempre rotulado como tal. Dados 100% reais.
+     */
+    suspend fun dexTrend(mint: String): String? {
+        val o = bestDexPair(mint) ?: return null
+        val pc = o["priceChange"] as? JsonObject
+        val vol = o["volume"] as? JsonObject
+        val txns = o["txns"] as? JsonObject
+        val sym = o["baseToken"]?.jsonObject?.get("symbol")?.jsonPrimitive?.contentOrNull ?: mint.take(6)
+        fun ch(k: String) = pc?.get(k)?.jsonPrimitive?.doubleOrNull
+        fun v(k: String) = vol?.get(k)?.jsonPrimitive?.doubleOrNull
+        fun flow(k: String): String {
+            val t = txns?.get(k) as? JsonObject ?: return "?"
+            val b = t["buys"]?.jsonPrimitive?.intOrNull ?: 0; val s = t["sells"]?.jsonPrimitive?.intOrNull ?: 0
+            return "${b}c/${s}v"
+        }
+        return buildString {
+            appendLine("Tendência real (DexScreener; NÃO é OHLCV, mas é dado real de mercado) — $sym:")
+            o["priceUsd"]?.jsonPrimitive?.contentOrNull?.toDoubleOrNull()?.let { appendLine("Preço: US$ " + String.format(java.util.Locale.US, if (it < 1.0) "%.8f" else "%.4f", it)) }
+            appendLine("Variação: m5 ${ch("m5")?.let{String.format(java.util.Locale.US,"%+.2f",it)}?:"?"}% | h1 ${ch("h1")?.let{String.format(java.util.Locale.US,"%+.2f",it)}?:"?"}% | h6 ${ch("h6")?.let{String.format(java.util.Locale.US,"%+.2f",it)}?:"?"}% | h24 ${ch("h24")?.let{String.format(java.util.Locale.US,"%+.2f",it)}?:"?"}%")
+            appendLine("Volume: h1 US$ ${v("h1")?.let{String.format(java.util.Locale.US,"%,.0f",it)}?:"?"} | h24 US$ ${v("h24")?.let{String.format(java.util.Locale.US,"%,.0f",it)}?:"?"}")
+            appendLine("Fluxo (compras/vendas): m5 ${flow("m5")} | h1 ${flow("h1")} | h24 ${flow("h24")}")
+            (o["liquidity"] as? JsonObject)?.get("usd")?.jsonPrimitive?.doubleOrNull?.let { appendLine("Liquidez: US$ " + String.format(java.util.Locale.US, "%,.0f", it)) }
+        }.trim()
     }
 
     private fun cacheGet(k: String): String? {
@@ -196,7 +244,7 @@ class SolanaMarketDataClient(
         require(SolanaAddressValidator.isValidAddress(mint)) { "Mint inválido" }
         require(timeframe in setOf("day", "hour", "minute")) { "timeframe deve ser day, hour ou minute" }
         val safeLimit = limit.coerceIn(1, 1000)
-        val pool = topPoolFor(mint) ?: throw IOException("Nenhum pool de liquidez encontrado para este token na Solana")
+        val pool = poolForMint(mint) ?: throw IOException("Nenhum pool de liquidez encontrado para este token na Solana")
         val body = geckoGet("/networks/solana/pools/$pool/ohlcv/$timeframe?aggregate=${aggregate.coerceAtLeast(1)}&limit=$safeLimit&currency=usd")
         run {
             val list = json.parseToJsonElement(body).jsonObject["data"]?.jsonObject
