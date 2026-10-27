@@ -138,6 +138,38 @@ class SolanaRpcClient(
             }
         }
 
+    /** Recent on-chain signatures for a public address. This is history, not proof of wallet ownership. */
+    suspend fun getRecentSignatures(publicKey: String, limit: Int = 10): List<SolanaRecentSignature> =
+        withContext(Dispatchers.IO) {
+            require(SolanaAddressValidator.isValidAddress(publicKey)) {
+                "Invalid 32-byte Solana public key"
+            }
+            require(limit in 1..25) { "Signature history limit must be between 1 and 25" }
+            val result = rpc("getSignaturesForAddress", listOf(
+                JsonPrimitive(publicKey),
+                buildJsonObject {
+                    put("limit", limit)
+                    put("commitment", "confirmed")
+                }
+            ))
+            result.jsonArray.mapNotNull { element ->
+                runCatching {
+                    val fields = element.jsonObject
+                    val signature = fields["signature"]?.jsonPrimitive?.content
+                        ?: throw IOException("RPC signature item omitted signature")
+                    if (!SolanaSignatureValidator.isValid(signature)) {
+                        throw IOException("RPC returned invalid transaction signature")
+                    }
+                    val slot = fields["slot"]?.jsonPrimitive?.content?.toLongOrNull()
+                        ?: throw IOException("RPC signature item omitted slot")
+                    val blockTime = fields["blockTime"]?.takeUnless { it == JsonNull }
+                        ?.jsonPrimitive?.content?.toLongOrNull()
+                    val error = fields["err"]?.takeUnless { it == JsonNull }?.toString()
+                    SolanaRecentSignature(signature, slot, blockTime, error)
+                }.getOrNull()
+            }
+        }
+
     /** Status is null when RPC has no record; this is not proof of transaction failure. */
     suspend fun getSignatureStatus(signature: String): SolanaSignatureStatus? =
         withContext(Dispatchers.IO) {
@@ -222,6 +254,13 @@ class SolanaRpcClient(
         fun lamportsToSol(lamports: Long): Double = lamports / 1_000_000_000.0
     }
 }
+
+data class SolanaRecentSignature(
+    val signature: String,
+    val slot: Long,
+    val blockTimeEpochSeconds: Long?,
+    val error: String?
+)
 
 data class SolanaBlockhash(val blockhash: String, val lastValidBlockHeight: Long)
 
