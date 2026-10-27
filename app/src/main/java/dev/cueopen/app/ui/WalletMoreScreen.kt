@@ -126,7 +126,7 @@ fun WalletMoreScreen(nav: NavController) {
                                         .onFailure { e -> error = e.message }
                                 }
                                 if (auto) Text(
-                                    "⚠ Envio automático ativo. Exige allowlist abaixo; sem destinatários autorizados, o envio é bloqueado. Limites por transação/dia sempre aplicados.",
+                                    "⚠ Envio automático ativo: o agente pode enviar para qualquer endereço sem aprovação manual. A allowlist abaixo é opcional — se vazia, qualquer destinatário é permitido. Os limites por transação/dia são sempre aplicados.",
                                     color = c.warn, fontSize = 12.sp
                                 )
 
@@ -142,7 +142,7 @@ fun WalletMoreScreen(nav: NavController) {
                                 Spacer(Modifier.height(8.dp))
                                 CueField(maxSol, { maxSol = it }, "Limite por pedido (SOL, máx. 0,05)")
                                 CueField(dailySol, { dailySol = it }, "Limite diário (SOL, máx. 0,10)")
-                                CueField(allowlist, { allowlist = it }, "Destinatários autorizados (um por linha)", minLines = 2)
+                                CueField(allowlist, { allowlist = it }, "Allowlist (opcional; um por linha; vazio = qualquer endereço)", minLines = 2)
                                 Spacer(Modifier.height(8.dp))
                                 PillButton("Salvar limites e destinatários", Icons.Rounded.Check, modifier = Modifier.fillMaxWidth()) {
                                     runCatching {

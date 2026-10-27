@@ -95,6 +95,7 @@ class SolanaSwapClient(
         const val DEFAULT_BASE = "https://lite-api.jup.ag"
         const val SOL_MINT = "So11111111111111111111111111111111111111112"
         const val USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+        const val USDT_MINT = "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB"
         private const val MAX_RESPONSE_CHARS = 512 * 1024
     }
 }

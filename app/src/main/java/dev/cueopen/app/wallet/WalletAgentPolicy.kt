@@ -49,11 +49,10 @@ data class WalletAgentPolicy(
                 if (!SolanaAddressValidator.isValidAddress(recipient)) {
                     return PolicyDecision.Denied("Recipient is not a valid Solana public address")
                 }
+                // Optional allowlist: if the user configured one, restrict to it; if empty, any
+                // recipient is permitted. Per-transaction and daily SOL limits always apply.
                 if (allowedRecipients.isNotEmpty() && recipient !in allowedRecipients) {
                     return PolicyDecision.Denied("Recipient is not allowlisted")
-                }
-                if (autonomousExecution && allowedRecipients.isEmpty()) {
-                    return PolicyDecision.Denied("Autonomous transfers require an explicit recipient allowlist")
                 }
                 if (!autonomousExecution) PolicyDecision.RequiresUserApproval else PolicyDecision.Allowed
             }

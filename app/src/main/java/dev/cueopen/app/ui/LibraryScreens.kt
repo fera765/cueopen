@@ -157,12 +157,12 @@ fun AgentEditScreen(nav: NavController, id: String) {
                     if (walletRequestTransfer) {
                         ToggleRow(
                             "Transferência automática (sem aprovação manual)",
-                            "O agente assina e envia transferências sozinho, sem confirmar a cada vez. Só funciona com uma allowlist de destinatários configurada na tela Carteira, e sempre respeita os limites por transação (0,05 SOL) e diário (0,10 SOL). Use com cautela.",
+                            "O agente assina e envia transferências sozinho, sem confirmar a cada vez, para qualquer destinatário. Sempre respeita os limites por transação e diário deste agente. Use com cautela.",
                             walletAutonomousTransfer
                         ) { walletAutonomousTransfer = it }
                         if (walletAutonomousTransfer) {
                             Text(
-                                "⚠ Modo autônomo ativo. Defina a allowlist de destinatários e os limites deste agente na tela Carteira → Mais. Sem allowlist, o envio automático é bloqueado por segurança.",
+                                "⚠ Modo autônomo ativo: o agente pode enviar para qualquer endereço, sem aprovação manual. A allowlist é opcional (em Carteira → Mais); se vazia, qualquer destinatário é permitido. Os limites por transação/dia são o único teto de segurança — mantenha-os.",
                                 fontSize = 12.sp,
                                 color = c.warn
                             )

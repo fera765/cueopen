@@ -84,16 +84,20 @@ fun WalletSwapScreen(nav: NavController) {
             CueField(amountSol, { amountSol = it; quote = null }, "Você paga (SOL)")
 
             Text("Receber", fontSize = 13.sp, color = c.ink2)
+            val isPreset = outputMint == SolanaSwapClient.USDC_MINT || outputMint == SolanaSwapClient.USDT_MINT
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Chip("USDC", outputMint == SolanaSwapClient.USDC_MINT) {
                     outputMint = SolanaSwapClient.USDC_MINT; outputLabel = "USDC"; outDecimals = 6; quote = null
                 }
-                Chip("Outro mint", outputMint != SolanaSwapClient.USDC_MINT) {
+                Chip("USDT", outputMint == SolanaSwapClient.USDT_MINT) {
+                    outputMint = SolanaSwapClient.USDT_MINT; outputLabel = "USDT"; outDecimals = 6; quote = null
+                }
+                Chip("Outro mint", !isPreset) {
                     outputMint = ""; outputLabel = "Token"; quote = null
                 }
             }
-            if (outputMint != SolanaSwapClient.USDC_MINT) {
-                CueField(outputMint, { outputMint = it; quote = null }, "Endereço do mint de saída")
+            if (!isPreset) {
+                CueField(outputMint, { outputMint = it; quote = null }, "Endereço do mint de saída (ex.: outra cripto SPL)")
             }
 
             Text("Slippage", fontSize = 13.sp, color = c.ink2)
@@ -112,8 +116,8 @@ fun WalletSwapScreen(nav: NavController) {
                         require(lamports > 0L) { "Valor inválido" }
                         val client = SolanaSwapClient()
                         val q = client.quote(SolanaSwapClient.SOL_MINT, outputMint.trim(), lamports, slippageBps)
-                        val dec = if (outputMint == SolanaSwapClient.USDC_MINT) 6
-                            else runCatching { SolanaRpcClient(endpoint = network.rpcEndpoint, network = network).getTokenDecimals(outputMint.trim()) }.getOrDefault(0)
+                        val dec = if (outputMint == SolanaSwapClient.USDC_MINT || outputMint == SolanaSwapClient.USDT_MINT) 6
+                            else runCatching { SolanaRpcClient(endpoint = network.rpcEndpoint, network = network).getTokenDecimals(outputMint.trim()) }.getOrDefault(6)
                         outDecimals = dec
                         quote = q
                     } catch (e: Exception) {
@@ -128,7 +132,7 @@ fun WalletSwapScreen(nav: NavController) {
                     Spacer(Modifier.height(6.dp))
                     QuoteRow("Você paga", String.format(Locale.US, "%.9f", q.inAmountRaw / 1_000_000_000.0) + " SOL", c)
                     QuoteRow("Você recebe (estim.)", "≈ " + outUi(q.outAmountRaw) + " " + outputLabel, c)
-                    QuoteRow("Impacto de preço", q.priceImpactPct + "%", c)
+                    QuoteRow("Impacto de preço", formatPriceImpact(q.priceImpactPct), c)
                     if (q.routeLabels.isNotEmpty()) QuoteRow("Rota", q.routeLabels.joinToString(" → "), c)
                     Spacer(Modifier.height(10.dp))
                     PillButton("Revisar e trocar", Icons.Rounded.SwapHoriz, modifier = Modifier.fillMaxWidth(), enabled = !swapping) { confirmOpen = true }
@@ -192,6 +196,16 @@ fun WalletSwapScreen(nav: NavController) {
             },
             dismissButton = { TextButton(onClick = { confirmOpen = false }) { Text("Cancelar") } }
         )
+    }
+}
+
+private fun formatPriceImpact(raw: String): String {
+    val d = raw.toDoubleOrNull() ?: return raw + "%"
+    val pct = d * 100.0 // Jupiter returns a fraction (e.g. 0.001 = 0.1%)
+    return when {
+        pct <= 0.0 -> "0%"
+        pct < 0.01 -> "< 0,01%"
+        else -> String.format(Locale.US, "%.3f%%", pct)
     }
 }
 

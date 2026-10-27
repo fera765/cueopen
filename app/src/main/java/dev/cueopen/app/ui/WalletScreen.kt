@@ -63,6 +63,7 @@ import dev.cueopen.app.wallet.SolanaNetwork
 import dev.cueopen.app.wallet.SolanaRecentSignature
 import dev.cueopen.app.wallet.SolanaRpcClient
 import dev.cueopen.app.wallet.SolanaWalletRepository
+import dev.cueopen.app.wallet.SplTokenBalance
 import dev.cueopen.app.wallet.WalletSetupSession
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -108,6 +109,7 @@ fun WalletScreen(nav: NavController) {
 
     var recent by remember { mutableStateOf<List<SolanaRecentSignature>>(emptyList()) }
     var historyLoading by remember { mutableStateOf(false) }
+    var tokens by remember { mutableStateOf<List<SplTokenBalance>>(emptyList()) }
 
     // Onboarding / backup / repair state
     var setup by remember { mutableStateOf<WalletSetupSession?>(null) }
@@ -164,6 +166,14 @@ fun WalletScreen(nav: NavController) {
                 SolanaRpcClient.recentSignaturesWithFallback(selectedNetwork.value, current, limit = 6)
             }
         } catch (e: Exception) { /* keep previous history */ } finally { historyLoading = false }
+    }
+    LaunchedEffect(address, refreshCounter) {
+        val current = address ?: return@LaunchedEffect
+        try {
+            tokens = withContext(Dispatchers.IO) {
+                SolanaRpcClient.tokenAccountsWithFallback(selectedNetwork.value, current)
+            }
+        } catch (e: Exception) { /* keep previous token list */ }
     }
 
     Scaffold(containerColor = c.bg, topBar = { CueTopBar("Carteira", { nav.popBackStack() }) }) { pad ->
@@ -237,17 +247,15 @@ fun WalletScreen(nav: NavController) {
                                 Icon(Icons.Rounded.Refresh, null, Modifier.size(16.dp)); Spacer(Modifier.width(6.dp)); Text("Atualizar")
                             }
                         }
-                        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                            Surface(shape = CircleShape, color = WalletPalette.heroBg) {
-                                Icon(Icons.Rounded.AccountBalanceWallet, null, Modifier.padding(12.dp), tint = WalletPalette.coral)
-                            }
-                            Column(Modifier.weight(1f)) {
-                                Text("Solana", style = MaterialTheme.typography.titleMedium)
-                                Text("SOL", color = c.ink2, style = MaterialTheme.typography.bodyMedium)
-                            }
-                            Text(if (hideBalance) "••••" else (balance ?: "—"), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                        AssetRow("Solana", "SOL", if (hideBalance) "••••" else (balance ?: "—"), c)
+                        tokens.forEach { t ->
+                            val symbol = SolanaRpcClient.knownSymbol(t.mint) ?: (t.mint.take(4) + "…" + t.mint.takeLast(4))
+                            val name = SolanaRpcClient.knownSymbol(t.mint) ?: "Token SPL"
+                            AssetRow(name, symbol, if (hideBalance) "••••" else t.uiAmount, c)
                         }
-                        Text("Tokens SPL e cotação em moeda aparecem quando a consulta de tokens e a fonte de preços estiverem integradas.", color = c.ink3, style = MaterialTheme.typography.bodySmall)
+                        if (tokens.isEmpty()) {
+                            Text("Nenhum token SPL nesta carteira ainda. Ao receber ou trocar por um token, ele aparece aqui.", color = c.ink3, style = MaterialTheme.typography.bodySmall)
+                        }
                     }
                 }
 
@@ -358,6 +366,20 @@ fun WalletScreen(nav: NavController) {
 
             error?.let { if (address == null) Text(it, color = c.ink2, style = MaterialTheme.typography.bodySmall) }
         }
+    }
+}
+
+@Composable
+private fun AssetRow(name: String, symbol: String, amount: String, c: dev.cueopen.app.ui.theme.CueColors) {
+    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+        Surface(shape = CircleShape, color = WalletPalette.heroBg) {
+            Icon(Icons.Rounded.AccountBalanceWallet, null, Modifier.padding(12.dp), tint = WalletPalette.coral)
+        }
+        Column(Modifier.weight(1f)) {
+            Text(name, style = MaterialTheme.typography.titleMedium)
+            Text(symbol, color = c.ink2, style = MaterialTheme.typography.bodyMedium)
+        }
+        Text(amount, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
     }
 }
 

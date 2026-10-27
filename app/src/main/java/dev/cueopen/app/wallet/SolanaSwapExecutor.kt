@@ -21,6 +21,11 @@ class SolanaSwapExecutor(
 ) {
     private val vault = WalletSecretVault(context.applicationContext)
 
+    private companion object {
+        // Buffer for network fee + possible destination token-account rent (~0.00204 SOL).
+        const val FEE_AND_RENT_BUFFER_LAMPORTS = 3_000_000L
+    }
+
     suspend fun executeSwap(
         inputMint: String,
         outputMint: String,
@@ -39,6 +44,20 @@ class SolanaSwapExecutor(
         }
         val expectedAddress = repository.publicAddress()
             ?: return@withContext SwapResult.Rejected("Metadados da carteira indisponíveis.")
+
+        // Pre-check SOL balance so a zero/low balance gives a clear message instead of a raw
+        // "AccountNotFound" from the on-chain preflight. Needs the swap amount plus fee + ATA rent.
+        if (inputMint == SolanaSwapClient.SOL_MINT) {
+            val balance = runCatching { SolanaRpcClient.balanceWithFallback(network, expectedAddress) }.getOrNull()
+            if (balance != null) {
+                if (balance == 0L) {
+                    return@withContext SwapResult.Rejected("Sua carteira não tem SOL. Deposite SOL para pagar a troca e a taxa de rede antes de trocar.")
+                }
+                if (balance < amountRaw + FEE_AND_RENT_BUFFER_LAMPORTS) {
+                    return@withContext SwapResult.Rejected("Saldo de SOL insuficiente: a troca precisa do valor trocado mais ~0,003 SOL de taxa/rent. Reduza o valor ou deposite mais SOL.")
+                }
+            }
+        }
 
         val quote = try {
             swapClient.quote(inputMint, outputMint, amountRaw, slippageBps)
@@ -73,7 +92,11 @@ class SolanaSwapExecutor(
             signedBytes = bytes
             val simulation = rpc.simulateSerializedTransaction(bytes)
             if (!simulation.success) {
-                return@withContext SwapResult.Rejected("Simulação da troca falhou: " + (simulation.error ?: "erro desconhecido") + ". Nada foi enviado.")
+                val raw = simulation.error ?: "erro desconhecido"
+                val friendly = if (raw.contains("AccountNotFound", ignoreCase = true) || raw.contains("InsufficientFunds", ignoreCase = true))
+                    "A carteira não existe on-chain ou não tem SOL suficiente para a troca e a taxa. Deposite SOL e tente de novo. (preflight: $raw)"
+                else "A verificação on-chain da troca falhou ($raw). Nada foi enviado."
+                return@withContext SwapResult.Rejected(friendly)
             }
             val signature = rpc.sendSignedTransaction(bytes)
             SwapResult.Submitted(signature, quote.outAmountRaw, quote.priceImpactPct, quote.routeLabels)

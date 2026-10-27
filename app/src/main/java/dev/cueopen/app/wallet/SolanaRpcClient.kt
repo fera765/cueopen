@@ -84,6 +84,38 @@ class SolanaRpcClient(
             ?: throw IOException("Invalid lamports value from Solana RPC")
     }
 
+    /** Real SPL token balances owned by [owner], read on-chain via getTokenAccountsByOwner (jsonParsed). */
+    suspend fun getTokenAccounts(owner: String): List<SplTokenBalance> = withContext(Dispatchers.IO) {
+        require(SolanaAddressValidator.isValidAddress(owner)) { "Invalid owner address" }
+        val result = mutableMapOf<String, SplTokenBalance>()
+        for (programId in listOf(TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID)) {
+            val value = runCatching {
+                rpc("getTokenAccountsByOwner", listOf(
+                    JsonPrimitive(owner),
+                    buildJsonObject { put("programId", programId) },
+                    buildJsonObject { put("encoding", "jsonParsed"); put("commitment", "confirmed") }
+                )).jsonObject["value"]?.jsonArray
+            }.getOrNull() ?: continue
+            for (element in value) {
+                val info = element.jsonObject["account"]?.jsonObject
+                    ?.get("data")?.jsonObject?.get("parsed")?.jsonObject
+                    ?.get("info")?.jsonObject ?: continue
+                val mint = info["mint"]?.jsonPrimitive?.content ?: continue
+                val tokenAmount = info["tokenAmount"]?.jsonObject ?: continue
+                val amountRaw = tokenAmount["amount"]?.jsonPrimitive?.content?.toLongOrNull() ?: continue
+                val decimals = tokenAmount["decimals"]?.jsonPrimitive?.content?.toIntOrNull() ?: continue
+                val uiAmount = tokenAmount["uiAmountString"]?.jsonPrimitive?.content
+                    ?: (amountRaw.toDouble() / Math.pow(10.0, decimals.toDouble())).toString()
+                if (amountRaw <= 0L) continue
+                // Sum duplicates (same mint across multiple token accounts).
+                val existing = result[mint]
+                result[mint] = if (existing == null) SplTokenBalance(mint, amountRaw, decimals, uiAmount)
+                else existing.copy(amountRaw = existing.amountRaw + amountRaw)
+            }
+        }
+        result.values.sortedByDescending { it.amountRaw }
+    }
+
     /** Number of decimals for an SPL token mint, read on-chain. Used only to format amounts. */
     suspend fun getTokenDecimals(mint: String): Int = withContext(Dispatchers.IO) {
         require(SolanaAddressValidator.isValidAddress(mint)) { "Invalid token mint address" }
@@ -274,6 +306,27 @@ class SolanaRpcClient(
         private const val JSON_MEDIA_TYPE = "application/json; charset=utf-8"
         private const val MAX_TRANSACTION_BYTES = 1232
         private const val MAX_RESPONSE_CHARS = 512 * 1024
+        const val TOKEN_PROGRAM_ID = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+        const val TOKEN_2022_PROGRAM_ID = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"
+
+        /** Known-mint display symbols (no external price/metadata source used). */
+        fun knownSymbol(mint: String): String? = when (mint) {
+            "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v" -> "USDC"
+            "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB" -> "USDT"
+            "So11111111111111111111111111111111111111112" -> "wSOL"
+            else -> null
+        }
+
+        /** Token balances with endpoint fallback; throws only after all read endpoints fail. */
+        suspend fun tokenAccountsWithFallback(network: SolanaNetwork, owner: String): List<SplTokenBalance> {
+            var last: Exception? = null
+            for (endpoint in network.readEndpoints) {
+                try {
+                    return SolanaRpcClient(endpoint = endpoint, network = network).getTokenAccounts(owner)
+                } catch (e: Exception) { last = e }
+            }
+            throw last ?: IOException("Tokens indisponíveis")
+        }
 
         fun lamportsToSol(lamports: Long): Double = lamports / 1_000_000_000.0
 
@@ -305,6 +358,13 @@ class SolanaRpcClient(
         }
     }
 }
+
+data class SplTokenBalance(
+    val mint: String,
+    val amountRaw: Long,
+    val decimals: Int,
+    val uiAmount: String
+)
 
 data class SolanaRecentSignature(
     val signature: String,
