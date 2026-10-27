@@ -147,12 +147,13 @@ fun WalletScreen(nav: NavController) {
         loading = true; error = null
         try {
             val lamports = withContext(Dispatchers.IO) {
-                SolanaRpcClient(endpoint = selectedNetwork.value.rpcEndpoint, network = selectedNetwork.value)
-                    .getBalanceLamports(current)
+                SolanaRpcClient.balanceWithFallback(selectedNetwork.value, current)
             }
             balance = String.format(Locale.US, "%.9f", lamports / 1_000_000_000.0)
+            error = null
         } catch (e: Exception) {
-            balance = null; error = "Saldo indisponível. Verifique a conexão e tente novamente."
+            // Keep the last known balance instead of blanking the hero; show a soft hint only.
+            if (balance == null) error = "Saldo indisponível no momento. Tentaremos de novo ao atualizar."
         } finally { loading = false }
     }
     LaunchedEffect(address, refreshCounter) {
@@ -160,10 +161,9 @@ fun WalletScreen(nav: NavController) {
         historyLoading = true
         try {
             recent = withContext(Dispatchers.IO) {
-                SolanaRpcClient(endpoint = selectedNetwork.value.rpcEndpoint, network = selectedNetwork.value)
-                    .getRecentSignatures(current, limit = 6)
+                SolanaRpcClient.recentSignaturesWithFallback(selectedNetwork.value, current, limit = 6)
             }
-        } catch (e: Exception) { recent = emptyList() } finally { historyLoading = false }
+        } catch (e: Exception) { /* keep previous history */ } finally { historyLoading = false }
     }
 
     Scaffold(containerColor = c.bg, topBar = { CueTopBar("Carteira", { nav.popBackStack() }) }) { pad ->

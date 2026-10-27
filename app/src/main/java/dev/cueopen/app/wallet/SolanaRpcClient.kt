@@ -33,6 +33,17 @@ enum class SolanaNetwork(
         return if (this == DEVNET) base + "?cluster=devnet" else base
     }
 
+    /**
+     * Read-only endpoints tried in order for balance/history. The canonical [rpcEndpoint] is kept
+     * first; extra free, no-key public nodes make balance reads resilient to a flaky primary RPC.
+     * Signing/sending always uses [rpcEndpoint] only.
+     */
+    val readEndpoints: List<String>
+        get() = when (this) {
+            MAINNET -> listOf(rpcEndpoint, "https://solana-rpc.publicnode.com", "https://api.mainnet-beta.solana.com")
+            DEVNET -> listOf(rpcEndpoint, "https://api.devnet.solana.com")
+        }.distinct()
+
     companion object {
         fun fromEndpoint(endpoint: String): SolanaNetwork? =
             entries.firstOrNull { it.rpcEndpoint == endpoint }
@@ -265,6 +276,33 @@ class SolanaRpcClient(
         private const val MAX_RESPONSE_CHARS = 512 * 1024
 
         fun lamportsToSol(lamports: Long): Double = lamports / 1_000_000_000.0
+
+        /** Balance read with endpoint fallback + bounded retry, so a flaky primary RPC doesn't blank the UI. */
+        suspend fun balanceWithFallback(network: SolanaNetwork, address: String): Long {
+            var last: Exception? = null
+            for (endpoint in network.readEndpoints) {
+                repeat(2) { attempt ->
+                    try {
+                        return SolanaRpcClient(endpoint = endpoint, network = network).getBalanceLamports(address)
+                    } catch (e: Exception) {
+                        last = e
+                        kotlinx.coroutines.delay(250L * (attempt + 1))
+                    }
+                }
+            }
+            throw last ?: IOException("Saldo indisponível")
+        }
+
+        /** Recent signatures with endpoint fallback; returns empty list only after all endpoints fail. */
+        suspend fun recentSignaturesWithFallback(network: SolanaNetwork, address: String, limit: Int = 6): List<SolanaRecentSignature> {
+            var last: Exception? = null
+            for (endpoint in network.readEndpoints) {
+                try {
+                    return SolanaRpcClient(endpoint = endpoint, network = network).getRecentSignatures(address, limit)
+                } catch (e: Exception) { last = e }
+            }
+            throw last ?: IOException("Histórico indisponível")
+        }
     }
 }
 
