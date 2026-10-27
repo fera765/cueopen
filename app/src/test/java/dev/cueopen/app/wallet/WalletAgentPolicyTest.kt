@@ -63,9 +63,11 @@ class WalletAgentPolicyTest {
     }
 
     @Test
-    fun autonomousTransfersRequireExplicitAllowlist() {
+    fun autonomousTransferWithoutAllowlistIsAllowedForAnyRecipient() {
+        // Allowlist is optional: with an empty allowlist, an autonomous transfer to any valid
+        // recipient is authorized (per-transaction/daily limits still apply and are tested below).
         assertEquals(
-            PolicyDecision.Denied("Autonomous transfers require an explicit recipient allowlist"),
+            PolicyDecision.Allowed,
             policy(autonomous = true).authorize(WalletAction.TRANSFER, 10L, validRecipient)
         )
     }

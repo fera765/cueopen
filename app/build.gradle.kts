@@ -18,7 +18,7 @@ android {
         targetSdk = 28
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         versionCode = 12
-        versionName = "4.3.0"
+        versionName = "4.3.1"
         ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64") }
     }
     buildTypes {
