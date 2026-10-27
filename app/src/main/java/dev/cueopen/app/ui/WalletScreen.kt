@@ -36,10 +36,12 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.unit.dp
 import androidx.navigation.NavController
 import dev.cueopen.app.ui.theme.Cue
 import dev.cueopen.app.wallet.SolanaRpcClient
+import dev.cueopen.app.wallet.SolanaRecentSignature
 import dev.cueopen.app.wallet.SolanaNetwork
 import dev.cueopen.app.wallet.SolanaWalletRepository
 import dev.cueopen.app.wallet.WalletSetupSession
@@ -52,6 +54,7 @@ import java.util.Locale
 @Composable
 fun WalletScreen(nav: NavController) {
     val context = LocalContext.current
+    val uriHandler = LocalUriHandler.current
     val repository = remember(context) { SolanaWalletRepository(context.applicationContext) }
     val walletPolicyStore = remember(context) { WalletAgentPolicyStore(context.applicationContext) }
     val appState by CueApp.instance.store.state.collectAsState()
@@ -71,6 +74,9 @@ fun WalletScreen(nav: NavController) {
     var address by remember { mutableStateOf<String?>(null) }
     var walletExists by remember { mutableStateOf(false) }
     var balance by remember { mutableStateOf<String?>(null) }
+    var recentOnChain by remember { mutableStateOf<List<SolanaRecentSignature>>(emptyList()) }
+    var historyLoading by remember { mutableStateOf(false) }
+    var historyError by remember { mutableStateOf<String?>(null) }
     var loading by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
     var setup by remember { mutableStateOf<WalletSetupSession?>(null) }
@@ -125,6 +131,23 @@ fun WalletScreen(nav: NavController) {
             error = "Saldo indisponível. Verifique a conexão e tente novamente."
         } finally {
             loading = false
+        }
+    }
+
+    LaunchedEffect(address, refreshCounter, selectedNetwork) {
+        val current = address ?: return@LaunchedEffect
+        historyLoading = true
+        historyError = null
+        try {
+            recentOnChain = withContext(Dispatchers.IO) {
+                SolanaRpcClient(endpoint = selectedNetwork.rpcEndpoint, network = selectedNetwork)
+                    .getRecentSignatures(current, limit = 10)
+            }
+        } catch (e: Exception) {
+            recentOnChain = emptyList()
+            historyError = "Histórico on-chain indisponível no momento."
+        } finally {
+            historyLoading = false
         }
     }
 
@@ -248,6 +271,45 @@ fun WalletScreen(nav: NavController) {
                     }
                 }
                 Text("Os saldos e taxas podem mudar rapidamente. Transações transmitidas à " + selectedNetwork.displayName + " não podem ser desfeitas.", color = c.ink2)
+
+                Text("Atividade on-chain", style = androidx.compose.material3.MaterialTheme.typography.titleMedium)
+                Text("Assinaturas recentes registradas pela rede para este endereço. Isso não inclui detalhes completos de tokens ou valores de cada transação.", color = c.ink2)
+                if (historyLoading) {
+                    CircularProgressIndicator()
+                } else if (historyError != null) {
+                    Text(historyError!!, color = c.err)
+                    OutlinedButton(onClick = { refreshCounter++ }) { Text("Tentar novamente") }
+                } else if (recentOnChain.isEmpty()) {
+                    Text("Nenhuma assinatura recente encontrada nesta rede.", color = c.ink2)
+                } else {
+                    recentOnChain.forEach { tx ->
+                        androidx.compose.material3.Card(
+                            modifier = Modifier.fillMaxWidth(),
+                            colors = androidx.compose.material3.CardDefaults.cardColors(containerColor = c.surface)
+                        ) {
+                            Column(Modifier.fillMaxWidth().padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                Text(
+                                    if (tx.error == null) "Transação registrada" else "Transação com falha on-chain",
+                                    color = if (tx.error == null) c.ok else c.err,
+                                    style = androidx.compose.material3.MaterialTheme.typography.labelLarge
+                                )
+                                Text("Slot " + tx.slot, color = c.ink2)
+                                tx.blockTimeEpochSeconds?.let { timestamp ->
+                                    Text(
+                                        java.text.SimpleDateFormat("dd/MM/yyyy HH:mm", Locale("pt", "BR"))
+                                            .format(java.util.Date(timestamp * 1000L)),
+                                        color = c.ink2
+                                    )
+                                }
+                                Text(tx.signature.take(18) + "…" + tx.signature.takeLast(10), color = c.ink)
+                                TextButton(onClick = {
+                                    runCatching { uriHandler.openUri(selectedNetwork.transactionExplorerUrl(tx.signature)) }
+                                        .onFailure { error = "Não foi possível abrir o explorador de transações." }
+                                }) { Text("Ver no Explorer") }
+                            }
+                        }
+                    }
+                }
 
                 Text("Permissões de carteira por agente", style = androidx.compose.material3.MaterialTheme.typography.titleMedium)
                 Text("Cada permissão é salva neste dispositivo e começa desativada. Leitura permite consultar endereço/saldo; a permissão de transferência só permite criar pedidos tipados, sempre sujeitos à revisão, aprovação humana, assinatura local e confirmação separada antes do envio. Agentes nunca recebem chaves privadas.", color = c.ink2)
