@@ -17,20 +17,20 @@ android {
         // do sandbox a partir de filesDir. Os .so do proot também vêm em jniLibs.
         targetSdk = 28
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
-        versionCode = 19
-        versionName = "4.7.1"
+        versionCode = 20
+        versionName = "4.7.2"
         ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64") }
     }
     signingConfigs {
         // Chave de assinatura estável opcional: lida de variáveis de ambiente no CI (sem credenciais
         // commitadas). Quando presentes, garante assinatura fixa para atualizar o APK sem desinstalar.
         create("cueopen") {
-            val ksPath = System.getenv("CUEOPEN_KEYSTORE")
-            if (!ksPath.isNullOrBlank() && file(ksPath).exists()) {
-                storeFile = file(ksPath)
-                storePassword = System.getenv("CUEOPEN_STORE_PASSWORD")
-                keyAlias = System.getenv("CUEOPEN_KEY_ALIAS")
-                keyPassword = System.getenv("CUEOPEN_KEY_PASSWORD")
+            val ks = rootProject.file("app/cueopen-release.jks")
+            if (ks.exists()) {
+                storeFile = ks
+                storePassword = System.getenv("CUEOPEN_STORE_PASSWORD") ?: "cueopen2026"
+                keyAlias = System.getenv("CUEOPEN_KEY_ALIAS") ?: "cueopen"
+                keyPassword = System.getenv("CUEOPEN_KEY_PASSWORD") ?: "cueopen2026"
             }
         }
     }
@@ -40,8 +40,8 @@ android {
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
-            // Usa a chave estável se configurada por env (CI secret); senão cai para a debug.
-            signingConfig = if (!System.getenv("CUEOPEN_KEYSTORE").isNullOrBlank())
+            // Chave fixa do app (assinatura estável para atualizar sem desinstalar); cai para debug se faltar.
+            signingConfig = if (rootProject.file("app/cueopen-release.jks").exists())
                 signingConfigs.getByName("cueopen") else signingConfigs.getByName("debug")
         }
     }
