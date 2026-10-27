@@ -17,6 +17,7 @@ import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.Card
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -209,7 +210,7 @@ fun WalletScreen(nav: NavController) {
                 Card(
                     modifier = Modifier.fillMaxWidth(),
                     shape = RoundedCornerShape(24.dp),
-                    colors = androidx.compose.material3.CardDefaults.cardColors(containerColor = c.panel)
+                    colors = androidx.compose.material3.CardDefaults.cardColors(containerColor = c.surface2)
                 ) {
                     Column(
                         Modifier.fillMaxWidth().padding(20.dp),
