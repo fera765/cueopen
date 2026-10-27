@@ -205,6 +205,30 @@ fun WalletScreen(nav: NavController) {
             }
 
             if (address != null) {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(24.dp),
+                    colors = androidx.compose.material3.CardDefaults.cardColors(containerColor = c.panel)
+                ) {
+                    Column(
+                        Modifier.fillMaxWidth().padding(20.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Text("SALDO DISPONÍVEL", style = androidx.compose.material3.MaterialTheme.typography.labelMedium, color = c.ink2)
+                        if (loading) {
+                            CircularProgressIndicator()
+                        } else {
+                            Text(
+                                balance ?: "— SOL",
+                                style = androidx.compose.material3.MaterialTheme.typography.headlineMedium,
+                                color = c.ink,
+                                fontWeight = androidx.compose.ui.text.font.FontWeight.Bold
+                            )
+                        }
+                        Text(selectedNetwork.displayName + " · Solana", color = c.ink2)
+                        if (error != null) Text(error!!, color = c.err, style = androidx.compose.material3.MaterialTheme.typography.bodySmall)
+                    }
+                }
                 Text("Endereço público", style = androidx.compose.material3.MaterialTheme.typography.titleMedium)
                 Text(address!!, color = c.ink2)
                 WalletReceiveQr(address!!, selectedNetwork)
@@ -221,10 +245,7 @@ fun WalletScreen(nav: NavController) {
                         Text("Atualizar")
                     }
                 }
-                Text("Saldo (" + selectedNetwork.displayName + ")", style = androidx.compose.material3.MaterialTheme.typography.titleMedium)
-                if (loading) CircularProgressIndicator()
-                else Text(balance ?: "Saldo ainda não disponível")
-                Text("Saldo e taxas podem mudar rapidamente. Transações transmitidas à " + selectedNetwork.displayName + " não podem ser desfeitas.", color = c.ink2)
+                Text("Os saldos e taxas podem mudar rapidamente. Transações transmitidas à " + selectedNetwork.displayName + " não podem ser desfeitas.", color = c.ink2)
 
                 Text("Permissões de carteira por agente", style = androidx.compose.material3.MaterialTheme.typography.titleMedium)
                 Text("Cada permissão é salva neste dispositivo e começa desativada. Leitura permite consultar endereço/saldo; a permissão de transferência só permite criar pedidos tipados, sempre sujeitos à revisão, aprovação humana, assinatura local e confirmação separada antes do envio. Agentes nunca recebem chaves privadas.", color = c.ink2)
