@@ -141,6 +141,20 @@ fun AgentEditScreen(nav: NavController, id: String) {
             SectionLabel("Ferramentas")
             ToggleRow("Terminal Linux", "Executar comandos no sandbox", a.useTerminal) { a = a.copy(useTerminal = it) }
             ToggleRow("Browser", "Navegar e interagir com sites", a.useBrowser) { a = a.copy(useBrowser = it) }
+            // UI Connectors (SDK): um toggle por conector. Login, limites e "Agent required ?" ficam na tela do conector.
+            val uiHub = dev.cueopen.app.CueApp.instance.uiConnectors
+            if (uiHub.connectors.isNotEmpty()) {
+                SectionLabel("UI Conectores")
+                uiHub.connectors.forEach { uc ->
+                    ToggleRow(
+                        "Usar ${uc.spec.name}",
+                        "Libera as ferramentas de ${uc.spec.name} para este agente. Sessão, limites e credenciais ficam em Conectores → UI Conectores; o agente nunca vê a senha.",
+                        uc.spec.id in a.uiConnectorIds,
+                    ) { on ->
+                        a = a.copy(uiConnectorIds = if (on) (a.uiConnectorIds + uc.spec.id).distinct() else a.uiConnectorIds - uc.spec.id)
+                    }
+                }
+            }
             SectionLabel("Carteira Solana")
             ToggleRow(
                 "Permitir acesso à carteira",

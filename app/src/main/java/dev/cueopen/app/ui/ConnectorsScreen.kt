@@ -96,6 +96,10 @@ fun ConnectorsScreen(nav: NavController) {
     } }) { pad ->
         LazyColumn(Modifier.padding(pad), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             item {
+                UiConnectorsSection(nav)
+            }
+            item {
+                SectionLabel("Conectores MCP")
                 Text("Conecte serviços via MCP com login OAuth do próprio serviço. As ferramentas ficam disponíveis para o agente e para os seus Agents autônomos.",
                     fontSize = 13.sp, color = c.ink2)
             }

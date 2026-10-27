@@ -20,6 +20,8 @@ class CueApp : Application() {
     lateinit var llm: OpenRouter; private set
     lateinit var agent: AgentRunner; private set
     lateinit var terminals: dev.cueopen.app.sandbox.TerminalManager; private set
+    /** Hub dos UI Connectors (conectores com interface própria e ferramentas para o agente). */
+    val uiConnectors: dev.cueopen.app.uiconnector.UiConnectorHub by lazy { dev.cueopen.app.uiconnector.UiConnectorHub(this) }
 
     override fun onCreate() {
         super.onCreate()

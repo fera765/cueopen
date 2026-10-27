@@ -162,7 +162,11 @@ fun ChatScreen(nav: NavController, sessionId: String) {
                 value = draft, onChange = { draft = it },
                 placeholder = if (session.status == SessionStatus.WAITING_USER) "Responda ao agente…" else "Envie uma mensagem",
                 running = running || session.status == SessionStatus.SLEEPING || autoAgent != null, onStop = { app.agent.stop(sessionId) },
-                nextCycleAt = session.wakeAt?.takeIf { it > System.currentTimeMillis() },
+                // Cronômetro até o próximo ciclo: durante um ciclo ativo (RUNNING) não mostra; parado,
+                // usa wakeAt (modo contínuo) ou o próximo heartbeat agendado (lastBeatAt + intervalo).
+                nextCycleAt = if (running) null else
+                    (session.wakeAt ?: autoAgent?.let { (it.lastBeatAt ?: System.currentTimeMillis()) + it.heartbeatMinutes * 60_000L })
+                        ?.takeIf { it > System.currentTimeMillis() },
                 onSend = { text, files ->
                     if (text.trim().startsWith("@create-agent", true)) {
                         val desc = text.trim().removePrefix("@create-agent").removePrefix("@Create-Agent").trim()

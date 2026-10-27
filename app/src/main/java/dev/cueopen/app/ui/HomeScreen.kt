@@ -574,7 +574,8 @@ private fun SessionRow(s: Session, agent: AgentProfile?, onClick: () -> Unit) {
                 val last = s.items.lastOrNull()?.let { previewOf(it) }.orEmpty()
                 if (last.isNotBlank()) Text(last, maxLines = 1, overflow = TextOverflow.Ellipsis, fontSize = 12.sp, color = c.ink3)
             }
-            StatusDot(s.status)
+            // Agente agendado/autônomo = "online": mostra dot verde mesmo parado entre ciclos.
+            StatusDot(s.status, online = agent?.autonomous == true && agent.homeSessionId == s.id)
         }
         DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
             DropdownMenuItem(text = { Text("Mudar título") }, leadingIcon = { Icon(Icons.Rounded.Edit, null) }, onClick = {
@@ -602,11 +603,13 @@ private fun SessionRow(s: Session, agent: AgentProfile?, onClick: () -> Unit) {
 }
 
 @Composable
-fun StatusDot(status: SessionStatus) {
+fun StatusDot(status: SessionStatus, online: Boolean = false) {
     val c = Cue.c
     val col = when (status) {
         SessionStatus.RUNNING -> c.accent; SessionStatus.WAITING_USER -> c.warn; SessionStatus.ERROR -> c.err
-        SessionStatus.DONE -> c.ok; else -> Color.Transparent
+        SessionStatus.DONE -> c.ok
+        // Autônomo parado entre ciclos continua "online" (verde), em vez de sumir (antes: Transparent).
+        else -> if (online) c.ok else Color.Transparent
     }
     Box(Modifier.size(8.dp).clip(CircleShape).background(col))
 }

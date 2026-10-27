@@ -146,7 +146,9 @@ data class AgentProfile(
     val heartbeatMinutes: Int = 30,
     val activeStartHour: Int = 0,
     val activeEndHour: Int = 24,
-    val dailyTokenBudget: Long = 300_000,
+    // Orçamento diário de tokens (guarda de custo). 300k parava um day-trader em ~30 min de forma
+    // SILENCIOSA; elevado para um teto generoso adequado a ciclos frequentes 24/7.
+    val dailyTokenBudget: Long = 20_000_000,
     val homeSessionId: String? = null,
     val lastBeatAt: Long? = null,
     val beats: Int = 0,
@@ -156,6 +158,8 @@ data class AgentProfile(
     val notifyOnAction: Boolean = true,
     /** Permissões do dispositivo liberadas PARA ESTE agente (ids em DeviceCaps). */
     val deviceCaps: List<String> = emptyList(),
+    /** UI Connectors (SDK próprio, ex.: "iqoption") ativados PARA ESTE agente. */
+    val uiConnectorIds: List<String> = emptyList(),
 )
 
 /** Conector MCP remoto (OAuth público com registro dinâmico de cliente, sem API key). */

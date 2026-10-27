@@ -211,6 +211,7 @@ class AgentRunner(
                     } catch (t: Throwable) {
                         attempt++
                         if (attempt >= 3) {
+                            runCatching { dev.cueopen.app.diag.ErrorLog.log("agent", "LLM falhou 3x: ${t.javaClass.simpleName}: ${t.message.orEmpty()}", sessionId, "llm") }
                             store.addItem(sessionId, ChatItem.Error(text = "O modelo falhou (${t.message?.take(120)}). Tentei 3 vezes. Toque em enviar para continuar, ou troque de modelo em Configurações."))
                             store.editSession(sessionId) { it.copy(status = SessionStatus.WAITING_USER) }
                             return
@@ -235,6 +236,7 @@ class AgentRunner(
             val cNow = reply.content?.trim().orEmpty()
             if (cNow.length > 40 && similar(cNow, lastContent)) {
                 if (++repeats >= 2) {
+                    runCatching { dev.cueopen.app.diag.ErrorLog.log("agent", "Modelo entrou em repetição (interrompido).", sessionId, "llm") }
                     store.addItem(sessionId, ChatItem.Error(text = "O modelo entrou em repetição. Interrompi para não gastar tokens à toa. Reformule o pedido ou troque de modelo."))
                     store.editSession(sessionId) { it.copy(status = SessionStatus.WAITING_USER) }
                     return
@@ -287,6 +289,7 @@ class AgentRunner(
                 }
                 if (tripped != null) {
                     if (++toolLoopNudges >= 2) {
+                        runCatching { dev.cueopen.app.diag.ErrorLog.log("agent", "Loop de ferramenta sem progresso: $tripped (interrompido).", sessionId, tripped) }
                         store.addItem(sessionId, ChatItem.Error(text = "O agente repetiu a mesma ação ($tripped) várias vezes sem progresso. Interrompi para evitar um loop de baixa qualidade. Ajuste o pedido/abordagem ou troque de modelo."))
                         store.editSession(sessionId) { it.copy(status = SessionStatus.WAITING_USER) }
                         return
@@ -358,6 +361,7 @@ class AgentRunner(
             while (isActive) {
                 runCatching { autonomyTick() }.onFailure { t ->
                     android.util.Log.e("CueOpen.Autonomy", "Falha no scheduler local", t)
+                    runCatching { dev.cueopen.app.diag.ErrorLog.log("scheduler", "autonomyTick: ${t.javaClass.simpleName}: ${t.message.orEmpty()}", null, "heartbeat") }
                 }
                 // Stop-loss/take-profit AUTOMÁTICO: avalia as regras armadas a cada ~20 s,
                 // independente do ciclo do agente, e fecha a posição assim que o alvo é atingido.
@@ -365,6 +369,7 @@ class AgentRunner(
                     lastRuleEvalAt = System.currentTimeMillis()
                     runCatching { evaluateAllArmedRules() }.onFailure { t ->
                         android.util.Log.e("CueOpen.Autonomy", "Falha ao avaliar regras de trade", t)
+                        runCatching { dev.cueopen.app.diag.ErrorLog.log("scheduler", "evaluateAllArmedRules: ${t.javaClass.simpleName}: ${t.message.orEmpty()}", null, "trade") }
                     }
                 }
                 // Intervalos de 1 minuto precisam de margem; verificar a cada 5 s evita atraso
@@ -427,14 +432,45 @@ class AgentRunner(
         val a = store.agent(agentId) ?: return
         if (!a.autonomous || a.homeSessionId == null) return
         scope.launch {
-            runCatching { evaluateAllArmedRules() }
-            val hour = java.util.Calendar.getInstance().get(java.util.Calendar.HOUR_OF_DAY)
-            val inHours = if (a.activeStartHour <= a.activeEndHour) hour in a.activeStartHour until a.activeEndHour
-                          else hour >= a.activeStartHour || hour < a.activeEndHour
-            val today = today()
-            val spent = if (a.tokensDay == today) a.tokensToday else 0
-            if (inHours && spent < a.dailyTokenBudget && jobs[a.homeSessionId]?.isActive != true) heartbeat(a)
+            runCatching { evaluateAllArmedRules() }.onFailure {
+                runCatching { dev.cueopen.app.diag.ErrorLog.log("scheduler", "evaluateAllArmedRules (alarme): ${it.message}", a.homeSessionId, "trade") }
+            }
+            // O alarme JÁ é o horário agendado → não exigimos "due" (evita perder o ciclo por arredondamento).
+            if (canBeat(a, System.currentTimeMillis(), java.util.Calendar.getInstance().get(java.util.Calendar.HOUR_OF_DAY), requireDue = false)) heartbeat(a)
         }
+    }
+
+    // Dia (yyyy-MM-dd) em que já avisamos cada agente sobre orçamento esgotado — evita repetir o aviso.
+    private val budgetWarnedDay = java.util.concurrent.ConcurrentHashMap<String, String>()
+
+    /**
+     * Decide se um agente autônomo deve iniciar um ciclo AGORA. Centraliza as condições das duas vias
+     * (ticker em processo e alarme) para que a lógica nunca divirja. Ponto-chave: quando um ciclo é
+     * BLOQUEADO pelo orçamento diário de tokens, NÃO falha em silêncio — avisa no chat + log + push
+     * uma vez por dia, para o usuário entender por que o agente "parou" (antes isso era invisível e
+     * parecia que o agendamento tinha quebrado).
+     */
+    private fun canBeat(a: AgentProfile, now: Long, hour: Int, requireDue: Boolean): Boolean {
+        if (!a.autonomous) return false
+        val home = a.homeSessionId ?: return false
+        if (jobs[home]?.isActive == true) return false
+        if (requireDue && now < (a.lastBeatAt ?: 0) + a.heartbeatMinutes * 60_000L) return false
+        val inHours = if (a.activeStartHour <= a.activeEndHour) hour in a.activeStartHour until a.activeEndHour
+                      else hour >= a.activeStartHour || hour < a.activeEndHour
+        if (!inHours) return false
+        val day = today()
+        val spent = if (a.tokensDay == day) a.tokensToday else 0
+        if (spent >= a.dailyTokenBudget) {
+            if (budgetWarnedDay[a.id] != day) {
+                budgetWarnedDay[a.id] = day
+                val msg = "Orçamento diário de tokens do agente atingido (${a.dailyTokenBudget}). A autonomia fica pausada até a virada do dia ou até aumentar o limite. As regras de stop-loss/take-profit continuam sendo monitoradas normalmente."
+                runCatching { dev.cueopen.app.diag.ErrorLog.log("heartbeat", msg, home, "set_schedule") }
+                runCatching { store.addItem(home, ChatItem.Error(text = msg)); store.flush() }
+                runCatching { notifyAgent(a, msg) }
+            }
+            return false
+        }
+        return true
     }
 
     private fun today() = SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date())
@@ -454,12 +490,8 @@ class AgentRunner(
         val now = System.currentTimeMillis()
         val hour = java.util.Calendar.getInstance().get(java.util.Calendar.HOUR_OF_DAY)
         store.state.value.agents.filter { it.autonomous && it.homeSessionId != null }.forEach { a ->
-            val inHours = if (a.activeStartHour <= a.activeEndHour) hour in a.activeStartHour until a.activeEndHour
-                          else hour >= a.activeStartHour || hour < a.activeEndHour
-            val spent = if (a.tokensDay == today()) a.tokensToday else 0
-            val due = now >= (a.lastBeatAt ?: 0) + a.heartbeatMinutes * 60_000L
-            val home = a.homeSessionId!!
-            if (inHours && due && spent < a.dailyTokenBudget && jobs[home]?.isActive != true) heartbeat(a)
+            // requireDue=true: o ticker verifica o intervalo; o alarme (requireDue=false) é o backup exato.
+            if (canBeat(a, now, hour, requireDue = true)) heartbeat(a)
         }
     }
 
@@ -492,9 +524,11 @@ class AgentRunner(
                 // Watchdog: um ciclo nunca pode travar para sempre e bloquear os próximos agendamentos.
                 kotlinx.coroutines.withTimeout(10 * 60_000L) { loop(sid) }
             } catch (to: kotlinx.coroutines.TimeoutCancellationException) {
+                runCatching { dev.cueopen.app.diag.ErrorLog.log("heartbeat", "Ciclo excedeu 10 min e foi encerrado (watchdog).", sid, "heartbeat") }
                 store.addItem(sid, ChatItem.Error(text = "Ciclo excedeu o tempo máximo (10 min) e foi encerrado para liberar o próximo agendamento."))
             } catch (c: kotlinx.coroutines.CancellationException) { throw c
             } catch (t: Throwable) {
+                runCatching { dev.cueopen.app.diag.ErrorLog.log("heartbeat", "${t.javaClass.simpleName}: ${t.message.orEmpty()}", sid, "heartbeat") }
                 store.addItem(sid, ChatItem.Error(text = "Heartbeat falhou: ${t.message}"))
             } finally {
                 val after = store.session(sid)
@@ -636,6 +670,7 @@ class AgentRunner(
                     wakeUp(s.id); loop(s.id)
                 } catch (c: kotlinx.coroutines.CancellationException) { throw c
                 } catch (t: Throwable) {
+                    runCatching { dev.cueopen.app.diag.ErrorLog.log("agent", "retomada contínua: ${t.javaClass.simpleName}: ${t.message.orEmpty()}", s.id, "resume") }
                     store.addItem(s.id, ChatItem.Error(text = t.message ?: t.toString()))
                     store.editSession(s.id) { it.copy(status = SessionStatus.ERROR) }
                 } finally { setActivity(s.id, Activity()) }
@@ -720,6 +755,17 @@ class AgentRunner(
                 }
             } else {
                 appendLine("- Este agente não possui permissões de carteira concedidas. Não tente consultar nem movimentar fundos; peça ao usuário para habilitar somente as capacidades necessárias nas configurações do agente.")
+            }
+            runCatching {
+                val hub = dev.cueopen.app.CueApp.instance.uiConnectors
+                val usable = hub.connectors.filter { hub.usableBy(it, agent) }
+                if (usable.isNotEmpty()) {
+                    appendLine()
+                    appendLine("## UI Connectors disponíveis")
+                    usable.forEach { appendLine("- ${it.spec.name}: ferramentas uic_${it.spec.id}_* (${it.spec.description})") }
+                    appendLine("- A sessão e as credenciais são gerenciadas pelo app; você nunca vê nem pede senha. Se uma ferramenta responder que é preciso fazer login, avise o usuário.")
+                    appendLine("- Respostas começando com RECUSADO são limites de segurança definidos pelo usuário: respeite-os, não tente contornar (nem trocar de conta/valor para burlar) e explique ao usuário. Operar envolve risco de perda; nunca prometa lucro.")
+                }
             }
             if (!agent?.instructions.isNullOrBlank()) { appendLine(); appendLine("## Instruções do Agent"); appendLine(agent!!.instructions) }
             if (skills.isNotEmpty()) {
@@ -916,6 +962,8 @@ class AgentRunner(
         if (dev.cueopen.app.device.DeviceCaps.OVERLAY in caps)
             add(tool("device_overlay", "Mostra um balão flutuante sobre os outros apps.", buildJsonObject { put("text", str("Texto")) }, listOf("text")))
         if (allowMultiAgent) connectorTools().forEach { add(it) }
+        // UI Connectors (ex.: IQ Option): só os que este agente pode usar (toggle por agente / "Agent required?").
+        if (allowMultiAgent) runCatching { dev.cueopen.app.CueApp.instance.uiConnectors.toolDefinitions(agent) }.getOrDefault(emptyList()).forEach { add(it) }
         if (allowMultiAgent) add(tool("ask_user", "Faz uma pergunta ao usuário e pausa a tarefa até ele responder.", buildJsonObject { put("question", str("Pergunta")) }, listOf("question")))
         add(tool("finish", "Conclui a tarefa com um resumo e a lista de entregáveis.", buildJsonObject {
             put("summary", str("Resumo do resultado")); put("files", strArray("Caminhos dos arquivos entregues"))
@@ -986,6 +1034,7 @@ class AgentRunner(
         toolName.startsWith("file_") -> "file"
         toolName.startsWith("device_") -> "device"
         toolName.startsWith("mcp_") -> "connector"
+        toolName.startsWith("uic_") -> "uiconnector"
         else -> "tool"
     }
 
@@ -1072,8 +1121,11 @@ class AgentRunner(
                     return ToolResult("Autonomia desligada para ${ag.name}.")
                 }
                 val mm = m.coerceIn(1, 1440)
+                // Eleva o orçamento diário de agentes antigos (criados com o teto baixo de 300k) para
+                // não pararem em silêncio em poucos ciclos. Mantém um valor maior já definido pelo usuário.
                 store.upsertAgent(ag.copy(autonomous = true, heartbeatMinutes = mm,
-                    mission = s("mission").ifBlank { ag.mission }, homeSessionId = sessionId, lastBeatAt = System.currentTimeMillis()))
+                    mission = s("mission").ifBlank { ag.mission }, homeSessionId = sessionId, lastBeatAt = System.currentTimeMillis(),
+                    dailyTokenBudget = maxOf(ag.dailyTokenBudget, 20_000_000L)))
                 dev.cueopen.app.scheduler.Heartbeat.schedule(ctx, ag.id, mm)
                 store.addItem(sessionId, ChatItem.Step(tool = "set_schedule", title = "Agendado: a cada ${mm} min", args = s("mission"), result = "", status = StepStatus.OK))
                 return ToolResult("Pronto: o Android vai me acordar sozinho a cada ${mm} min (mesmo com o app fechado) e eu farei a verificação. Nada de você precisar mandar mensagem. Pare com /stop ou desligando a autonomia no Agent.")
@@ -1630,6 +1682,14 @@ class AgentRunner(
                     "Skill \"${s("name")}\" criada e ativada."
                 }
                 else -> if (call.name.startsWith("mcp_")) dev.cueopen.app.connectors.Connectors.callTool(store, call.name, a)
+                        else if (call.name.startsWith("uic_")) {
+                            val ag = store.agent(store.session(sessionId)?.agentId)
+                            dev.cueopen.app.CueApp.instance.uiConnectors.callTool(ag, call.name, a).also { out ->
+                                // Falhas reais do conector entram no log de erros (sem expor segredos: já redigido).
+                                if (out.startsWith("ERRO") || out.startsWith("RECUSAD"))
+                                    runCatching { dev.cueopen.app.diag.ErrorLog.log("uiconnector", out.take(600), sessionId, call.name) }
+                            }
+                        }
                         else "Ferramenta desconhecida: ${call.name}"
             }
         } catch (c: kotlinx.coroutines.CancellationException) {
