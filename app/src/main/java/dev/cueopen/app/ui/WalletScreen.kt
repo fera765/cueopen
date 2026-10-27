@@ -76,6 +76,7 @@ fun WalletScreen(nav: NavController) {
     var confirmation by remember { mutableStateOf("") }
     var restoreMode by remember { mutableStateOf(false) }
     var revealPhrase by remember { mutableStateOf(false) }
+    var showRecoveryWords by remember { mutableStateOf(false) }
     var refreshCounter by remember { mutableStateOf(0) }
     val activeSetup by rememberUpdatedState(setup)
 
@@ -174,6 +175,7 @@ fun WalletScreen(nav: NavController) {
                             recoveryPhrase = words.concatToString()
                             words.fill('\u0000')
                             revealPhrase = true
+                            showRecoveryWords = false
                         } catch (e: Exception) {
                             error = e.message ?: "Não foi possível iniciar a carteira"
                         }
@@ -391,8 +393,21 @@ fun WalletScreen(nav: NavController) {
 
             if (setup != null && revealPhrase) {
                 Text("Frase de recuperação", style = androidx.compose.material3.MaterialTheme.typography.titleMedium)
-                Text("Anote estas 24 palavras em local privado. Qualquer pessoa com a frase pode controlar a carteira. Não tire capturas de tela.")
-                Text(recoveryPhrase)
+                Text("Anote estas 24 palavras em local privado. Qualquer pessoa com a frase pode controlar a carteira. Nunca envie a frase ao agente ou ao chat.")
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+                    OutlinedButton(onClick = { showRecoveryWords = !showRecoveryWords }) {
+                        Text(if (showRecoveryWords) "Ocultar palavras" else "Mostrar palavras")
+                    }
+                    OutlinedButton(onClick = {
+                        val clipboard = context.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                        clipboard.setPrimaryClip(android.content.ClipData.newPlainText("Frase de recuperação Solana", recoveryPhrase))
+                    }) {
+                        androidx.compose.material3.Icon(Icons.Rounded.ContentCopy, contentDescription = null)
+                        Text("Copiar palavras")
+                    }
+                }
+                if (showRecoveryWords) Text(recoveryPhrase)
+                else Text("Palavras ocultas por segurança")
                 OutlinedTextField(
                     value = confirmation,
                     onValueChange = { confirmation = it },
