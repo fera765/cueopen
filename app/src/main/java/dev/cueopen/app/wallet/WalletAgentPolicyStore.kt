@@ -37,18 +37,33 @@ class WalletAgentPolicyStore(context: Context) {
     }
 
     /**
-     * Returns the persisted policy for a transfer identity. Agent policies are strictly
-     * non-autonomous: a grant permits proposing a request, never signing or broadcasting it.
+     * Opt-in autonomous execution: when enabled (together with request-transfer), the agent may
+     * sign and broadcast a transfer WITHOUT per-transaction human approval. This is only honored
+     * by the policy gate when a recipient allowlist is configured (see WalletAgentPolicy.authorize),
+     * and always stays bounded by the per-transfer and daily SOL limits. Default: disabled.
+     */
+    fun canAgentAutonomousTransfer(agentId: String): Boolean =
+        prefs.getBoolean(agentCapabilityKey(agentId, CAPABILITY_AUTONOMOUS_TRANSFER), false)
+
+    fun setAgentAutonomousTransfer(agentId: String, enabled: Boolean) {
+        setAgentCapability(agentId, CAPABILITY_AUTONOMOUS_TRANSFER, enabled)
+    }
+
+    /**
+     * Returns the persisted policy for a transfer identity. Autonomous execution is only turned on
+     * when the user explicitly enabled both request-transfer and autonomous-transfer for this agent;
+     * the policy gate still requires a non-empty allowlist before allowing an autonomous signature.
      */
     fun transferPolicy(agentId: String, network: SolanaNetwork): WalletAgentPolicy =
         if (agentId == manualAgentId(network)) manualTransferPolicy(network)
         else {
             val enabled = canAgentRequestTransfer(agentId)
+            val autonomous = enabled && canAgentAutonomousTransfer(agentId)
             WalletAgentPolicy(
                 agentId = agentId,
                 enabled = enabled,
                 canTransfer = enabled,
-                autonomousExecution = false,
+                autonomousExecution = autonomous,
                 maxTransferLamports = agentMaxTransferLamports(agentId),
                 dailyLimitLamports = agentDailyLimitLamports(agentId),
                 allowedRecipients = agentAllowedRecipients(agentId)
@@ -137,13 +152,17 @@ class WalletAgentPolicyStore(context: Context) {
         agentId: String,
         readAddress: Boolean,
         readBalance: Boolean,
-        requestTransfer: Boolean
+        requestTransfer: Boolean,
+        autonomousTransfer: Boolean = false
     ) {
         require(agentId.isNotBlank()) { "Agent ID is required" }
+        // Autonomous execution can never be on without the base request-transfer grant.
+        val autonomous = requestTransfer && autonomousTransfer
         check(prefs.edit()
             .putBoolean(agentCapabilityKey(agentId, CAPABILITY_READ_ADDRESS), readAddress)
             .putBoolean(agentCapabilityKey(agentId, CAPABILITY_READ_BALANCE), readBalance)
             .putBoolean(agentCapabilityKey(agentId, CAPABILITY_REQUEST_TRANSFER), requestTransfer)
+            .putBoolean(agentCapabilityKey(agentId, CAPABILITY_AUTONOMOUS_TRANSFER), autonomous)
             .commit()) { "Could not persist wallet agent permissions" }
     }
 
@@ -175,6 +194,7 @@ class WalletAgentPolicyStore(context: Context) {
         private const val CAPABILITY_READ_ADDRESS = "read_address"
         private const val CAPABILITY_READ_BALANCE = "read_balance"
         private const val CAPABILITY_REQUEST_TRANSFER = "request_transfer"
+        private const val CAPABILITY_AUTONOMOUS_TRANSFER = "autonomous_transfer"
         private const val MAX_AGENT_TRANSFER_LAMPORTS = 50_000_000L
         private const val DAILY_AGENT_TRANSFER_LIMIT_LAMPORTS = 100_000_000L
 

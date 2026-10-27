@@ -101,6 +101,7 @@ fun AgentEditScreen(nav: NavController, id: String) {
     var walletReadAddress by remember(a.id) { mutableStateOf(walletPolicies.canAgentReadAddress(a.id)) }
     var walletReadBalance by remember(a.id) { mutableStateOf(walletPolicies.canAgentReadBalance(a.id)) }
     var walletRequestTransfer by remember(a.id) { mutableStateOf(walletPolicies.canAgentRequestTransfer(a.id)) }
+    var walletAutonomousTransfer by remember(a.id) { mutableStateOf(walletPolicies.canAgentAutonomousTransfer(a.id)) }
     Scaffold(containerColor = c.bg, topBar = {
         CueTopBar(if (existing == null) "Criar Agent" else a.name, { nav.popBackStack() }) {
             if (existing != null) IconButton({ app.store.deleteAgent(id); nav.popBackStack() }) { Icon(Icons.Rounded.Delete, "Excluir", tint = c.err) }
@@ -152,9 +153,23 @@ fun AgentEditScreen(nav: NavController, id: String) {
                 ) {
                     ToggleRow("Consultar endereço público", "Permite ler o endereço público da carteira local.", walletReadAddress) { walletReadAddress = it }
                     ToggleRow("Consultar saldo SOL", "Permite consultar o saldo on-chain da rede selecionada.", walletReadBalance) { walletReadBalance = it }
-                    ToggleRow("Solicitar transferência", "Permite criar uma solicitação para revisão humana. Não permite assinatura ou envio automático.", walletRequestTransfer) { walletRequestTransfer = it }
+                    ToggleRow("Solicitar transferência", "Permite criar um pedido de envio de SOL. Por padrão, cada pedido exige aprovação manual.", walletRequestTransfer) { walletRequestTransfer = it; if (!it) walletAutonomousTransfer = false }
+                    if (walletRequestTransfer) {
+                        ToggleRow(
+                            "Transferência automática (sem aprovação manual)",
+                            "O agente assina e envia transferências sozinho, sem confirmar a cada vez. Só funciona com uma allowlist de destinatários configurada na tela Carteira, e sempre respeita os limites por transação (0,05 SOL) e diário (0,10 SOL). Use com cautela.",
+                            walletAutonomousTransfer
+                        ) { walletAutonomousTransfer = it }
+                        if (walletAutonomousTransfer) {
+                            Text(
+                                "⚠ Modo autônomo ativo. Defina a allowlist de destinatários e os limites deste agente na tela Carteira → Mais. Sem allowlist, o envio automático é bloqueado por segurança.",
+                                fontSize = 12.sp,
+                                color = c.warn
+                            )
+                        }
+                    }
                     Text(
-                        "As transferências continuam sujeitas aos limites locais e à aprovação explícita do usuário.",
+                        "Chaves privadas e a frase de recuperação nunca são expostas ao agente. Os limites locais são sempre aplicados no assinador.",
                         fontSize = 12.sp,
                         color = c.ink2
                     )
@@ -187,7 +202,8 @@ fun AgentEditScreen(nav: NavController, id: String) {
                     a.id,
                     readAddress = walletAccess && walletReadAddress,
                     readBalance = walletAccess && walletReadBalance,
-                    requestTransfer = walletAccess && walletRequestTransfer
+                    requestTransfer = walletAccess && walletRequestTransfer,
+                    autonomousTransfer = walletAccess && walletRequestTransfer && walletAutonomousTransfer
                 )
                 if (a.autonomous) app.agent.startAutonomy()
                 nav.popBackStack()

@@ -44,7 +44,25 @@ jobs:
           gradle-version: '8.9'
 
       - name: Run JVM unit tests and build installable release APK
-        run: gradle testReleaseUnitTest assembleRelease --stacktrace
+        run: |
+          set -o pipefail
+          gradle testReleaseUnitTest assembleRelease --stacktrace 2>&1 | tee /tmp/build.log
+
+      - name: Publish build log to wallet-build-log branch
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p blog
+          cp /tmp/build.log blog/build.log 2>/dev/null || echo "no build log" > blog/build.log
+          cd blog
+          git init -q
+          git checkout -q -b wallet-build-log
+          git config user.email "actions@github.com"
+          git config user.name "github-actions"
+          git add -A
+          git commit -q -m "app build log #${{ github.run_number }} (${{ github.sha }})"
+          git push -q --force "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git" wallet-build-log
 
       - name: Verify APK and calculate checksum
         shell: bash

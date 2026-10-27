@@ -1,663 +1,377 @@
 package dev.cueopen.app.ui
 
 import android.app.Activity
+import android.content.Context
 import android.view.WindowManager
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.AccountBalanceWallet
-import androidx.compose.material.icons.rounded.ContentCopy
-import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.ArrowDownward
 import androidx.compose.material.icons.rounded.ArrowUpward
-import androidx.compose.material.icons.rounded.SwapHoriz
+import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.material.icons.rounded.GridView
+import androidx.compose.material.icons.rounded.Refresh
+import androidx.compose.material.icons.rounded.SwapHoriz
 import androidx.compose.material.icons.rounded.Visibility
-import androidx.compose.ui.graphics.Color
-import androidx.compose.material3.AlertDialog
+import androidx.compose.material.icons.rounded.VisibilityOff
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.layout.onGloballyPositioned
-import androidx.compose.ui.layout.positionInParent
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalUriHandler
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.navigation.NavController
 import dev.cueopen.app.ui.theme.Cue
-import dev.cueopen.app.wallet.SolanaRpcClient
-import dev.cueopen.app.wallet.SolanaRecentSignature
 import dev.cueopen.app.wallet.SolanaNetwork
+import dev.cueopen.app.wallet.SolanaRecentSignature
+import dev.cueopen.app.wallet.SolanaRpcClient
 import dev.cueopen.app.wallet.SolanaWalletRepository
 import dev.cueopen.app.wallet.WalletSetupSession
-import dev.cueopen.app.wallet.WalletAgentPolicyStore
-import dev.cueopen.app.CueApp
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.util.Locale
 
+/** Shared palette for the wallet surfaces (dark, MetaMask/Trust-inspired, coral accents). */
+internal object WalletPalette {
+    val coral = Color(0xFFFF895B)
+    val coralSoft = Color(0xFFFFA27E)
+    val heroBg = Color(0xFF17110F)
+    val chipBg = Color(0xFF2A1B16)
+}
+
+internal fun readSelectedNetwork(context: Context): SolanaNetwork {
+    val prefs = context.applicationContext.getSharedPreferences("solana_wallet_settings", Context.MODE_PRIVATE)
+    return runCatching { SolanaNetwork.valueOf(prefs.getString("network", SolanaNetwork.MAINNET.name)!!) }
+        .getOrDefault(SolanaNetwork.MAINNET)
+}
+
+internal fun shortAddress(address: String): String =
+    if (address.length <= 14) address else address.take(6) + "…" + address.takeLast(6)
+
+/** Wallet home / dashboard. Four actions navigate to dedicated pages. */
 @Composable
 fun WalletScreen(nav: NavController) {
     val context = LocalContext.current
     val uriHandler = LocalUriHandler.current
     val repository = remember(context) { SolanaWalletRepository(context.applicationContext) }
-    val walletPolicyStore = remember(context) { WalletAgentPolicyStore(context.applicationContext) }
-    val appState by CueApp.instance.store.state.collectAsState()
-    val walletAgents = appState.agents
-    var permissionRefresh by remember { mutableStateOf(0) }
-    val networkPrefs = remember(context) {
-        context.applicationContext.getSharedPreferences("solana_wallet_settings", android.content.Context.MODE_PRIVATE)
-    }
-    var selectedNetwork by remember(context) {
-        mutableStateOf(
-            runCatching {
-                SolanaNetwork.valueOf(networkPrefs.getString("network", SolanaNetwork.MAINNET.name)!!)
-            }.getOrDefault(SolanaNetwork.MAINNET)
-        )
-    }
     val c = Cue.c
+
+    val networkPrefs = remember(context) {
+        context.applicationContext.getSharedPreferences("solana_wallet_settings", Context.MODE_PRIVATE)
+    }
+    val selectedNetwork = remember { mutableStateOf(readSelectedNetwork(context)) }
+
     var address by remember { mutableStateOf<String?>(null) }
     var walletExists by remember { mutableStateOf(false) }
     var balance by remember { mutableStateOf<String?>(null) }
-    var recentOnChain by remember { mutableStateOf<List<SolanaRecentSignature>>(emptyList()) }
-    var historyLoading by remember { mutableStateOf(false) }
-    var historyError by remember { mutableStateOf<String?>(null) }
     var loading by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
+    var hideBalance by remember { mutableStateOf(false) }
+    var refreshCounter by remember { mutableStateOf(0) }
+
+    var recent by remember { mutableStateOf<List<SolanaRecentSignature>>(emptyList()) }
+    var historyLoading by remember { mutableStateOf(false) }
+
+    // Onboarding / backup / repair state
     var setup by remember { mutableStateOf<WalletSetupSession?>(null) }
     var recoveryPhrase by remember { mutableStateOf("") }
     var confirmation by remember { mutableStateOf("") }
     var restoreMode by remember { mutableStateOf(false) }
     var revealPhrase by remember { mutableStateOf(false) }
     var showRecoveryWords by remember { mutableStateOf(false) }
-    var refreshCounter by remember { mutableStateOf(0) }
-    var hideBalance by remember { mutableStateOf(false) }
-    var quickAction by remember { mutableStateOf<String?>(null) }
-    val walletScrollState = rememberScrollState()
-    val walletScope = rememberCoroutineScope()
-    var receiveOffset by remember { mutableStateOf(0) }
-    var sendOffset by remember { mutableStateOf(0) }
-    var settingsOffset by remember { mutableStateOf(0) }
-    val activeSetup by rememberUpdatedState(setup)
 
-    DisposableEffect(Unit) {
-        onDispose {
-            activeSetup?.close()
-            recoveryPhrase = ""
-            confirmation = ""
+    fun refreshAddress() {
+        address = runCatching { repository.publicAddress() }.getOrElse {
+            error = it.message ?: "Não foi possível ler os dados da carteira"; null
         }
     }
 
-    val protectSensitiveInput = revealPhrase || restoreMode || (walletExists && address == null)
-    DisposableEffect(protectSensitiveInput) {
+    DisposableEffect(Unit) {
+        onDispose { setup?.close(); recoveryPhrase = ""; confirmation = "" }
+    }
+    val protectSensitive = revealPhrase || restoreMode || (walletExists && address == null)
+    DisposableEffect(protectSensitive) {
         val activity = context as? Activity
-        if (protectSensitiveInput) activity?.window?.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
+        if (protectSensitive) activity?.window?.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
         else activity?.window?.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
         onDispose { activity?.window?.clearFlags(WindowManager.LayoutParams.FLAG_SECURE) }
     }
 
-    fun refreshAddress() {
-        address = runCatching { repository.publicAddress() }.getOrElse {
-            error = it.message ?: "Não foi possível ler os dados da carteira"
-            null
-        }
-    }
-
     LaunchedEffect(Unit) {
-        // Persist the same default network used by the UI and agent tools on first launch.
         if (!networkPrefs.contains("network")) {
             networkPrefs.edit().putString("network", SolanaNetwork.MAINNET.name).commit()
         }
+        selectedNetwork.value = readSelectedNetwork(context)
         walletExists = repository.hasWallet()
         refreshAddress()
     }
-    LaunchedEffect(address, refreshCounter, selectedNetwork) {
+    LaunchedEffect(address, refreshCounter) {
         val current = address ?: return@LaunchedEffect
-        loading = true
-        error = null
+        loading = true; error = null
         try {
-            val lamports = withContext(Dispatchers.IO) { SolanaRpcClient(endpoint = selectedNetwork.rpcEndpoint, network = selectedNetwork).getBalanceLamports(current) }
-            balance = String.format(Locale.US, "%.9f SOL", lamports / 1_000_000_000.0)
+            val lamports = withContext(Dispatchers.IO) {
+                SolanaRpcClient(endpoint = selectedNetwork.value.rpcEndpoint, network = selectedNetwork.value)
+                    .getBalanceLamports(current)
+            }
+            balance = String.format(Locale.US, "%.9f", lamports / 1_000_000_000.0)
         } catch (e: Exception) {
-            balance = null
-            error = "Saldo indisponível. Verifique a conexão e tente novamente."
-        } finally {
-            loading = false
-        }
+            balance = null; error = "Saldo indisponível. Verifique a conexão e tente novamente."
+        } finally { loading = false }
     }
-
-    LaunchedEffect(address, refreshCounter, selectedNetwork) {
+    LaunchedEffect(address, refreshCounter) {
         val current = address ?: return@LaunchedEffect
         historyLoading = true
-        historyError = null
         try {
-            recentOnChain = withContext(Dispatchers.IO) {
-                SolanaRpcClient(endpoint = selectedNetwork.rpcEndpoint, network = selectedNetwork)
-                    .getRecentSignatures(current, limit = 10)
+            recent = withContext(Dispatchers.IO) {
+                SolanaRpcClient(endpoint = selectedNetwork.value.rpcEndpoint, network = selectedNetwork.value)
+                    .getRecentSignatures(current, limit = 6)
             }
-        } catch (e: Exception) {
-            recentOnChain = emptyList()
-            historyError = "Histórico on-chain indisponível no momento."
-        } finally {
-            historyLoading = false
-        }
+        } catch (e: Exception) { recent = emptyList() } finally { historyLoading = false }
     }
 
-
-    if (quickAction != null) {
-        AlertDialog(
-            onDismissRequest = { quickAction = null },
-            title = { Text(when (quickAction) { "Enviar" -> "Enviar SOL"; "Receber" -> "Receber SOL"; "Trocar" -> "Trocar ativos"; else -> "Mais opções da carteira" }) },
-            text = { Text(when (quickAction) {
-                "Enviar" -> "O formulário de transferência segura fica nesta tela. Revise endereço, rede, taxa e valor; a assinatura e o envio exigem confirmação explícita."
-                "Receber" -> "Use o endereço público e o QR Code na seção Receber abaixo. Compartilhe somente o endereço público, nunca a frase de recuperação."
-                "Trocar" -> "A troca de tokens ainda não está integrada. Nenhuma cotação ou troca simulada será apresentada como real."
-                else -> "As configurações da carteira incluem rede Mainnet/Devnet, permissões dos agentes, limites de transferência e destinatários autorizados."
-            }) },
-            confirmButton = {
-                TextButton(onClick = {
-                    val target = when (quickAction) {
-                        "Enviar" -> sendOffset
-                        "Receber" -> receiveOffset
-                        "Mais" -> settingsOffset
-                        else -> null
-                    }
-                    quickAction = null
-                    if (target != null) walletScope.launch { walletScrollState.animateScrollTo(target.coerceIn(0, walletScrollState.maxValue)) }
-                }) { Text(if (quickAction == "Trocar") "Entendi" else "Abrir seção") }
-            },
-            dismissButton = { TextButton(onClick = { quickAction = null }) { Text("Fechar") } }
-        )
-    }
-
-    Scaffold(
-        containerColor = c.bg,
-        topBar = { CueTopBar("Carteira Solana", { nav.popBackStack() }) }
-    ) { padding ->
+    Scaffold(containerColor = c.bg, topBar = { CueTopBar("Carteira", { nav.popBackStack() }) }) { pad ->
         Column(
-            Modifier.padding(padding).verticalScroll(walletScrollState).padding(20.dp),
+            Modifier.padding(pad).verticalScroll(rememberScrollState()).padding(horizontal = 16.dp, vertical = 14.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
-            Card(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(24.dp), colors = androidx.compose.material3.CardDefaults.cardColors(containerColor = c.surface)) {
-                Row(Modifier.fillMaxWidth().padding(18.dp), verticalAlignment = androidx.compose.ui.Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(14.dp)) {
-                    androidx.compose.material3.Surface(shape = RoundedCornerShape(16.dp), color = c.surface2) {
-                        androidx.compose.material3.Icon(Icons.Rounded.AccountBalanceWallet, contentDescription = null, modifier = Modifier.padding(13.dp), tint = c.ink)
-                    }
-                    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                        Text("Sua carteira", style = androidx.compose.material3.MaterialTheme.typography.titleLarge)
-                        Text("Solana · autocustódia", color = c.ink2, style = androidx.compose.material3.MaterialTheme.typography.bodySmall)
-                    }
-                }
-            }
-            Text("Suas chaves permanecem no dispositivo. Transferências exigem aprovação humana e assinatura local.", color = c.ink2, style = androidx.compose.material3.MaterialTheme.typography.bodyMedium)
-
             if (address != null) {
-                Card(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(26.dp), colors = androidx.compose.material3.CardDefaults.cardColors(containerColor = Color(0xFF17110F))) {
-                    Column(Modifier.fillMaxWidth().padding(20.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                        Row(Modifier.fillMaxWidth(), verticalAlignment = androidx.compose.ui.Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
-                            Text("Saldo total", color = Color(0xFFD6D0CE), style = androidx.compose.material3.MaterialTheme.typography.titleMedium)
-                            androidx.compose.material3.IconButton(onClick = { hideBalance = !hideBalance }) {
-                                androidx.compose.material3.Icon(Icons.Rounded.Visibility, contentDescription = if (hideBalance) "Mostrar saldo" else "Ocultar saldo", tint = Color(0xFFEDE7E5))
-                            }
-                        }
-                        Text(if (hideBalance) "••••••" else (balance ?: "— SOL"), color = Color.White, style = androidx.compose.material3.MaterialTheme.typography.headlineLarge, fontWeight = androidx.compose.ui.text.font.FontWeight.Bold)
-                        Text(if (hideBalance) "•••• SOL" else "Saldo on-chain · " + selectedNetwork.displayName, color = Color(0xFFBDB4B0), style = androidx.compose.material3.MaterialTheme.typography.bodyMedium)
-                        Text("A cotação em moeda fiduciária não está disponível sem uma fonte de preços.", color = Color(0xFFE7A080), style = androidx.compose.material3.MaterialTheme.typography.bodySmall)
-                    }
-                }
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    WalletQuickAction("Enviar", Icons.Rounded.ArrowUpward, true, Modifier.weight(1f)) { quickAction = "Enviar" }
-                    WalletQuickAction("Receber", Icons.Rounded.ArrowDownward, false, Modifier.weight(1f)) { quickAction = "Receber" }
-                    WalletQuickAction("Trocar", Icons.Rounded.SwapHoriz, false, Modifier.weight(1f)) { quickAction = "Trocar" }
-                    WalletQuickAction("Mais", Icons.Rounded.GridView, false, Modifier.weight(1f)) { quickAction = "Mais" }
-                }
-                Card(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(22.dp), colors = androidx.compose.material3.CardDefaults.cardColors(containerColor = c.surface)) {
-                    Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                        Row(Modifier.fillMaxWidth(), verticalAlignment = androidx.compose.ui.Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
-                            Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                                Text("Meus ativos", style = androidx.compose.material3.MaterialTheme.typography.titleLarge)
-                                Text("Ativos confirmados nesta carteira", color = c.ink2, style = androidx.compose.material3.MaterialTheme.typography.bodySmall)
-                            }
-                            androidx.compose.material3.Surface(shape = RoundedCornerShape(50), color = Color(0xFF2A1B16)) {
-                                Text("1 ativo", modifier = Modifier.padding(horizontal = 11.dp, vertical = 7.dp), color = Color(0xFFFF966A), style = androidx.compose.material3.MaterialTheme.typography.labelMedium)
-                            }
-                        }
-                        Row(Modifier.fillMaxWidth(), verticalAlignment = androidx.compose.ui.Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                            androidx.compose.material3.Surface(shape = RoundedCornerShape(50), color = Color(0xFF17110F)) {
-                                androidx.compose.material3.Icon(Icons.Rounded.AccountBalanceWallet, contentDescription = null, modifier = Modifier.padding(12.dp), tint = Color(0xFFFF966A))
-                            }
-                            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                                Text("Solana", style = androidx.compose.material3.MaterialTheme.typography.titleMedium)
-                                Text("SOL", color = c.ink2, style = androidx.compose.material3.MaterialTheme.typography.bodyMedium)
-                            }
-                            Column(horizontalAlignment = androidx.compose.ui.Alignment.End, verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                                Text(if (hideBalance) "••••" else (balance?.removeSuffix(" SOL") ?: "—"), style = androidx.compose.material3.MaterialTheme.typography.titleMedium)
-                                Text("Saldo da rede", color = c.ink2, style = androidx.compose.material3.MaterialTheme.typography.bodySmall)
-                            }
-                        }
-                        Text("Tokens SPL e valores em moeda fiduciária serão exibidos quando a consulta de tokens e a fonte de preços estiverem integradas.", color = c.ink2, style = androidx.compose.material3.MaterialTheme.typography.bodySmall)
-                    }
-                }
-            }
-            if (walletExists && address == null && setup == null) {
-                Text("A carteira local existe, mas os metadados públicos não estão disponíveis. Confirme a frase de recuperação para reparar os metadados sem substituir a chave armazenada.")
-                OutlinedTextField(
-                    value = recoveryPhrase,
-                    onValueChange = { recoveryPhrase = it },
-                    label = { Text("Frase de recuperação") },
-                    modifier = Modifier.fillMaxWidth(),
-                    minLines = 3
-                )
-                Button(onClick = {
-                    val input = recoveryPhrase.toCharArray()
-                    recoveryPhrase = ""
-                    try {
-                        address = repository.repairMetadataFromRecoveryPhrase(input)
-                        walletExists = true
-                        revealPhrase = false
-                        error = null
-                    } catch (e: Exception) {
-                        error = e.message ?: "Não foi possível reparar os metadados"
-                    }
-                }, modifier = Modifier.fillMaxWidth()) { Text("Verificar frase e reparar carteira") }
-            }
-
-            if (address == null && setup == null && !walletExists) {
-                Button(
-                    onClick = {
-                        error = null
-                        try {
-                            setup = if (restoreMode) {
-                                val input = recoveryPhrase.toCharArray()
-                                recoveryPhrase = ""
-                                repository.beginRestore(input)
-                            } else repository.beginCreate()
-                            val words = setup!!.phraseForBackup()
-                            recoveryPhrase = words.concatToString()
-                            words.fill('\u0000')
-                            revealPhrase = true
-                            showRecoveryWords = false
-                        } catch (e: Exception) {
-                            error = e.message ?: "Não foi possível iniciar a carteira"
-                        }
-                    },
-                    modifier = Modifier.fillMaxWidth()
-                ) { Text(if (restoreMode) "Restaurar carteira" else "Criar carteira") }
-
-                OutlinedButton(
-                    onClick = { restoreMode = !restoreMode; recoveryPhrase = ""; error = null },
-                    modifier = Modifier.fillMaxWidth()
-                ) { Text(if (restoreMode) "Voltar para criar carteira" else "Já tenho uma frase de recuperação") }
-
-                if (restoreMode) {
-                    OutlinedTextField(
-                        value = recoveryPhrase,
-                        onValueChange = { recoveryPhrase = it },
-                        label = { Text("Frase de recuperação (24 palavras)") },
-                        supportingText = { Text("A frase é processada localmente. Não a envie no chat nem a compartilhe.") },
-                        modifier = Modifier.fillMaxWidth(),
-                        minLines = 3
-                    )
-                }
-            }
-
-            if (address != null) {
+                // ---- Hero balance card ----
                 Card(
                     modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(24.dp),
-                    colors = androidx.compose.material3.CardDefaults.cardColors(containerColor = c.surface2)
+                    shape = RoundedCornerShape(26.dp),
+                    colors = CardDefaults.cardColors(containerColor = WalletPalette.heroBg)
                 ) {
-                    Column(
-                        Modifier.fillMaxWidth().padding(20.dp),
-                        verticalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        Row(Modifier.fillMaxWidth(), verticalAlignment = androidx.compose.ui.Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
-                            Text("Saldo disponível", style = androidx.compose.material3.MaterialTheme.typography.labelLarge, color = c.ink2)
-                            androidx.compose.material3.Surface(shape = RoundedCornerShape(50), color = c.surface) {
-                                Text(selectedNetwork.displayName, modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp), style = androidx.compose.material3.MaterialTheme.typography.labelSmall, color = c.ink2)
+                    Column(Modifier.fillMaxWidth().padding(20.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
+                            Surface(shape = RoundedCornerShape(50), color = WalletPalette.chipBg) {
+                                Text(selectedNetwork.value.displayName, Modifier.padding(horizontal = 12.dp, vertical = 6.dp), color = WalletPalette.coralSoft, style = MaterialTheme.typography.labelMedium)
+                            }
+                            IconButton(onClick = { hideBalance = !hideBalance }) {
+                                Icon(if (hideBalance) Icons.Rounded.VisibilityOff else Icons.Rounded.Visibility, contentDescription = "Ocultar saldo", tint = Color(0xFFEDE7E5))
                             }
                         }
-                        if (loading) {
-                            CircularProgressIndicator()
-                        } else {
-                            Text(
-                                balance ?: "— SOL",
-                                style = androidx.compose.material3.MaterialTheme.typography.headlineMedium,
-                                color = c.ink,
-                                fontWeight = androidx.compose.ui.text.font.FontWeight.Bold
-                            )
+                        Text("Saldo total", color = Color(0xFFBDB4B0), style = MaterialTheme.typography.bodyMedium)
+                        Row(verticalAlignment = Alignment.Bottom) {
+                            if (loading) {
+                                CircularProgressIndicator(Modifier.size(28.dp), strokeWidth = 3.dp, color = WalletPalette.coral)
+                            } else {
+                                Text(if (hideBalance) "••••••" else (balance ?: "—"), color = Color.White, fontSize = 36.sp, fontWeight = FontWeight.Bold)
+                                Spacer(Modifier.width(8.dp))
+                                Text("SOL", color = Color(0xFFBDB4B0), fontSize = 18.sp, modifier = Modifier.padding(bottom = 6.dp))
+                            }
                         }
-                        Text("SOL · Saldo na rede selecionada", color = c.ink2, style = androidx.compose.material3.MaterialTheme.typography.bodySmall)
-                        if (error != null) Text(error!!, color = c.err, style = androidx.compose.material3.MaterialTheme.typography.bodySmall)
-                    }
-                }
-                Text("Receber", modifier = Modifier.onGloballyPositioned { receiveOffset = it.positionInParent().y.toInt() }, style = androidx.compose.material3.MaterialTheme.typography.titleLarge)
-                Text("Seu endereço público", color = c.ink2, style = androidx.compose.material3.MaterialTheme.typography.bodyMedium)
-                Card(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(16.dp), colors = androidx.compose.material3.CardDefaults.cardColors(containerColor = c.surface)) {
-                    Text(address!!, modifier = Modifier.fillMaxWidth().padding(14.dp), color = c.ink, style = androidx.compose.material3.MaterialTheme.typography.bodySmall)
-                }
-                WalletReceiveQr(address!!, selectedNetwork)
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedButton(onClick = {
-                        val clipboard = context.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
-                        clipboard.setPrimaryClip(android.content.ClipData.newPlainText("Endereço público Solana", address))
-                    }) {
-                        androidx.compose.material3.Icon(Icons.Rounded.ContentCopy, contentDescription = null)
-                        Text("Copiar endereço")
-                    }
-                    OutlinedButton(onClick = { balance = null; error = null; refreshAddress(); refreshCounter++ }) {
-                        androidx.compose.material3.Icon(Icons.Rounded.Refresh, contentDescription = null)
-                        Text("Atualizar")
-                    }
-                }
-                Text("Os saldos e taxas podem mudar rapidamente. Transações transmitidas à " + selectedNetwork.displayName + " não podem ser desfeitas.", color = c.ink2)
-
-                Text("Atividade", style = androidx.compose.material3.MaterialTheme.typography.titleLarge)
-                Text("Movimentações registradas diretamente na rede. Detalhes de tokens e valores por transação podem não estar disponíveis.", color = c.ink2, style = androidx.compose.material3.MaterialTheme.typography.bodySmall)
-                if (historyLoading) {
-                    CircularProgressIndicator()
-                } else if (historyError != null) {
-                    Text(historyError!!, color = c.err)
-                    OutlinedButton(onClick = { refreshCounter++ }) { Text("Tentar novamente") }
-                } else if (recentOnChain.isEmpty()) {
-                    Text("Nenhuma assinatura recente encontrada nesta rede.", color = c.ink2)
-                } else {
-                    recentOnChain.forEach { tx ->
-                        androidx.compose.material3.Card(
-                            modifier = Modifier.fillMaxWidth(),
-                            shape = RoundedCornerShape(18.dp),
-                            colors = androidx.compose.material3.CardDefaults.cardColors(containerColor = c.surface)
+                        Row(
+                            Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
-                            Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                                Text(
-                                    if (tx.error == null) "Transação registrada" else "Transação com falha on-chain",
-                                    color = if (tx.error == null) c.ok else c.err,
-                                    style = androidx.compose.material3.MaterialTheme.typography.labelLarge
-                                )
-                                Text("Slot " + tx.slot, color = c.ink2)
-                                tx.blockTimeEpochSeconds?.let { timestamp ->
-                                    Text(
-                                        java.text.SimpleDateFormat("dd/MM/yyyy HH:mm", Locale("pt", "BR"))
-                                            .format(java.util.Date(timestamp * 1000L)),
-                                        color = c.ink2
-                                    )
+                            Text(shortAddress(address!!), color = Color(0xFFD6D0CE), style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
+                            Surface(
+                                onClick = {
+                                    val clip = context.getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                                    clip.setPrimaryClip(android.content.ClipData.newPlainText("Endereço Solana", address))
+                                },
+                                shape = CircleShape, color = WalletPalette.chipBg
+                            ) {
+                                Row(Modifier.padding(horizontal = 10.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+                                    Icon(Icons.Rounded.ContentCopy, null, Modifier.size(15.dp), tint = WalletPalette.coralSoft)
+                                    Spacer(Modifier.width(5.dp)); Text("Copiar", color = WalletPalette.coralSoft, style = MaterialTheme.typography.labelMedium)
                                 }
-                                Text(tx.signature.take(18) + "…" + tx.signature.takeLast(10), color = c.ink)
-                                TextButton(onClick = {
-                                    runCatching { uriHandler.openUri(selectedNetwork.transactionExplorerUrl(tx.signature)) }
-                                        .onFailure { error = "Não foi possível abrir o explorador de transações." }
-                                }) { Text("Ver no Explorer") }
                             }
                         }
+                        if (error != null) Text(error!!, color = Color(0xFFE7A080), style = MaterialTheme.typography.bodySmall)
                     }
                 }
 
-                Text("Acesso dos agentes", modifier = Modifier.onGloballyPositioned { settingsOffset = it.positionInParent().y.toInt() }, style = androidx.compose.material3.MaterialTheme.typography.titleLarge)
-                Text("Cada permissão é salva neste dispositivo e começa desativada. Leitura permite consultar endereço/saldo; a permissão de transferência só permite criar pedidos tipados, sempre sujeitos à revisão, aprovação humana, assinatura local e confirmação separada antes do envio. Agentes nunca recebem chaves privadas.", color = c.ink2)
-                if (walletAgents.isEmpty()) {
-                    Text("Nenhum agente foi configurado.")
-                } else {
-                    walletAgents.forEach { agent ->
-                        key(agent.id, permissionRefresh) {
-                            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                                Text(agent.name, style = androidx.compose.material3.MaterialTheme.typography.titleSmall)
-                                var addressPermission by remember(agent.id, permissionRefresh) {
-                                    mutableStateOf(walletPolicyStore.canAgentReadAddress(agent.id))
-                                }
-                                Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
-                                    Column(Modifier.weight(1f)) {
-                                        Text("Consultar endereço público")
+                // ---- Four actions (navigate) ----
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    WalletActionButton("Enviar", Icons.Rounded.ArrowUpward, true, Modifier.weight(1f)) { nav.navigate("wallet/send") }
+                    WalletActionButton("Receber", Icons.Rounded.ArrowDownward, false, Modifier.weight(1f)) { nav.navigate("wallet/receive") }
+                    WalletActionButton("Trocar", Icons.Rounded.SwapHoriz, false, Modifier.weight(1f)) { nav.navigate("wallet/swap") }
+                    WalletActionButton("Mais", Icons.Rounded.GridView, false, Modifier.weight(1f)) { nav.navigate("wallet/more") }
+                }
+
+                // ---- Assets ----
+                Card(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(22.dp), colors = CardDefaults.cardColors(containerColor = c.surface)) {
+                    Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
+                            Text("Meus ativos", style = MaterialTheme.typography.titleMedium)
+                            OutlinedButton(onClick = { balance = null; error = null; refreshAddress(); refreshCounter++ }) {
+                                Icon(Icons.Rounded.Refresh, null, Modifier.size(16.dp)); Spacer(Modifier.width(6.dp)); Text("Atualizar")
+                            }
+                        }
+                        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                            Surface(shape = CircleShape, color = WalletPalette.heroBg) {
+                                Icon(Icons.Rounded.AccountBalanceWallet, null, Modifier.padding(12.dp), tint = WalletPalette.coral)
+                            }
+                            Column(Modifier.weight(1f)) {
+                                Text("Solana", style = MaterialTheme.typography.titleMedium)
+                                Text("SOL", color = c.ink2, style = MaterialTheme.typography.bodyMedium)
+                            }
+                            Text(if (hideBalance) "••••" else (balance ?: "—"), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                        }
+                        Text("Tokens SPL e cotação em moeda aparecem quando a consulta de tokens e a fonte de preços estiverem integradas.", color = c.ink3, style = MaterialTheme.typography.bodySmall)
+                    }
+                }
+
+                // ---- Recent activity ----
+                Card(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(22.dp), colors = CardDefaults.cardColors(containerColor = c.surface)) {
+                    Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Text("Atividade recente", style = MaterialTheme.typography.titleMedium)
+                        when {
+                            historyLoading -> CircularProgressIndicator(Modifier.size(22.dp), strokeWidth = 2.dp, color = c.accent)
+                            recent.isEmpty() -> Text("Nenhuma movimentação on-chain nesta rede.", color = c.ink2, style = MaterialTheme.typography.bodySmall)
+                            else -> recent.forEach { tx ->
+                                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                                    Surface(shape = CircleShape, color = if (tx.error == null) Color(0xFF14321F) else Color(0xFF3A1A1A)) {
+                                        Icon(if (tx.error == null) Icons.Rounded.ArrowDownward else Icons.Rounded.SwapHoriz, null, Modifier.padding(9.dp).size(16.dp), tint = if (tx.error == null) c.ok else c.err)
                                     }
-                                    androidx.compose.material3.Switch(
-                                        checked = addressPermission,
-                                        onCheckedChange = { enabled ->
-                                            try {
-                                                walletPolicyStore.setAgentReadAddress(agent.id, enabled)
-                                                addressPermission = enabled
-                                                permissionRefresh++
-                                            } catch (e: Exception) {
-                                                error = e.message ?: "Não foi possível salvar a permissão."
-                                            }
-                                        }
-                                    )
-                                }
-                                var balancePermission by remember(agent.id, permissionRefresh) {
-                                    mutableStateOf(walletPolicyStore.canAgentReadBalance(agent.id))
-                                }
-                                Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
                                     Column(Modifier.weight(1f)) {
-                                        Text("Consultar saldo da rede selecionada")
+                                        Text(if (tx.error == null) "Transação registrada" else "Falha on-chain", style = MaterialTheme.typography.bodyMedium, color = if (tx.error == null) c.ink else c.err)
+                                        Text(shortAddress(tx.signature), color = c.ink3, style = MaterialTheme.typography.bodySmall)
                                     }
-                                    androidx.compose.material3.Switch(
-                                        checked = balancePermission,
-                                        onCheckedChange = { enabled ->
-                                            try {
-                                                walletPolicyStore.setAgentReadBalance(agent.id, enabled)
-                                                balancePermission = enabled
-                                                permissionRefresh++
-                                            } catch (e: Exception) {
-                                                error = e.message ?: "Não foi possível salvar a permissão."
-                                            }
-                                        }
-                                    )
+                                    TextButton(onClick = {
+                                        runCatching { uriHandler.openUri(selectedNetwork.value.transactionExplorerUrl(tx.signature)) }
+                                    }) { Text("Explorer") }
                                 }
-                                var transferRequestPermission by remember(agent.id, permissionRefresh) {
-                                    mutableStateOf(walletPolicyStore.canAgentRequestTransfer(agent.id))
-                                }
-                                Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
-                                    Column(Modifier.weight(1f)) {
-                                        Text("Solicitar transferência SOL (sempre exige aprovação humana)")
-                                        Text(
-                                            "Tetos de segurança: 0,05 SOL por pedido e 0,10 SOL por dia. Você pode reduzir esses limites; o agente nunca assina nem envia sozinho.",
-                                            color = c.ink2
-                                        )
-                                    }
-                                    androidx.compose.material3.Switch(
-                                        checked = transferRequestPermission,
-                                        onCheckedChange = { enabled ->
-                                            try {
-                                                walletPolicyStore.setAgentRequestTransfer(agent.id, enabled)
-                                                transferRequestPermission = enabled
-                                                permissionRefresh++
-                                            } catch (e: Exception) {
-                                                error = e.message ?: "Não foi possível salvar a permissão."
-                                            }
-                                        }
-                                    )
-                                }
-                                var maxAgentSol by remember(agent.id, permissionRefresh) {
-                                    mutableStateOf(String.format(Locale.US, "%.9f", walletPolicyStore.agentMaxTransferLamports(agent.id) / 1_000_000_000.0))
-                                }
-                                var dailyAgentSol by remember(agent.id, permissionRefresh) {
-                                    mutableStateOf(String.format(Locale.US, "%.9f", walletPolicyStore.agentDailyLimitLamports(agent.id) / 1_000_000_000.0))
-                                }
-                                var recipientAllowlist by remember(agent.id, permissionRefresh) {
-                                    mutableStateOf(walletPolicyStore.agentAllowedRecipients(agent.id).joinToString("\n"))
-                                }
-                                OutlinedTextField(
-                                    value = maxAgentSol,
-                                    onValueChange = { maxAgentSol = it },
-                                    label = { Text("Limite por pedido do agente (SOL, máx. 0,05)") },
-                                    modifier = Modifier.fillMaxWidth(),
-                                    singleLine = true
-                                )
-                                OutlinedTextField(
-                                    value = dailyAgentSol,
-                                    onValueChange = { dailyAgentSol = it },
-                                    label = { Text("Limite diário do agente (SOL, máx. 0,10)") },
-                                    modifier = Modifier.fillMaxWidth(),
-                                    singleLine = true
-                                )
-                                OutlinedTextField(
-                                    value = recipientAllowlist,
-                                    onValueChange = { recipientAllowlist = it },
-                                    label = { Text("Destinatários autorizados (um por linha; opcional)") },
-                                    supportingText = { Text("Se preenchida, apenas estes endereços poderão ser solicitados. A aprovação humana continua obrigatória.") },
-                                    modifier = Modifier.fillMaxWidth(),
-                                    minLines = 2
-                                )
-                                OutlinedButton(
-                                    onClick = {
-                                        try {
-                                            fun toLamports(value: String): Long =
-                                                java.math.BigDecimal(value.trim())
-                                                    .setScale(9, java.math.RoundingMode.UNNECESSARY)
-                                                    .multiply(java.math.BigDecimal("1000000000"))
-                                                    .longValueExact()
-                                            val maxLamports = toLamports(maxAgentSol)
-                                            val dailyLamports = toLamports(dailyAgentSol)
-                                            val recipients = recipientAllowlist
-                                                .split(Regex("""[,\s]+"""))
-                                                .map { it.trim() }
-                                                .filter { it.isNotEmpty() }
-                                                .toSet()
-                                            walletPolicyStore.setAgentTransferSettings(
-                                                agent.id, maxLamports, dailyLamports, recipients
-                                            )
-                                            error = null
-                                            permissionRefresh++
-                                        } catch (e: Exception) {
-                                            error = e.message ?: "Limites ou destinatários inválidos."
-                                        }
-                                    },
-                                    modifier = Modifier.fillMaxWidth()
-                                ) { Text("Salvar limites e destinatários") }
                             }
                         }
                     }
                 }
             }
 
-            Text("Rede Solana", modifier = Modifier.onGloballyPositioned { sendOffset = it.positionInParent().y.toInt() }, style = androidx.compose.material3.MaterialTheme.typography.titleLarge)
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                Button(
-                    modifier = Modifier.weight(1f),
-                    enabled = selectedNetwork != SolanaNetwork.MAINNET,
-                    onClick = {
-                        selectedNetwork = SolanaNetwork.MAINNET
-                        networkPrefs.edit().putString("network", selectedNetwork.name).apply()
-                        balance = null
-                        refreshCounter++
+            // ---- Repair: ciphertext exists but metadata missing ----
+            if (walletExists && address == null && setup == null) {
+                Card(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(20.dp), colors = CardDefaults.cardColors(containerColor = c.surface)) {
+                    Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Text("Reparar carteira", style = MaterialTheme.typography.titleMedium)
+                        Text("A carteira local existe, mas os metadados públicos não estão disponíveis. Confirme a frase de recuperação para reparar sem substituir a chave armazenada.", color = c.ink2, style = MaterialTheme.typography.bodySmall)
+                        OutlinedTextField(recoveryPhrase, { recoveryPhrase = it }, label = { Text("Frase de recuperação") }, modifier = Modifier.fillMaxWidth(), minLines = 3)
+                        Button(onClick = {
+                            val input = recoveryPhrase.toCharArray(); recoveryPhrase = ""
+                            try { address = repository.repairMetadataFromRecoveryPhrase(input); walletExists = true; error = null }
+                            catch (e: Exception) { error = e.message ?: "Não foi possível reparar os metadados" }
+                        }, modifier = Modifier.fillMaxWidth()) { Text("Verificar frase e reparar") }
                     }
-                ) { Text("Mainnet") }
-                OutlinedButton(
-                    modifier = Modifier.weight(1f),
-                    enabled = selectedNetwork != SolanaNetwork.DEVNET,
-                    onClick = {
-                        selectedNetwork = SolanaNetwork.DEVNET
-                        networkPrefs.edit().putString("network", selectedNetwork.name).apply()
-                        balance = null
-                        refreshCounter++
-                    }
-                ) { Text("Devnet (testes)") }
-            }
-            Text(
-                if (selectedNetwork == SolanaNetwork.DEVNET)
-                    "Devnet usa tokens de teste sem valor real."
-                else
-                    "Mainnet usa SOL real. Verifique a rede antes de enviar.",
-                color = c.ink2
-            )
-            if (address != null) {
-                key(selectedNetwork) {
-                    WalletTransferPanel(context.applicationContext, repository, selectedNetwork)
                 }
             }
 
+            // ---- Onboarding: create / restore ----
+            if (address == null && setup == null && !walletExists) {
+                Card(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(24.dp), colors = CardDefaults.cardColors(containerColor = c.surface)) {
+                    Column(Modifier.fillMaxWidth().padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                        Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+                            Surface(shape = CircleShape, color = WalletPalette.heroBg) {
+                                Icon(Icons.Rounded.AccountBalanceWallet, null, Modifier.padding(18.dp).size(34.dp), tint = WalletPalette.coral)
+                            }
+                        }
+                        Text("Sua carteira Solana", style = MaterialTheme.typography.titleLarge, modifier = Modifier.fillMaxWidth(), fontWeight = FontWeight.Bold)
+                        Text("Autocustódia: as chaves ficam só neste aparelho. Crie uma nova carteira ou restaure com sua frase de 24 palavras.", color = c.ink2, style = MaterialTheme.typography.bodyMedium)
+                        Button(onClick = {
+                            error = null
+                            try {
+                                setup = if (restoreMode) {
+                                    val input = recoveryPhrase.toCharArray(); recoveryPhrase = ""; repository.beginRestore(input)
+                                } else repository.beginCreate()
+                                val words = setup!!.phraseForBackup(); recoveryPhrase = words.concatToString(); words.fill('\u0000')
+                                revealPhrase = true; showRecoveryWords = false
+                            } catch (e: Exception) { error = e.message ?: "Não foi possível iniciar a carteira" }
+                        }, modifier = Modifier.fillMaxWidth()) { Text(if (restoreMode) "Restaurar carteira" else "Criar nova carteira") }
+                        OutlinedButton(onClick = { restoreMode = !restoreMode; recoveryPhrase = ""; error = null }, modifier = Modifier.fillMaxWidth()) {
+                            Text(if (restoreMode) "Voltar para criar carteira" else "Já tenho uma frase de recuperação")
+                        }
+                        if (restoreMode) {
+                            OutlinedTextField(recoveryPhrase, { recoveryPhrase = it }, label = { Text("Frase de recuperação (24 palavras)") },
+                                supportingText = { Text("Processada localmente. Nunca envie no chat.") }, modifier = Modifier.fillMaxWidth(), minLines = 3)
+                        }
+                    }
+                }
+            }
+
+            // ---- Backup confirmation ----
             if (setup != null && revealPhrase) {
-                Text("Frase de recuperação", style = androidx.compose.material3.MaterialTheme.typography.titleMedium)
-                Text("Anote estas 24 palavras em local privado. Qualquer pessoa com a frase pode controlar a carteira. Nunca envie a frase ao agente ou ao chat.")
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
-                    OutlinedButton(onClick = { showRecoveryWords = !showRecoveryWords }) {
-                        Text(if (showRecoveryWords) "Ocultar palavras" else "Mostrar palavras")
-                    }
-                    OutlinedButton(onClick = {
-                        val clipboard = context.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
-                        clipboard.setPrimaryClip(android.content.ClipData.newPlainText("Frase de recuperação Solana", recoveryPhrase))
-                    }) {
-                        androidx.compose.material3.Icon(Icons.Rounded.ContentCopy, contentDescription = null)
-                        Text("Copiar palavras")
+                Card(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(20.dp), colors = CardDefaults.cardColors(containerColor = c.surface)) {
+                    Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Text("Frase de recuperação", style = MaterialTheme.typography.titleMedium)
+                        Text("Anote estas 24 palavras em local privado. Quem tiver a frase controla a carteira. Nunca envie ao agente ou ao chat.", color = c.ink2, style = MaterialTheme.typography.bodySmall)
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            OutlinedButton(onClick = { showRecoveryWords = !showRecoveryWords }) { Text(if (showRecoveryWords) "Ocultar" else "Mostrar palavras") }
+                            OutlinedButton(onClick = {
+                                val clip = context.getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                                clip.setPrimaryClip(android.content.ClipData.newPlainText("Frase de recuperação Solana", recoveryPhrase))
+                            }) { Icon(Icons.Rounded.ContentCopy, null, Modifier.size(16.dp)); Spacer(Modifier.width(6.dp)); Text("Copiar") }
+                        }
+                        if (showRecoveryWords) Text(recoveryPhrase, color = c.ink) else Text("Palavras ocultas por segurança", color = c.ink3)
+                        OutlinedTextField(confirmation, { confirmation = it }, label = { Text("Digite a frase novamente para confirmar") }, modifier = Modifier.fillMaxWidth(), minLines = 3)
+                        Button(onClick = {
+                            val chars = confirmation.toCharArray(); confirmation = ""
+                            try {
+                                setup!!.confirmBackupAndPersist(chars); setup!!.close(); setup = null
+                                revealPhrase = false; recoveryPhrase = ""; restoreMode = false
+                                walletExists = true; refreshAddress()
+                            } catch (e: Exception) { error = e.message ?: "A confirmação não corresponde" }
+                        }, modifier = Modifier.fillMaxWidth()) { Text("Confirmar backup e salvar") }
+                        TextButton(onClick = {
+                            setup?.close(); setup = null; recoveryPhrase = ""; confirmation = ""; revealPhrase = false
+                            error = "Configuração cancelada; nenhum segredo foi salvo."
+                        }) { Text("Cancelar e apagar sessão temporária") }
                     }
                 }
-                if (showRecoveryWords) Text(recoveryPhrase)
-                else Text("Palavras ocultas por segurança")
-                OutlinedTextField(
-                    value = confirmation,
-                    onValueChange = { confirmation = it },
-                    label = { Text("Digite novamente a frase para confirmar o backup") },
-                    modifier = Modifier.fillMaxWidth(),
-                    minLines = 3
-                )
-                Button(
-                    onClick = {
-                        val chars = confirmation.toCharArray()
-                        confirmation = ""
-                        try {
-                            setup!!.confirmBackupAndPersist(chars)
-                            setup!!.close()
-                            setup = null
-                            revealPhrase = false
-                            recoveryPhrase = ""
-                            restoreMode = false
-                            refreshAddress()
-                        } catch (e: Exception) {
-                            error = e.message ?: "A confirmação não corresponde"
-                        }
-                    },
-                    modifier = Modifier.fillMaxWidth()
-                ) { Text("Confirmar backup e salvar carteira") }
-                TextButton(onClick = {
-                    setup?.close()
-                    setup = null
-                    recoveryPhrase = ""
-                    confirmation = ""
-                    revealPhrase = false
-                    error = "Configuração cancelada; nenhum segredo foi salvo."
-                }) { Text("Cancelar e apagar a sessão temporária") }
             }
 
-            error?.let { Text(it, color = c.ink2) }
+            error?.let { if (address == null) Text(it, color = c.ink2, style = MaterialTheme.typography.bodySmall) }
         }
     }
 }
 
 @Composable
-private fun WalletQuickAction(label: String, icon: androidx.compose.ui.graphics.vector.ImageVector, primary: Boolean, modifier: Modifier = Modifier, onClick: () -> Unit) {
-    Column(modifier, horizontalAlignment = androidx.compose.ui.Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(7.dp)) {
-        androidx.compose.material3.Surface(onClick = onClick, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(22.dp),
-            color = if (primary) Color(0xFFFF895B) else Color(0xFF1C1A19),
-            contentColor = if (primary) Color(0xFF17110F) else Color(0xFFF3EFED),
-            border = androidx.compose.foundation.BorderStroke(1.dp, if (primary) Color(0xFFFFA27E) else Color(0xFF38302D))) {
-            androidx.compose.foundation.layout.Box(Modifier.padding(vertical = 14.dp), contentAlignment = androidx.compose.ui.Alignment.Center) {
-                androidx.compose.material3.Icon(icon, contentDescription = label, modifier = Modifier.size(26.dp))
-            }
+internal fun WalletActionButton(label: String, icon: ImageVector, primary: Boolean, modifier: Modifier = Modifier, onClick: () -> Unit) {
+    Column(modifier, horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(7.dp)) {
+        Surface(
+            onClick = onClick, modifier = Modifier.fillMaxWidth().height(58.dp), shape = RoundedCornerShape(20.dp),
+            color = if (primary) WalletPalette.coral else Color(0xFF1C1A19),
+            contentColor = if (primary) WalletPalette.heroBg else Color(0xFFF3EFED),
+            border = BorderStroke(1.dp, if (primary) WalletPalette.coralSoft else Color(0xFF38302D))
+        ) {
+            Box(contentAlignment = Alignment.Center) { Icon(icon, contentDescription = label, modifier = Modifier.size(24.dp)) }
         }
-        Text(label, style = androidx.compose.material3.MaterialTheme.typography.labelMedium, color = Cue.c.ink)
+        Text(label, style = MaterialTheme.typography.labelMedium, color = Cue.c.ink)
     }
 }
