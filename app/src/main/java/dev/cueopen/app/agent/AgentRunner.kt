@@ -889,8 +889,15 @@ class AgentRunner(
                                     if (address == null) {
                                         "Endereço público indisponível."
                                     } else {
-                                        val lamports = SolanaRpcClient(endpoint = network.rpcEndpoint, network = network).getBalanceLamports(address)
-                                        "Saldo " + network.displayName + ": " + String.format(Locale.US, "%.9f SOL", lamports / 1_000_000_000.0)
+                                        try {
+                                            val lamports = SolanaRpcClient(endpoint = network.rpcEndpoint, network = network).getBalanceLamports(address)
+                                            "Saldo " + network.displayName + ": " + String.format(Locale.US, "%.9f SOL", lamports / 1_000_000_000.0) +
+                                                if (lamports == 0L) "\\nSaldo RPC retornado como zero. Um endereço válido pode ainda não ter uma conta financiada nesta rede; isso não significa que a frase ou a chave local seja inválida." else ""
+                                        } catch (e: Exception) {
+                                            "WALLET_RPC_ERROR: Não foi possível consultar o saldo em " + network.displayName +
+                                                ". Motivo: " + (e.message ?: e.javaClass.simpleName).take(240) +
+                                                ". Não tente contornar esta falha com shell, terminal, curl ou Solscan. Informe o erro e peça para o usuário verificar a rede/conectividade; nenhuma chave ou frase deve ser exposta."
+                                        }
                                     }
                                 }
                             }
