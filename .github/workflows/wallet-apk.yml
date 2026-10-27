@@ -1,6 +1,12 @@
 name: CueOpen APK (wallet branch)
 
 on:
+  push:
+    branches:
+      - work/solana-wallet-completion
+    paths-ignore:
+      - '**/*.md'
+      - 'docs/**'
   workflow_dispatch:
     inputs:
       branch:
