@@ -23,6 +23,7 @@ import androidx.compose.material.icons.rounded.AccountBalanceWallet
 import androidx.compose.material.icons.rounded.ArrowDownward
 import androidx.compose.material.icons.rounded.ArrowUpward
 import androidx.compose.material.icons.rounded.ContentCopy
+import androidx.compose.material.icons.rounded.Download
 import androidx.compose.material.icons.rounded.GridView
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.SwapHoriz
@@ -352,6 +353,19 @@ fun WalletScreen(nav: NavController) {
                                 val clip = context.getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
                                 clip.setPrimaryClip(android.content.ClipData.newPlainText("Frase de recuperação Solana", recoveryPhrase))
                             }) { Icon(Icons.Rounded.ContentCopy, null, Modifier.size(16.dp)); Spacer(Modifier.width(6.dp)); Text("Copiar") }
+                            OutlinedButton(onClick = {
+                                runCatching {
+                                    val dir = java.io.File(context.cacheDir, "wallet").apply { mkdirs() }
+                                    val f = java.io.File(dir, "cueopen-frase-recuperacao.txt")
+                                    f.writeText("CueOpen — Frase de recuperação (24 palavras)\nMantenha em segredo e offline. Quem tiver estas palavras controla a carteira.\nUse em qualquer wallet Solana compatível para acessar em outro dispositivo.\n\n$recoveryPhrase\n")
+                                    val uri = androidx.core.content.FileProvider.getUriForFile(context, context.packageName + ".files", f)
+                                    val send = android.content.Intent(android.content.Intent.ACTION_SEND)
+                                        .setType("text/plain").putExtra(android.content.Intent.EXTRA_STREAM, uri)
+                                        .putExtra(android.content.Intent.EXTRA_SUBJECT, "CueOpen — frase de recuperação")
+                                        .addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                                    context.startActivity(android.content.Intent.createChooser(send, "Baixar/salvar frase de recuperação").addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK))
+                                }.onFailure { error = "Não foi possível exportar a frase: ${it.message}" }
+                            }) { Icon(Icons.Rounded.Download, null, Modifier.size(16.dp)); Spacer(Modifier.width(6.dp)); Text("Baixar") }
                         }
                         if (showRecoveryWords) Text(recoveryPhrase, color = c.ink) else Text("Palavras ocultas por segurança", color = c.ink3)
                         OutlinedTextField(confirmation, { confirmation = it }, label = { Text("Digite a frase novamente para confirmar") }, modifier = Modifier.fillMaxWidth(), minLines = 3)

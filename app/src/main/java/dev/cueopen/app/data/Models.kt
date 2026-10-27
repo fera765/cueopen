@@ -223,6 +223,8 @@ data class Settings(
     val baseUrl: String = "https://openrouter.ai/api/v1",
     val model: String = "deepseek/deepseek-v4-flash",
     val fastModel: String = "deepseek/deepseek-v4-flash",
+    /** Modelo avaliador de acurácia para day trade (TypeSafe Jev por padrão; roteia p/ o melhor/mais barato). */
+    val accuracyModel: String = "typesafe/jev-router",
     val disableThinking: Boolean = true,
     val maxSteps: Int = 1000,
     val theme: ThemeMode = ThemeMode.SYSTEM,

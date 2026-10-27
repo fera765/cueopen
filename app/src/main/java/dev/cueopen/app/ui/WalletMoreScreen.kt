@@ -39,6 +39,7 @@ fun WalletMoreScreen(nav: NavController) {
     val address = remember { runCatching { repository.publicAddress() }.getOrNull() }
     var permissionRefresh by remember { mutableStateOf(0) }
     var error by remember { mutableStateOf<String?>(null) }
+    var confirmLogout by remember { mutableStateOf(false) }
 
     Scaffold(containerColor = c.bg, topBar = { CueTopBar("Mais · Configurações", { nav.popBackStack() }) }) { pad ->
         Column(
@@ -175,10 +176,33 @@ fun WalletMoreScreen(nav: NavController) {
                 Text("A troca (swap) é feita via Jupiter, direto na carteira. Nenhuma cotação ou troca simulada é apresentada como real.", color = c.ink2, fontSize = 13.sp)
             }
 
+            // Logout / sair da carteira
+            if (address != null) {
+                SectionLabel("Sessão da carteira")
+                CueCard {
+                    Text("Sair remove a carteira deste aparelho. Ela continua existindo na blockchain — você pode reabri-la a qualquer momento com a frase de recuperação, aqui ou em outra wallet. Sem a frase, o acesso é perdido.", color = c.ink2, fontSize = 13.sp)
+                    Spacer(Modifier.height(10.dp))
+                    PillButton("Sair da carteira", Icons.Rounded.Logout, primary = false, modifier = Modifier.fillMaxWidth()) { confirmLogout = true }
+                }
+            }
+
             error?.let { Text(it, color = c.err, fontSize = 13.sp) }
             Spacer(Modifier.height(24.dp))
         }
     }
+    if (confirmLogout) AlertDialog(
+        onDismissRequest = { confirmLogout = false },
+        title = { Text("Sair da carteira?") },
+        text = { Text("A carteira será removida deste aparelho. Guarde a frase de recuperação antes de sair — sem ela o acesso é perdido. Você poderá reabrir a carteira depois importando a frase.") },
+        confirmButton = {
+            TextButton(onClick = {
+                runCatching { repository.forgetWallet() }
+                    .onSuccess { confirmLogout = false; nav.popBackStack() }
+                    .onFailure { e -> error = e.message ?: "Falha ao sair da carteira."; confirmLogout = false }
+            }) { Text("Sair", color = c.err) }
+        },
+        dismissButton = { TextButton(onClick = { confirmLogout = false }) { Text("Cancelar") } }
+    )
 }
 
 @Composable

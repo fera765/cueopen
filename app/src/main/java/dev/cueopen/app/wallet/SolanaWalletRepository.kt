@@ -86,6 +86,17 @@ class SolanaWalletRepository(context: Context) {
         }
     }
 
+    /**
+     * "Sair da carteira": remove o segredo e os metadados DESTE aparelho. A carteira continua
+     * existindo na blockchain e pode ser reaberta a qualquer momento com a frase de recuperação
+     * (nesta ou em outra wallet). Operação local; não toca a rede nem o LLM.
+     */
+    @Synchronized
+    fun forgetWallet() {
+        runCatching { vault.deleteLocalSecret() }
+        prefs.edit().remove("public_address").remove("backup_confirmed").commit()
+    }
+
     @Synchronized
     private fun persist(material: WalletKeyMaterial) {
         check(!vault.hasSecret()) { "Wallet already exists" }

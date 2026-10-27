@@ -69,6 +69,8 @@ fun SettingsScreen(nav: NavController) {
             CueField(s.apiKey, { v -> app.store.updateSettings { it.copy(apiKey = v.trim()) } }, "Chave da API", password = true)
             ModelPicker(s.model, { v -> app.store.updateSettings { it.copy(model = v) } }, "Modelo do agente")
             ModelPicker(s.fastModel, { v -> app.store.updateSettings { it.copy(fastModel = v) } }, "Modelo rápido (títulos e resumos de contexto)")
+            CueField(s.accuracyModel, { v -> app.store.updateSettings { it.copy(accuracyModel = v.trim()) } }, "Modelo avaliador de acurácia (day trade)")
+            Text("Usado pela ferramenta typesafe_jev_check para medir a acurácia dos sinais antes de operar. Padrão: typesafe/jev-router (TypeSafe Jev, roteia para o melhor/mais barato).", fontSize = 12.sp, color = Cue.c.ink2)
             CueField(s.baseUrl, { v -> app.store.updateSettings { it.copy(baseUrl = v.trim()) } }, "Base URL (compatível OpenAI)")
             ToggleRow("Desativar thinking", "Zero raciocínio estendido — respostas mais rápidas", s.disableThinking) { v -> app.store.updateSettings { it.copy(disableThinking = v) } }
             Text("Passos máximos por execução: ${s.maxSteps}", fontSize = 14.sp)

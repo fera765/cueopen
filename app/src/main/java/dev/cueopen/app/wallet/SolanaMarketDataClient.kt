@@ -88,6 +88,43 @@ class SolanaMarketDataClient(
         }
     }
 
+    /**
+     * DexScreener (sem API key, limite alto ~300/min): dados de token na Solana. Fonte PRIMÁRIA
+     * de token_info/preço para tirar carga do GeckoTerminal e evitar 429. Escolhe o par de maior
+     * liquidez. Resiliente: devolve null em falha (o chamador tenta outra fonte).
+     */
+    private suspend fun dexScreenerToken(mint: String): TokenMarket? = withContext(Dispatchers.IO) {
+        val cacheKey = "dex:$mint"
+        val body = cacheGet(cacheKey) ?: runCatching {
+            val req = Request.Builder().url("$DEXSCREENER_BASE/latest/dex/tokens/$mint")
+                .header("Accept", "application/json").get().build()
+            client.newCall(req).execute().use { resp ->
+                if (!resp.isSuccessful) return@use null
+                val b = resp.body?.string().orEmpty()
+                if (b.isNotBlank() && b.length <= MAX_RESPONSE_CHARS) { cachePut(cacheKey, b); b } else null
+            }
+        }.getOrNull() ?: return@withContext null
+        val pairs = runCatching { json.parseToJsonElement(body).jsonObject["pairs"]?.jsonArray }.getOrNull() ?: return@withContext null
+        val solPairs = pairs.filter { (it.jsonObject["chainId"]?.jsonPrimitive?.contentOrNull) == "solana" }
+        val best = solPairs.maxByOrNull {
+            (it.jsonObject["liquidity"] as? kotlinx.serialization.json.JsonObject)?.get("usd")?.jsonPrimitive?.doubleOrNull ?: 0.0
+        } ?: return@withContext null
+        val o = best.jsonObject
+        val baseTok = o["baseToken"]?.jsonObject
+        TokenMarket(
+            mint = mint,
+            symbol = baseTok?.get("symbol")?.jsonPrimitive?.contentOrNull ?: mint.take(6),
+            name = baseTok?.get("name")?.jsonPrimitive?.contentOrNull.orEmpty(),
+            priceUsd = o["priceUsd"]?.jsonPrimitive?.contentOrNull?.toDoubleOrNull(),
+            liquidityUsd = (o["liquidity"] as? kotlinx.serialization.json.JsonObject)?.get("usd")?.jsonPrimitive?.doubleOrNull,
+            volume24hUsd = (o["volume"] as? kotlinx.serialization.json.JsonObject)?.get("h24")?.jsonPrimitive?.doubleOrNull,
+            priceChange24hPct = (o["priceChange"] as? kotlinx.serialization.json.JsonObject)?.get("h24")?.jsonPrimitive?.doubleOrNull,
+            poolCreatedAt = o["pairCreatedAt"]?.jsonPrimitive?.contentOrNull,
+            poolAddress = o["pairAddress"]?.jsonPrimitive?.contentOrNull,
+            marketCapUsd = o["marketCap"]?.jsonPrimitive?.doubleOrNull ?: o["fdv"]?.jsonPrimitive?.doubleOrNull
+        )
+    }
+
     private fun cacheGet(k: String): String? {
         val e = cache[k] ?: return null
         return if (System.currentTimeMillis() - e.first < CACHE_TTL_MS) e.second else { cache.remove(k); null }
@@ -261,13 +298,27 @@ class SolanaMarketDataClient(
         out.values.take(safeLimit).toList()
     }
 
-    /** Informações REAIS de um token (preço, liquidez total, volume 24h, market cap) via GeckoTerminal. */
+    /**
+     * Informações REAIS de um token (preço, liquidez, volume 24h, market cap).
+     * Fonte primária: DexScreener (keyless, limite alto). Fallbacks: GeckoTerminal e, por fim,
+     * só o preço via Jupiter — nunca falha por rate limit se qualquer fonte responder.
+     */
     suspend fun tokenInfo(mint: String): TokenMarket? = withContext(Dispatchers.IO) {
         require(SolanaAddressValidator.isValidAddress(mint)) { "Mint inválido" }
+        // 1) DexScreener (primário)
+        dexScreenerToken(mint)?.let { return@withContext it }
+        // 2) GeckoTerminal (fallback)
+        runCatching { geckoTokenInfo(mint) }.getOrNull()?.let { return@withContext it }
+        // 3) Último recurso: preço via Jupiter (sem liquidez/volume), para não voltar vazio
+        val price = runCatching { priceUsd(mint) }.getOrNull()
+        if (price != null && price > 0.0) TokenMarket(mint, mint.take(6), "", price, null, null, null, null, null, null) else null
+    }
+
+    private suspend fun geckoTokenInfo(mint: String): TokenMarket? {
         val body = geckoGet("/networks/solana/tokens/$mint")
-        run {
+        return run {
             val attr = json.parseToJsonElement(body).jsonObject["data"]?.jsonObject
-                ?.get("attributes")?.jsonObject ?: return@withContext null
+                ?.get("attributes")?.jsonObject ?: return null
             TokenMarket(
                 mint = mint,
                 symbol = attr["symbol"]?.jsonPrimitive?.contentOrNull ?: mint.take(6),
@@ -289,9 +340,10 @@ class SolanaMarketDataClient(
         const val GECKO_BASE = "https://api.geckoterminal.com/api/v2"
         // Endpoint onchain da CoinGecko (espelha o GeckoTerminal) quando há chave Demo gratuita.
         const val COINGECKO_ONCHAIN_BASE = "https://api.coingecko.com/api/v3/onchain"
+        const val DEXSCREENER_BASE = "https://api.dexscreener.com"
         private const val MAX_RESPONSE_CHARS = 2 * 1024 * 1024
-        private const val MIN_INTERVAL_MS = 2200L
-        private const val CACHE_TTL_MS = 45_000L
+        private const val MIN_INTERVAL_MS = 2500L
+        private const val CACHE_TTL_MS = 90_000L
         private val geckoMutex = Mutex()
         @Volatile private var lastGeckoCallMs = 0L
         private val cache = java.util.concurrent.ConcurrentHashMap<String, Pair<Long, String>>()

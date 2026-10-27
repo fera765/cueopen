@@ -36,6 +36,7 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.doubleOrNull
 import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
@@ -633,7 +634,8 @@ class AgentRunner(
                     appendLine()
                     appendLine("## Day trade (capacidade habilitada)")
                     appendLine("- Dados de mercado são 100% reais (sem API key): market_discover (tokens de todo o ecossistema Solana, novos→velhos ou em alta, com liquidez e volume), market_token_info (preço/liquidez/volume/market cap de um token), market_price (preço USD ao vivo), market_candles (OHLCV real do pool de maior liquidez), market_liquidity (impacto real por tamanho — AMM não tem order book central). Nunca invente preços, velas ou profundidade; se uma ferramenta retornar MARKET_ERROR, relate o erro e não contorne com shell/curl.")
-                    appendLine("- FLUXO recomendado: (1) descubra oportunidades com market_discover e cheque market_token_info; (2) analise preço/tendência com market_candles; (3) meça liquidez/impacto com market_liquidity antes de entrar (confirme que dá para comprar E vender); (4) entre com wallet_swap; (5) proteja a posição com trade_set_rule (stop-loss price_below e/ou take-profit price_above); (6) a cada ciclo chame trade_list para avaliar e disparar os gatilhos no preço real.")
+                    appendLine("- FLUXO OBRIGATÓRIO: (1) descubra oportunidades com market_discover e cheque market_token_info; (2) analise preço/tendência com market_candles; (3) meça liquidez/impacto com market_liquidity (confirme que dá para comprar E vender); (4) SEMPRE chame typesafe_jev_check com os dados reais dos sinais ANTES de operar e entre APENAS nos sinais com acurácia suficiente (✅ OPERAR); (5) entre com wallet_swap só nos sinais aprovados; (6) proteja a posição com trade_set_rule (stop-loss price_below e/ou take-profit price_above); (7) a cada ciclo chame trade_list para avaliar e disparar os gatilhos no preço real.")
+                    appendLine("- NUNCA execute wallet_swap ou trade_set_rule sem antes validar o sinal com typesafe_jev_check. A acurácia vem de dados reais; não invente probabilidades.")
                     appendLine("- wallet_swap executa troca REAL e assinada localmente; entradas em SOL respeitam o limite por operação autorizado pelo usuário. Só diga 'enviado/executado' com base na assinatura retornada (Explorer); jamais afirme lucro ou execução sem a assinatura.")
                     appendLine("- Para monitorar o mercado de forma contínua, use set_schedule (ex.: a cada 5-15 min) e, a cada ciclo, reavalie com market_* e trade_list. Seja econômico e honesto sobre risco: day trade pode gerar perdas; nunca prometa retorno.")
                 }
@@ -809,6 +811,10 @@ class AgentRunner(
                 add(tool("trade_cancel", "Cancela uma regra de day trade armada deste agente.", buildJsonObject {
                     put("rule_id", str("ID da regra"))
                 }, listOf("rule_id")))
+                add(tool("typesafe_jev_check", "OBRIGATÓRIO antes de operar: avalia a ACURÁCIA de cada sinal de trade usando o modelo avaliador TypeSafe Jev (OpenRouter). Envie os dados REAIS que você já coletou (preço, velas, liquidez, volume, direção) de CADA sinal; retorna acurácia (0-100) e confiança por sinal. Entre apenas nos sinais de maior acurácia. Não invente números: baseie-se só nos dados fornecidos.", buildJsonObject {
+                    put("signals_json", str("JSON array de sinais, cada um: {\"id\":\"SOL\",\"direction\":\"buy|sell\",\"data\":\"resumo com preço, velas OHLCV, liquidez, volume, tendência\"}"))
+                    put("min_accuracy", int("Acurácia mínima (0-100) para considerar o sinal operável (padrão 70)"))
+                }, listOf("signals_json")))
             }
         }
         // Capacidades do dispositivo liberadas para este agente
@@ -897,6 +903,43 @@ class AgentRunner(
         toolName.startsWith("device_") -> "device"
         toolName.startsWith("mcp_") -> "connector"
         else -> "tool"
+    }
+
+    /**
+     * Avalia a acurácia de sinais de trade com o modelo TypeSafe Jev (ou o configurado) via OpenRouter.
+     * Usa SOMENTE os dados reais enviados pelo agente; retorna acurácia/confiança por sinal.
+     */
+    private suspend fun jevAccuracyCheck(signalsJson: String, minAccuracy: Int): String {
+        if (signalsJson.isBlank()) return "Informe 'signals_json' com os sinais e seus dados reais."
+        val model = store.settings.accuracyModel.ifBlank { "typesafe/jev-router" }
+        val sys = LlmMessage("system",
+            "Você é um avaliador de ACURÁCIA de sinais de day trade cripto. Avalie cada sinal usando EXCLUSIVAMENTE os dados reais fornecidos (preço, velas OHLCV, liquidez, volume, tendência). " +
+            "Não invente dados. Para cada sinal, estime a probabilidade (0-100) de o trade ser lucrativo no curto prazo e uma confiança (0-100) baseada na qualidade/suficiência dos dados. " +
+            "Responda SOMENTE com um array JSON, sem texto fora dele: [{\"id\":\"...\",\"accuracy\":NN,\"confidence\":NN,\"reason\":\"curto\"}].")
+        val user = LlmMessage("user", "Sinais (JSON):\n$signalsJson\n\nAvalie e retorne o array JSON.")
+        val reply = runCatching { llm.chat(listOf(sys, user), tools = null, model = model, maxTokens = 1200) }
+            .getOrElse { return "ACCURACY_ERROR ao consultar o avaliador ($model): ${(it.message ?: it.javaClass.simpleName).take(200)}. Ajuste o modelo avaliador em Configurações se necessário." }
+        val content = reply.content?.trim().orEmpty()
+        val arr = runCatching {
+            val start = content.indexOf('['); val end = content.lastIndexOf(']')
+            val jsonText = if (start >= 0 && end > start) content.substring(start, end + 1) else content
+            json.parseToJsonElement(jsonText).jsonArray
+        }.getOrNull()
+            ?: return "Avaliador ($model) respondeu, mas não em JSON válido. Resposta: ${content.take(500)}"
+        return buildString {
+            appendLine("Acurácia dos sinais (modelo $model; opere só ≥ $minAccuracy%):")
+            arr.forEach { el ->
+                val o = el.jsonObject
+                val id = o["id"]?.jsonPrimitive?.contentOrNull ?: "?"
+                val acc = o["accuracy"]?.jsonPrimitive?.doubleOrNull ?: 0.0
+                val conf = o["confidence"]?.jsonPrimitive?.doubleOrNull ?: 0.0
+                val reason = o["reason"]?.jsonPrimitive?.contentOrNull.orEmpty()
+                val ok = if (acc >= minAccuracy) "✅ OPERAR" else "⛔ PULAR"
+                appendLine("$id: acurácia ${acc.toInt()}% · confiança ${conf.toInt()}% · $ok${if (reason.isNotBlank()) " — $reason" else ""}")
+            }
+            appendLine()
+            append("Regra: entre APENAS nos sinais marcados ✅ OPERAR. Para os demais, não execute wallet_swap nem trade_set_rule.")
+        }.trim()
     }
 
     private suspend fun runTool(sessionId: String, call: ToolCall): ToolResult {
@@ -1177,7 +1220,7 @@ class AgentRunner(
                     }
                 }
                 "market_price", "market_candles", "market_liquidity", "market_discover", "market_token_info",
-                "wallet_list_tokens", "wallet_swap", "trade_set_rule", "trade_list", "trade_cancel" -> {
+                "typesafe_jev_check", "wallet_list_tokens", "wallet_swap", "trade_set_rule", "trade_list", "trade_cancel" -> {
                     val agentId = store.session(sessionId)?.agentId
                     val policies = WalletAgentPolicyStore(ctx.applicationContext)
                     if (agentId.isNullOrBlank() || store.agent(agentId) == null) {
@@ -1187,9 +1230,10 @@ class AgentRunner(
                     } else {
                         val wallet = SolanaWalletRepository(ctx.applicationContext)
                         val market = dev.cueopen.app.wallet.SolanaMarketDataClient()
-                        if (call.name.startsWith("market_")) {
-                            // Dados de mercado são somente leitura (não tocam a carteira).
+                        if (call.name.startsWith("market_") || call.name == "typesafe_jev_check") {
+                            // Leitura/análise: não tocam a carteira nem a chave.
                             when (call.name) {
+                                "typesafe_jev_check" -> jevAccuracyCheck(s("signals_json"), i("min_accuracy") ?: 70)
                                 "market_discover" -> {
                                     val sort = s("sort").ifBlank { "new" }
                                     runCatching { market.discoverTokens(sort, i("limit") ?: 30) }.fold({ tokens ->
