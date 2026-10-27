@@ -105,6 +105,21 @@ class WalletAgentPolicyStoreTest {
     }
 
     @Test
+    fun completeAgentWalletGrantIsSavedAndRevokedAtomically() {
+        val agent = "agent-atomic-wallet"
+        store.setAgentCapabilities(agent, readAddress = true, readBalance = true, requestTransfer = true)
+        assertTrue(store.canAgentReadAddress(agent))
+        assertTrue(store.canAgentReadBalance(agent))
+        assertTrue(store.canAgentRequestTransfer(agent))
+
+        store.setAgentCapabilities(agent, readAddress = false, readBalance = false, requestTransfer = false)
+        val recreated = WalletAgentPolicyStore(context)
+        assertFalse(recreated.canAgentReadAddress(agent))
+        assertFalse(recreated.canAgentReadBalance(agent))
+        assertFalse(recreated.canAgentRequestTransfer(agent))
+    }
+
+    @Test
     fun agentReadGrantsRejectBlankAgentIdentity() {
         org.junit.Assert.assertThrows(IllegalArgumentException::class.java) {
             store.setAgentReadAddress(" ", true)
