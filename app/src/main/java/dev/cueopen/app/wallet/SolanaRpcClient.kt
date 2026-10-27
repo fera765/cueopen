@@ -73,6 +73,21 @@ class SolanaRpcClient(
             ?: throw IOException("Invalid lamports value from Solana RPC")
     }
 
+    /** Number of decimals for an SPL token mint, read on-chain. Used only to format amounts. */
+    suspend fun getTokenDecimals(mint: String): Int = withContext(Dispatchers.IO) {
+        require(SolanaAddressValidator.isValidAddress(mint)) { "Invalid token mint address" }
+        val value = rpc("getTokenSupply", listOf(
+            JsonPrimitive(mint),
+            buildJsonObject { put("commitment", "confirmed") }
+        )).jsonObject["value"]?.jsonObject ?: throw IOException("Malformed getTokenSupply response")
+        value["decimals"]?.jsonPrimitive?.content?.toIntOrNull()?.takeIf { it in 0..18 }
+            ?: throw IOException("Token mint has no valid decimals")
+    }
+
+    /** Sends an already-signed serialized transaction. Used by the swap executor. */
+    suspend fun sendSignedTransaction(serializedTransaction: ByteArray): String =
+        sendPersistedTransaction(serializedTransaction)
+
     /** Recent blockhash plus its expiry height; never store this as signing authorization. */
     suspend fun getLatestBlockhash(): SolanaBlockhash = withContext(Dispatchers.IO) {
         val result = rpc("getLatestBlockhash", listOf(
