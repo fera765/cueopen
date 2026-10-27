@@ -66,6 +66,11 @@ import dev.cueopen.app.wallet.SolanaRecentSignature
 import dev.cueopen.app.wallet.SolanaRpcClient
 import dev.cueopen.app.wallet.SolanaWalletRepository
 import dev.cueopen.app.wallet.SplTokenBalance
+import dev.cueopen.app.wallet.SolanaMarketDataClient
+import dev.cueopen.app.wallet.SolanaSwapClient
+import dev.cueopen.app.wallet.TokenDisplay
+import coil.compose.AsyncImage
+import androidx.compose.ui.text.style.TextOverflow
 import dev.cueopen.app.wallet.WalletSetupSession
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -112,6 +117,7 @@ fun WalletScreen(nav: NavController) {
     var recent by remember { mutableStateOf<List<SolanaRecentSignature>>(emptyList()) }
     var historyLoading by remember { mutableStateOf(false) }
     var tokens by remember { mutableStateOf<List<SplTokenBalance>>(emptyList()) }
+    var tokenMeta by remember { mutableStateOf<Map<String, TokenDisplay>>(emptyMap()) }
 
     // Onboarding / backup / repair state
     var setup by remember { mutableStateOf<WalletSetupSession?>(null) }
@@ -176,6 +182,11 @@ fun WalletScreen(nav: NavController) {
                 SolanaRpcClient.tokenAccountsWithFallback(selectedNetwork.value, current)
             }
         } catch (e: Exception) { /* keep previous token list */ }
+    }
+    // Enriquece os ativos com nome, símbolo, ícone e preço USD reais (DexScreener, keyless, 1 chamada).
+    LaunchedEffect(tokens, address) {
+        val mints = tokens.map { it.mint } + SolanaSwapClient.SOL_MINT
+        tokenMeta = runCatching { SolanaMarketDataClient().tokenDisplays(mints) }.getOrDefault(emptyMap())
     }
 
     Scaffold(containerColor = c.bg, topBar = { CueTopBar("Carteira", { nav.popBackStack() }) }) { pad ->
@@ -255,11 +266,23 @@ fun WalletScreen(nav: NavController) {
                                 Icon(Icons.Rounded.Refresh, null, Modifier.size(16.dp)); Spacer(Modifier.width(6.dp)); Text("Atualizar")
                             }
                         }
-                        AssetRow("Solana", "SOL", if (hideBalance) "••••" else (balance ?: "—"), c)
+                        run {
+                            val solMeta = tokenMeta[SolanaSwapClient.SOL_MINT]
+                            val solAmt = balance?.toDoubleOrNull()
+                            val solUsd = if (solAmt != null && solMeta?.priceUsd != null) solAmt * solMeta.priceUsd else null
+                            AssetRow("Solana", "SOL",
+                                if (hideBalance) "••••" else fmtAmount(balance),
+                                if (hideBalance) null else fmtUsd(solUsd), solMeta?.imageUrl, c)
+                        }
                         tokens.forEach { t ->
-                            val symbol = SolanaRpcClient.knownSymbol(t.mint) ?: (t.mint.take(4) + "…" + t.mint.takeLast(4))
-                            val name = SolanaRpcClient.knownSymbol(t.mint) ?: "Token SPL"
-                            AssetRow(name, symbol, if (hideBalance) "••••" else t.uiAmount, c)
+                            val meta = tokenMeta[t.mint]
+                            val symbol = meta?.symbol?.ifBlank { null } ?: SolanaRpcClient.knownSymbol(t.mint) ?: (t.mint.take(4) + "…" + t.mint.takeLast(4))
+                            val name = meta?.name?.ifBlank { null } ?: meta?.symbol?.ifBlank { null } ?: SolanaRpcClient.knownSymbol(t.mint) ?: "Token SPL"
+                            val amt = t.uiAmount.toDoubleOrNull()
+                            val usd = if (amt != null && meta?.priceUsd != null) amt * meta.priceUsd else null
+                            AssetRow(name, symbol,
+                                if (hideBalance) "••••" else fmtAmount(t.uiAmount),
+                                if (hideBalance) null else fmtUsd(usd), meta?.imageUrl, c)
                         }
                         if (tokens.isEmpty()) {
                             Text("Nenhum token SPL nesta carteira ainda. Ao receber ou trocar por um token, ele aparece aqui.", color = c.ink3, style = MaterialTheme.typography.bodySmall)
@@ -391,17 +414,41 @@ fun WalletScreen(nav: NavController) {
 }
 
 @Composable
-private fun AssetRow(name: String, symbol: String, amount: String, c: dev.cueopen.app.ui.theme.CueColors) {
+private fun AssetRow(name: String, symbol: String, amount: String, usd: String?, imageUrl: String?, c: dev.cueopen.app.ui.theme.CueColors) {
     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-        Surface(shape = CircleShape, color = WalletPalette.heroBg) {
-            Icon(Icons.Rounded.AccountBalanceWallet, null, Modifier.padding(12.dp), tint = WalletPalette.coral)
+        if (!imageUrl.isNullOrBlank()) {
+            AsyncImage(model = imageUrl, contentDescription = null, modifier = Modifier.size(44.dp).clip(CircleShape))
+        } else {
+            Surface(shape = CircleShape, color = WalletPalette.heroBg) {
+                Icon(Icons.Rounded.AccountBalanceWallet, null, Modifier.padding(12.dp), tint = WalletPalette.coral)
+            }
         }
         Column(Modifier.weight(1f)) {
-            Text(name, style = MaterialTheme.typography.titleMedium)
-            Text(symbol, color = c.ink2, style = MaterialTheme.typography.bodyMedium)
+            Text(name, style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(symbol, color = c.ink2, style = MaterialTheme.typography.bodyMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
-        Text(amount, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+        Column(horizontalAlignment = Alignment.End) {
+            Text(amount, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+            if (!usd.isNullOrBlank()) Text(usd, color = c.ink2, style = MaterialTheme.typography.bodySmall)
+        }
     }
+}
+
+/** Formata o valor do ativo: até 6 casas significativas, sem zeros à direita desnecessários. */
+private fun fmtAmount(raw: String?): String {
+    val v = raw?.toDoubleOrNull() ?: return raw ?: "—"
+    val s = when {
+        v == 0.0 -> "0"
+        v >= 1000 -> String.format(java.util.Locale.US, "%,.2f", v)
+        v >= 1 -> String.format(java.util.Locale.US, "%.4f", v)
+        else -> String.format(java.util.Locale.US, "%.6f", v)
+    }
+    return if (s.contains('.')) s.trimEnd('0').trimEnd('.') else s
+}
+
+private fun fmtUsd(v: Double?): String? {
+    if (v == null || v <= 0.0) return null
+    return "≈ US$ " + String.format(java.util.Locale.US, if (v >= 1.0) "%,.2f" else "%.4f", v)
 }
 
 @Composable

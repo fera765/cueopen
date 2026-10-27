@@ -204,6 +204,7 @@ private fun AgentSelector(agent: AgentProfile?, agents: List<AgentProfile>, onSe
 fun Composer(
     value: String, onChange: (String) -> Unit, placeholder: String,
     running: Boolean = false, onStop: () -> Unit = {},
+    nextCycleAt: Long? = null,
     onSend: (String, List<Uri>) -> Unit,
 ) {
     val c = Cue.c
@@ -452,8 +453,32 @@ fun Composer(
             Spacer(Modifier.weight(1f))
             // Com o agente ativo e sem texto digitado → botão PARAR. Ao digitar → botão ENVIAR.
             if (running && value.isBlank()) {
-                Box(Modifier.size(40.dp).clip(CircleShape).background(c.ink).clickable(onClick = onStop), contentAlignment = Alignment.Center) {
-                    Box(Modifier.size(12.dp).clip(RoundedCornerShape(2.dp)).background(c.bg))
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    // Balão de cronômetro real: conta o tempo exato até o próximo ciclo agendado.
+                    if (nextCycleAt != null) {
+                        var now by remember(nextCycleAt) { mutableStateOf(System.currentTimeMillis()) }
+                        LaunchedEffect(nextCycleAt) {
+                            while (true) { now = System.currentTimeMillis(); kotlinx.coroutines.delay(1000) }
+                        }
+                        val remaining = (nextCycleAt - now).coerceAtLeast(0L)
+                        val mm = (remaining / 60_000L).toInt()
+                        val ss = ((remaining % 60_000L) / 1000L).toInt()
+                        Row(
+                            Modifier.clip(RoundedCornerShape(14.dp)).background(c.ink).padding(horizontal = 12.dp, vertical = 7.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(Icons.Rounded.Schedule, null, Modifier.size(15.dp), tint = c.bg)
+                            Spacer(Modifier.width(6.dp))
+                            Text(
+                                if (remaining == 0L) "iniciando ciclo…" else "Próximo ciclo em " + String.format("%02d:%02d", mm, ss),
+                                color = c.bg, fontSize = 13.sp, fontWeight = FontWeight.SemiBold
+                            )
+                        }
+                        Spacer(Modifier.height(6.dp))
+                    }
+                    Box(Modifier.size(40.dp).clip(CircleShape).background(c.ink).clickable(onClick = onStop), contentAlignment = Alignment.Center) {
+                        Box(Modifier.size(12.dp).clip(RoundedCornerShape(2.dp)).background(c.bg))
+                    }
                 }
             } else {
                 val enabled = value.isNotBlank()

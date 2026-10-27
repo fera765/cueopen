@@ -17,8 +17,8 @@ android {
         // do sandbox a partir de filesDir. Os .so do proot também vêm em jniLibs.
         targetSdk = 28
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
-        versionCode = 20
-        versionName = "4.7.2"
+        versionCode = 21
+        versionName = "4.8.0"
         ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64") }
     }
     signingConfigs {
@@ -66,6 +66,8 @@ dependencies {
     implementation("androidx.core:core-ktx:1.15.0")
     implementation(project(":terminal-view"))
     implementation("com.caverock:androidsvg-aar:1.4")
+    // Carrega ícones de tokens (logos remotos) na lista de ativos
+    implementation("io.coil-kt:coil-compose:2.7.0")
     // Markdown estilo GitHub no chat (tabelas, listas, citações) + highlight de código
     implementation("com.mikepenz:multiplatform-markdown-renderer-m3:0.27.0")
     implementation("com.mikepenz:multiplatform-markdown-renderer-code:0.27.0")

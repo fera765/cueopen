@@ -162,6 +162,7 @@ fun ChatScreen(nav: NavController, sessionId: String) {
                 value = draft, onChange = { draft = it },
                 placeholder = if (session.status == SessionStatus.WAITING_USER) "Responda ao agente…" else "Envie uma mensagem",
                 running = running || session.status == SessionStatus.SLEEPING || autoAgent != null, onStop = { app.agent.stop(sessionId) },
+                nextCycleAt = session.wakeAt?.takeIf { it > System.currentTimeMillis() },
                 onSend = { text, files ->
                     if (text.trim().startsWith("@create-agent", true)) {
                         val desc = text.trim().removePrefix("@create-agent").removePrefix("@Create-Agent").trim()

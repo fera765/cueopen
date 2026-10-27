@@ -97,6 +97,48 @@ class SolanaMarketDataClient(
      * de token_info/preço para tirar carga do GeckoTerminal e evitar 429. Escolhe o par de maior
      * liquidez. Resiliente: devolve null em falha (o chamador tenta outra fonte).
      */
+    /**
+     * Metadados de exibição (símbolo, nome, preço USD, ícone) de vários tokens numa ÚNICA chamada
+     * ao DexScreener (keyless; aceita mints separados por vírgula). Para a lista "Meus ativos".
+     */
+    suspend fun tokenDisplays(mints: List<String>): Map<String, TokenDisplay> = withContext(Dispatchers.IO) {
+        val ids = mints.filter { SolanaAddressValidator.isValidAddress(it) }.distinct()
+        if (ids.isEmpty()) return@withContext emptyMap()
+        val out = HashMap<String, TokenDisplay>()
+        // DexScreener aceita até 30 mints por chamada.
+        ids.chunked(30).forEach { chunk ->
+            val cacheKey = "disp:" + chunk.joinToString(",")
+            val body = cacheGet(cacheKey) ?: runCatching {
+                val req = Request.Builder().url("$DEXSCREENER_BASE/latest/dex/tokens/" + chunk.joinToString(","))
+                    .header("Accept", "application/json").get().build()
+                client.newCall(req).execute().use { resp ->
+                    if (!resp.isSuccessful) return@use null
+                    val b = resp.body?.string().orEmpty()
+                    if (b.isNotBlank() && b.length <= MAX_RESPONSE_CHARS) { cachePut(cacheKey, b); b } else null
+                }
+            }.getOrNull() ?: return@forEach
+            val pairs = runCatching { json.parseToJsonElement(body).jsonObject["pairs"]?.jsonArray }.getOrNull() ?: return@forEach
+            // Para cada mint, escolhe o par de maior liquidez.
+            chunk.forEach { mint ->
+                val best = pairs.filter {
+                    val o = it.jsonObject
+                    (o["chainId"]?.jsonPrimitive?.contentOrNull) == "solana" &&
+                        (o["baseToken"]?.jsonObject?.get("address")?.jsonPrimitive?.contentOrNull) == mint
+                }.maxByOrNull { (it.jsonObject["liquidity"] as? JsonObject)?.get("usd")?.jsonPrimitive?.doubleOrNull ?: 0.0 }
+                    ?.jsonObject ?: return@forEach
+                val baseTok = best["baseToken"]?.jsonObject
+                out[mint] = TokenDisplay(
+                    mint = mint,
+                    symbol = baseTok?.get("symbol")?.jsonPrimitive?.contentOrNull ?: mint.take(4),
+                    name = baseTok?.get("name")?.jsonPrimitive?.contentOrNull.orEmpty(),
+                    priceUsd = best["priceUsd"]?.jsonPrimitive?.contentOrNull?.toDoubleOrNull(),
+                    imageUrl = (best["info"] as? JsonObject)?.get("imageUrl")?.jsonPrimitive?.contentOrNull
+                )
+            }
+        }
+        out
+    }
+
     /** Melhor par (maior liquidez) do token na Solana via DexScreener, em cache. */
     private suspend fun bestDexPair(mint: String): JsonObject? = withContext(Dispatchers.IO) {
         val cacheKey = "dex:$mint"
@@ -402,6 +444,14 @@ class SolanaMarketDataClient(
 object MarketApiConfig {
     @Volatile var geckoApiKey: String? = null
 }
+
+data class TokenDisplay(
+    val mint: String,
+    val symbol: String,
+    val name: String,
+    val priceUsd: Double?,
+    val imageUrl: String?
+)
 
 data class TokenMarket(
     val mint: String,
