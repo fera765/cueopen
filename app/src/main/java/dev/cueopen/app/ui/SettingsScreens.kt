@@ -80,6 +80,15 @@ fun SettingsScreen(nav: NavController) {
             SettingsLink(Icons.Rounded.Psychology, "Memória de longo prazo", "${st.memories.size} itens") { nav.navigate("memory") }
             SectionLabel("Carteira")
             SettingsLink(Icons.Rounded.AccountBalanceWallet, "Carteira Solana", "Criar ou restaurar carteira local e consultar saldo") { nav.navigate("wallet") }
+            // Chave Demo gratuita e opcional da CoinGecko para o mercado (evita rate limit). Vazio = keyless.
+            val marketPrefs = remember { nav.context.getSharedPreferences("solana_wallet_settings", android.content.Context.MODE_PRIVATE) }
+            var geckoKey by remember { mutableStateOf(marketPrefs.getString("gecko_api_key", "").orEmpty()) }
+            CueField(geckoKey, { v ->
+                geckoKey = v.trim()
+                marketPrefs.edit().putString("gecko_api_key", geckoKey).apply()
+                dev.cueopen.app.wallet.MarketApiConfig.geckoApiKey = geckoKey.ifBlank { null }
+            }, "Chave Demo CoinGecko (opcional, grátis)", password = true)
+            Text("O mercado funciona sem chave (com cache e limites automáticos). Se você bater em limite de requisições com frequência, crie uma chave Demo gratuita em coingecko.com e cole aqui para ter quota dedicada.", fontSize = 12.sp, color = Cue.c.ink2)
             SectionLabel("Aparência")
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 listOf(ThemeMode.SYSTEM to "Sistema", ThemeMode.LIGHT to "Claro", ThemeMode.DARK to "Escuro").forEach { (m, l) ->

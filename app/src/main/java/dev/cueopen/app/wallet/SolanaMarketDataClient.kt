@@ -1,6 +1,9 @@
 package dev.cueopen.app.wallet
 
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.doubleOrNull
@@ -36,6 +39,63 @@ class SolanaMarketDataClient(
         .build()
 ) {
     private val json = Json { ignoreUnknownKeys = true }
+
+    /**
+     * GET resiliente ao GeckoTerminal: cache curto (evita repetir chamadas), throttle global
+     * (respeita o limite de ~30 req/min keyless) e retry com backoff em HTTP 429. Se o usuário
+     * configurar uma chave Demo gratuita da CoinGecko, usa o endpoint onchain com quota dedicada.
+     * [pathAndQuery] ex.: "/networks/solana/new_pools?page=1".
+     */
+    private suspend fun geckoGet(pathAndQuery: String): String = withContext(Dispatchers.IO) {
+        cacheGet(pathAndQuery)?.let { return@withContext it }
+        val key = MarketApiConfig.geckoApiKey?.takeIf { it.isNotBlank() }
+        val base = if (key != null) COINGECKO_ONCHAIN_BASE else geckoBase.trimEnd('/')
+        val url = base + pathAndQuery
+        var attempt = 0
+        var lastErr = "limite de requisições (HTTP 429)"
+        while (attempt < 4) {
+            geckoThrottle(key != null)
+            val reqB = Request.Builder().url(url).header("Accept", "application/json").get()
+            if (key != null) reqB.header("x-cg-demo-api-key", key)
+            client.newCall(reqB.build()).execute().use { resp ->
+                when {
+                    resp.isSuccessful -> {
+                        val body = resp.body?.string().orEmpty()
+                        if (body.length > MAX_RESPONSE_CHARS) throw IOException("Resposta excede o limite")
+                        cachePut(pathAndQuery, body)
+                        return@withContext body
+                    }
+                    resp.code == 429 -> {
+                        lastErr = "limite de requisições (HTTP 429)"
+                        val retryMs = (resp.header("Retry-After")?.toLongOrNull()?.times(1000)
+                            ?: (1500L * (attempt + 1))).coerceAtMost(6000L)
+                        delay(retryMs)
+                    }
+                    else -> throw IOException("HTTP ${resp.code}")
+                }
+            }
+            attempt++
+        }
+        throw IOException(lastErr)
+    }
+
+    private suspend fun geckoThrottle(hasKey: Boolean) {
+        val interval = if (hasKey) 1300L else MIN_INTERVAL_MS
+        geckoMutex.withLock {
+            val wait = interval - (System.currentTimeMillis() - lastGeckoCallMs)
+            if (wait > 0) delay(wait)
+            lastGeckoCallMs = System.currentTimeMillis()
+        }
+    }
+
+    private fun cacheGet(k: String): String? {
+        val e = cache[k] ?: return null
+        return if (System.currentTimeMillis() - e.first < CACHE_TTL_MS) e.second else { cache.remove(k); null }
+    }
+    private fun cachePut(k: String, v: String) {
+        if (cache.size > 200) cache.clear()
+        cache[k] = System.currentTimeMillis() to v
+    }
 
     /** USD spot prices for the given mints. Missing entries are derived from a real quote vs USDC. */
     suspend fun pricesUsd(mints: List<String>): Map<String, Double> = withContext(Dispatchers.IO) {
@@ -100,13 +160,8 @@ class SolanaMarketDataClient(
         require(timeframe in setOf("day", "hour", "minute")) { "timeframe deve ser day, hour ou minute" }
         val safeLimit = limit.coerceIn(1, 1000)
         val pool = topPoolFor(mint) ?: throw IOException("Nenhum pool de liquidez encontrado para este token na Solana")
-        val url = geckoBase.trimEnd('/') +
-            "/networks/solana/pools/$pool/ohlcv/$timeframe?aggregate=${aggregate.coerceAtLeast(1)}&limit=$safeLimit&currency=usd"
-        val req = Request.Builder().url(url).header("Accept", "application/json").get().build()
-        client.newCall(req).execute().use { resp ->
-            if (!resp.isSuccessful) throw IOException("OHLCV HTTP ${resp.code}")
-            val body = resp.body?.string().orEmpty()
-            if (body.length > MAX_RESPONSE_CHARS) throw IOException("Resposta OHLCV excede o limite")
+        val body = geckoGet("/networks/solana/pools/$pool/ohlcv/$timeframe?aggregate=${aggregate.coerceAtLeast(1)}&limit=$safeLimit&currency=usd")
+        run {
             val list = json.parseToJsonElement(body).jsonObject["data"]?.jsonObject
                 ?.get("attributes")?.jsonObject?.get("ohlcv_list")?.jsonArray
                 ?: throw IOException("OHLCV em formato inválido")
@@ -127,20 +182,14 @@ class SolanaMarketDataClient(
 
     /** Address of the deepest (reserve-ranked) Solana pool for a token, without the "solana_" prefix. */
     private suspend fun topPoolFor(mint: String): String? {
-        val url = geckoBase.trimEnd('/') + "/networks/solana/tokens/$mint/pools?page=1"
-        val req = Request.Builder().url(url).header("Accept", "application/json").get().build()
-        return client.newCall(req).execute().use { resp ->
-            if (!resp.isSuccessful) return@use null
-            val body = resp.body?.string().orEmpty()
-            if (body.length > MAX_RESPONSE_CHARS) return@use null
-            val data = runCatching { json.parseToJsonElement(body).jsonObject["data"]?.jsonArray }.getOrNull()
-                ?: return@use null
-            val best = data.maxByOrNull {
-                it.jsonObject["attributes"]?.jsonObject?.get("reserve_in_usd")
-                    ?.jsonPrimitive?.doubleOrNull ?: 0.0
-            } ?: data.firstOrNull() ?: return@use null
-            best.jsonObject["id"]?.jsonPrimitive?.content?.removePrefix("solana_")
-        }
+        val body = runCatching { geckoGet("/networks/solana/tokens/$mint/pools?page=1") }.getOrNull() ?: return null
+        val data = runCatching { json.parseToJsonElement(body).jsonObject["data"]?.jsonArray }.getOrNull()
+            ?: return null
+        val best = data.maxByOrNull {
+            it.jsonObject["attributes"]?.jsonObject?.get("reserve_in_usd")
+                ?.jsonPrimitive?.doubleOrNull ?: 0.0
+        } ?: data.firstOrNull() ?: return null
+        return best.jsonObject["id"]?.jsonPrimitive?.content?.removePrefix("solana_")
     }
 
     /**
@@ -176,16 +225,10 @@ class SolanaMarketDataClient(
         // GeckoTerminal pagina de 20 em 20; busca páginas até preencher o limite.
         var page = 1
         while (out.size < safeLimit && page <= 5) {
-            val url = geckoBase.trimEnd('/') + "/networks/solana/$endpoint?page=$page"
-            val req = Request.Builder().url(url).header("Accept", "application/json").get().build()
-            val data = runCatching {
-                client.newCall(req).execute().use { resp ->
-                    if (!resp.isSuccessful) throw IOException("Discover HTTP ${resp.code}")
-                    val body = resp.body?.string().orEmpty()
-                    if (body.length > MAX_RESPONSE_CHARS) throw IOException("Resposta de descoberta excede o limite")
-                    json.parseToJsonElement(body).jsonObject["data"]?.jsonArray
-                }
-            }.getOrNull()
+            // Primeira página propaga erro (ex.: 429) para o chamador; páginas seguintes são best-effort.
+            val body = if (page == 1) geckoGet("/networks/solana/$endpoint?page=$page")
+            else runCatching { geckoGet("/networks/solana/$endpoint?page=$page") }.getOrNull()
+            val data = body?.let { runCatching { json.parseToJsonElement(it).jsonObject["data"]?.jsonArray }.getOrNull() }
             if (data.isNullOrEmpty()) break
             for (pool in data) {
                 if (out.size >= safeLimit) break
@@ -221,14 +264,10 @@ class SolanaMarketDataClient(
     /** Informações REAIS de um token (preço, liquidez total, volume 24h, market cap) via GeckoTerminal. */
     suspend fun tokenInfo(mint: String): TokenMarket? = withContext(Dispatchers.IO) {
         require(SolanaAddressValidator.isValidAddress(mint)) { "Mint inválido" }
-        val url = geckoBase.trimEnd('/') + "/networks/solana/tokens/$mint"
-        val req = Request.Builder().url(url).header("Accept", "application/json").get().build()
-        client.newCall(req).execute().use { resp ->
-            if (!resp.isSuccessful) throw IOException("Token info HTTP ${resp.code}")
-            val body = resp.body?.string().orEmpty()
-            if (body.length > MAX_RESPONSE_CHARS) throw IOException("Resposta de token excede o limite")
+        val body = geckoGet("/networks/solana/tokens/$mint")
+        run {
             val attr = json.parseToJsonElement(body).jsonObject["data"]?.jsonObject
-                ?.get("attributes")?.jsonObject ?: return@use null
+                ?.get("attributes")?.jsonObject ?: return@withContext null
             TokenMarket(
                 mint = mint,
                 symbol = attr["symbol"]?.jsonPrimitive?.contentOrNull ?: mint.take(6),
@@ -248,8 +287,20 @@ class SolanaMarketDataClient(
     companion object {
         const val JUP_PRICE_BASE = "https://lite-api.jup.ag"
         const val GECKO_BASE = "https://api.geckoterminal.com/api/v2"
+        // Endpoint onchain da CoinGecko (espelha o GeckoTerminal) quando há chave Demo gratuita.
+        const val COINGECKO_ONCHAIN_BASE = "https://api.coingecko.com/api/v3/onchain"
         private const val MAX_RESPONSE_CHARS = 2 * 1024 * 1024
+        private const val MIN_INTERVAL_MS = 2200L
+        private const val CACHE_TTL_MS = 45_000L
+        private val geckoMutex = Mutex()
+        @Volatile private var lastGeckoCallMs = 0L
+        private val cache = java.util.concurrent.ConcurrentHashMap<String, Pair<Long, String>>()
     }
+}
+
+/** Configuração opcional do mercado. Chave Demo gratuita da CoinGecko evita rate limit keyless. */
+object MarketApiConfig {
+    @Volatile var geckoApiKey: String? = null
 }
 
 data class TokenMarket(

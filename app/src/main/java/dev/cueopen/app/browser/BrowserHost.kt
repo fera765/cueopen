@@ -117,6 +117,51 @@ class BrowserHost(private val appCtx: Context) {
      */
     private fun agentView(): WebView = _view ?: view(appCtx)
 
+    /** Página de erro própria do CueOpen, no lugar da tela padrão do Chrome/WebView. */
+    private fun errorPageHtml(url: String, rawDesc: String): String {
+        fun esc(s: String) = s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("\"", "&quot;")
+        val code = rawDesc.substringAfter("net::", rawDesc).trim()
+        val friendly = when {
+            code.contains("CONNECTION_REFUSED") -> "O servidor recusou a conexão. Se for um site local (localhost), confirme que ele está rodando."
+            code.contains("NAME_NOT_RESOLVED") -> "Não foi possível encontrar esse endereço. Verifique se o domínio está certo."
+            code.contains("INTERNET_DISCONNECTED") || code.contains("NETWORK_CHANGED") -> "Sem conexão com a internet no momento."
+            code.contains("TIMED_OUT") -> "O servidor demorou demais para responder."
+            code.contains("FILE_NOT_FOUND") -> "O arquivo ou página não foi encontrado."
+            code.contains("SSL") || code.contains("CERT") -> "Houve um problema de segurança (certificado) com este site."
+            else -> "Não foi possível abrir esta página."
+        }
+        val safeUrl = esc(url); val safeCode = esc(code.ifBlank { rawDesc })
+        return """
+<!doctype html><html lang="pt-br"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+  :root{color-scheme:dark}
+  *{box-sizing:border-box}
+  body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;
+    background:#0F1115;color:#E6E6E6;font-family:-apple-system,Roboto,system-ui,sans-serif;padding:28px}
+  .card{max-width:480px;width:100%;text-align:center}
+  .emoji{font-size:54px;line-height:1;margin-bottom:12px}
+  h1{font-size:22px;font-weight:700;margin:0 0 10px}
+  p{font-size:15px;line-height:1.5;color:#AFAFAF;margin:0 0 18px}
+  .url{font-family:ui-monospace,Menlo,monospace;font-size:12px;color:#8A8A8A;
+    background:#171A20;border-radius:10px;padding:10px 12px;word-break:break-all;margin-bottom:18px}
+  .code{font-family:ui-monospace,Menlo,monospace;font-size:12px;color:#FF8A63;margin-bottom:22px}
+  button{appearance:none;border:0;cursor:pointer;background:#FF8A63;color:#0F1115;font-weight:700;
+    font-size:15px;border-radius:999px;padding:13px 26px}
+  .brand{margin-top:26px;font-size:12px;color:#5A5A5A}
+</style></head>
+<body><div class="card">
+  <div class="emoji">🛰️</div>
+  <h1>Página indisponível</h1>
+  <p>$friendly</p>
+  <div class="url">$safeUrl</div>
+  <button onclick="location.href='$safeUrl'">Tentar de novo</button>
+  <div class="code">$safeCode</div>
+  <div class="brand">CueOpen · navegador do agente</div>
+</div></body></html>
+        """.trimIndent()
+    }
+
     @SuppressLint("SetJavaScriptEnabled")
     private fun createView(ctx: Context, agentMode: Boolean): WebView {
         val v = WebView(ctx)
@@ -171,7 +216,11 @@ class BrowserHost(private val appCtx: Context) {
                 patchNet(request.url.toString()) { it.copy(error = error.description?.toString()) }
                 if (request.isForMainFrame) {
                     sync(view, loading = false)
-                    pageDone?.complete("ERROR: " + (error.description?.toString() ?: "Falha ao carregar a página"))
+                    val desc = error.description?.toString() ?: "Falha ao carregar a página"
+                    pageDone?.complete("ERROR: $desc")
+                    // Página de erro própria (substitui a tela padrão do Chrome/WebView).
+                    val failing = request.url.toString()
+                    view.loadDataWithBaseURL(null, errorPageHtml(failing, desc), "text/html", "UTF-8", failing)
                 }
             }
             override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
@@ -411,7 +460,10 @@ class BrowserHost(private val appCtx: Context) {
 
     private suspend fun awaitLoadIfNavigating() {
         kotlinx.coroutines.delay(800)
-        if (agentView().progress < 100) { pageDone = CompletableDeferred(); awaitLoad() }
+        // progress é método do WebView: só pode ser lido na main thread (evita o crash
+        // "A WebView method was called on thread 'DefaultDispatcher-worker'").
+        val navigating = onMain { agentView().progress < 100 }
+        if (navigating) { onMain { pageDone = CompletableDeferred() }; awaitLoad() }
     }
 
     private suspend fun eval(js: String): String {

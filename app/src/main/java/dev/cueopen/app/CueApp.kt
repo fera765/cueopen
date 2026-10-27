@@ -25,6 +25,11 @@ class CueApp : Application() {
         super.onCreate()
         instance = this
         dev.cueopen.app.diag.ErrorLog.init(this)
+        // Chave Demo opcional da CoinGecko (gratuita) para o mercado, se o usuário tiver configurado.
+        runCatching {
+            dev.cueopen.app.wallet.MarketApiConfig.geckoApiKey = getSharedPreferences("solana_wallet_settings", MODE_PRIVATE)
+                .getString("gecko_api_key", null)?.trim()?.ifBlank { null }
+        }
         // registra falhas para diagnóstico (Configurações > Último erro / Logs de erros)
         val prev = Thread.getDefaultUncaughtExceptionHandler()
         Thread.setDefaultUncaughtExceptionHandler { t, e ->
