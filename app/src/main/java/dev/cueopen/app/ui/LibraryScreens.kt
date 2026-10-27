@@ -147,7 +147,7 @@ fun AgentEditScreen(nav: NavController, id: String) {
             ) { walletAccess = it }
             if (walletAccess) {
                 Column(
-                    Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(c.panel).padding(12.dp),
+                    Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(c.surface2).padding(12.dp),
                     verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
                     ToggleRow("Consultar endereço público", "Permite ler o endereço público da carteira local.", walletReadAddress) { walletReadAddress = it }
