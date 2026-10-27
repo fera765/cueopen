@@ -257,7 +257,15 @@ class AgentRunner(
             var stopLoop: SessionStatus? = null
             var sleepReq: Pair<Int, String>? = null
             for (call in reply.toolCalls) {
-                val result = runTool(sessionId, call)
+                // Auto-recuperação: uma exceção em qualquer ferramenta vira um erro acionável devolvido
+                // ao modelo (nunca derruba o loop do agente).
+                val result = try {
+                    runTool(sessionId, call)
+                } catch (c: kotlinx.coroutines.CancellationException) {
+                    throw c
+                } catch (t: Throwable) {
+                    ToolResult(output = "ERRO ao executar a ferramenta \"${call.name}\": ${t.message?.take(300) ?: t.javaClass.simpleName}. Diagnostique a causa, ajuste os argumentos/abordagem e tente de outra forma; não repita a mesma chamada. Se estiver bloqueado, chame finish explicando.")
+                }
                 val ctxOut = ctxMgr.storeToolOutput(sessionId, call.id, result.output)
                 store.editSession(sessionId) {
                     it.copy(llm = it.llm + LlmMessage("tool", ctxOut, toolCallId = call.id, name = call.name))
@@ -295,7 +303,12 @@ class AgentRunner(
             }
             val sl = sleepReq
             if (sl != null) { sleepAndWake(sessionId, sl.first, sl.second); steps = 0; continue }
-            if (++steps >= maxSteps) {
+            steps++
+            // Aviso de proximidade do limite: pede para priorizar a entrega antes do corte abrupto.
+            if (steps == (maxSteps - 2).coerceAtLeast(1) && store.session(sessionId)?.continuous != true) {
+                store.editSession(sessionId) { it.copy(llm = it.llm + LlmMessage("user", "[Sistema] Você está perto do limite de passos. Priorize concluir o essencial e entregar agora com finish (resumo curto + arquivos). Deixe o não-essencial como próximo passo.")) }
+            }
+            if (steps >= maxSteps) {
                 if (store.session(sessionId)?.continuous == true) { sleepAndWake(sessionId, 1, "pausa automática após $maxSteps passos"); steps = 0; continue }
                 store.addItem(sessionId, ChatItem.Error(text = "Limite de $maxSteps passos atingido. Envie \"continue\" para seguir."))
                 store.editSession(sessionId) { it.copy(status = SessionStatus.WAITING_USER) }
@@ -576,6 +589,8 @@ class AgentRunner(
             appendLine("Modo de trabalho:")
             appendLine("1. Tarefas com várias etapas: chame `update_plan` e atualize ao concluir fases.")
             appendLine("2. Aja com ferramentas em vez de descrever. Verifique resultados.")
+            appendLine("2a. ENTREGA: nunca diga que algo foi feito/funciona sem evidência real da ferramenta (saída, arquivo, status). Antes de `finish`, confira o resultado (ls/file_read/execução). Se não conseguiu validar, diga isso claramente em vez de afirmar sucesso.")
+            appendLine("2b. ERRO: se uma ferramenta falhar, leia a mensagem, diagnostique e MUDE a abordagem (outro caminho/comando/argumento). Nunca repita a mesma chamada que falhou. Se ficar bloqueado, finalize explicando o motivo em vez de entrar em loop.")
             appendLine("3. Economize contexto: leia só o necessário (head/grep), mande saídas longas para arquivo.")
             appendLine("3a. Trabalhe APENAS no seu workspace (${sandbox.guestPath(sessionId)}); não leia /root/workspace de outras tarefas.")
             appendLine("3b. Arquivos: use file_write (nunca heredoc gigante no shell). Arquivos grandes em partes com append=true. Depois confira com `ls -la` ou file_read.")
