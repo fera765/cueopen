@@ -63,6 +63,32 @@ class SolanaRpcClientTest {
     }
 
     @Test
+    fun recentSignaturesReturnsValidatedOnChainHistory() = runBlocking {
+        val rpc = client(
+            """{"jsonrpc":"2.0","id":1,"result":[{"signature":"$signature","slot":42,"blockTime":1700000000,"err":null,"memo":null,"confirmationStatus":"finalized"},{"signature":"$signature","slot":41,"blockTime":null,"err":{"InstructionError":[0,"Custom"]},"memo":null,"confirmationStatus":"confirmed"}]}"""
+        )
+        val history = rpc.getRecentSignatures(
+            "HAgk14JpMQLgt6rVgv7cBQFJWFto5Dqxi472uT3DKpqk", limit = 2
+        )
+        assertEquals(2, history.size)
+        assertEquals(42L, history[0].slot)
+        assertEquals(1700000000L, history[0].blockTimeEpochSeconds)
+        assertNull(history[0].error)
+        assertTrue(history[1].error.orEmpty().contains("InstructionError"))
+    }
+
+    @Test
+    fun recentSignaturesRejectsInvalidAddressAndOutOfRangeLimit() {
+        val rpc = client("""{"jsonrpc":"2.0","id":1,"result":[]}""")
+        assertThrows(IllegalArgumentException::class.java) {
+            runBlocking { rpc.getRecentSignatures("invalid-address") }
+        }
+        assertThrows(IllegalArgumentException::class.java) {
+            runBlocking { rpc.getRecentSignatures("HAgk14JpMQLgt6rVgv7cBQFJWFto5Dqxi472uT3DKpqk", 26) }
+        }
+    }
+
+    @Test
     fun signatureStatusDistinguishesFinalizedAndFailed() = runBlocking {
         val finalized = client(
             """{"jsonrpc":"2.0","id":1,"result":{"context":{"slot":9},"value":[{"slot":8,"confirmations":null,"err":null,"confirmationStatus":"finalized"}]}}"""
