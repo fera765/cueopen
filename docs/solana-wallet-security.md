@@ -15,8 +15,8 @@ A wallet cannot guarantee recovery merely by storing its key in Android Keystore
 ## Agent boundary
 
 - `AgentRunner.tools(...)` now registers only two read-only wallet tools (`wallet_get_address`, `wallet_get_balance`) when the selected agent has the matching persisted capability grant. The tool dispatcher rechecks the grant at execution time.
-- The wallet screen exposes per-agent switches for public-address reads, balance reads and SOL transfer requests. All grants default to disabled and are stored locally under hash-derived preference keys. Each agent can have lower per-request/daily caps and an optional exact-match recipient allowlist; updates are validated and saved atomically, with hard caps of 0.05 SOL/request and 0.10 SOL/day.
-- Authorized agent sessions can call `wallet_request_transfer` with only a recipient and decimal SOL amount. The agent identity is taken from the local session, never from model arguments; network is read from the persisted wallet setting and fails closed when missing/invalid.
+- The wallet screen and agent editor expose per-agent switches for public-address reads, balance reads and SOL transfer requests. All grants default to disabled and are stored locally under hash-derived preference keys. The agent editor saves the three grants atomically. Each agent can have lower per-request/daily caps and an optional exact-match recipient allowlist; updates are validated and saved atomically, with hard caps of 0.05 SOL/request and 0.10 SOL/day.
+- Authorized agent sessions can call `wallet_request_transfer` with only a recipient and decimal SOL amount. The agent identity is taken from the local session, never from model arguments; network is read from the persisted wallet setting and fails closed when missing/invalid. The wallet screen persists the explicit initial Mainnet selection, but agent tools never silently choose a network when the saved preference is missing.
 - The request tool creates a typed intent in the SQLite ledger and never signs or broadcasts. Identical recent agent intents are deduplicated inside the SQLite authorization transaction to reduce duplicate requests during retries/concurrent tool calls. A wallet approval queue shows pending agent requests, lets the user reject them, or approve and sign locally. The final broadcast remains a separate explicit confirmation. Agent transfer policies are persisted, non-autonomous, limited to 0.05 SOL per request and 0.10 SOL per local day.
 - The signer and broadcaster re-read the persisted policy for the request's actual agent identity and network; revoked permissions or stale/forged policy objects are rejected. Temporary multi-agent workers do not receive wallet tool schemas. No wallet tool returns a seed, private key, recovery phrase, or signing material.
 - The signer must check action, network, asset, amount, destination, fees, cumulative spend limits and duplicate request ID on every operation.
@@ -26,7 +26,7 @@ A wallet cannot guarantee recovery merely by storing its key in Android Keystore
 
 ## Transaction lifecycle
 
-The repository now contains an initial SOL transfer path: typed SOL intent, address and amount validation, a SQLite idempotency/spending ledger, policy checks, local signing, simulation, persistence of signed bytes before broadcast, explicit broadcast confirmation and signature reconciliation. The UI has a manual transfer switch, per-transfer and daily limits, a recent ledger list and explorer links.
+The repository now contains an initial SOL transfer path: typed SOL intent, address and amount validation, a SQLite idempotency/spending ledger, policy checks, local signing, simulation, persistence of signed bytes before broadcast, explicit broadcast confirmation and signature reconciliation. The UI has a manual transfer switch, per-transfer and daily limits, a local request ledger, pending-agent approval/recovery flows, and explorer links. The wallet dashboard also fetches a bounded list of recent on-chain signatures (up to 10) for the selected network; this signature list is not a full decoded token/transaction history.
 
 These are implementation features, not evidence that the entire wallet is release-ready. In particular, do not infer production readiness from the existence of these classes.
 
@@ -51,11 +51,11 @@ These are implementation features, not evidence that the entire wallet is releas
 - Obtain an external security review before enabling autonomous mainnet transfers.
 - Do not use production funds until all gates pass.
 
-## Current implementation status (2026-10-26)
+## Current implementation status (2026-10-27)
 
 Implemented in the repository: local BIP-39/Solana key derivation and restore path; encrypted local secret vault; backup confirmation; public address and QR UI; read-only balance; mainnet/devnet selection; manual SOL transfer UI; typed transfer intent; deny-by-default policy; SQLite request ledger with spend reservations and idempotency; local transaction signing, simulation, signed-byte persistence, explicit broadcast confirmation and signature reconciliation; per-agent read grants; and an agent SOL request → local approval queue → local signing → separate human broadcast confirmation path. Tests have been authored for several components, including per-agent read/transfer policies and intent validation.
 
-Not verified yet: automated tests/build have not been run, per the current workflow decision that the user will perform installation and end-to-end manual checks. The wallet must not be considered release-ready until those checks and the documented release gates are satisfied. Token swaps are still not implemented; this phase supports SOL transfers only. Do not use real funds until the manual validation and security review are complete.
+Not verified yet: the newest commits have not been built or tested. The manual-only GitHub Actions workflow has been updated to run JVM release unit tests before `assembleRelease`; Android instrumentation tests and end-to-end manual checks still require separate execution. The agent system prompt now explicitly forbids shell/curl/Solscan fallback for wallet operations and prohibits exposing wallet secrets. The wallet must not be considered release-ready until those checks and the documented release gates are satisfied. Token swaps are still not implemented; this phase supports SOL transfers only. Do not use real funds until the manual validation and security review are complete.
 
 
 ## Manual validation checklist for the current SOL/agent flow
