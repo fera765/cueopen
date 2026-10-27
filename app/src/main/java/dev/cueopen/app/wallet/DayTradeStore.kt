@@ -49,6 +49,10 @@ class DayTradeStore(context: Context) {
     fun armedForAgent(agentId: String): List<Rule> =
         allForAgent(agentId).filter { it.status == Status.ARMED }
 
+    /** IDs de agentes que têm ao menos uma regra ARMADA (para o avaliador automático de SL/TP). */
+    fun armedAgentIds(): List<String> =
+        load().filter { it.status == Status.ARMED }.map { it.agentId }.distinct()
+
     fun get(id: String): Rule? = load().firstOrNull { it.id == id }
 
     fun upsert(rule: Rule) {

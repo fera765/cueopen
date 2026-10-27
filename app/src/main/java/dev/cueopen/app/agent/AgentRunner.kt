@@ -350,17 +350,90 @@ class AgentRunner(
      */
     fun startAutonomy() {
         dev.cueopen.app.scheduler.Heartbeat.rescheduleAll(ctx)
-        if (store.state.value.agents.any { it.autonomous }) dev.cueopen.app.sandbox.SandboxService.start(ctx, "Agentes autônomos ativos")
+        val hasArmedRules = runCatching { dev.cueopen.app.wallet.DayTradeStore(ctx.applicationContext).armedAgentIds().isNotEmpty() }.getOrDefault(false)
+        if (store.state.value.agents.any { it.autonomous } || hasArmedRules)
+            dev.cueopen.app.sandbox.SandboxService.start(ctx, if (hasArmedRules) "Monitorando stop-loss/take-profit" else "Agentes autônomos ativos")
         if (autonomyJob?.isActive == true) return
         autonomyJob = scope.launch {
             while (isActive) {
                 runCatching { autonomyTick() }.onFailure { t ->
                     android.util.Log.e("CueOpen.Autonomy", "Falha no scheduler local", t)
                 }
+                // Stop-loss/take-profit AUTOMÁTICO: avalia as regras armadas a cada ~20 s,
+                // independente do ciclo do agente, e fecha a posição assim que o alvo é atingido.
+                if (System.currentTimeMillis() - lastRuleEvalAt >= 20_000L) {
+                    lastRuleEvalAt = System.currentTimeMillis()
+                    runCatching { evaluateAllArmedRules() }.onFailure { t ->
+                        android.util.Log.e("CueOpen.Autonomy", "Falha ao avaliar regras de trade", t)
+                    }
+                }
                 // Intervalos de 1 minuto precisam de margem; verificar a cada 5 s evita atraso
                 // adicional causado pelo ticker de 20 s.
                 kotlinx.coroutines.delay(5_000)
             }
+        }
+    }
+
+    @Volatile private var lastRuleEvalAt = 0L
+
+    /** Rede salva da carteira (fail-closed). */
+    private fun walletNetworkOrNull(): SolanaNetwork? = runCatching {
+        val stored = ctx.applicationContext
+            .getSharedPreferences("solana_wallet_settings", android.content.Context.MODE_PRIVATE)
+            .getString("network", null) ?: return null
+        SolanaNetwork.valueOf(stored)
+    }.getOrNull()
+
+    /**
+     * Avaliador AUTOMÁTICO de stop-loss/take-profit: roda fora do ciclo do agente. Para cada agente
+     * com regras armadas e capacidade de day trade, checa o preço real e executa a troca no gatilho.
+     * O usuário vê o fechamento automático no chat do agente. Só Mainnet (o engine garante).
+     */
+    private suspend fun evaluateAllArmedRules() {
+        val network = walletNetworkOrNull() ?: return
+        if (network != SolanaNetwork.MAINNET) return // day trade opera só na Mainnet
+        val dtStore = dev.cueopen.app.wallet.DayTradeStore(ctx.applicationContext)
+        val agentIds = dtStore.armedAgentIds()
+        if (agentIds.isEmpty()) return
+        val wallet = SolanaWalletRepository(ctx.applicationContext)
+        if (!wallet.hasWallet() || !wallet.backupConfirmed()) return
+        val policies = WalletAgentPolicyStore(ctx.applicationContext)
+        val engine = dev.cueopen.app.wallet.DayTradeEngine(ctx.applicationContext, wallet)
+        for (agentId in agentIds) {
+            if (!policies.canAgentDayTrade(agentId)) continue
+            val outcomes = runCatching {
+                engine.evaluateAgentRules(agentId, network, policies.agentMaxTransferLamports(agentId))
+            }.getOrDefault(emptyList())
+            val executed = outcomes.filter { it.executed }
+            if (executed.isNotEmpty()) {
+                val home = store.agent(agentId)?.homeSessionId
+                if (home != null && store.session(home) != null) {
+                    executed.forEach { o ->
+                        store.addItem(home, ChatItem.Step(tool = "trade", title = "Trade automático: ${o.rule.label}", args = o.rule.id, result = o.message, status = StepStatus.OK))
+                    }
+                    store.flush()
+                    store.agent(agentId)?.let { notifyAgent(it, "Trade automático executado: " + executed.joinToString("; ") { it.rule.label }) }
+                }
+            }
+        }
+    }
+
+    /**
+     * Chamado pelo alarme (AlarmManager) do agendamento. NÃO bloqueia o receiver: dispara o ciclo e a
+     * avaliação de regras no próprio escopo do app, para o receiver finalizar rápido e nunca estourar
+     * o limite de ~10 s dos BroadcastReceivers (o que quebrava a corrente de agendamento).
+     */
+    fun triggerHeartbeatFromAlarm(agentId: String) {
+        val a = store.agent(agentId) ?: return
+        if (!a.autonomous || a.homeSessionId == null) return
+        scope.launch {
+            runCatching { evaluateAllArmedRules() }
+            val hour = java.util.Calendar.getInstance().get(java.util.Calendar.HOUR_OF_DAY)
+            val inHours = if (a.activeStartHour <= a.activeEndHour) hour in a.activeStartHour until a.activeEndHour
+                          else hour >= a.activeStartHour || hour < a.activeEndHour
+            val today = today()
+            val spent = if (a.tokensDay == today) a.tokensToday else 0
+            if (inHours && spent < a.dailyTokenBudget && jobs[a.homeSessionId]?.isActive != true) heartbeat(a)
         }
     }
 
@@ -416,7 +489,10 @@ class AgentRunner(
         dev.cueopen.app.sandbox.SandboxService.start(ctx, "${a.name}: heartbeat")
         val job = scope.launch {
             try {
-                loop(sid)
+                // Watchdog: um ciclo nunca pode travar para sempre e bloquear os próximos agendamentos.
+                kotlinx.coroutines.withTimeout(10 * 60_000L) { loop(sid) }
+            } catch (to: kotlinx.coroutines.TimeoutCancellationException) {
+                store.addItem(sid, ChatItem.Error(text = "Ciclo excedeu o tempo máximo (10 min) e foi encerrado para liberar o próximo agendamento."))
             } catch (c: kotlinx.coroutines.CancellationException) { throw c
             } catch (t: Throwable) {
                 store.addItem(sid, ChatItem.Error(text = "Heartbeat falhou: ${t.message}"))
@@ -637,6 +713,7 @@ class AgentRunner(
                     appendLine("- FLUXO OBRIGATÓRIO: (1) descubra oportunidades com market_discover e cheque market_token_info; (2) analise preço/tendência com market_candles; (3) meça liquidez/impacto com market_liquidity (confirme que dá para comprar E vender); (4) SEMPRE chame typesafe_jev_check com os dados reais dos sinais ANTES de operar e entre APENAS nos sinais com acurácia suficiente (✅ OPERAR); (5) entre com wallet_swap só nos sinais aprovados; (6) proteja a posição com trade_set_rule (stop-loss price_below e/ou take-profit price_above); (7) a cada ciclo chame trade_list para avaliar e disparar os gatilhos no preço real.")
                     appendLine("- NUNCA execute wallet_swap ou trade_set_rule sem antes validar o sinal com typesafe_jev_check. A acurácia vem de dados reais; não invente probabilidades.")
                     appendLine("- Se market_candles retornar 'tendência real alternativa' (DexScreener: variações m5/h1/h6/h24, volume, fluxo compra/venda), isso é dado REAL e suficiente para analisar a tendência — use-o normalmente, não repita a chamada em loop.")
+                    appendLine("- STOP-LOSS / TAKE-PROFIT são AUTOMÁTICOS: ao abrir uma posição, arme imediatamente trade_set_rule para o stop-loss (price_below) e para o take-profit (price_above). O sistema monitora o preço real sozinho (a cada ~20s) e FECHA a operação automaticamente quando o alvo é atingido — mesmo entre os seus ciclos. Você NÃO precisa ficar acordando para fechar; só arme as regras uma vez.")
                     appendLine("- wallet_swap executa troca REAL e assinada localmente; entradas em SOL respeitam o limite por operação autorizado pelo usuário. Só diga 'enviado/executado' com base na assinatura retornada (Explorer); jamais afirme lucro ou execução sem a assinatura.")
                     appendLine("- Para monitorar o mercado de forma contínua, use set_schedule (ex.: a cada 5-15 min) e, a cada ciclo, reavalie com market_* e trade_list. Seja econômico e honesto sobre risco: day trade pode gerar perdas; nunca prometa retorno.")
                 }
@@ -1380,7 +1457,9 @@ class AgentRunner(
                                                 slippageBps = (i("slippage_bps") ?: 100).coerceIn(1, 5000)
                                             )
                                             dev.cueopen.app.wallet.DayTradeStore(ctx.applicationContext).upsert(rule)
-                                            "Regra de day trade armada. ID: ${rule.id}. Avalie com trade_list a cada ciclo; o gatilho dispara quando o preço real cruzar o alvo."
+                                            // Mantém o processo vivo para o monitoramento AUTOMÁTICO de SL/TP (avaliação a cada ~20s).
+                                            runCatching { dev.cueopen.app.sandbox.SandboxService.start(ctx, "Monitorando stop-loss/take-profit") }
+                                            "Regra de day trade ARMADA (ID: ${rule.id}). O sistema vai monitorar o preço real automaticamente (a cada ~20s) e EXECUTAR a troca sozinho quando o alvo for atingido — você NÃO precisa ficar chamando trade_list para isso acontecer."
                                         }
                                     }
                                 }

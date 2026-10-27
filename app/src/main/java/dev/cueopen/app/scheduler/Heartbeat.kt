@@ -58,27 +58,14 @@ class HeartbeatReceiver : BroadcastReceiver() {
         val agentId = intent.getStringExtra(Heartbeat.EXTRA_AGENT) ?: return
         val app = context.applicationContext as? CueApp ?: return
         val agent = app.store.agent(agentId) ?: return
+        // 1) REAGENDA O PRÓXIMO ALARME IMEDIATAMENTE. Antes, o ciclo inteiro rodava dentro do
+        //    receiver (goAsync ~10 s); se o ciclo demorasse, o Android matava o receiver e o
+        //    reagendamento no finally não rodava — a corrente quebrava e o agente nunca mais acordava.
+        //    Reagendar primeiro garante que o próximo ciclo sempre aconteça, não importa a duração.
+        if (agent.autonomous) Heartbeat.schedule(context, agentId, agent.heartbeatMinutes)
         if (!agent.autonomous) return
-        // sobe o serviço em foreground (mantém o processo vivo) e roda o ciclo
+        // 2) Mantém o processo vivo e dispara o ciclo no escopo do app (sem bloquear o receiver).
         dev.cueopen.app.sandbox.SandboxService.start(context, "${agent.name}: ciclo autônomo")
-        val pending = goAsync()
-        Thread {
-            try {
-                val hour = java.util.Calendar.getInstance().get(java.util.Calendar.HOUR_OF_DAY)
-                val a = app.store.agent(agentId) ?: return@Thread
-                val inHours = if (a.activeStartHour <= a.activeEndHour) hour in a.activeStartHour until a.activeEndHour
-                              else hour >= a.activeStartHour || hour < a.activeEndHour
-                val today = java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.US).format(java.util.Date())
-                val spent = if (a.tokensDay == today) a.tokensToday else 0
-                if (inHours && spent < a.dailyTokenBudget) {
-                    kotlinx.coroutines.runBlocking { app.agent.heartbeat(a).join() }
-                }
-            } catch (_: Throwable) {
-            } finally {
-                // reagenda o próximo ciclo
-                app.store.agent(agentId)?.let { if (it.autonomous) Heartbeat.schedule(context, agentId, it.heartbeatMinutes) }
-                pending.finish()
-            }
-        }.start()
+        runCatching { app.agent.triggerHeartbeatFromAlarm(agentId) }
     }
 }
