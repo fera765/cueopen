@@ -78,6 +78,16 @@ class SolanaRpcClientTest {
     }
 
     @Test
+    fun recentSignaturesDoesNotSilentlyDiscardMalformedRpcRecords() {
+        val rpc = client(
+            """{"jsonrpc":"2.0","id":1,"result":[{"signature":"bad","slot":42,"blockTime":null,"err":null}]}"""
+        )
+        assertThrows(IOException::class.java) {
+            runBlocking { rpc.getRecentSignatures("HAgk14JpMQLgt6rVgv7cBQFJWFto5Dqxi472uT3DKpqk") }
+        }
+    }
+
+    @Test
     fun recentSignaturesRejectsInvalidAddressAndOutOfRangeLimit() {
         val rpc = client("""{"jsonrpc":"2.0","id":1,"result":[]}""")
         assertThrows(IllegalArgumentException::class.java) {
