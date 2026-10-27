@@ -108,7 +108,25 @@ jobs:
           gradle-version: '8.9'
 
       - name: Compile instrumented test sources
-        run: gradle assembleDebugAndroidTest --stacktrace
+        run: |
+          set -o pipefail
+          gradle assembleDebugAndroidTest --stacktrace 2>&1 | tee /tmp/at-compile.log
+
+      - name: Publish androidTest compile log
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p diag
+          cp /tmp/at-compile.log diag/at-compile.log 2>/dev/null || echo "no log" > diag/at-compile.log
+          cd diag
+          git init -q
+          git checkout -q -b wallet-diagnostics
+          git config user.email "actions@github.com"
+          git config user.name "github-actions"
+          git add -A
+          git commit -q -m "androidTest compile log #${{ github.run_number }}"
+          git push -q --force "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git" wallet-diagnostics
 
       - name: Enable KVM
         run: |
