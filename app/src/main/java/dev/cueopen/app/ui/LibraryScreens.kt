@@ -183,9 +183,12 @@ fun AgentEditScreen(nav: NavController, id: String) {
             Spacer(Modifier.height(8.dp))
             PillButton("Salvar", Icons.Rounded.Check, modifier = Modifier.fillMaxWidth(), enabled = a.name.isNotBlank()) {
                 app.store.upsertAgent(a)
-                walletPolicies.setAgentReadAddress(a.id, walletAccess && walletReadAddress)
-                walletPolicies.setAgentReadBalance(a.id, walletAccess && walletReadBalance)
-                walletPolicies.setAgentRequestTransfer(a.id, walletAccess && walletRequestTransfer)
+                walletPolicies.setAgentCapabilities(
+                    a.id,
+                    readAddress = walletAccess && walletReadAddress,
+                    readBalance = walletAccess && walletReadBalance,
+                    requestTransfer = walletAccess && walletRequestTransfer
+                )
                 if (a.autonomous) app.agent.startAutonomy()
                 nav.popBackStack()
             }
