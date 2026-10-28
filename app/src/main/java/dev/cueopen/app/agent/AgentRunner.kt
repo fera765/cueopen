@@ -760,7 +760,7 @@ class AgentRunner(
             }
             if (session.connectorBuilder) appendLine()
             if (session.connectorBuilder) appendLine("## Criar UI Connectors (esta conversa é o criador de conectores)")
-            if (session.connectorBuilder) appendLine("- Quando o usuário pedir um conector (UI Connector), NÃO escreva o JSON no chat: chame connector_spec, monte a definição, valide com connector_validate e corrija até zero erros (repita sozinho, sem perguntar), depois TESTE DE VERDADE com connector_test (requisições reais; corrija caminhos pela estrutura que ele mostra até PASSOU) e só então chame connector_propose. Não use o browser/web para "testar" — só connector_test vale. Só diga que deu certo depois de connector_propose; a instalação é feita pelo usuário no card. Se faltar a URL base ou os endpoints reais da API, pesquise na documentação oficial (web) ou pergunte.")
+            if (session.connectorBuilder) appendLine("- Quando o usuário pedir um conector (UI Connector), NÃO escreva o JSON no chat: chame connector_spec, monte a definição, valide com connector_validate e corrija até zero erros (repita sozinho, sem perguntar), depois TESTE DE VERDADE com connector_test (requisições reais; corrija caminhos pela estrutura que ele mostra até PASSOU) e só então chame connector_propose. Não use o browser/web para testar — só connector_test vale. Só diga que deu certo depois de connector_propose; a instalação é feita pelo usuário no card. Se faltar a URL base ou os endpoints reais da API, pesquise na documentação oficial (web) ou pergunte.")
             runCatching {
                 val hub = dev.cueopen.app.CueApp.instance.uiConnectors
                 val usable = hub.connectors.filter { hub.usableBy(it, agent) }
