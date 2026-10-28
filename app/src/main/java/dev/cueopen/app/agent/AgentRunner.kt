@@ -20,6 +20,8 @@ import dev.cueopen.app.llm.strArray
 import dev.cueopen.app.llm.tool
 import dev.cueopen.app.sandbox.Sandbox
 import dev.cueopen.app.trading.TradeCoordinator
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.sync.withLock
 import dev.cueopen.app.wallet.WalletAgentPolicyStore
 import dev.cueopen.app.wallet.SolanaWalletRepository
@@ -1047,7 +1049,7 @@ class AgentRunner(
         // Validação TypeSafe Jev: obrigatória antes de QUALQUER ordem (day trade Solana e conectores de trading).
         if (allowMultiAgent && (agent?.let { WalletAgentPolicyStore(ctx.applicationContext).canAgentDayTrade(it.id) } == true ||
                 runCatching { dev.cueopen.app.CueApp.instance.uiConnectors.hasTradingTools(agent) }.getOrDefault(false))) {
-            add(tool("typesafe_jev_check", "OBRIGATÓRIO antes de QUALQUER ordem de COMPRA ou VENDA (Solana day trade e IQ Option): avalia a ACURÁCIA de cada sinal com o avaliador TypeSafe Jev. Só com ✅ OPERAR a ordem é liberada, e a aprovação vale para UMA ordem (5 min). Sem ela, wallet_swap e as ferramentas de ordem dos conectores são RECUSADOS. Envie dados REAIS (preço, velas, tendência, liquidez). Não invente números.", buildJsonObject {
+            add(tool("typesafe_jev_check", "OBRIGATÓRIO antes de QUALQUER ordem de COMPRA ou VENDA (Solana day trade e IQ Option): avalia a ACURÁCIA de cada sinal com o avaliador TypeSafe Jev. Só com ✅ OPERAR a ordem é liberada, e a aprovação vale para UMA ordem (5 min). Sem ela, wallet_swap e as ferramentas de ordem dos conectores são RECUSADOS. Envie dados REAIS (preço, velas, tendência, liquidez). Não invente números. Para venue=iqoption o app ANEXA SOZINHO o contexto real (35 indicadores, estratégias MHI com assertividade e sinal do quadrante, estado da vela e gerenciamento) — basta id, venue, direction e horizon_minutes.", buildJsonObject {
                 put("signals_json", str("JSON array de sinais: {\"id\":\"<mint Solana ou ticker, ex.: EURUSD>\",\"venue\":\"solana|iqoption\",\"direction\":\"buy|sell (Solana) ou call|put (IQ Option)\",\"horizon_minutes\":5,\"data\":\"resumo com preço, velas OHLCV, tendência, liquidez\"}"))
                 put("min_accuracy", int("Acurácia mínima (0-100); o piso de 70 não pode ser rebaixado"))
             }, listOf("signals_json")))
@@ -1156,8 +1158,21 @@ class AgentRunner(
         val sys = LlmMessage("system",
             "Você é um avaliador de ACURÁCIA de sinais de trading (cripto Solana, opções binárias/turbo e forex). Avalie cada sinal usando EXCLUSIVAMENTE os dados reais fornecidos (preço, velas OHLCV, liquidez, volume, tendência) e a direção pedida (buy/call = alta; sell/put = queda) no horizonte informado (horizon_minutes; se ausente, curto prazo). " +
             "Não invente dados. Para cada sinal, estime a probabilidade (0-100) de a direção pedida ser lucrativa e uma confiança (0-100) baseada na qualidade/suficiência dos dados. " +
+            "Quando houver CONTEXTO AUTOMÁTICO DO APP (dados reais da corretora), use-o como evidência principal: resumo dos 35 indicadores, assertividade histórica das estratégias MHI (G0 acima do equilíbrio pelo payout = vantagem), " +
+            "se um sinal MHI do quadrante CONFIRMA ou CONTRARIA a direção, a posição do preço em relação à abertura da vela (entrada contra o candle) e o horário (entrada no início da vela). " +
+            "Penalize forte quando indicadores e estratégias contrariam a direção, quando a melhor estratégia não tem vantagem, ou quando há perdas seguidas recentes. " +
             "Responda SOMENTE com um array JSON, sem texto fora dele: [{\"id\":\"...\",\"accuracy\":NN,\"confidence\":NN,\"reason\":\"curto\"}].")
-        val user = LlmMessage("user", "Sinais (JSON):\n$signalsJson\n\nAvalie e retorne o array JSON.")
+        // Enriquecimento automático: para sinais da IQ Option o app anexa o contexto REAL (indicadores, MHI, vela, gerenciamento).
+        val ctxText = run {
+            val iq = dev.cueopen.app.CueApp.instance.uiConnectors.get("iqoption") as? dev.cueopen.app.uiconnector.iqoption.IqOptionConnector
+            val iqSignals = inputs.filter { it.venue.equals("iqoption", true) }
+            if (iq == null || !iq.isLoggedIn || iqSignals.isEmpty()) "" else kotlinx.coroutines.coroutineScope {
+                iqSignals.take(6).map { sig -> async { iq.jevContext(sig.id, sig.direction.orEmpty()) } }.awaitAll().joinToString("\n\n")
+            }
+        }
+        val user = LlmMessage("user", "Sinais (JSON):\n$signalsJson" +
+            (if (ctxText.isNotBlank()) "\n\nCONTEXTO AUTOMÁTICO DO APP (dados reais da corretora, use como evidência):\n$ctxText" else "") +
+            "\n\nAvalie e retorne o array JSON.")
         val reply = TradeCoordinator.validationMutex.withLock {
             runCatching { llm.chat(listOf(sys, user), tools = null, model = model, maxTokens = 1200) }
         }.getOrElse { return "ACCURACY_ERROR ao consultar o avaliador ($model): ${(it.message ?: it.javaClass.simpleName).take(200)}. Nenhuma ordem foi liberada. Ajuste o modelo avaliador em Configurações se necessário." }

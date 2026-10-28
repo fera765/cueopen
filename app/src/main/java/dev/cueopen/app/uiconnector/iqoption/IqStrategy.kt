@@ -157,3 +157,78 @@ object IqRules {
             1.0 / (1 + payout), flat, total, cw, cl, maxStreak, calls, puts)
     }
 }
+
+/**
+ * Estratégias MHI (velas de 1 min, quadrantes de 5 min: hh:00–04, 05–09…).
+ * Análise: as 3 ÚLTIMAS velas do quadrante (minutos 3, 4 e 5). Minoria = entra na cor que apareceu MENOS;
+ * Maioria = na cor que apareceu MAIS. MHI 1/2/3 = entrada na 1ª/2ª/3ª vela do quadrante seguinte.
+ * Gale 1 e 2 = repetir nas velas seguintes (só estatística: o app não faz martingale sozinho).
+ * Doji na análise → sem sinal; doji na entrada conta como perda (conservador).
+ */
+object Mhi {
+    data class M1(val from: Long, val open: Double, val close: Double) {
+        val color: Int get() = if (close > open) 1 else if (close < open) -1 else 0
+    }
+    data class Variant(val name: String, val entryOffset: Int, val minority: Boolean)
+    data class Stats(val variant: Variant, val signals: Int, val g0: Int, val g1: Int, val g2: Int) {
+        val rateG0 get() = if (signals == 0) 0.0 else g0.toDouble() / signals
+        val rateG1 get() = if (signals == 0) 0.0 else (g0 + g1).toDouble() / signals
+        val rateG2 get() = if (signals == 0) 0.0 else (g0 + g1 + g2).toDouble() / signals
+    }
+    data class Signal(val variant: Variant, val direction: String, val entryAt: Long)
+
+    val VARIANTS = listOf(
+        Variant("MHI 1 (minoria)", 0, true), Variant("MHI 2 (minoria)", 1, true), Variant("MHI 3 (minoria)", 2, true),
+        Variant("MHI 1 (maioria)", 0, false), Variant("MHI 2 (maioria)", 1, false), Variant("MHI 3 (maioria)", 2, false),
+    )
+
+    /** Direção pela análise das 3 velas que fecham o quadrante iniciado em [q] − 300. null = sem sinal (faltam velas ou doji). */
+    fun direction(byTime: Map<Long, M1>, q: Long, minority: Boolean): String? {
+        val a = listOf(q - 180, q - 120, q - 60).map { byTime[it] ?: return null }
+        if (a.any { it.color == 0 }) return null
+        val greens = a.count { it.color == 1 }
+        val majorityUp = greens >= 2
+        val up = if (minority) !majorityUp else majorityUp
+        return if (up) "call" else "put"
+    }
+
+    /** Assertividade histórica com G0, G1 e G2 sobre velas reais FECHADAS. */
+    fun backtest(candles: List<M1>, v: Variant): Stats {
+        val byTime = candles.associateBy { it.from }
+        if (candles.isEmpty()) return Stats(v, 0, 0, 0, 0)
+        var signals = 0; var g0 = 0; var g1 = 0; var g2 = 0
+        val first = (candles.first().from / 300 + 1) * 300
+        var q = first
+        val last = candles.last().from
+        while (q + 60L * (v.entryOffset + 2) <= last) {
+            val dir = direction(byTime, q, v.minority)
+            if (dir != null) {
+                val want = if (dir == "call") 1 else -1
+                val e = q + 60L * v.entryOffset
+                val tries = (0..2).map { byTime[e + 60L * it] }
+                if (tries.all { it != null }) {
+                    signals++
+                    when {
+                        tries[0]!!.color == want -> g0++
+                        tries[1]!!.color == want -> g1++
+                        tries[2]!!.color == want -> g2++
+                    }
+                }
+            }
+            q += 300
+        }
+        return Stats(v, signals, g0, g1, g2)
+    }
+
+    /** Próximos sinais a partir de agora (relógio do servidor), para cada variante com entrada ainda por vir. */
+    fun upcoming(candles: List<M1>, nowSec: Long, windowSec: Int = 10): List<Signal> {
+        val closed = candles.filter { it.from + 60 <= nowSec }.associateBy { it.from }
+        val q = nowSec / 300 * 300
+        return VARIANTS.mapNotNull { v ->
+            val e = q + 60L * v.entryOffset
+            if (nowSec > e + windowSec) return@mapNotNull null
+            val dir = direction(closed, q, v.minority) ?: return@mapNotNull null
+            Signal(v, dir, e)
+        }
+    }
+}

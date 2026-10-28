@@ -74,16 +74,18 @@ class IqOptionConnector(private val kv: KvStore? = null) : UiConnector {
                 "Desligado: o agente só opera na conta DEMO. Ligado: ele pode abrir operações com dinheiro real, sempre dentro dos limites abaixo.",
                 SettingType.SWITCH, "false", risky = true,
             ),
-            SettingSpec("max_amount", "Valor máximo por operação (agente)", "Teto do valor de cada operação aberta pelo agente, na moeda da conta.", SettingType.NUMBER, "1"),
-            SettingSpec("max_open", "Máx. de operações abertas (agente)", "O agente não abre novas operações acima deste número.", SettingType.NUMBER, "3"),
+            SettingSpec("max_amount", "Valor máximo por operação (agente)", "Teto do valor de cada operação aberta pelo agente, na moeda da conta. Ignorado com o Masaniello ativo.", SettingType.NUMBER, "1"),
+            SettingSpec("max_open", "Máx. de operações abertas (agente)", "O agente não abre novas operações acima deste número. Com o Masaniello ativo é sempre 1.", SettingType.NUMBER, "3"),
+            SettingSpec("strategy_asset", "Ativo das estratégias na tela", "Ticker para mostrar as estratégias MHI (assertividade e próximos sinais) nesta tela, ex.: EURUSD-OTC. Vazio = não mostrar.", SettingType.TEXT, ""),
             SettingSpec(
                 "short_max_minutes", "Duração máxima de operação CURTA (min)",
                 "Até este tempo a operação é curta: o agente pode comprar (call) e vender (put). Acima disso é LONGA: só compra (call).",
                 SettingType.NUMBER, "5",
             ),
-            SettingSpec("mm_enabled", "Gerenciamento Masaniello (agente)",
-                "Ligado: o VALOR de cada operação do agente é calculado pelo Masaniello (ciclo de N operações buscando K acertos) e as operações são uma por vez. O ciclo nunca perde mais que a banca do ciclo.",
-                SettingType.SWITCH, "true", risky = true),
+            SettingSpec("mm_enabled", "Ativar Masaniello (sobrescreve o valor de entrada)",
+                "Ligado: o Masaniello assume o VALOR de todas as entradas do agente (ignora o valor pedido e o 'Valor máximo por operação') e o MODO de operar (uma operação por vez, ignora 'Máx. de operações abertas'). " +
+                "O risco passa a ser limitado pela banca do ciclo: um ciclo nunca perde mais que ela. Desligado: valem o valor e os limites normais.",
+                SettingType.SWITCH, "false", risky = true),
             SettingSpec("mm_bank", "Masaniello: banca do ciclo", "Valor máximo que um ciclo pode perder. Ao acertar K de N, o ciclo fecha no lucro-alvo.", SettingType.NUMBER, "10"),
             SettingSpec("mm_trades", "Masaniello: operações por ciclo (N)", "Quantidade de operações do ciclo.", SettingType.NUMBER, "10"),
             SettingSpec("mm_wins", "Masaniello: acertos esperados (K)", "Acertos necessários dentro das N. Use uma taxa abaixo da sua taxa real de acerto (ex.: 5 de 10).", SettingType.NUMBER, "5"),
@@ -126,6 +128,9 @@ class IqOptionConnector(private val kv: KvStore? = null) : UiConnector {
                 ParamSpec("asset", "Ticker do ativo, ex.: EURUSD"),
                 ParamSpec("timeframe", "Tamanho da vela em segundos (60=1min, 300=5min…) ou 1m/5m/1h. Padrão 60.", required = false),
                 ParamSpec("count", "Quantidade de velas (1–200). Padrão 30.", "integer", required = false),
+            )),
+            ToolSpec("strategies", "Estratégias MHI (1, 2 e 3 — minoria e maioria) no ativo: assertividade histórica em velas REAIS de 1 min (G0, G1, G2) e os próximos sinais com horário de entrada. Simples: diz qual estratégia está melhor e quando entrar.", listOf(
+                ParamSpec("asset", "Ticker do ativo, ex.: EURUSD-OTC"),
             )),
             ToolSpec("mm_status", "Gerenciamento e regras: ciclo Masaniello (acertos/operações restantes, banca, próxima entrada, lucro-alvo), resultado do dia, perdas seguidas e se o agente está pausado."),
             ToolSpec("backtest", "Backtest com velas REAIS do ativo: aplica a suíte técnica vela a vela e simula operações de 1 vela, com taxa de acerto, ponto de equilíbrio pelo payout, resultado com valor fixo e com Masaniello. Use para escolher ativo/tempo gráfico ANTES de operar.", listOf(
@@ -657,7 +662,7 @@ class IqOptionConnector(private val kv: KvStore? = null) : UiConnector {
     private fun mmText(settings: ConnectorSettings?): String {
         val r = risk()
         return buildString {
-            if (settings?.bool("mm_enabled") != false) {
+            if (settings?.bool("mm_enabled") == true) {
                 val m = mmState(settings); val o = odds(settings)
                 val st = Masaniello.stake(m.bank, m.n, m.k, o)
                 appendLine("Masaniello — ciclo ${m.cycle}: faltam ${m.k} acerto(s) em ${m.n} operação(ões) · banca ${String.format(Locale.US, "%.2f", m.bank)} (início ${String.format(Locale.US, "%.2f", m.startBank)}) · " +
@@ -708,6 +713,78 @@ class IqOptionConnector(private val kv: KvStore? = null) : UiConnector {
                 else "SEM vantagem estatística neste período: NÃO opere este ativo/tempo gráfico com esta estratégia.")
         }
     }
+
+    // ------------------------------------------------------------------ estratégias MHI
+    private data class StratCache(val at: Long, val ticker: String, val stats: List<Mhi.Stats>, val candles: List<Mhi.M1>)
+    private val stratCache = ConcurrentHashMap<String, StratCache>()
+
+    private suspend fun strategies(asset: String): StratCache? {
+        val a = IqProtocol.resolveAsset(loadAssets(), asset) ?: return null
+        stratCache[a.ticker]?.takeIf { System.currentTimeMillis() - it.at < 50_000 }?.let { return it }
+        val id = reqId()
+        val root = request(id, IqProtocol.getCandlesMessage(id, a.id, 60, 1000, serverNowSec()), "candles", timeoutMs = 20_000)
+        val list = IqProtocol.parseCandles(root["msg"] as? JsonObject ?: JsonObject(emptyMap())).sortedBy { it.from }
+            .map { Mhi.M1(it.from, it.open, it.close) }
+        val now = serverNowSec()
+        val closed = list.filter { it.from + 60 <= now }
+        val stats = withContext(Dispatchers.Default) { Mhi.VARIANTS.map { Mhi.backtest(closed, it) } }
+        return StratCache(System.currentTimeMillis(), a.ticker, stats, list).also { stratCache[a.ticker] = it }
+    }
+
+    private fun pct(v: Double) = String.format(Locale.US, "%.0f%%", v * 100)
+
+    private suspend fun strategiesText(asset: String): String {
+        val sc = strategies(asset) ?: return "Ativo '$asset' não encontrado. Use open_assets."
+        val now = serverNowSec()
+        val up = Mhi.upcoming(sc.candles, now, (10)).associateBy { it.variant.name }
+        val best = sc.stats.filter { it.signals >= 20 }.maxByOrNull { it.rateG0 }
+        return buildString {
+            appendLine("Estratégias MHI — ${sc.ticker} · velas de 1 min reais (~${sc.candles.size} min) · servidor ${hms(now)}")
+            sc.stats.sortedByDescending { it.rateG0 }.forEach { st ->
+                val sig = up[st.variant.name]
+                appendLine("${st.variant.name}: G0 ${pct(st.rateG0)} · G1 ${pct(st.rateG1)} · G2 ${pct(st.rateG2)} (${st.signals} sinais)" +
+                    (sig?.let { " · PRÓXIMO: ${it.direction.uppercase()} às ${hms(it.entryAt)} (${if (it.entryAt > now) "em ${it.entryAt - now}s" else "AGORA"})" } ?: ""))
+            }
+            appendLine("Equilíbrio pelo payout: ${pct(1.0 / (1 + 0.85))} de acerto em G0 (com 85%).")
+            append(if (best == null) "Poucos sinais para comparar." else "Melhor agora: ${best.variant.name} com ${pct(best.rateG0)} em G0 (${best.signals} sinais). " +
+                "O app executa só a entrada principal (G0); gale não é automático. Resultado passado não garante o futuro.")
+        }
+    }
+
+    /**
+     * Contexto REAL da IQ Option para o avaliador TypeSafe Jev: resumo técnico, estratégias MHI (assertividade e sinal
+     * atual), relógio/estado da vela e gerenciamento. O agente não precisa montar isso: o app anexa sozinho.
+     */
+    suspend fun jevContext(asset: String, direction: String): String = runCatching {
+        withTimeout(12_000) {
+            ensureConnected()
+            val a = IqProtocol.resolveAsset(loadAssets(), asset) ?: return@withTimeout "[$asset] ativo não encontrado na IQ Option."
+            val sc = strategies(a.ticker)
+            val now = serverNowSec()
+            val m1 = sc?.candles.orEmpty()
+            val recent = m1.takeLast(150)
+            val tech = if (recent.size >= 60) TechnicalSuite.analyze(TechnicalSuite.Candles(recent.map { it.from.toDouble() }, recent.map { it.open },
+                recent.map { maxOf(it.open, it.close) }, recent.map { minOf(it.open, it.close) }, recent.map { it.close }, recent.map { 0.0 })) else null
+            val cur = m1.lastOrNull()
+            val dir = direction.lowercase().let { if (it in setOf("buy", "compra", "call")) "call" else if (it in setOf("sell", "venda", "put")) "put" else it }
+            val up = sc?.let { Mhi.upcoming(it.candles, now, 10) }.orEmpty()
+            buildString {
+                appendLine("[${a.ticker} · direção pedida ${dir.uppercase()} · servidor ${hms(now)}]")
+                if (tech != null) appendLine("Resumo técnico (35 indicadores, M1): ${tech.summary} — ${tech.buys} compra × ${tech.sells} venda; médias ${tech.maBuys}/${tech.maSells}, osciladores ${tech.oscBuys}/${tech.oscSells}. " +
+                    tech.rows.filter { it.name.startsWith("RSI") || it.name.startsWith("MACD") || it.name.startsWith("ADX") || it.name.startsWith("Estoc") || it.name.startsWith("EMA(20)") || it.name.startsWith("Supertrend") }
+                        .joinToString("; ") { "${it.name}=${it.value?.let { v -> fmtPx(v) } ?: "—"} (${it.signal})" })
+                if (sc != null) appendLine("Estratégias MHI (histórico real): " + sc.stats.sortedByDescending { it.rateG0 }.joinToString("; ") { "${it.variant.name} G0 ${pct(it.rateG0)}/G1 ${pct(it.rateG1)} n=${it.signals}" })
+                if (up.isNotEmpty()) appendLine("Sinais MHI deste quadrante: " + up.joinToString("; ") { "${it.variant.name} → ${it.direction.uppercase()} às ${hms(it.entryAt)}" + if (it.direction == dir) " (CONFIRMA)" else " (CONTRA)" })
+                else appendLine("Nenhum sinal MHI ativo neste quadrante.")
+                if (cur != null && cur.from + 60 > now) appendLine("Vela atual: aberta às ${hms(cur.from)} (há ${now - cur.from}s), abertura ${fmtPx(cur.open)}, preço ${fmtPx(cur.close)} → " +
+                    (if (cur.close < cur.open) "abaixo da abertura (favorece CALL contra o candle)" else if (cur.close > cur.open) "acima da abertura (favorece PUT contra o candle)" else "na abertura"))
+                val last5 = m1.filter { it.from + 60 <= now }.takeLast(5).joinToString(" ") { if (it.color > 0) "▲" else if (it.color < 0) "▼" else "•" }
+                if (last5.isNotEmpty()) appendLine("Últimas 5 velas fechadas: $last5")
+                val rk = risk()
+                append("Gerenciamento: hoje ${String.format(Locale.US, "%+.2f", rk.dayPnl)} em ${rk.dayTrades} operação(ões), perdas seguidas ${rk.consecLosses}.")
+            }
+        }
+    }.getOrElse { "[$asset] contexto da IQ Option indisponível: ${it.message ?: it.javaClass.simpleName}" }
 
     private fun serverNowMs(): Long = System.currentTimeMillis() + serverOffsetMs
 
@@ -798,7 +875,7 @@ class IqOptionConnector(private val kv: KvStore? = null) : UiConnector {
             val maxAmount = settings.num("max_amount", 1.0)
             if (amount > maxAmount && !settings.bool("mm_enabled")) return "RECUSADO: valor $amount excede o máximo permitido por operação ($maxAmount). Reduza o valor."
             val maxOpen = settings.num("max_open", 3.0).toInt()
-            if (openCount() >= maxOpen) return "RECUSADO: já existem ${openCount()} operações abertas (máximo $maxOpen). Aguarde fechar."
+            if (!settings.bool("mm_enabled") && openCount() >= maxOpen) return "RECUSADO: já existem ${openCount()} operações abertas (máximo $maxOpen). Aguarde fechar."
             val shortMax = settings.num("short_max_minutes", 5.0).toInt().coerceAtLeast(1)
             if (minutes > shortMax && dir != "call")
                 return "RECUSADO: operação LONGA (mais de $shortMax min) só pode ser de COMPRA (call). Venda (put) só em operações curtas (até $shortMax min)."
@@ -813,14 +890,14 @@ class IqOptionConnector(private val kv: KvStore? = null) : UiConnector {
         var useMm = false
         if (byAgent) {
             riskCheck(settings)?.let { return it }
-            if (settings?.bool("mm_enabled") != false) {
+            if (settings?.bool("mm_enabled") == true) {
                 if (tracked.values.any { it.byAgent && it.result == null && it.expSec + 120 > serverNowSec() })
                     return "RECUSADO (Masaniello): já existe uma operação do agente em aberto; no gerenciamento as operações são UMA POR VEZ. Aguarde o resultado."
                 val m = mmState(settings)
                 val st = Masaniello.stake(m.bank, m.n, m.k, odds(settings)) ?: return "RECUSADO: ciclo Masaniello encerrado; consulte mm_status."
-                finalAmount = maxOf(1.0, Math.round(st * 100) / 100.0) // mínimo da corretora: 1
-                val maxAmount = settings?.num("max_amount", 1.0) ?: 1.0
-                if (finalAmount > maxAmount) return "RECUSADO: a entrada do Masaniello agora é ${String.format(Locale.US, "%.2f", finalAmount)}, acima do seu limite por operação ($maxAmount). Aumente o limite ou reduza a banca do ciclo nas configurações."
+                // o Masaniello SOBRESCREVE o valor de entrada (o limite é a banca do ciclo: a entrada nunca passa dela)
+                finalAmount = maxOf(1.0, Math.round(minOf(st, m.bank) * 100) / 100.0) // mínimo da corretora: 1
+                if (finalAmount > m.bank + 1e-9) return "RECUSADO (Masaniello): a banca restante do ciclo (${String.format(Locale.US, "%.2f", m.bank)}) é menor que a entrada mínima de 1. Reinicie o ciclo."
                 useMm = true
             }
             confluenceCheck(a, dir, settings)?.let { return it }
@@ -908,11 +985,25 @@ class IqOptionConnector(private val kv: KvStore? = null) : UiConnector {
                 resultLabel(it.result) + (it.profit?.let { p -> " " + String.format(Locale.US, "%.2f", p) } ?: "")) },
             empty = "Sem operações fechadas nesta sessão.",
         )
+        // estratégias MHI do ativo escolhido nas configurações (calculadas em segundo plano)
+        val sAsset = settings.text("strategy_asset").trim()
+        if (sAsset.isNotEmpty()) {
+            val key = IqProtocol.resolveAsset(assets, sAsset)?.ticker
+            val sc = key?.let { stratCache[it] }
+            if (sc == null || System.currentTimeMillis() - sc.at > 50_000) bg.launch { runCatching { strategies(sAsset) } }
+            if (sc != null) {
+                val now2 = serverNowSec()
+                val up = Mhi.upcoming(sc.candles, now2, 10).associateBy { it.variant.name }
+                blocks += UiBlock.Table("Estratégias MHI · ${sc.ticker}", listOf("Estratégia", "G0", "G1", "G2", "Sinais", "Próximo"),
+                    sc.stats.sortedByDescending { it.rateG0 }.map { st -> listOf(st.variant.name, pct(st.rateG0), pct(st.rateG1), pct(st.rateG2), st.signals.toString(),
+                        up[st.variant.name]?.let { "${it.direction.uppercase()} ${hms(it.entryAt)}" } ?: "—") })
+            } else blocks += UiBlock.Note("Calculando estratégias MHI de $sAsset…", Tone.NEUTRAL)
+        }
         // gerenciamento e regras do agente
         run {
             val rk = risk()
             val items = ArrayList<Stat>()
-            if (settings.bool("mm_enabled") || settings.text("mm_enabled").isEmpty()) {
+            if (settings.bool("mm_enabled")) {
                 val m = mmState(settings)
                 val st = Masaniello.stake(m.bank, m.n, m.k, odds(settings))
                 items += Stat("Masaniello", "${m.k} acertos em ${m.n}", Tone.NEUTRAL)
@@ -1005,6 +1096,7 @@ class IqOptionConnector(private val kv: KvStore? = null) : UiConnector {
             }
         }
         "mm_status" -> mmText(settings)
+        "strategies" -> strategiesText(args["asset"].orEmpty())
         "backtest" -> backtestText(args["asset"].orEmpty(), args["timeframe"], args["count"]?.toDoubleOrNull()?.toInt(), args["strong"] == "true", settings)
         "candle_clock" -> clockText(IqProtocol.timeframeSeconds(args["timeframe"] ?: "60") ?: 60, settings)
         "indicators" -> indicatorsText(args["asset"].orEmpty(), args["timeframe"], args["count"]?.toDoubleOrNull()?.toInt())
