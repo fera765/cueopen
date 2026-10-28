@@ -96,9 +96,11 @@ fechadas por eventos reais do servidor.
 
 Em **Conectores → UI Conectores → Criar conector (SDK)** o usuário escreve (ou pede à IA) uma definição JSON.
 O editor valida ao vivo, permite **testar** login/painéis/ferramentas e só então salva. Nada é executado no
-aparelho: a definição só faz requisições **HTTPS** ao host de `baseUrl` (porta 443, sem IP/localhost/rede privada,
-sem redirecionamentos, resposta ≤ 256 KB, 20 s). Protocolos que não são REST (WebSocket, SDKs) usam a API Kotlin
-acima (como o conector IQ Option).
+aparelho: a definição só faz requisições **HTTPS** e conexões **WSS** aos hosts de `baseUrl`/`allowedHosts` (porta 443,
+sem IP/localhost/rede privada, sem redirecionamentos, resposta HTTP ≤ 2 MB em 20 s, mensagem WebSocket ≤ 1 MB).
+Conectores em **tempo real** (corretoras de ações/Forex/cripto, cotações e saldo ao vivo, ordens com resposta
+por `request_id`) usam o bloco `realtime` — a mesma arquitetura do conector IQ Option, declarativa.
+A especificação completa (a mesma do botão **Doc** do editor) está em `SdkPrompt.kt`.
 
 ```json
 {
@@ -138,6 +140,32 @@ acima (como o conector IQ Option).
   usa o conector se o usuário ativar (“Agent required ?” + perfil do agente).
 * **Ordens**: ferramenta com `"requiresSignal": true` + `"orderIntent": {"asset": "{{par}}", "direction": "{{lado}}"}`
   só executa após validação TypeSafe Jev do ativo/lado (uso único, 5 min) — igual ao IQ Option.
+
+### Tempo real (`realtime`)
+
+```json
+"realtime": {
+  "url": "wss://ws.suacorretora.com/stream",
+  "connect": "login",
+  "onOpen": [ { "type": "auth", "token": "{{token}}" }, { "type": "subscribe", "channels": ["balance", "quotes"] } ],
+  "heartbeat": { "everySec": 20, "message": { "type": "ping" } },
+  "rules": [
+    { "match": { "$.type": "balance" }, "set": { "saldo": "$.data.amount" } },
+    { "match": { "$.type": "quote" }, "push": { "to": "cotacoes", "item": "$.data", "key": "$.symbol", "max": 50 } }
+  ]
+}
+```
+
+- Conecta ao entrar (`connect: "login"`) ou no primeiro uso (`"auto"`, fontes públicas); envia `onOpen`, mantém
+  `heartbeat` e reconecta sozinha (até 5 tentativas com espera crescente; depois, no próximo uso).
+- Cada mensagem recebida passa pelas `rules`: `set` grava o **estado** (`{{rt.saldo}}`, além de `{{rt.connected}}` e
+  `{{rt.messages}}`); `push` mantém **coleções** (mais recentes primeiro; `key` substitui o item com a mesma chave).
+- Painéis e ferramentas leem coleções com `"source": "cotacoes"` (`"rows": "$.items[*]"`) e o estado com `{{rt.…}}`.
+- Ferramenta com `send` envia uma mensagem e, com `await.match` (ex.: `{"$.request_id": "{{rid}}"}`), espera a resposta
+  correspondente; `{{rid}}` é único por chamada. Ordens via `send` seguem as mesmas proteções: `risky` (confirmação),
+  `limits` (teto do usuário) e `requiresSignal` + `orderIntent` (validação TypeSafe Jev + coordenação entre agentes).
+- O criador com IA só libera a instalação de conectores sem login depois do `connector_test`, que conecta de verdade,
+  espera mensagens e confere se cada `set` e cada coleção recebeu dados.
 
 ## Validação TypeSafe Jev e coordenação (imposto em código)
 

@@ -234,6 +234,7 @@ private fun TestPanel(def: CustomDef) {
     val c = Cue.c
     val scope = rememberCoroutineScope()
     val connector = remember(def) { CustomConnector(def) }
+    androidx.compose.runtime.DisposableEffect(connector) { onDispose { connector.dispose() } }
     val settings = remember(def) { ConnectorSettings { k -> def.settings.firstOrNull { it.id == k }?.default } }
     val fields = remember(def) { mutableStateMapOf<String, String>() }
     var loggedIn by remember(def) { mutableStateOf(false) }

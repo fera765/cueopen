@@ -782,6 +782,7 @@ class AgentRunner(
             if (session.connectorBuilder) appendLine()
             if (session.connectorBuilder) appendLine("## Criar UI Connectors (esta conversa é o criador de conectores)")
             if (session.connectorBuilder) appendLine("- Quando o usuário pedir um conector (UI Connector), NÃO escreva o JSON no chat: chame connector_spec, monte a definição, valide com connector_validate e corrija até zero erros (repita sozinho, sem perguntar), depois TESTE DE VERDADE com connector_test (requisições reais; corrija caminhos pela estrutura que ele mostra até PASSOU) e só então chame connector_propose. Não use o browser/web para testar — só connector_test vale. Só diga que deu certo depois de connector_propose; a instalação é feita pelo usuário no card. Se faltar a URL base ou os endpoints reais da API, pesquise na documentação oficial (web) ou pergunte.")
+            if (session.connectorBuilder) appendLine("- Serviços em TEMPO REAL (corretoras de ações/Forex/cripto/opções, cotações e saldo ao vivo, streams) usam o bloco realtime (WebSocket wss://) do SDK: login HTTP extrai o token, onOpen autentica/assina, rules montam estado (rt.*) e coleções (source), e ordens usam tools com send + await por request_id, sempre com risky, limits, requiresSignal e orderIntent. Use as mensagens REAIS do protocolo do serviço (documentação oficial); nunca invente.")
             runCatching {
                 val hub = dev.cueopen.app.CueApp.instance.uiConnectors
                 val usable = hub.connectors.filter { hub.usableBy(it, agent) }
@@ -899,7 +900,7 @@ class AgentRunner(
         if (builder) add(tool("connector_validate", "Valida uma definição JSON de UI Connector com o parser real do app. Retorna OK ou a lista exata de erros (caminho + motivo). Corrija e valide de novo até zero erros.", buildJsonObject {
             put("json", str("Definição JSON completa do conector"))
         }, listOf("json")))
-        if (builder) add(tool("connector_test", "TESTA DE VERDADE o conector (requisições reais): busca cada painel, confere se tabelas têm linhas e colunas preenchidas e executa cada ferramenta não sensível. Mostra a estrutura real da resposta quando um caminho falha, para você corrigir. Obrigatório passar antes de connector_propose (conectores sem login).", buildJsonObject {
+        if (builder) add(tool("connector_test", "TESTA DE VERDADE o conector (requisições reais; com realtime, conecta o WebSocket, espera mensagens e confere estado/coleções): busca cada painel, confere se tabelas têm linhas e colunas preenchidas e executa cada ferramenta não sensível. Mostra a estrutura real da resposta quando um caminho falha, para você corrigir. Obrigatório passar antes de connector_propose (conectores sem login).", buildJsonObject {
             put("json", str("Definição JSON completa do conector"))
             put("args_json", str("Opcional: exemplos de argumentos por ferramenta, ex.: {\"buscar\":{\"termo\":\"anitta\",\"tipo\":\"artist\"}}"))
         }, listOf("json")))
@@ -1152,7 +1153,7 @@ class AgentRunner(
                         }.getOrDefault(emptyMap())
                         val conn = dev.cueopen.app.uiconnector.custom.CustomConnector(d)
                         val settings = dev.cueopen.app.uiconnector.ConnectorSettings { k -> d.settings.firstOrNull { it.id == k }?.default }
-                        val (passed, report) = runCatching { conn.selfTest(settings, toolArgs) }.getOrElse { false to "Falha no teste: ${it.message}" }
+                        val (passed, report) = try { runCatching { conn.selfTest(settings, toolArgs) }.getOrElse { false to "Falha no teste: ${it.message}" } } finally { conn.dispose() }
                         if (passed) builderPassed[sessionId] = raw.hashCode()
                         (if (passed) "PASSOU — o conector funciona com dados reais.\n" else "FALHOU — corrija a definição (caminhos/endpoints) e rode connector_test de novo:\n") + report.take(6000) +
                             (if (passed) "\nAgora chame connector_propose com o MESMO JSON." else "")

@@ -138,7 +138,121 @@ object CustomTemplates {
 }
 """.trimIndent())
 
-    val ALL = listOf(TOKEN_LOGIN, API_KEY, RSS, SPOTIFY, MINIMAL)
+
+    val MARKET_WS = Entry("Tempo real público (WebSocket: Binance)", """
+{
+  "id": "binancetempo",
+  "name": "Binance tempo real",
+  "description": "Preços de criptomoedas em tempo real pelo stream público da Binance.",
+  "version": "1.0",
+  "baseUrl": "https://api.binance.com",
+  "allowedHosts": [ "stream.binance.com" ],
+  "realtime": {
+    "url": "wss://stream.binance.com:443/ws",
+    "connect": "auto",
+    "onOpen": [ { "method": "SUBSCRIBE", "params": [ "btcusdt@ticker", "ethusdt@ticker", "solusdt@ticker" ], "id": 1 } ],
+    "rules": [
+      { "match": { "${'$'}.e": "24hrTicker" }, "set": { "ultimo": "${'$'}.s" }, "push": { "to": "precos", "key": "${'$'}.s", "max": 50 } }
+    ]
+  },
+  "panels": [
+    { "type": "stats", "items": [
+      { "label": "Mensagens", "value": "{{rt.messages}}" },
+      { "label": "Último par", "value": "{{rt.ultimo|default:-}}", "tone": "good" } ] },
+    { "type": "table", "title": "Preços ao vivo", "source": "precos", "rows": "${'$'}.items[*]",
+      "columns": [
+        { "title": "Par", "value": "{{${'$'}.s}}" },
+        { "title": "Preço", "value": "{{${'$'}.c|num:4}}" },
+        { "title": "24h", "value": "{{${'$'}.P|pct:2}}" } ],
+      "empty": "Aguardando preços…" }
+  ],
+  "tools": [
+    { "name": "precos_ao_vivo", "description": "Últimos preços recebidos em tempo real (par, preço, variação 24h).",
+      "source": "precos", "list": { "rows": "${'$'}.items[*]", "item": "{{${'$'}.s}}: {{${'$'}.c}} ({{${'$'}.P|pct:2}})", "max": 50 } },
+    { "name": "acompanhar_par", "description": "Passa a receber em tempo real o preço de um par (ex.: BNBUSDT).",
+      "params": [ { "name": "par", "description": "Par da Binance, ex.: BNBUSDT" } ],
+      "send": { "message": { "method": "SUBSCRIBE", "params": [ "{{par|lower}}@ticker" ], "id": "{{rid|int}}" },
+        "await": { "match": { "${'$'}.id": "{{rid}}" }, "timeoutSec": 10 } },
+      "response": "Acompanhando {{par|upper}} em tempo real." },
+    { "name": "preco_rest", "description": "Preço atual de um par pela API REST.",
+      "params": [ { "name": "par", "description": "Par, ex.: BTCUSDT" } ],
+      "request": { "path": "/api/v3/ticker/price", "query": { "symbol": "{{par|upper}}" } },
+      "response": "{{${'$'}.symbol}}: {{${'$'}.price}}" }
+  ]
+}
+""".trimIndent())
+
+    val BROKER_WS = Entry("Corretora em tempo real (login + WebSocket + ordens)", """
+{
+  "id": "corretorart",
+  "name": "Corretora (tempo real)",
+  "description": "Login, saldo e cotações em tempo real e envio de ordens validadas.",
+  "version": "1.0",
+  "baseUrl": "https://api.suacorretora.com",
+  "allowedHosts": [ "ws.suacorretora.com" ],
+  "headers": { "Authorization": "Bearer {{token}}" },
+  "login": {
+    "fields": [
+      { "id": "email", "label": "E-mail", "type": "email" },
+      { "id": "password", "label": "Senha", "type": "password" }
+    ],
+    "request": { "method": "POST", "path": "/auth/login", "body": { "email": "{{email}}", "password": "{{password}}" } },
+    "extract": { "token": "${'$'}.token" }
+  },
+  "settings": [
+    { "id": "maxValor", "label": "Valor máximo por ordem", "description": "Teto por ordem do agente.", "type": "number", "default": "10", "risky": true }
+  ],
+  "realtime": {
+    "url": "wss://ws.suacorretora.com/stream",
+    "onOpen": [
+      { "type": "auth", "token": "{{token}}" },
+      { "type": "subscribe", "channels": [ "balance", "quotes", "orders" ] }
+    ],
+    "heartbeat": { "everySec": 20, "message": { "type": "ping" } },
+    "rules": [
+      { "match": { "${'$'}.type": "balance" }, "set": { "saldo": "${'$'}.data.amount", "moeda": "${'$'}.data.currency" } },
+      { "match": { "${'$'}.type": "quote" }, "push": { "to": "cotacoes", "item": "${'$'}.data", "key": "${'$'}.symbol", "max": 50 } },
+      { "match": { "${'$'}.type": "order" }, "push": { "to": "ordens", "item": "${'$'}.data", "key": "${'$'}.id", "max": 100 } }
+    ]
+  },
+  "panels": [
+    { "type": "stats", "items": [
+      { "label": "Saldo", "value": "{{rt.saldo|num:2}} {{rt.moeda}}", "tone": "good" },
+      { "label": "Conectado", "value": "{{rt.connected}}" } ] },
+    { "type": "table", "title": "Cotações", "source": "cotacoes", "rows": "${'$'}.items[*]",
+      "columns": [ { "title": "Ativo", "value": "{{${'$'}.symbol}}" }, { "title": "Preço", "value": "{{${'$'}.price|num:5}}" } ],
+      "empty": "Aguardando cotações…" },
+    { "type": "table", "title": "Ordens", "source": "ordens", "rows": "${'$'}.items[*]",
+      "columns": [ { "title": "Ativo", "value": "{{${'$'}.symbol}}" }, { "title": "Lado", "value": "{{${'$'}.side}}" },
+        { "title": "Valor", "value": "{{${'$'}.amount|num:2}}" }, { "title": "Status", "value": "{{${'$'}.status}}" } ],
+      "empty": "Nenhuma ordem." }
+  ],
+  "tools": [
+    { "name": "saldo", "description": "Saldo atual (tempo real).", "response": "Saldo: {{rt.saldo|num:2}} {{rt.moeda}}" },
+    { "name": "cotacoes", "description": "Últimas cotações recebidas em tempo real.",
+      "source": "cotacoes", "list": { "rows": "${'$'}.items[*]", "item": "{{${'$'}.symbol}}: {{${'$'}.price}}", "max": 50 } },
+    { "name": "velas", "description": "Velas (candles) recentes de um ativo.",
+      "params": [ { "name": "ativo", "description": "Símbolo do ativo" }, { "name": "minutos", "description": "Tamanho da vela em minutos", "type": "integer" } ],
+      "send": { "message": { "type": "candles", "symbol": "{{ativo}}", "size": "{{minutos|int}}", "request_id": "{{rid}}" },
+        "await": { "match": { "${'$'}.request_id": "{{rid}}" }, "timeoutSec": 10 } },
+      "list": { "rows": "${'$'}.data[*]", "item": "{{${'$'}.time|date}} abre {{${'$'}.open}} fecha {{${'$'}.close}}", "max": 60 } },
+    { "name": "enviar_ordem", "description": "Envia uma ordem de compra ou venda (exige validação TypeSafe Jev).",
+      "risky": true, "requiresSignal": true,
+      "params": [
+        { "name": "ativo", "description": "Símbolo do ativo" },
+        { "name": "lado", "description": "buy ou sell", "enum": [ "buy", "sell" ] },
+        { "name": "valor", "description": "Valor da ordem", "type": "number" }
+      ],
+      "limits": [ { "param": "valor", "maxSetting": "maxValor" } ],
+      "orderIntent": { "asset": "{{ativo}}", "direction": "{{lado}}" },
+      "send": { "message": { "type": "order", "symbol": "{{ativo}}", "side": "{{lado}}", "amount": "{{valor|num}}", "request_id": "{{rid}}" },
+        "await": { "match": { "${'$'}.request_id": "{{rid}}" }, "timeoutSec": 15 } },
+      "response": "Ordem {{${'$'}.data.id}}: {{${'$'}.data.status}}" }
+  ]
+}
+""".trimIndent())
+
+    val ALL = listOf(TOKEN_LOGIN, API_KEY, RSS, SPOTIFY, MARKET_WS, BROKER_WS, MINIMAL)
 
     /** Rascunho enviado ao chat para a IA escrever a definição (o usuário só descreve o serviço). */
     val AI_PROMPT = """Crie um UI Connector em JSON para o serviço: <DESCREVA AQUI: nome, URL base da API e o que quer ver/fazer>.

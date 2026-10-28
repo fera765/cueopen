@@ -35,14 +35,20 @@ data class StatDef(val label: String, val value: String, val tone: Tone)
 data class PanelDef(
     val type: String, val title: String, val subtitle: String, val badge: String, val tone: Tone,
     val request: ReqDef?, val stats: List<StatDef>, val rows: String, val columns: List<ColDef>, val text: String, val empty: String,
+    /** Coleção do tempo real usada como dados ({"items":[…]}, mais recentes primeiro) em vez de request. */
+    val source: String = "",
 )
 data class ActionDef(val id: String, val label: String, val risky: Boolean, val request: ReqDef, val message: String)
 data class LimitDef(val param: String, val maxSetting: String)
 data class IntentDef(val asset: String, val direction: String)
 data class ToolDef(
     val name: String, val description: String, val params: List<ParamSpec>, val risky: Boolean, val requiresSignal: Boolean,
-    val intent: IntentDef?, val limits: List<LimitDef>, val request: ReqDef, val response: String,
+    val intent: IntentDef?, val limits: List<LimitDef>, val request: ReqDef?, val response: String,
     val list: ListDef? = null,
+    /** Envio de mensagem pelo tempo real (com espera opcional da resposta). */
+    val send: SendDef? = null,
+    /** Coleção do tempo real lida pela ferramenta. */
+    val source: String = "",
 )
 data class LoginDef(val fields: List<LoginField>, val request: ReqDef?, val extract: Map<String, String>, val verify: ReqDef?)
 
@@ -51,6 +57,7 @@ data class CustomDef(
     val baseUrl: String, val host: String, val headers: Map<String, String>, val login: LoginDef,
     val settings: List<SettingSpec>, val panels: List<PanelDef>, val actions: List<ActionDef>, val tools: List<ToolDef>,
     val allowedHosts: List<String> = emptyList(),
+    val realtime: RtDef? = null,
 ) {
     /** Todos os hosts que o conector pode chamar. */
     val hosts: Set<String> get() = (listOf(host) + allowedHosts).map { it.lowercase() }.toSet()
@@ -68,6 +75,7 @@ object CustomDefParser {
     private val METHODS = setOf("GET", "POST", "PUT", "PATCH", "DELETE")
     private val ID = Regex("^[a-z][a-z0-9]{1,19}$")
     private val IDENT = Regex("^[a-z][a-zA-Z0-9_]{0,31}$")
+    private val ORDER_WORDS = Regex("(?i)(buy|sell|order|trade|compra|vend|ordem|operar|opera[cç][aã]o|withdraw|saque|transfer)")
     private val EXTRACT_SRC = Regex("^(\\$.*|header:[A-Za-z0-9-]+|cookie:[A-Za-z0-9_.-]+)$")
 
     data class Parsed(val def: CustomDef?, val errors: List<String>, val warnings: List<String>)
@@ -230,7 +238,7 @@ object CustomDefParser {
         }
 
         fun build(o: JsonObject): CustomDef? {
-            known(o, "$", setOf("id", "name", "description", "version", "accent", "baseUrl", "allowedHosts", "headers", "login", "settings", "panels", "actions", "tools"))
+            known(o, "$", setOf("id", "name", "description", "version", "accent", "baseUrl", "allowedHosts", "headers", "login", "settings", "panels", "actions", "tools", "realtime"))
             val id = str(o, "id", "$", required = true)
             if (id.isNotEmpty() && !ID.matches(id)) errors.add("$.id '$id' inválido: use [a-z0-9], começando com letra (2–20).")
             val name = str(o, "name", "$", required = true)
@@ -327,17 +335,27 @@ object CustomDefParser {
             val sessionVars = credVars + login.extract.keys
             val headers = strMap(obj(o, "headers", "$"), "$.headers")
             headers.forEach { (k, v) -> tpl(v, "$.headers.$k", sessionVars, false) }
-            val reqVars = sessionVars + settingVars
+            // tempo real (WebSocket)
+            val rt = realtime(obj(o, "realtime", "$"), sessionVars + settingVars)
+            val rtVars = if (rt == null) emptySet() else rt.stateKeys.map { "rt.$it" }.toSet() + setOf("rt.connected", "rt.messages")
+            val collections = rt?.collections.orEmpty()
+            val reqVars = sessionVars + settingVars + rtVars
 
             // painéis
             val panels = ArrayList<PanelDef>()
             arr(o, "panels", "$", 10).forEachIndexed { i, po ->
                 val p = "$.panels[$i]"
-                known(po, p, setOf("type", "title", "subtitle", "badge", "tone", "request", "items", "rows", "columns", "text", "empty"))
+                known(po, p, setOf("type", "title", "subtitle", "badge", "tone", "request", "items", "rows", "columns", "text", "empty", "source"))
                 val type = str(po, "type", p, required = true).lowercase()
                 if (type !in setOf("header", "stats", "table", "note")) errors.add("$p.type '$type' inválido (header, stats, table, note).")
                 val preq = req(obj(po, "request", p), "$p.request")
                 tplReq(preq, "$p.request", reqVars)
+                val psource = str(po, "source", p).trim()
+                if (psource.isNotEmpty()) {
+                    if (preq != null) errors.add("$p: use \"request\" OU \"source\", não os dois.")
+                    if (rt == null) errors.add("$p.source exige o bloco \"realtime\".")
+                    else if (psource !in collections) errors.add("$p.source '$psource' não é uma coleção do realtime (disponíveis: ${collections.joinToString().ifEmpty { "nenhuma — use push.to numa regra" }}).")
+                }
                 val title = str(po, "title", p)
                 val subtitle = str(po, "subtitle", p)
                 val badge = str(po, "badge", p)
@@ -362,7 +380,7 @@ object CustomDefParser {
                 if (type == "table") {
                     rows = str(po, "rows", p, required = true)
                     if (rows.isNotEmpty() && !JsonPath.isValid(rows)) errors.add("$p.rows: caminho inválido '$rows' (ex.: \"\$.data[*]\").")
-                    if (preq == null) errors.add("$p.request é obrigatório em tabelas.")
+                    if (preq == null && psource.isEmpty()) errors.add("$p: tabelas exigem \"request\" ou \"source\" (coleção do realtime).")
                     arr(po, "columns", p, 8, required = true).forEachIndexed { j, co ->
                         val cp = "$p.columns[$j]"
                         known(co, cp, setOf("title", "value"))
@@ -372,7 +390,7 @@ object CustomDefParser {
                         cols.add(ColDef(ct, cv))
                     }
                 }
-                panels.add(PanelDef(type, title, subtitle, badge, tn, preq, stats, rows, cols, text, empty))
+                panels.add(PanelDef(type, title, subtitle, badge, tn, preq, stats, rows, cols, text, empty, psource))
             }
 
             // ações do usuário (botões)
@@ -397,7 +415,7 @@ object CustomDefParser {
             val tools = ArrayList<ToolDef>()
             arr(o, "tools", "$", 30).forEachIndexed { i, to ->
                 val p = "$.tools[$i]"
-                known(to, p, setOf("name", "description", "params", "risky", "requiresSignal", "orderIntent", "limits", "request", "response", "list"))
+                known(to, p, setOf("name", "description", "params", "risky", "requiresSignal", "orderIntent", "limits", "request", "response", "list", "send", "source"))
                 val params = ArrayList<ParamSpec>()
                 arr(to, "params", p, 12).forEachIndexed { j, pa ->
                     val pp = "$p.params[$j]"
@@ -411,9 +429,20 @@ object CustomDefParser {
                 val vars = reqVars + paramVars
                 val risky = bool(to, "risky", p, false)
                 val requiresSignal = bool(to, "requiresSignal", p, false)
-                val treq = req(obj(to, "request", p, required = true), "$p.request")
+                val treq = req(obj(to, "request", p), "$p.request")
                 tplReq(treq, "$p.request", vars)
                 if (treq != null && treq.method != "GET" && !risky) errors.add("$p: ferramenta com método ${treq.method} exige \"risky\": true.")
+                val tsend = send(obj(to, "send", p), "$p.send", vars, rt != null)
+                val tsource = str(to, "source", p).trim()
+                if (tsource.isNotEmpty()) {
+                    if (rt == null) errors.add("$p.source exige o bloco \"realtime\".")
+                    else if (tsource !in collections) errors.add("$p.source '$tsource' não é uma coleção do realtime (disponíveis: ${collections.joinToString().ifEmpty { "nenhuma" }}).")
+                }
+                val modes = listOfNotNull(treq?.let { "request" }, tsend?.let { "send" }, tsource.ifEmpty { null }?.let { "source" })
+                if (modes.size > 1) errors.add("$p: use só um entre request, send e source (encontrado: ${modes.joinToString()}).")
+                if (modes.isEmpty() && rt == null && to["send"] == null) errors.add("$p.request é obrigatório (ou send/source com o bloco realtime).")
+                if (modes.isEmpty() && rt != null && str(to, "response", p).isBlank()) errors.add("$p: sem request/send/source, a ferramenta precisa de \"response\" lendo o estado (ex.: {{rt.saldo}}).")
+                if (tsend != null && !risky && ORDER_WORDS.containsMatchIn(str(to, "name", p) + " " + str(to, "description", p))) errors.add("$p: ferramenta que envia ordem/operação pelo tempo real exige \"risky\": true.")
                 val limits = ArrayList<LimitDef>()
                 arr(to, "limits", p, 6).forEachIndexed { j, lo2 ->
                     val lp = "$p.limits[$j]"
@@ -446,6 +475,7 @@ object CustomDefParser {
                 val lso = obj(to, "list", p)
                 if (lso != null) {
                     known(lso, "$p.list", setOf("rows", "item", "max"))
+                    if (treq == null && tsend == null && tsource.isEmpty()) errors.add("$p.list exige request, send ou source.")
                     val rows = str(lso, "rows", "$p.list", required = true)
                     if (rows.isNotEmpty() && !JsonPath.isValid(rows)) errors.add("$p.list.rows: caminho inválido '$rows'.")
                     val item = str(lso, "item", "$p.list", required = true)
@@ -456,9 +486,121 @@ object CustomDefParser {
                 }
                 val tname = str(to, "name", p, required = true)
                 val tdesc = str(to, "description", p, required = true)
-                if (treq != null) tools.add(ToolDef(tname, tdesc, params, risky, requiresSignal, intent, limits, treq, response, list))
+                tools.add(ToolDef(tname, tdesc, params, risky, requiresSignal, intent, limits, treq, response, list, tsend, tsource))
             }
-            return CustomDef(id, name, description, version, accent, baseUrl, host, headers, login, settings, panels, actions, tools, allowed)
+            return CustomDef(id, name, description, version, accent, baseUrl, host, headers, login, settings, panels, actions, tools, allowed, rt)
+        }
+
+        /** Mensagem do tempo real: objeto/array JSON ou string (texto cru). Valida os modelos. */
+        fun rtMsg(e: JsonElement?, path: String, vars: Set<String>): JsonElement? {
+            if (e == null || e is JsonNull) return null
+            if (e is JsonPrimitive && !e.isString) { errors.add("$path deve ser objeto, lista ou texto."); return null }
+            Template.strings(e).forEach { tpl(it, path, vars, false) }
+            return e
+        }
+
+        fun matchMap(o: JsonObject?, path: String, vars: Set<String>): Map<String, String> {
+            val m = strMap(o, path)
+            if (m.size > 6) errors.add("$path: no máximo 6 condições.")
+            m.forEach { (k, v) ->
+                if (!k.startsWith("$") || !JsonPath.isValid(k)) errors.add("$path: chave '$k' deve ser um caminho (ex.: \"\$.name\").")
+                tpl(v, "$path.$k", vars, false)
+            }
+            return m
+        }
+
+        fun send(o: JsonObject?, path: String, vars: Set<String>, hasRt: Boolean): SendDef? {
+            if (o == null) return null
+            if (!hasRt) errors.add("$path exige o bloco \"realtime\".")
+            known(o, path, setOf("message", "await"))
+            val sv = vars + setOf("rid", "now")
+            val msg = rtMsg(o["message"], "$path.message", sv)
+            if (msg == null) { errors.add("$path.message é obrigatório."); return null }
+            val ao = obj(o, "await", path)
+            var aw: AwaitDef? = null
+            if (ao != null) {
+                known(ao, "$path.await", setOf("match", "timeoutSec"))
+                val mm = matchMap(obj(ao, "match", "$path.await", required = true), "$path.await.match", sv)
+                if (mm.isEmpty()) errors.add("$path.await.match precisa de ao menos 1 condição.")
+                val ts = str(ao, "timeoutSec", "$path.await", def = "10").toIntOrNull()
+                if (ts == null || ts !in 1..60) errors.add("$path.await.timeoutSec deve ser de 1 a 60.")
+                aw = AwaitDef(mm, (ts ?: 10).coerceIn(1, 60))
+            }
+            return SendDef(msg, aw)
+        }
+
+        fun realtime(o: JsonObject?, baseVars: Set<String>): RtDef? {
+            if (o == null) return null
+            val p = "$.realtime"
+            known(o, p, setOf("url", "headers", "onOpen", "heartbeat", "rules", "connect"))
+            val cv = baseVars + setOf("rid", "now")
+            val url = str(o, "url", p, required = true).trim()
+            if (url.isNotEmpty()) {
+                if (!url.startsWith("wss://")) errors.add("$p.url deve começar com wss://")
+                else {
+                    val hp = url.removePrefix("wss://").substringBefore('/').substringBefore('?').lowercase()
+                    val h = hp.substringBefore(':')
+                    val port = hp.substringAfter(':', "")
+                    if (h.contains("{{")) errors.add("$p.url: o host não pode ter variável.")
+                    else if (h !in hosts) errors.add("$p.url: host '$h' não está em baseUrl/allowedHosts.")
+                    if (port.isNotEmpty() && port != "443") errors.add("$p.url: somente a porta 443.")
+                }
+                tpl(url, "$p.url", cv, false)
+            }
+            val headers = strMap(obj(o, "headers", p), "$p.headers")
+            headers.forEach { (k, v) -> tpl(v, "$p.headers.$k", cv, false) }
+            val onOpen = ArrayList<JsonElement>()
+            val oo = o["onOpen"]
+            if (oo != null && oo !is JsonNull) {
+                val a = oo as? JsonArray
+                if (a == null) errors.add("$p.onOpen deve ser uma lista de mensagens.")
+                else {
+                    if (a.size > 10) errors.add("$p.onOpen: no máximo 10 mensagens.")
+                    a.take(10).forEachIndexed { i, el -> rtMsg(el, "$p.onOpen[$i]", cv)?.let { onOpen.add(it) } }
+                }
+            }
+            var hbSec = 0
+            var hb: JsonElement? = null
+            val ho = obj(o, "heartbeat", p)
+            if (ho != null) {
+                known(ho, "$p.heartbeat", setOf("everySec", "message"))
+                val ev = str(ho, "everySec", "$p.heartbeat", required = true).toIntOrNull()
+                if (ev == null || ev !in 5..300) errors.add("$p.heartbeat.everySec deve ser de 5 a 300.")
+                hbSec = (ev ?: 30).coerceIn(5, 300)
+                hb = rtMsg(ho["message"], "$p.heartbeat.message", cv)
+                if (hb == null) errors.add("$p.heartbeat.message é obrigatório.")
+            }
+            val rules = ArrayList<RtRule>()
+            arr(o, "rules", p, 30).forEachIndexed { i, ro ->
+                val rp = "$p.rules[$i]"
+                known(ro, rp, setOf("match", "set", "push"))
+                val mm = matchMap(obj(ro, "match", rp), "$rp.match", baseVars)
+                val set = strMap(obj(ro, "set", rp), "$rp.set")
+                set.forEach { (k, v) ->
+                    if (!IDENT.matches(k)) errors.add("$rp.set.$k: nome inválido (letra inicial; letras, números e _).")
+                    if (k == "connected" || k == "messages") errors.add("$rp.set.$k: nome reservado.")
+                    if (!v.startsWith("$") || !JsonPath.isValid(v)) errors.add("$rp.set.$k: use um caminho (ex.: \"\$.msg.amount\").")
+                }
+                var pushTo = ""; var item = "$"; var key = ""; var max = 100
+                val po = obj(ro, "push", rp)
+                if (po != null) {
+                    known(po, "$rp.push", setOf("to", "item", "key", "max"))
+                    pushTo = str(po, "to", "$rp.push", required = true)
+                    if (pushTo.isNotEmpty() && !IDENT.matches(pushTo)) errors.add("$rp.push.to '$pushTo' inválido.")
+                    item = str(po, "item", "$rp.push", def = "$")
+                    if (item != "$" && !JsonPath.isValid(item)) errors.add("$rp.push.item: caminho inválido '$item'.")
+                    key = str(po, "key", "$rp.push")
+                    if (key.isNotEmpty() && !JsonPath.isValid(key)) errors.add("$rp.push.key: caminho inválido '$key'.")
+                    val mx = str(po, "max", "$rp.push", def = "100").toIntOrNull()
+                    if (mx == null || mx !in 1..500) errors.add("$rp.push.max deve ser de 1 a 500.")
+                    max = (mx ?: 100).coerceIn(1, 500)
+                }
+                if (set.isEmpty() && po == null) errors.add("$rp: a regra precisa de \"set\" e/ou \"push\".")
+                rules.add(RtRule(mm, set, pushTo, item, key, max))
+            }
+            val connect = str(o, "connect", p, def = "login").lowercase()
+            if (connect !in setOf("login", "auto")) errors.add("$p.connect deve ser login ou auto.")
+            return RtDef(url, headers, onOpen, hbSec, hb, rules, connect)
         }
     }
 

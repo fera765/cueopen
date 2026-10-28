@@ -23,8 +23,31 @@ class CustomConnector(
     val def: CustomDef,
     private val http: HttpExec = OkHttpExec(),
     private val permissive: Boolean = false,
+    ws: WsExec? = null,
 ) : UiConnector {
     override val spec = def.toSpec()
+
+    /** Sessão de tempo real (WebSocket) quando a definição tem o bloco "realtime". */
+    val rt: RealtimeSession? = def.realtime?.let { RealtimeSession(it, def.hosts, ws ?: OkHttpWs(permissive), permissive) }
+
+    private fun defaultSettings(): Map<String, String> = def.settings.associate { "s.${it.id}" to it.default }
+
+    /** Conecta o tempo real se preciso. null = ok (ou sem realtime); senão o motivo. */
+    private suspend fun ensureRt(base: Map<String, String>): String? {
+        val r = rt ?: return null
+        if (!isLoggedIn) return "entre na conta primeiro"
+        return r.ensure((creds ?: emptyMap()) + extracted + base)
+    }
+
+    /** Dados de um painel/ferramenta com "source": a coleção do tempo real. */
+    private suspend fun sourceJson(source: String, base: Map<String, String>): JsonElement {
+        val r = rt ?: throw IllegalStateException("conector sem tempo real")
+        ensureRt(base)?.let { throw IllegalStateException("tempo real indisponível: $it") }
+        return r.collection(source)
+    }
+
+    /** Fecha a conexão em tempo real e libera recursos (definição trocada/removida). */
+    fun dispose() { rt?.dispose() }
 
     private val parser = Json { isLenient = true; ignoreUnknownKeys = true }
 
@@ -35,7 +58,7 @@ class CustomConnector(
 
     private class Reply(val code: Int, val body: String, val json: JsonElement?, val headers: Map<String, List<String>>)
 
-    private fun sessionVars(): Map<String, String> = (creds ?: emptyMap()) + extracted
+    private fun sessionVars(): Map<String, String> = (creds ?: emptyMap()) + extracted + (rt?.vars() ?: emptyMap())
 
     private fun settingVars(st: ConnectorSettings): Map<String, String> =
         def.settings.associate { "s.${it.id}" to st.text(it.id).ifEmpty { it.default } }
@@ -115,6 +138,11 @@ class CustomConnector(
                     return Result.failure(IllegalStateException("Credenciais não aceitas (verificação HTTP ${vr.code})."))
                 }
             }
+            if (rt != null && def.realtime?.connect == "login") {
+                ensureRt(defaultSettings())?.let { err ->
+                    return Result.failure(IllegalStateException("Login aceito, mas a conexão em tempo real falhou: " + Redactor.redact(err, secrets())))
+                }
+            }
             Result.success(Unit)
         } catch (t: kotlinx.coroutines.CancellationException) {
             throw t
@@ -124,6 +152,7 @@ class CustomConnector(
     }
 
     override suspend fun logout() {
+        rt?.close()
         creds = null
         extracted = emptyMap()
     }
@@ -131,9 +160,14 @@ class CustomConnector(
     override suspend fun snapshot(settings: ConnectorSettings): List<UiBlock> {
         val out = ArrayList<UiBlock>()
         val base = settingVars(settings)
+        if (rt != null && isLoggedIn) {
+            val err = ensureRt(base)
+            if (err != null) out.add(UiBlock.Note("Tempo real desconectado: " + Redactor.redact(err, secrets()), Tone.BAD))
+        }
         for (p in def.panels) {
             try {
-                val reply = if (p.request != null) authed(p.request, base) else null
+                val reply = if (p.request != null) authed(p.request, base)
+                    else if (p.source.isNotEmpty()) Reply(200, "", sourceJson(p.source, base), emptyMap()) else null
                 if (reply != null && reply.code !in 200..299) {
                     out.add(UiBlock.Note("${p.title.ifBlank { p.type }}: servidor respondeu HTTP ${reply.code}.", Tone.BAD))
                     continue
@@ -205,7 +239,20 @@ class CustomConnector(
         }
         return try {
             val vars = settingVars(settings) + args.filterValues { it.isNotEmpty() }
-            val reply = authed(t.request, vars)
+            val reply = when {
+                t.request != null -> authed(t.request, vars)
+                t.send != null -> {
+                    ensureRt(settingVars(settings))?.let { return "ERRO: tempo real indisponível: " + Redactor.redact(it, secrets()) }
+                    val got = rt!!.request(t.send.message, t.send.await, sessionVars() + vars)
+                    if (t.send.await == null && t.response.isBlank() && t.list == null) return "Mensagem enviada."
+                    Reply(200, got.toString(), got, emptyMap())
+                }
+                t.source.isNotEmpty() -> Reply(200, "", sourceJson(t.source, settingVars(settings)), emptyMap())
+                else -> {
+                    ensureRt(settingVars(settings))?.let { return "ERRO: tempo real indisponível: " + Redactor.redact(it, secrets()) }
+                    Reply(200, "", null, emptyMap())
+                }
+            }
             if (reply.code in 300..399) return "ERRO HTTP ${reply.code}: o servidor redirecionou para ${reply.headers["location"]?.firstOrNull() ?: "?"} — atualize o endereço na definição do conector."
             if (reply.code !in 200..299) return "ERRO HTTP ${reply.code}: ${reply.body.take(300)}"
             val lst = t.list
@@ -224,7 +271,7 @@ class CustomConnector(
         } catch (c: kotlinx.coroutines.CancellationException) {
             throw c
         } catch (e: Throwable) {
-            "ERRO: ${e.message ?: e.javaClass.simpleName}"
+            "ERRO: " + Redactor.redact(e.message ?: e.javaClass.simpleName, secrets())
         }
     }
 
@@ -238,12 +285,30 @@ class CustomConnector(
         val sb = StringBuilder()
         var ok = true
         val base = settingVars(settings)
+        val r0 = rt
+        if (r0 != null) {
+            val err = ensureRt(base)
+            if (err != null) return false to Redactor.redact("✗ tempo real: não conectou — $err", secrets())
+            r0.settle(8_000)
+            val n = r0.received.get()
+            if (n == 0L) { ok = false; sb.appendLine("✗ tempo real: conectou, mas nenhuma mensagem chegou em 8 s (confira onOpen/assinaturas).") }
+            else sb.appendLine("✓ tempo real: conectado, $n mensagem(ns) recebida(s)")
+            val st = r0.stateSnapshot()
+            for (k in def.realtime!!.stateKeys) {
+                val v = st[k]
+                if (v == null) { ok = false; sb.appendLine("✗ estado rt.$k: nenhuma mensagem casou com a regra (confira match/set)") }
+                else sb.appendLine("✓ estado rt.$k = " + v.take(80))
+            }
+            for ((c, size) in r0.collectionSizes()) {
+                if (size == 0) { ok = false; sb.appendLine("✗ coleção $c: vazia (confira match/push)") } else sb.appendLine("✓ coleção $c: $size item(ns)")
+            }
+        }
         def.panels.forEachIndexed { idx, p ->
             val label = "painel $idx (${p.type}${if (p.title.isNotBlank()) " \"${p.title.take(30)}\"" else ""})"
             val r = p.request
-            if (r == null) { sb.appendLine("✓ $label: sem requisição"); return@forEachIndexed }
+            if (r == null && p.source.isEmpty()) { sb.appendLine("✓ $label: sem requisição"); return@forEachIndexed }
             try {
-                val reply = authed(r, base)
+                val reply = if (r != null) authed(r, base) else Reply(200, "", sourceJson(p.source, base), emptyMap())
                 if (reply.code !in 200..299) {
                     ok = false; sb.appendLine("✗ $label: HTTP ${reply.code} — ${reply.body.take(200)}"); return@forEachIndexed
                 }

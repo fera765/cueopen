@@ -24,7 +24,7 @@ nome diferente ou valor fora das regras faz o conector ser recusado.
 2. Use **somente** as chaves listadas neste documento, com a grafia exata (camelCase: `baseUrl`, `requiresSignal`,
    `orderIntent`, `maxSetting`). Chaves inventadas são ignoradas e as obrigatórias ficam faltando.
    **NÃO EXISTEM**: `connector`, `authentication`, `auth`, `base_url`, `endpoints`, `dashboards`, `rate_limits`,
-   `errors`, `screens`, `ui`, `name` dentro de actions, `url` dentro de request, `type` em tools.
+   `errors`, `screens`, `ui`, `websocket`, `ws`, `stream`, `subscriptions`, `name` dentro de actions, `type` em tools.
 3. O objeto raiz é plano: `id`, `name`, `description`, `baseUrl` (e `login`, se houver) ficam **no nível raiz** (não aninhe
    dentro de "connector").
 4. Nunca invente endpoints: use os caminhos reais da API que o usuário indicou. Se não souber, pergunte.
@@ -47,6 +47,7 @@ nome diferente ou valor fora das regras faz o conector ser recusado.
 | `panels` | lista (≤10) | não | blocos da tela do conector |
 | `actions` | lista (≤10) | não | botões que o USUÁRIO toca |
 | `tools` | lista (≤30) | não | ferramentas que o AGENTE chama |
+| `realtime` | objeto | não | conexão em **tempo real** (WebSocket `wss://`) — ver seção própria |
 
 Todo o tráfego vai **só** para o host de `baseUrl` e os de `allowedHosts`.
 
@@ -79,14 +80,51 @@ Campo de login: `{"id": "...", "label": "...", "type": "text|email|password|numb
   Texto puro → `{"body": "..."}` (use `{{${D}.body|strip|trunc:500}}`).
 - `[*]` num elemento único (feed com 1 item) devolve o próprio elemento — funciona igual.
 
+### `realtime` (tempo real / WebSocket) — corretoras, Forex, bolsa, cotações, chats, eventos
+Mantém uma conexão WebSocket aberta (como o conector IQ Option do app): autentica, assina canais, mantém
+heartbeat, **reconecta sozinha** e transforma cada mensagem recebida em **estado** e **coleções**.
+```
+"realtime": {
+  "url": "wss://ws.exemplo.com/stream?token={{token}}",
+  "headers": {"Authorization": "Bearer {{token}}"},
+  "connect": "login",
+  "onOpen": [ {"type": "auth", "token": "{{token}}"}, {"type": "subscribe", "channels": ["quotes"]} ],
+  "heartbeat": {"everySec": 20, "message": {"type": "ping"}},
+  "rules": [
+    {"match": {"${D}.type": "balance"}, "set": {"saldo": "${D}.data.amount"}},
+    {"match": {"${D}.type": "quote"}, "push": {"to": "cotacoes", "item": "${D}.data", "key": "${D}.symbol", "max": 50}}
+  ]
+}
+```
+| chave | obrig. | regra |
+|---|---|---|
+| `url` | sim | `wss://` + host **fixo** que esteja em `baseUrl` ou `allowedHosts`; porta só 443 (`:443` opcional). Aceita `{{token}}` etc. no caminho/query |
+| `headers` | não | cabeçalhos do handshake |
+| `connect` | não | `"login"` (padrão: conecta ao entrar; falha = login falha) ou `"auto"` (no 1º uso — use em fontes públicas sem login) |
+| `onOpen` | não | ≤10 mensagens enviadas ao conectar (autenticação, assinaturas) |
+| `heartbeat` | não | `{"everySec": 5–300, "message": ...}` — mensagem periódica para manter a sessão |
+| `rules` | não | ≤30 regras aplicadas a CADA mensagem recebida |
+
+- **Mensagem** (em `onOpen`, `heartbeat.message`, `send.message`): objeto/lista JSON (textos aceitam `{{ }}`) **ou** uma string
+  enviada como texto cru (protocolos de texto, ex.: `"42[\"subscribe\",\"{{par}}\"]"`). `"{{rid|int}}"` vira número.
+- Mensagens recebidas são lidas como JSON (ou XML/texto → mesma árvore das respostas HTTP; texto puro → `{"body": "..."}`).
+- **Regra**: `match` = até 6 condições `"${D}.caminho": "valor"` (todas precisam bater; `"*"` = só existir; sem `match` = toda mensagem).
+  `set` = `{"nome": "${D}.caminho"}` grava no **estado**, lido como `{{rt.nome}}` (nomes `connected`/`messages` são reservados;
+  `{{rt.connected}}` e `{{rt.messages}}` já existem). `push` = guarda itens numa **coleção**: `to` (nome), `item` (caminho do item, padrão `"${D}"`
+  = a mensagem inteira; se for lista, cada elemento entra), `key` (caminho DENTRO do item; mesmo key substitui — ex.: um preço por ativo), `max` 1–500.
+  Uma regra precisa de `set` e/ou `push`.
+- Coleções são lidas por painéis/ferramentas com `"source": "nome"`: os dados viram `{"items": [...]}` com os **mais recentes primeiro**
+  → use `"rows": "${D}.items[*]"`.
+
 ### `settings[]`
 `{"id": "maxValor", "label": "...", "description": "...", "type": "number|switch|text", "default": "10", "risky": true}`
 — `id` e `label` obrigatórios. `default` é texto: número em `number`, `"true"`/`"false"` em `switch`.
 Ids reservados: `enabled`, `agentrequired`. Referencie no modelo como `{{s.maxValor}}`.
 
 ### `panels[]`
-Campo `type` obrigatório: `header`, `stats`, `table` ou `note`. `request` opcional (obrigatório em `table`);
-os textos do painel podem ler a resposta com `{{${D}.caminho}}`.
+Campo `type` obrigatório: `header`, `stats`, `table` ou `note`. `request` opcional; `table` exige `request` **ou**
+`"source": "<coleção do realtime>"` (nunca os dois). Os textos do painel leem a resposta com `{{${D}.caminho}}` e o
+estado do tempo real com `{{rt.nome}}` (painéis sem request podem mostrar só `{{rt.…}}`).
 - header: `{"type":"header","title":"...","subtitle":"...","badge":"...","tone":"good","request":{...}}`
 - stats: `{"type":"stats","request":{...},"items":[{"label":"Saldo","value":"{{${D}.balance|num:2}}","tone":"good"}]}` (`items` obrigatório, ≤20; `label`/`value` obrigatórios)
 - table: `{"type":"table","title":"...","request":{...},"rows":"${D}.data[*]","columns":[{"title":"Nome","value":"{{${D}.name}}"}],"empty":"Nada."}`
@@ -106,7 +144,15 @@ os textos do painel podem ler a resposta com `{{${D}.caminho}}`.
  "requiresSignal": false, "orderIntent": {"asset": "{{par}}", "direction": "{{lado}}"},
  "request": {...}, "response": "Pedido {{${D}.id}} criado"}
 ```
-- `name` (`^[a-z][a-z0-9_]{1,31}${'$'}`, snake_case), `description` e `request` obrigatórios.
+- `name` (`^[a-z][a-z0-9_]{1,31}${'$'}`, snake_case) e `description` obrigatórios.
+- **Fonte dos dados — exatamente UMA** (ou nenhuma, só com `realtime`):
+  - `request`: requisição HTTP.
+  - `send` (exige `realtime`): `{"message": {...}, "await": {"match": {"${D}.request_id": "{{rid}}"}, "timeoutSec": 10}}` — envia pela
+    conexão em tempo real e espera a 1ª mensagem que casa com `match` (1–60 s). `response`/`list` leem ESSA mensagem.
+    Sem `await`, só envia. `{{rid}}` é um id único por chamada (para casar pedido↔resposta); `{{now}}` = epoch ms.
+  - `source` (exige `realtime`): lê uma coleção (`{"items": [...]}`).
+  - nenhuma: ferramenta que só lê o estado — exige `response`, ex.: `"Saldo: {{rt.saldo|num:2}}"`.
+- `send` que envia ordem/operação/compra/venda/saque/transferência **exige** `"risky": true` (e, para ordens, `requiresSignal` + `orderIntent` + `limits`).
 - `params[]`: `name` e `description` obrigatórios; `type` padrão `string`; `required` padrão true; ≤12.
 - Método diferente de GET **exige** `"risky": true`.
 - `limits`: o `param` precisa existir e ser `number`/`integer`; `maxSetting` precisa ser uma setting `type: "number"`.
@@ -124,6 +170,9 @@ os textos do painel podem ler a resposta com `{{${D}.caminho}}`.
   - `headers` raiz e `login.verify`: campos do login + nomes do `extract`.
   - painéis e ações: login + extract + `s.<setting>`.
   - ferramentas: login + extract + `s.<setting>` + parâmetros da ferramenta.
+  - com `realtime`: painéis, ações e ferramentas também leem `rt.<nome do set>`, `rt.connected`, `rt.messages`.
+  - `realtime.url`/`headers`/`onOpen`/`heartbeat`: login + extract + `s.<setting>` + `rid` + `now`.
+  - `send.message` e `send.await.match`: variáveis da ferramenta + `rid` + `now`.
   - `orderIntent`: só parâmetros da ferramenta.
   Variável fora dessa lista = erro "variável desconhecida".
 - `{{${D}.a.b[0]}}` — lê a resposta JSON. Permitido em textos de painel, `message` e `response`; **proibido**
@@ -138,14 +187,20 @@ os textos do painel podem ler a resposta com `{{${D}.caminho}}`.
 ## O que dá e o que não dá para fazer
 - ✅ APIs REST com JSON ou XML, feeds RSS/Atom, páginas de texto, login com e-mail/senha → token, chave de API,
   OAuth **client credentials**, cookies de sessão (`cookie:Nome` + header `Cookie`).
-- ❌ OAuth com tela de consentimento do usuário (authorization code/PKCE), WebSocket, certificados de cliente (mTLS),
+- ✅ **Tempo real (WebSocket wss://)**: corretoras de ações/Forex/cripto/opções, cotações ao vivo, saldo ao vivo, livros de ofertas,
+  envio de ordens com resposta por `request_id`, protocolos JSON ou texto, heartbeat e reconexão automática. Combine com login HTTP
+  (token extraído → `onOpen`/`url`).
+- ❌ OAuth com tela de consentimento do usuário (authorization code/PKCE), WebSocket binário não-UTF-8 (protobuf/msgpack), certificados de cliente (mTLS),
   captcha e 2FA interativo — para esses, o conector precisa ser escrito em Kotlin no SDK do app.
 - Serviços sem API pública (ex.: bancos como Nubank) não devem ser simulados: diga ao usuário que não há API
   pública/oficial disponível em vez de inventar endpoints.
 
 ## Segurança (o app impõe; não tente contornar)
 - Senhas e valores extraídos nunca chegam à IA (são redigidos). Não coloque segredos fixos no JSON.
-- Só o host de `baseUrl`, só HTTPS, sem redirecionamentos, resposta ≤ 256 KB, 20 s.
+- Só os hosts de `baseUrl`/`allowedHosts`, só HTTPS/WSS na porta 443, sem redes privadas, sem redirecionamentos, resposta HTTP ≤ 2 MB (20 s),
+  mensagem de tempo real ≤ 1 MB.
+- Ferramentas `risky` pedem confirmação; `requiresSignal` só executa após validação TypeSafe Jev; `limits` impõem o teto do usuário —
+  vale igual para `request` e `send`.
 - O agente só usa o conector se o usuário ativar ("Agent required ?" e perfil do agente).
 
 ## Checklist antes de responder
@@ -157,6 +212,9 @@ os textos do painel podem ler a resposta com `{{${D}.caminho}}`.
 - [ ] todo `path` começa com `/`
 - [ ] toda `{{variável}}` existe naquele lugar; `{{${D}...}}` só em textos de exibição/resposta
 - [ ] método ≠ GET ⇒ `"risky": true`; dinheiro ⇒ `limits` com setting `number`
+- [ ] `realtime.url` é `wss://` com host de `baseUrl`/`allowedHosts`; cada regra tem `set` e/ou `push`
+- [ ] `source` aponta para um `push.to` existente; tabelas com `source` usam `"rows": "${D}.items[*]"`
+- [ ] cada ferramenta tem no máximo um entre `request`, `send`, `source`; `send` de ordem ⇒ `risky` + `requiresSignal` + `orderIntent` + `limits`
 - [ ] nenhuma chave fora deste documento; JSON sem comentários
 
 ## Exemplo válido completo
@@ -172,6 +230,17 @@ ${CustomTemplates.RSS.json}
 ## Exemplo: OAuth client credentials com dois domínios (Spotify)
 ```json
 ${CustomTemplates.SPOTIFY.json}
+```
+
+## Exemplo: tempo real público (WebSocket da Binance, sem login)
+```json
+${CustomTemplates.MARKET_WS.json}
+```
+
+## Exemplo: corretora em tempo real (login → token → WebSocket, saldo/cotações ao vivo, ordens com validação)
+Troque host, mensagens e caminhos pelos do protocolo REAL da corretora (consulte a documentação dela).
+```json
+${CustomTemplates.BROKER_WS.json}
 ```
 
 ## Exemplo mínimo (API com chave, sem login por senha)

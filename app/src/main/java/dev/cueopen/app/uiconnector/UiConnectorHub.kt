@@ -55,11 +55,15 @@ class UiConnectorHub(context: Context) {
     fun isCustom(id: String): Boolean = custom.any { it.spec.id == id }
 
     // ------------------------------------------------------------------ conectores do usuário
-    private fun loadCustom(previous: List<UiConnector>): List<UiConnector> =
-        customStore.loadAll().mapNotNull { def ->
+    private fun loadCustom(previous: List<UiConnector>): List<UiConnector> {
+        val next = customStore.loadAll().mapNotNull { def ->
             // definição idêntica → mantém a instância (e a sessão logada)
             previous.firstOrNull { it is CustomConnector && it.def == def } ?: runCatching { CustomConnector(def) }.getOrNull()
         }
+        // instâncias descartadas fecham a conexão em tempo real (WebSocket)
+        previous.filter { p -> next.none { it === p } }.forEach { (it as? CustomConnector)?.dispose() }
+        return next
+    }
 
     fun customJson(id: String): String? = customStore.rawJson(id)
 
