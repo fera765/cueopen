@@ -286,8 +286,7 @@ object Compute {
         when (n.op) {
             "==" -> return eq(a, b)
             "!=" -> return !eq(a, b)
-            "+" -> if (a is String || b is String) return str(a) + str(b)
-                else if (a is List<*> && b is List<*>) { ctx.charge((a.size + b.size).toLong()); return a + b }
+            "+" -> if (a is String || b is String) return str(a) + str(b) // listas: soma elemento a elemento (junte com concat)
         }
         // operações elemento a elemento entre séries (lista × lista ou lista × número)
         if (a is List<*> || b is List<*>) {
