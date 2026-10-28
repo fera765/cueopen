@@ -303,7 +303,42 @@ object CustomTemplates {
 }
 """.trimIndent())
 
-    val ALL = listOf(TOKEN_LOGIN, API_KEY, RSS, SPOTIFY, MARKET_WS, BROKER_WS, TV_INDICATORS, MINIMAL)
+    val YT_DOWNLOAD = Entry("Terminal: baixar vídeo do YouTube (yt-dlp)", """
+{
+ "id": "ytbaixar",
+ "name": "Baixar do YouTube",
+ "description": "Baixa vídeo ou áudio do YouTube com yt-dlp no terminal e salva no workspace isolado do conector.",
+ "version": "1.0",
+ "capabilities": ["terminal", "files"],
+ "settings": [
+  {"id": "qualidade", "label": "Qualidade do vídeo", "description": "ex.: 720, 1080 ou best", "type": "text", "default": "best"}
+ ],
+ "tools": [
+  {
+   "name": "baixar",
+   "description": "Baixa um vídeo (mp4) ou o áudio (mp3) de uma URL do YouTube e salva no workspace do conector. Use quando o usuário pedir para baixar um vídeo/música do YouTube.",
+   "params": [
+    {"name": "url", "description": "URL do vídeo do YouTube", "type": "string", "required": true},
+    {"name": "tipo", "description": "video = mp4, audio = mp3", "type": "string", "required": false, "enum": ["video", "audio"]}
+   ],
+   "risky": true,
+   "shell": {
+    "run": "command -v yt-dlp >/dev/null 2>&1 || pip install -q --break-system-packages yt-dlp >/dev/null 2>&1; yt-dlp --no-playlist -o 'download.%(ext)s' {{url}} && ls -la",
+    "timeoutSec": 280
+   },
+   "response": "Processado no workspace do conector.\n{{${'$'}.body|trunc:1800}}"
+  },
+  {
+   "name": "arquivos",
+   "description": "Lista os arquivos já baixados no workspace do conector.",
+   "params": [],
+   "file": {"op": "list", "path": ""}
+  }
+ ]
+}
+""".trimIndent())
+
+    val ALL = listOf(TOKEN_LOGIN, API_KEY, RSS, SPOTIFY, MARKET_WS, BROKER_WS, TV_INDICATORS, YT_DOWNLOAD, MINIMAL)
 
     /** Rascunho enviado ao chat para a IA escrever a definição (o usuário só descreve o serviço). */
     val AI_PROMPT = """Crie um UI Connector em JSON para o serviço: <DESCREVA AQUI: nome, URL base da API e o que quer ver/fazer>.

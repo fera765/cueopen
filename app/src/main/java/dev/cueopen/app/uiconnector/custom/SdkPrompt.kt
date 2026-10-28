@@ -48,8 +48,9 @@ nome diferente ou valor fora das regras faz o conector ser recusado.
 | `actions` | lista (≤10) | não | botões que o USUÁRIO toca |
 | `tools` | lista (≤30) | não | ferramentas que o AGENTE chama |
 | `realtime` | objeto | não | conexão em **tempo real** (WebSocket `wss://`) — ver seção própria |
+| `capabilities` | lista | não | capacidades do aparelho que o conector usa: `"terminal"`, `"files"`, `"browser"` — ver seção **Capacidades**. Exigem autorização do usuário |
 
-Todo o tráfego vai **só** para o host de `baseUrl` e os de `allowedHosts`.
+Todo o tráfego de rede vai **só** para o host de `baseUrl` e os de `allowedHosts`.
 
 ### `login`
 | chave | tipo | obrig. | regra |
@@ -161,6 +162,46 @@ Os resultados entram nos modelos como `{{c.nome}}` e listas calculadas viram lin
 ```
   e então `"value": "{{c.rsi|num:2}}"` ou `"rows": "c.tabela"` com colunas `{{${D}.rsi}}`.
 
+### `capabilities` — terminal, arquivos e browser (recursos do aparelho)
+Além de HTTP, tempo real e cálculo, uma ferramenta pode usar o **terminal Linux**, o **gerenciador de arquivos**
+e o **browser** do app. Para isso, declare no raiz quais capacidades o conector usa e adicione o passo correspondente
+numa ferramenta. **Cada capacidade só funciona depois que o usuário autoriza na tela do conector** (fica desligada por padrão).
+```
+"capabilities": ["terminal", "files", "browser"]
+```
+Cada conector tem um **workspace isolado** (uma pasta própria no sandbox). O terminal roda nessa pasta; os arquivos
+ficam confinados a ela (não dá para ler/gravar fora). Nada é compartilhado com outros conectores nem com os chats.
+
+**Passo de terminal** (`shell`) — exige `"terminal"` em `capabilities` e `"risky": true`:
+```
+{"name": "baixar", "description": "...", "params": [{"name": "url", "description": "URL"}],
+ "risky": true, "shell": {"run": "yt-dlp -o 'v.%(ext)s' {{url}}", "timeoutSec": 240}, "response": "{{${D}.body|trunc:1500}}"}
+```
+- `run`: a linha de comando. Todo valor `{{...}}` é inserido **com aspas** automaticamente (à prova de injeção): o
+  argumento entra sempre como um único token, então `;`, `|`, `${D}()`, espaços etc. vindos de um parâmetro NÃO viram
+  comando. Você escreve a estrutura do comando; os valores entram seguros. Use `&&` para encadear.
+- `timeoutSec`: 1–300 (padrão 120). A saída (stdout+stderr, até ~24 KB) vira `{{${D}.body}}` (texto) e alimenta `response`/`list`/`compute`.
+
+**Passo de arquivo** (`file`) — exige `"files"`; `write`/`delete` exigem `"risky": true`:
+```
+{"name": "ler", "description": "...", "file": {"op": "read", "path": "download.mp4"}}
+{"name": "salvar", "description": "...", "risky": true, "file": {"op": "write", "path": "nota.txt", "content": "{{texto}}"}}
+{"name": "listar", "description": "...", "file": {"op": "list", "path": ""}}
+```
+- `op`: `read` | `write` | `list` | `delete`. `path` é **relativo ao workspace** do conector (sem `/` inicial, sem `..`).
+  `content` só em `write`. A saída vira o retorno da ferramenta (lido também por `response`/`compute`).
+
+**Passo de browser** (`fetch`) — exige `"browser"`:
+```
+{"name": "ler_pagina", "description": "...", "params": [{"name": "endereco", "description": "URL https"}],
+ "fetch": {"url": "{{endereco}}", "waitSec": 2}, "response": "{{${D}.body|trunc:2000}}"}
+```
+- Abre a URL **https** (host precisa estar em `baseUrl`/`allowedHosts`) numa aba própria, espera `waitSec` (0–10) e
+  devolve o **texto renderizado** da página (útil para páginas que dependem de JavaScript). Vira `{{${D}.body}}`.
+
+Uma ferramenta usa **no máximo um** entre `request`, `send`, `source`, `shell`, `file`, `fetch`.
+No teste automático do criador, ferramentas com essas capacidades só rodam depois que você autoriza no aparelho.
+
 ### `settings[]`
 `{"id": "maxValor", "label": "...", "description": "...", "type": "number|switch|text", "default": "10", "risky": true}`
 — `id` e `label` obrigatórios. `default` é texto: número em `number`, `"true"`/`"false"` em `switch`.
@@ -196,6 +237,7 @@ estado do tempo real com `{{rt.nome}}` (painéis sem request podem mostrar só `
     conexão em tempo real e espera a 1ª mensagem que casa com `match` (1–60 s). `response`/`list` leem ESSA mensagem.
     Sem `await`, só envia. `{{rid}}` é um id único por chamada (para casar pedido↔resposta); `{{now}}` = epoch ms.
   - `source` (exige `realtime`): lê uma coleção (`{"items": [...]}`).
+  - `shell` / `file` / `fetch`: capacidades do aparelho (terminal, arquivos, browser) — ver seção **Capacidades**.
   - nenhuma: ferramenta que só lê o estado — exige `response`, ex.: `"Saldo: {{rt.saldo|num:2}}"`.
 - `send` que envia ordem/operação/compra/venda/saque/transferência **exige** `"risky": true` (e, para ordens, `requiresSignal` + `orderIntent` + `limits`).
 - `params[]`: `name` e `description` obrigatórios; `type` padrão `string`; `required` padrão true; ≤12.
@@ -238,6 +280,10 @@ estado do tempo real com `{{rt.nome}}` (painéis sem request podem mostrar só `
 - ✅ **Tempo real (WebSocket wss://)**: corretoras de ações/Forex/cripto/opções, cotações ao vivo, saldo ao vivo, livros de ofertas,
   envio de ordens com resposta por `request_id`, protocolos JSON ou texto, heartbeat e reconexão automática. Combine com login HTTP
   (token extraído → `onOpen`/`url`).
+- ✅ **Capacidades do aparelho (`capabilities`)**: `terminal` (rodar comandos Linux no sandbox, ex.: baixar vídeo com yt-dlp,
+  converter arquivos, usar ferramentas de linha de comando), `files` (ler/gravar no workspace isolado do conector),
+  `browser` (abrir uma página https de host declarado e ler o conteúdo renderizado). Tudo isolado por conector e só com a
+  autorização do usuário.
 - ❌ OAuth com tela de consentimento do usuário (authorization code/PKCE), WebSocket binário não-UTF-8 (protobuf/msgpack), certificados de cliente (mTLS),
   captcha e 2FA interativo — para esses, o conector precisa ser escrito em Kotlin no SDK do app.
 - Serviços sem API pública (ex.: bancos como Nubank) não devem ser simulados: diga ao usuário que não há API
@@ -250,6 +296,10 @@ estado do tempo real com `{{rt.nome}}` (painéis sem request podem mostrar só `
 - Ferramentas `risky` pedem confirmação; `requiresSignal` só executa após validação TypeSafe Jev; `limits` impõem o teto do usuário —
   vale igual para `request` e `send`.
 - O agente só usa o conector se o usuário ativar ("Agent required ?" e perfil do agente).
+- **Capacidades (`terminal`/`files`/`browser`)**: cada uma fica DESLIGADA até o usuário autorizar na tela do conector.
+  O terminal e os arquivos ficam confinados ao workspace isolado do conector; os valores dos parâmetros entram no comando
+  shell já com aspas (sem injeção); o browser só abre hosts declarados. Não tente ler/gravar fora do workspace nem embutir
+  segredos no comando.
 
 ## Checklist antes de responder
 - [ ] raiz tem `id`, `name`, `description`, `baseUrl`
@@ -262,7 +312,8 @@ estado do tempo real com `{{rt.nome}}` (painéis sem request podem mostrar só `
 - [ ] método ≠ GET ⇒ `"risky": true`; dinheiro ⇒ `limits` com setting `number`
 - [ ] `realtime.url` é `wss://` com host de `baseUrl`/`allowedHosts`; cada regra tem `set` e/ou `push`
 - [ ] `source` aponta para um `push.to` existente; tabelas com `source` usam `"rows": "${D}.items[*]"`
-- [ ] cada ferramenta tem no máximo um entre `request`, `send`, `source`; `send` de ordem ⇒ `risky` + `requiresSignal` + `orderIntent` + `limits`
+- [ ] cada ferramenta tem no máximo um entre `request`, `send`, `source`, `shell`, `file`, `fetch`; `send` de ordem ⇒ `risky` + `requiresSignal` + `orderIntent` + `limits`
+- [ ] `shell` ⇒ `"terminal"` em `capabilities` + `risky`; `file` write/delete ⇒ `"files"` + `risky`; `fetch` ⇒ `"browser"` + host declarado
 - [ ] cada `compute` usa só funções listadas; `c.x` só depois de `x` ser calculado; `rows: "c.nome"` aponta para uma lista do compute
 - [ ] nenhuma chave fora deste documento; JSON sem comentários
 
@@ -295,6 +346,11 @@ ${CustomTemplates.BROKER_WS.json}
 ## Exemplo: indicadores técnicos calculados no app (compute, estilo TradingView)
 ```json
 ${CustomTemplates.TV_INDICATORS.json}
+```
+
+## Exemplo: terminal — baixar vídeo do YouTube (capability `terminal` + `files`)
+```json
+${CustomTemplates.YT_DOWNLOAD.json}
 ```
 
 ## Exemplo mínimo (API com chave, sem login por senha)

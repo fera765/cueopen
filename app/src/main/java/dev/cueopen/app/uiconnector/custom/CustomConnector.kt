@@ -24,6 +24,8 @@ class CustomConnector(
     private val http: HttpExec = OkHttpExec(),
     private val permissive: Boolean = false,
     ws: WsExec? = null,
+    /** Ponte para terminal/arquivos/browser (capacidades do aparelho). Padrão: nega tudo. */
+    private val bridge: HostBridge = NoHostBridge,
 ) : UiConnector {
     override val spec = def.toSpec()
 
@@ -260,6 +262,11 @@ class CustomConnector(
         return null
     }
 
+    /** Mensagem padrão quando o usuário ainda não autorizou uma capacidade do conector. */
+    private fun capDenied(cap: String): String =
+        "RECUSADO: o conector \"${def.name}\" precisa da sua autorização para usar ${Capabilities.label(cap)}. " +
+            "Ative em Conectores → ${def.name} → Permissões."
+
     override suspend fun callTool(name: String, args: Map<String, String>, settings: ConnectorSettings): String {
         val t = def.tools.firstOrNull { it.name == name } ?: return "Ferramenta desconhecida: $name"
         checkArgs(t, args)?.let { return "ERRO: $it" }
@@ -272,7 +279,35 @@ class CustomConnector(
         }
         return try {
             val vars = settingVars(settings) + args.filterValues { it.isNotEmpty() }
-            val reply = when {
+            // passos de capacidade do aparelho (terminal/arquivos/browser): autorizados pelo usuário e
+            // executados no sandbox/workspace isolado do conector. Em falha, devolve o erro direto.
+            val stepReply: Reply? = when {
+                t.shell != null -> {
+                    if (!bridge.granted(Capabilities.TERMINAL)) return capDenied(Capabilities.TERMINAL)
+                    val cmd = Template.renderShell(t.shell.run, Template.Ctx(sessionVars() + vars))
+                    val r = bridge.shell(cmd, t.shell.timeoutSec)
+                    if (!r.ok) return "ERRO: " + Redactor.redact(r.text.take(2000), secrets())
+                    Reply(200, r.text, ResponseTree.parse(r.text, null), emptyMap())
+                }
+                t.file != null -> {
+                    if (!bridge.granted(Capabilities.FILES)) return capDenied(Capabilities.FILES)
+                    val ctxF = Template.Ctx(sessionVars() + vars)
+                    val fpath = Template.render(t.file.path, ctxF)
+                    val content = t.file.content?.let { Template.render(it, ctxF) }
+                    val r = bridge.fileOp(t.file.op, fpath, content)
+                    if (!r.ok) return "ERRO: " + Redactor.redact(r.text.take(2000), secrets())
+                    Reply(200, r.text, ResponseTree.parse(r.text, null), emptyMap())
+                }
+                t.fetch != null -> {
+                    if (!bridge.granted(Capabilities.BROWSER)) return capDenied(Capabilities.BROWSER)
+                    val url = Template.render(t.fetch.url, Template.Ctx(sessionVars() + vars))
+                    val r = bridge.fetch(url, t.fetch.waitSec)
+                    if (!r.ok) return "ERRO: " + Redactor.redact(r.text.take(2000), secrets())
+                    Reply(200, r.text, ResponseTree.parse(r.text, null), emptyMap())
+                }
+                else -> null
+            }
+            val reply = stepReply ?: when {
                 t.request != null -> authed(t.request, vars)
                 t.send != null -> {
                     ensureRt(settingVars(settings))?.let { return "ERRO: tempo real indisponível: " + Redactor.redact(it, secrets()) }
@@ -386,6 +421,7 @@ class CustomConnector(
         }
         for (t in def.tools) {
             if (t.risky) { sb.appendLine("• ferramenta ${t.name}: sensível — não executada no teste"); continue }
+            if (t.shell != null || t.file != null || t.fetch != null) { sb.appendLine("• ferramenta ${t.name}: usa capacidade do aparelho (terminal/arquivos/browser) — testada só após você autorizar"); continue }
             val args = toolArgs[t.name].orEmpty()
             val missing = t.params.filter { it.required && args[it.name].isNullOrBlank() }.map { it.name }
             if (missing.isNotEmpty()) { ok = false; sb.appendLine("✗ ferramenta ${t.name}: informe exemplos em args_json para ${missing.joinToString()}"); continue }

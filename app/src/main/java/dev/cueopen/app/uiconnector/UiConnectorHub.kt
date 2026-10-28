@@ -62,7 +62,10 @@ class UiConnectorHub(context: Context) {
     private fun loadCustom(previous: List<UiConnector>): List<UiConnector> {
         val next = customStore.loadAll().mapNotNull { def ->
             // definição idêntica → mantém a instância (e a sessão logada)
-            previous.firstOrNull { it is CustomConnector && it.def == def } ?: runCatching { CustomConnector(def) }.getOrNull()
+            previous.firstOrNull { it is CustomConnector && it.def == def }
+                ?: runCatching {
+                    CustomConnector(def, bridge = dev.cueopen.app.uiconnector.custom.AndroidHostBridge(def) { cap -> capabilityGranted(def.id, cap) })
+                }.getOrNull()
         }
         // instâncias descartadas fecham a conexão em tempo real (WebSocket)
         previous.filter { p -> next.none { it === p } }.forEach { (it as? CustomConnector)?.dispose() }
@@ -150,6 +153,14 @@ class UiConnectorHub(context: Context) {
     /** "Agent required?": ligado → só agentes com o conector ativado o usam. Padrão: ligado (mais seguro). */
     fun agentRequired(id: String): Boolean = prefs.getBoolean("agentreq_$id", true)
     fun setAgentRequired(id: String, v: Boolean) { prefs.edit().putBoolean("agentreq_$id", v).apply() }
+
+    // ------------------------------------------------------------------ capacidades do aparelho (terminal/files/browser)
+    /** Capacidades DECLARADAS por um conector criado pelo usuário (vazio para built-in/HTTP puro). */
+    fun declaredCapabilities(id: String): Set<String> = (get(id) as? CustomConnector)?.def?.capabilities ?: emptySet()
+
+    /** O usuário autorizou esta capacidade para este conector? Padrão: NÃO (precisa autorizar na tela do conector). */
+    fun capabilityGranted(id: String, cap: String): Boolean = prefs.getBoolean("cap_${id}_$cap", false)
+    fun setCapabilityGranted(id: String, cap: String, v: Boolean) { prefs.edit().putBoolean("cap_${id}_$cap", v).apply() }
 
     fun settingValue(c: UiConnector, s: SettingSpec): String = prefs.getString("set_${c.spec.id}_${s.id}", null) ?: s.default
     fun setSetting(c: UiConnector, s: SettingSpec, value: String) { prefs.edit().putString("set_${c.spec.id}_${s.id}", value).apply() }

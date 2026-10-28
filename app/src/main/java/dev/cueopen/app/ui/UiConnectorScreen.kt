@@ -240,6 +240,23 @@ fun UiConnectorScreen(nav: NavController, id: String) {
                     }
                 }
             }
+            val caps = hub.declaredCapabilities(id)
+            if (caps.isNotEmpty()) {
+                item { SectionLabel("Permissões do aparelho") }
+                item {
+                    Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).background(c.surface).border(1.dp, c.line, RoundedCornerShape(16.dp)).padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Text("Este conector pede acesso a recursos do aparelho. Autorize só o necessário — fica desligado por padrão.", fontSize = 12.sp, color = c.ink3)
+                        dev.cueopen.app.uiconnector.custom.Capabilities.ALL.filter { it in caps }.forEach { cap ->
+                            var g by remember(cap) { mutableStateOf(hub.capabilityGranted(id, cap)) }
+                            ToggleRow(
+                                "⚠ " + dev.cueopen.app.uiconnector.custom.Capabilities.label(cap),
+                                dev.cueopen.app.uiconnector.custom.Capabilities.warning(cap),
+                                g,
+                            ) { g = it; hub.setCapabilityGranted(id, cap, it) }
+                        }
+                    }
+                }
+            }
             if (loggedIn || hub.hasSavedCredentials(id)) item {
                 OutlinedButton(
                     onClick = { scope.launch { hub.logout(id); loggedIn = false; blocks = emptyList(); notice = null } },

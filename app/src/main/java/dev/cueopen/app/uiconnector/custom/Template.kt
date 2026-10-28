@@ -67,6 +67,21 @@ object Template {
 
     fun render(t: String, ctx: Ctx): String = RE.replace(t) { m -> evalRef(m.groupValues[1], ctx) }
 
+    /**
+     * Renderiza um modelo para uso em LINHA DE COMANDO do shell, de forma SEGURA contra injeção:
+     * cada valor substituído em {{ }} é envolvido em aspas simples e tem suas aspas simples escapadas,
+     * de modo que espaços, `;`, `|`, `$()`, `&&`, `` ` ``, aspas e novas linhas vindos de um argumento
+     * NUNCA viram sintaxe do shell. O texto literal escrito pelo autor (fora de {{ }}) passa intacto,
+     * então o autor controla a estrutura do comando e os valores entram sempre como um único argumento.
+     *
+     * Ex.: run="yt-dlp {{url}} -o v.mp4" com url="https://x; rm -rf /" vira
+     *      yt-dlp 'https://x; rm -rf /' -o v.mp4  (o `; rm -rf /` é parte do argumento, não um comando).
+     */
+    fun renderShell(t: String, ctx: Ctx): String = RE.replace(t) { m -> shellQuote(evalRef(m.groupValues[1], ctx)) }
+
+    /** Envolve um valor em aspas simples para o shell POSIX (inclusive valores vazios → ''). */
+    fun shellQuote(v: String): String = "'" + v.replace("'", "'\\''") + "'"
+
     private fun fmtNum(v: String, arg: String?): String {
         val d = v.trim().replace(',', '.').toDoubleOrNull() ?: return "-"
         if (d.isNaN() || d.isInfinite()) return "-"

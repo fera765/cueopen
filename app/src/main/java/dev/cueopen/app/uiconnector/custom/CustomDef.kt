@@ -43,6 +43,14 @@ data class PanelDef(
 data class ActionDef(val id: String, val label: String, val risky: Boolean, val request: ReqDef, val message: String)
 data class LimitDef(val param: String, val maxSetting: String)
 data class IntentDef(val asset: String, val direction: String)
+
+/** Passo de TERMINAL: roda [run] (modelo shell-seguro) no sandbox do conector, com tempo-limite. */
+data class ShellStep(val run: String, val timeoutSec: Int)
+/** Passo de ARQUIVO no workspace do conector: op read|write|list|delete; [content] só para write. */
+data class FileStep(val op: String, val path: String, val content: String?)
+/** Passo de BROWSER: abre [url] (host declarado) e devolve o texto renderizado da página. */
+data class FetchStep(val url: String, val waitSec: Int)
+
 data class ToolDef(
     val name: String, val description: String, val params: List<ParamSpec>, val risky: Boolean, val requiresSignal: Boolean,
     val intent: IntentDef?, val limits: List<LimitDef>, val request: ReqDef?, val response: String,
@@ -52,6 +60,10 @@ data class ToolDef(
     /** Coleção do tempo real lida pela ferramenta. */
     val source: String = "",
     val compute: List<Pair<String, Compute.Node>> = emptyList(),
+    /** Capacidades do aparelho (exigem `capabilities` declarada + autorização do usuário). */
+    val shell: ShellStep? = null,
+    val file: FileStep? = null,
+    val fetch: FetchStep? = null,
 )
 data class LoginDef(val fields: List<LoginField>, val request: ReqDef?, val extract: Map<String, String>, val verify: ReqDef?)
 
@@ -61,6 +73,8 @@ data class CustomDef(
     val settings: List<SettingSpec>, val panels: List<PanelDef>, val actions: List<ActionDef>, val tools: List<ToolDef>,
     val allowedHosts: List<String> = emptyList(),
     val realtime: RtDef? = null,
+    /** Capacidades do aparelho que o conector usa (terminal | files | browser). Exigem autorização do usuário. */
+    val capabilities: Set<String> = emptySet(),
 ) {
     /** Todos os hosts que o conector pode chamar. */
     val hosts: Set<String> get() = (listOf(host) + allowedHosts).map { it.lowercase() }.toSet()
@@ -244,7 +258,7 @@ object CustomDefParser {
         }
 
         fun build(o: JsonObject): CustomDef? {
-            known(o, "$", setOf("id", "name", "description", "version", "accent", "baseUrl", "allowedHosts", "headers", "login", "settings", "panels", "actions", "tools", "realtime"))
+            known(o, "$", setOf("id", "name", "description", "version", "accent", "baseUrl", "allowedHosts", "headers", "login", "settings", "panels", "actions", "tools", "realtime", "capabilities"))
             val id = str(o, "id", "$", required = true)
             if (id.isNotEmpty() && !ID.matches(id)) errors.add("$.id '$id' inválido: use [a-z0-9], começando com letra (2–20).")
             val name = str(o, "name", "$", required = true)
@@ -273,6 +287,19 @@ object CustomDefParser {
                 }
             }
             hosts = (listOf(host) + allowed).filter { it.isNotEmpty() }.toSet()
+
+            // capacidades do aparelho (terminal | files | browser)
+            val capabilities = LinkedHashSet<String>()
+            val capEl = o["capabilities"]
+            if (capEl != null && capEl !is JsonNull) {
+                val arrC = capEl as? JsonArray
+                if (arrC == null) errors.add("$.capabilities deve ser uma lista (ex.: [\"terminal\",\"files\"]).")
+                else arrC.forEachIndexed { i, el ->
+                    val cv = (el as? JsonPrimitive)?.content?.trim()?.lowercase().orEmpty()
+                    if (cv !in Capabilities.ALL) errors.add("$.capabilities[$i]: '$cv' inválido (use terminal, files ou browser).")
+                    else capabilities.add(cv)
+                }
+            }
 
             // configurações
             val settings = ArrayList<SettingSpec>()
@@ -424,7 +451,7 @@ object CustomDefParser {
             val tools = ArrayList<ToolDef>()
             arr(o, "tools", "$", 30).forEachIndexed { i, to ->
                 val p = "$.tools[$i]"
-                known(to, p, setOf("name", "description", "params", "risky", "requiresSignal", "orderIntent", "limits", "request", "response", "list", "send", "source", "compute"))
+                known(to, p, setOf("name", "description", "params", "risky", "requiresSignal", "orderIntent", "limits", "request", "response", "list", "send", "source", "compute", "shell", "file", "fetch"))
                 val params = ArrayList<ParamSpec>()
                 arr(to, "params", p, 12).forEachIndexed { j, pa ->
                     val pp = "$p.params[$j]"
@@ -449,9 +476,16 @@ object CustomDefParser {
                     if (rt == null) errors.add("$p.source exige o bloco \"realtime\".")
                     else if (tsource !in collections) errors.add("$p.source '$tsource' não é uma coleção do realtime (disponíveis: ${collections.joinToString().ifEmpty { "nenhuma" }}).")
                 }
-                val modes = listOfNotNull(treq?.let { "request" }, tsend?.let { "send" }, tsource.ifEmpty { null }?.let { "source" })
-                if (modes.size > 1) errors.add("$p: use só um entre request, send e source (encontrado: ${modes.joinToString()}).")
-                if (modes.isEmpty() && rt == null && to["send"] == null && tcomp.isEmpty()) errors.add("$p.request é obrigatório (ou send/source com o bloco realtime).")
+                // passos de capacidade do aparelho (terminal/files/browser)
+                val tshell = shellStep(obj(to, "shell", p), "$p.shell", vars, capabilities, risky)
+                val tfile = fileStep(obj(to, "file", p), "$p.file", vars, capabilities, risky)
+                val tfetch = fetchStep(obj(to, "fetch", p), "$p.fetch", vars, capabilities)
+                val modes = listOfNotNull(
+                    treq?.let { "request" }, tsend?.let { "send" }, tsource.ifEmpty { null }?.let { "source" },
+                    tshell?.let { "shell" }, tfile?.let { "file" }, tfetch?.let { "fetch" },
+                )
+                if (modes.size > 1) errors.add("$p: use só um entre request, send, source, shell, file e fetch (encontrado: ${modes.joinToString()}).")
+                if (modes.isEmpty() && rt == null && to["send"] == null && tcomp.isEmpty()) errors.add("$p.request é obrigatório (ou send/source/shell/file/fetch).")
                 if (modes.isEmpty() && (rt != null || tcomp.isNotEmpty()) && str(to, "response", p).isBlank() && to["list"] == null) errors.add("$p: sem request/send/source, a ferramenta precisa de \"response\" lendo o estado (ex.: {{rt.saldo}}).")
                 if (tsend != null && !risky && ORDER_WORDS.containsMatchIn(str(to, "name", p) + " " + str(to, "description", p))) errors.add("$p: ferramenta que envia ordem/operação pelo tempo real exige \"risky\": true.")
                 val limits = ArrayList<LimitDef>()
@@ -497,10 +531,57 @@ object CustomDefParser {
                 }
                 val tname = str(to, "name", p, required = true)
                 val tdesc = str(to, "description", p, required = true)
-                tools.add(ToolDef(tname, tdesc, params, risky, requiresSignal, intent, limits, treq, response, list, tsend, tsource, tcomp))
+                tools.add(ToolDef(tname, tdesc, params, risky, requiresSignal, intent, limits, treq, response, list, tsend, tsource, tcomp, tshell, tfile, tfetch))
             }
             if (baseUrl.isEmpty() && (usesNetwork || rt != null)) errors.add("$.baseUrl é obrigatório quando o conector faz requisições ou usa tempo real.")
-            return CustomDef(id, name, description, version, accent, baseUrl, host, headers, login, settings, panels, actions, tools, allowed, rt)
+            return CustomDef(id, name, description, version, accent, baseUrl, host, headers, login, settings, panels, actions, tools, allowed, rt, capabilities)
+        }
+
+        /** Passo de terminal: comando [run] (modelo shell-seguro) rodado no sandbox do conector. */
+        fun shellStep(o: JsonObject?, path: String, vars: Set<String>, caps: Set<String>, risky: Boolean): ShellStep? {
+            if (o == null) return null
+            if (Capabilities.TERMINAL !in caps) errors.add("$path exige \"terminal\" na lista capabilities do conector.")
+            if (!risky) errors.add("$path: ferramenta de terminal exige \"risky\": true.")
+            known(o, path, setOf("run", "timeoutSec"))
+            val run = str(o, "run", path, required = true)
+            tpl(run, "$path.run", vars, false)
+            val ts = str(o, "timeoutSec", path, def = "120").toIntOrNull()
+            if (ts == null || ts !in BridgeSecurity.MIN_TIMEOUT..BridgeSecurity.MAX_TIMEOUT)
+                errors.add("$path.timeoutSec deve ser de ${BridgeSecurity.MIN_TIMEOUT} a ${BridgeSecurity.MAX_TIMEOUT}.")
+            return ShellStep(run, (ts ?: 120).coerceIn(BridgeSecurity.MIN_TIMEOUT, BridgeSecurity.MAX_TIMEOUT))
+        }
+
+        /** Passo de arquivo no workspace isolado do conector. */
+        fun fileStep(o: JsonObject?, path: String, vars: Set<String>, caps: Set<String>, risky: Boolean): FileStep? {
+            if (o == null) return null
+            if (Capabilities.FILES !in caps) errors.add("$path exige \"files\" na lista capabilities do conector.")
+            known(o, path, setOf("op", "path", "content"))
+            val op = str(o, "op", path, required = true).lowercase()
+            if (op !in BridgeSecurity.FILE_OPS) errors.add("$path.op deve ser read, write, list ou delete.")
+            if ((op == "write" || op == "delete") && !risky) errors.add("$path: op '$op' exige \"risky\": true.")
+            val fp = str(o, "path", path, required = op != "list")
+            tpl(fp, "$path.path", vars, false)
+            val content = if (op == "write") str(o, "content", path) else null
+            if (op == "write") tpl(content.orEmpty(), "$path.content", vars, false)
+            return FileStep(op, fp, content)
+        }
+
+        /** Passo de browser: abre uma URL https de um host declarado e lê a página renderizada. */
+        fun fetchStep(o: JsonObject?, path: String, vars: Set<String>, caps: Set<String>): FetchStep? {
+            if (o == null) return null
+            if (Capabilities.BROWSER !in caps) errors.add("$path exige \"browser\" na lista capabilities do conector.")
+            known(o, path, setOf("url", "waitSec"))
+            val url = str(o, "url", path, required = true)
+            tpl(url, "$path.url", vars, false)
+            val hostPart = url.removePrefix("https://").substringBefore('/').substringBefore('?')
+            if (url.startsWith("https://") && !hostPart.contains("{{")) {
+                if (hostPart.lowercase() !in hosts) errors.add("$path.url: host '${hostPart.lowercase()}' não está em baseUrl/allowedHosts.")
+            } else if (!url.startsWith("https://") && !url.trimStart().startsWith("{{")) {
+                errors.add("$path.url deve começar com https:// (ou ser um parâmetro {{...}} que forneça a URL https).")
+            }
+            val w = str(o, "waitSec", path, def = "2").toIntOrNull()
+            if (w == null || w !in 0..10) errors.add("$path.waitSec deve ser de 0 a 10.")
+            return FetchStep(url, (w ?: 2).coerceIn(0, 10))
         }
 
         /** Bloco "compute": {nome: expressão}. Valida sintaxe, funções, identificadores e referências c.x. */
