@@ -92,6 +92,17 @@ fechadas por eventos reais do servidor.
 
 ---
 
+## Conector Gmail (OAuth)
+
+`uiconnector/gmail/` — API oficial do Gmail com OAuth 2.0 + PKCE e redirect loopback (`127.0.0.1`).
+O usuário cria, no **próprio** projeto do Google Cloud, a Gmail API e um *ID do cliente OAuth* do tipo
+**App para computador**, e informa client ID e secret. O login abre a tela oficial do Google; o app guarda
+só o **refresh token** no cofre cifrado (`persistedCredentials`). Escopos: `gmail.readonly` e `gmail.send`.
+Ferramentas: `unread`, `search`, `read`, `labels` e `send` (sensível: só com "Agente pode ENVIAR" ligado,
+confirmação e teto diário). Em projetos em modo *Teste* o Google expira a autorização em 7 dias.
+
+---
+
 ## Criar conectores na própria app (definição JSON)
 
 Em **Conectores → UI Conectores → Criar conector (SDK)** o usuário escreve (ou pede à IA) uma definição JSON.

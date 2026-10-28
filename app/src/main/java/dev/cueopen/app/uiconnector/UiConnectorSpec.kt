@@ -134,6 +134,12 @@ interface UiConnector {
 
     /** Valores sensíveis que NUNCA podem aparecer em saídas para o LLM (são redigidos pelo hub). */
     fun secrets(): List<String>
+
+    /**
+     * O que guardar no cofre quando o usuário pede para lembrar o login. Padrão (null) = as credenciais digitadas.
+     * Conectores OAuth devolvem o refresh token (o login interativo não pode se repetir sozinho em segundo plano).
+     */
+    fun persistedCredentials(): Map<String, String>? = null
 }
 
 /**

@@ -40,7 +40,7 @@ class UiConnectorHub(context: Context) {
     private val customStore = CustomConnectorStore(ctx)
 
     /** Conectores que vêm com o app. Para adicionar um novo em Kotlin: crie a classe e acrescente aqui. */
-    private val builtin: List<UiConnector> = listOf<UiConnector>(IqOptionConnector()).filter { c ->
+    private val builtin: List<UiConnector> = listOf<UiConnector>(IqOptionConnector(), dev.cueopen.app.uiconnector.gmail.GmailConnector(ctx)).filter { c ->
         val problems = SpecValidator.validate(c.spec)
         if (problems.isNotEmpty()) ErrorLog.log("uiconnector", "spec inválido (${c.spec.id}): " + problems.joinToString("; "))
         problems.isEmpty()
@@ -162,7 +162,7 @@ class UiConnectorHub(context: Context) {
         if (missing.isNotEmpty()) return Result.failure(IllegalArgumentException("Preencha: " + missing.joinToString { it.label }))
         val r = c.login(credentials)
         if (r.isSuccess) {
-            if (remember) runCatching { vault.save(id, credentials) }.onFailure { ErrorLog.log("uiconnector", "cofre: ${it.message}", null, id) }
+            if (remember) runCatching { vault.save(id, c.persistedCredentials() ?: credentials) }.onFailure { ErrorLog.log("uiconnector", "cofre: ${it.message}", null, id) }
             else vault.clear(id)
         }
         return r
