@@ -3,6 +3,8 @@ package dev.cueopen.app.ui
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.CircleShape
@@ -335,12 +337,27 @@ internal fun UiBlockView(b: UiBlock, onAction: (String, Map<String, String>) -> 
             Text(b.title, fontWeight = FontWeight.SemiBold, fontSize = 15.sp)
             Spacer(Modifier.height(8.dp))
             if (b.rows.isEmpty()) Text(b.empty, fontSize = 13.sp, color = c.ink3)
-            else {
+            else if (b.columns.size <= 3 && b.rows.all { r -> r.sumOf { it.length } <= 42 }) {
                 Row(Modifier.fillMaxWidth()) { b.columns.forEach { Text(it, Modifier.weight(1f), fontSize = 11.sp, color = c.ink3, maxLines = 1) } }
                 b.rows.forEach { r ->
                     HorizontalDivider(color = c.line, modifier = Modifier.padding(vertical = 6.dp))
                     Row(Modifier.fillMaxWidth()) { r.forEach { Text(it, Modifier.weight(1f), fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis) } }
                 }
+            } else {
+                // tabela larga: rolagem horizontal com largura por coluna pelo conteúdo (nada fica escondido em telas pequenas)
+                val widths = b.columns.indices.map { i ->
+                    val longest = maxOf(b.columns[i].length, b.rows.maxOfOrNull { it.getOrNull(i)?.length ?: 0 } ?: 0)
+                    (longest * 8 + 16).coerceIn(64, 260).dp
+                }
+                Column(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState())) {
+                    Row { b.columns.forEachIndexed { i, h -> Text(h, Modifier.width(widths[i]), fontSize = 11.sp, color = c.ink3, maxLines = 1) } }
+                    b.rows.forEach { r ->
+                        HorizontalDivider(color = c.line, modifier = Modifier.padding(vertical = 6.dp).width(widths.fold(0.dp) { acc, w -> acc + w }))
+                        Row { r.forEachIndexed { i, v -> Text(v, Modifier.width(widths.getOrElse(i) { 100.dp }), fontSize = 13.sp, maxLines = 1,
+                            color = when { "ganhando" in v || v.startsWith("WIN") -> c.ok; "perdendo" in v || v.startsWith("LOSS") -> c.err; else -> c.ink }) } }
+                    }
+                }
+                Text("↔ deslize para ver todas as colunas", fontSize = 11.sp, color = c.ink3, modifier = Modifier.padding(top = 6.dp))
             }
         }
         is UiBlock.Segmented -> {

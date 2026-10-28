@@ -207,8 +207,11 @@ object CustomDefParser {
             Template.strings(r.body).forEach { tpl(it, "$path.body", vars, false) }
         }
 
+        var usesNetwork = false
+
         fun req(o: JsonObject?, path: String): ReqDef? {
             if (o == null) return null
+            usesNetwork = true
             known(o, path, setOf("method", "path", "url", "query", "headers", "body", "form"))
             val m = str(o, "method", path, def = "GET").uppercase()
             if (m !in METHODS) errors.add("$path.method '$m' inválido (GET, POST, PUT, PATCH, DELETE).")
@@ -248,7 +251,8 @@ object CustomDefParser {
             val description = str(o, "description", "$", required = true)
             val version = str(o, "version", "$", def = "1.0")
             val accent = parseAccent(str(o, "accent", "$"))
-            val baseUrl = str(o, "baseUrl", "$", required = true).trim().trimEnd('/')
+            // baseUrl só é obrigatório se o conector faz requisições (conectores de cálculo puro não precisam)
+            val baseUrl = str(o, "baseUrl", "$").trim().trimEnd('/')
             var host = ""
             if (baseUrl.isNotEmpty()) {
                 val (h, err) = UrlGuard.baseHost(baseUrl)
@@ -495,6 +499,7 @@ object CustomDefParser {
                 val tdesc = str(to, "description", p, required = true)
                 tools.add(ToolDef(tname, tdesc, params, risky, requiresSignal, intent, limits, treq, response, list, tsend, tsource, tcomp))
             }
+            if (baseUrl.isEmpty() && (usesNetwork || rt != null)) errors.add("$.baseUrl é obrigatório quando o conector faz requisições ou usa tempo real.")
             return CustomDef(id, name, description, version, accent, baseUrl, host, headers, login, settings, panels, actions, tools, allowed, rt)
         }
 

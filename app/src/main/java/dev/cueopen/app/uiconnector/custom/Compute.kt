@@ -424,7 +424,7 @@ object Compute {
             "supertrend" to (3 to 5), "ichimoku" to (2 to 5), "pivots" to (3 to 3), "ao" to (2 to 2), "uo" to (3 to 6),
             "cmo" to (1 to 2), "dpo" to (1 to 2), "kama" to (1 to 4), "chop" to (3 to 4), "bbw" to (1 to 3),
             "ppo" to (1 to 4), "tsi" to (1 to 3), "fisher" to (2 to 3), "elder" to (3 to 4), "zscore" to (2 to 2),
-            "heikin" to (4 to 4), "call" to (1 to N), "hl2" to (2 to 2), "hlc3" to (3 to 3), "ohlc4" to (4 to 4), "signal" to (1 to 1),
+            "heikin" to (4 to 4), "call" to (1 to N), "json" to (1 to 1), "candles" to (1 to 1), "indicators" to (1 to 5), "hl2" to (2 to 2), "hlc3" to (3 to 3), "ohlc4" to (4 to 4), "signal" to (1 to 1),
         )
 
         private fun dbl(v: Any?, name: String): Double = numOrNull(v) ?: throw ComputeError("$name: esperava número, recebeu ${str(v).take(40).ifEmpty { "nulo" }}")
@@ -549,6 +549,14 @@ object Compute {
                 "coalesce" -> a.firstOrNull { it != null }
                 "if" -> if (truthy(a[0])) a[1] else a[2]
                 "call" -> Compute.callFn(a[0], a.drop(1), ctx)
+                "json" -> runCatching { fromJson(kotlinx.serialization.json.Json { isLenient = true }.parseToJsonElement(str(a[0]))) }.getOrElse { throw ComputeError("json: texto inválido") }
+                "candles" -> TechnicalSuite.parse(a[0]).toMap()
+                // suíte completa: indicators(velas) ou indicators(o, h, l, c, v)
+                "indicators" -> if (a.size in 2..3) throw ComputeError("indicators: use indicators(velas) ou indicators(o, h, l, c[, v])") else TechnicalSuite.toValue(TechnicalSuite.analyze(
+                    if (a.size == 1) TechnicalSuite.parse(a[0])
+                    else { val o = l(0).map { numOrNull(it) }; val c = l(3).map { numOrNull(it) }
+                        TechnicalSuite.Candles(List(c.size) { it.toDouble() }, o, l(1).map { numOrNull(it) }, l(2).map { numOrNull(it) }, c,
+                            if (a.size > 4) l(4).map { numOrNull(it) ?: 0.0 } else List(c.size) { 0.0 }) }))
                 "fixed" -> numOrNull(a[0])?.let { String.format(Locale.US, "%.${intArg(a[1], fn, 0, 12)}f", it) } ?: ""
                 "type" -> when (a[0]) { null -> "null"; is Double -> "number"; is String -> "string"; is Boolean -> "boolean"; is List<*> -> "list"; is Map<*, *> -> "object"; else -> "function" }
                 "upper" -> str(a[0]).uppercase()

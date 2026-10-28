@@ -51,31 +51,38 @@ class ComputeTest {
         catch (e: Compute.ComputeError) { assertTrue(e.message!!.contains("limite")) }
     }
 
-    @Test fun `conector de indicadores calcula sobre velas`() = runBlocking {
-        // 300 velas determinísticas (senoide + tendência) no formato da Binance
-        val klines = (0 until 300).joinToString(",", "[", "]") { i ->
-            val base = 100 + i * 0.1 + 5 * Math.sin(i / 7.0)
-            val o = base; val c = base + Math.sin(i / 3.0); val h = maxOf(o, c) + 0.5; val l = minOf(o, c) - 0.5
-            "[${1_700_000_000_000L + i * 3_600_000L},\"$o\",\"$h\",\"$l\",\"$c\",\"${1000 + i}\",0]"
-        }
-        val http = object : HttpExec {
-            override suspend fun exec(r: HttpReq) = if (r.url.contains("/api/v3/klines")) HttpRes(200, mapOf("content-type" to listOf("application/json")), klines) else HttpRes(404, emptyMap(), "")
-        }
+    private fun klines(n: Int) = (0 until n).joinToString(",", "[", "]") { i ->
+        val base = 100 + i * 0.1 + 5 * Math.sin(i / 7.0)
+        val o = base; val c = base + Math.sin(i / 3.0); val h = maxOf(o, c) + 0.5; val l = minOf(o, c) - 0.5
+        "[${1_700_000_000_000L + i * 3_600_000L},\"$o\",\"$h\",\"$l\",\"$c\",\"${1000 + i}\",0]"
+    }
+
+    @Test fun `suite de indicadores recebe velas e nao busca dados`() = runBlocking {
+        val http = object : HttpExec { override suspend fun exec(r: HttpReq): HttpRes = throw AssertionError("não pode fazer requisição: ${r.url}") }
         val p = CustomDefParser.parse(CustomTemplates.TV_INDICATORS.json)
         assertEquals(emptyList<String>(), p.errors)
         val c = CustomConnector(p.def!!, http, permissive = true)
         val st = ConnectorSettings { null }
-        val out = c.callTool("indicadores", mapOf("par" to "BTCUSDT", "intervalo" to "1h"), st)
-        assertTrue(out, out.contains("resumo:") && out.contains("RSI(14):") && out.contains("Supertrend") && !out.contains("ERRO"))
-        assertTrue(out, out.lines().size >= 30)
+        val t0 = System.nanoTime()
+        val out = c.callTool("analisar", mapOf("velas" to klines(300), "ativo" to "EURUSD 1m"), st)
+        val ms = (System.nanoTime() - t0) / 1_000_000
+        assertTrue(out, out.contains("RESUMO:") && out.contains("RSI(14):") && out.contains("Supertrend") && !out.contains("ERRO"))
+        assertTrue(out, out.lines().size >= 35)
+        assertTrue("rápido: ${ms}ms", ms < 3_000)
+        // mesmo formato de texto que o get_candles da IQ Option devolve
+        val txt = "Velas EURUSD · 60s · 3 (horário UTC) — open high low close volume\n" + (0 until 120).joinToString("\n") { i ->
+            val b = 1.08 + i * 0.0001 + 0.001 * Math.sin(i / 5.0); "28/10 13:${i % 60} $b ${b + 0.0004} ${b - 0.0004} ${b + 0.0002} ${100 + i}" }
+        val out2 = c.callTool("analisar", mapOf("velas" to txt), st)
+        assertTrue(out2, out2.contains("120 velas") && out2.contains("MACD"))
         val blocks = c.snapshot(st)
-        val header = blocks.filterIsInstance<UiBlock.Header>().first()
-        assertTrue(header.subtitle, header.subtitle.contains("Resumo técnico: ") && !header.subtitle.endsWith(": "))
-        val tables = blocks.filterIsInstance<UiBlock.Table>()
-        assertTrue(tables[0].rows.size >= 30)
-        assertTrue(tables[0].rows.all { it[1].isNotBlank() })
-        assertEquals(20, tables[1].rows.size)
-        val (passed, report) = c.selfTest(st, mapOf("indicadores" to mapOf("par" to "BTCUSDT", "intervalo" to "1h")))
+        assertTrue(blocks.any { it is UiBlock.Note })
+        val (passed, report) = c.selfTest(st, mapOf("analisar" to mapOf("velas" to klines(250))))
         assertTrue(report, passed)
+    }
+
+    @Test fun `suite nativa e funcao no compute`() {
+        val v = Compute.eval("indicators(candles(x))", mapOf("x" to klines(260)), null) as Map<*, *>
+        assertTrue((v["rows"] as List<*>).size >= 35)
+        assertTrue(v["resumo"] in setOf("Forte compra", "Compra", "Neutro", "Venda", "Forte venda"))
     }
 }

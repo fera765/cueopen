@@ -15,6 +15,11 @@ import dev.cueopen.app.uiconnector.UiConnector
 import dev.cueopen.app.uiconnector.UiConnectorSpec
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -97,6 +102,11 @@ class IqOptionConnector : UiConnector {
                 ParamSpec("timeframe", "Tamanho da vela em segundos (60=1min, 300=5min…) ou 1m/5m/1h. Padrão 60.", required = false),
                 ParamSpec("count", "Quantidade de velas (1–200). Padrão 30.", "integer", required = false),
             )),
+            ToolSpec("indicators", "Análise técnica completa (padrão TradingView) sobre velas REAIS do ativo: mais de 30 indicadores (médias, RSI, MACD, Estocástico, ADX, Bollinger, Ichimoku, Supertrend, PSAR…) com sinal de compra/venda e o resumo. Calculado no aparelho, em milissegundos.", listOf(
+                ParamSpec("asset", "Ticker do ativo, ex.: EURUSD-OTC"),
+                ParamSpec("timeframe", "Tamanho da vela (60, 300, 900… segundos ou 1m/5m/15m/1h). Padrão 60.", required = false),
+                ParamSpec("count", "Quantidade de velas (50–1000). Padrão 300.", "integer", required = false),
+            )),
             ToolSpec("buy", "Abre uma operação (call = compra/sobe, put = venda/desce) na conta ativa, respeitando os limites do usuário. " +
                 "EXIGE validação prévia com typesafe_jev_check (venue=iqoption, id=ticker, direction=call|put). " +
                 "Curta (até o limite do usuário): call e put. Longa: somente call.", listOf(
@@ -142,6 +152,16 @@ class IqOptionConnector : UiConnector {
     private val marginIds = java.util.Collections.newSetFromMap(ConcurrentHashMap<Long, Boolean>())
     @Volatile private var allAssets: List<IqProtocol.Asset> = emptyList()
     @Volatile private var allAssetsAt = 0L
+    /** Tarefas de fundo (carregar ativos) — a tela nunca espera por elas. */
+    private val bg = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    @Volatile private var loadingAll = false
+
+    /** Atualiza a lista completa de ativos em segundo plano (sem travar a tela). */
+    private fun refreshAssetsInBackground() {
+        if (loadingAll || (allAssets.isNotEmpty() && System.currentTimeMillis() - allAssetsAt < 60_000)) return
+        loadingAll = true
+        bg.launch { try { runCatching { loadAllAssets(force = true) } } finally { loadingAll = false } }
+    }
     private val seen = ArrayDeque<String>()
 
     @Volatile private var ssid: String? = null
@@ -380,16 +400,25 @@ class IqOptionConnector : UiConnector {
         if (!force && allAssets.isNotEmpty() && System.currentTimeMillis() - allAssetsAt < 60_000) return allAssets
         val out = ArrayList(loadAssets(force))
         val now = serverNowSec()
-        runCatching {
-            val id = reqId()
-            val root = request(id, IqProtocol.underlyingListMessage(id), "underlying-list", timeoutMs = 12_000)
-            out += IqProtocol.parseUnderlying(root["msg"] as? JsonObject ?: JsonObject(emptyMap()), now)
-        }.onFailure { err("digital: ${it.message}") }
-        for (type in listOf("forex", "cfd", "crypto")) runCatching {
-            val id = reqId()
-            val root = request(id, IqProtocol.instrumentsMessage(id, type), "instruments", timeoutMs = 12_000)
-            out += IqProtocol.parseInstruments(root["msg"] as? JsonObject ?: JsonObject(emptyMap()), type, now)
-        }.onFailure { err("$type: ${it.message}") }
+        // as 4 fontes extras em PARALELO e com tempo curto: uma fonte lenta/indisponível não atrasa as outras
+        val extra = kotlinx.coroutines.coroutineScope {
+            val jobs = listOf("digital", "forex", "cfd", "crypto").map { type ->
+                async {
+                    runCatching {
+                        val id = reqId()
+                        if (type == "digital") {
+                            val root = request(id, IqProtocol.underlyingListMessage(id), "underlying-list", timeoutMs = 6_000)
+                            IqProtocol.parseUnderlying(root["msg"] as? JsonObject ?: JsonObject(emptyMap()), now)
+                        } else {
+                            val root = request(id, IqProtocol.instrumentsMessage(id, type), "instruments", timeoutMs = 6_000)
+                            IqProtocol.parseInstruments(root["msg"] as? JsonObject ?: JsonObject(emptyMap()), type, now)
+                        }
+                    }.getOrElse { err("$type: ${it.message}"); emptyList() }
+                }
+            }
+            jobs.awaitAll().flatten()
+        }
+        out += extra
         allAssets = out
         allAssetsAt = System.currentTimeMillis()
         return out
@@ -502,6 +531,21 @@ class IqOptionConnector : UiConnector {
         }.trim()
     }
 
+    /** Busca as velas reais e passa para a suíte de indicadores (que não busca nada sozinha). */
+    private suspend fun indicatorsText(asset: String, tf: String?, count: Int?): String {
+        val a = IqProtocol.resolveAsset(loadAssets(), asset) ?: return "Ativo '$asset' não encontrado. Use open_assets para ver os tickers."
+        val size = IqProtocol.timeframeSeconds(tf ?: "60") ?: return "timeframe inválido. Use 60, 300, 900, 3600… ou 1m/5m/15m/1h."
+        val n = (count ?: 300).coerceIn(50, 1000)
+        val id = reqId()
+        val root = request(id, IqProtocol.getCandlesMessage(id, a.id, size, n, serverNowSec()), "candles", timeoutMs = 20_000)
+        val list = IqProtocol.parseCandles(root["msg"] as? JsonObject ?: JsonObject(emptyMap())).sortedBy { it.from }
+        if (list.size < 30) return "Poucas velas para análise (${list.size}). Tente outro timeframe ou ativo."
+        val k = dev.cueopen.app.uiconnector.custom.TechnicalSuite.Candles(
+            list.map { it.from.toDouble() }, list.map { it.open }, list.map { it.max }, list.map { it.min }, list.map { it.close }, list.map { it.volume })
+        val r = dev.cueopen.app.uiconnector.custom.TechnicalSuite.analyze(k)
+        return dev.cueopen.app.uiconnector.custom.TechnicalSuite.report(r, "${a.ticker} · ${size}s")
+    }
+
     private fun openCount(): Int = tracked.values.count { it.result == null && it.expSec + 120 > serverNowSec() }
 
     private suspend fun buy(asset: String, direction: String, amount: Double, minutes: Int, settings: ConnectorSettings?, byAgent: Boolean): String {
@@ -607,12 +651,15 @@ class IqOptionConnector : UiConnector {
             empty = "Sem operações fechadas nesta sessão.",
         )
         if (marginIds.isNotEmpty()) {
-            val mp = runCatching { marginPositions() }.getOrNull()
+            val mp = runCatching { withTimeout(4_000) { marginPositions() } }.getOrNull()
             if (mp != null) blocks += UiBlock.Table("Forex / CFD / Cripto", listOf("Ativo", "Lado", "Valor", "P/L"),
                 mp.map { listOf(it.instrument, it.side.uppercase(), "${String.format(Locale.US, "%.2f", it.amount)} ×${it.leverage}", it.pnl?.let { p -> String.format(Locale.US, "%.2f", p) } ?: it.status) },
                 empty = "Nenhuma posição de margem aberta.")
         }
-        val all = runCatching { loadAllAssets() }.getOrNull()
+        // nunca espera a lista completa: usa o que já tem e atualiza em segundo plano
+        refreshAssetsInBackground()
+        val all = allAssets.ifEmpty { assets }.takeIf { it.isNotEmpty() }
+        if (all == null) blocks += UiBlock.Note("Carregando a lista de ativos…", Tone.NEUTRAL)
         if (all != null) {
             val openA = all.filter { it.open }
             blocks += UiBlock.Stats(listOf("turbo", "binary", "digital", "forex", "cfd", "crypto").mapNotNull { k ->
@@ -681,6 +728,7 @@ class IqOptionConnector : UiConnector {
                     l.take(120).joinToString(", ") { it.ticker }
             }
         }
+        "indicators" -> indicatorsText(args["asset"].orEmpty(), args["timeframe"], args["count"]?.toDoubleOrNull()?.toInt())
         "get_candles" -> candlesText(args["asset"].orEmpty(), args["timeframe"], args["count"]?.toDoubleOrNull()?.toInt())
         "buy" -> buy(
             args["asset"].orEmpty(), args["direction"].orEmpty(),

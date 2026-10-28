@@ -39,7 +39,7 @@ nome diferente ou valor fora das regras faz o conector ser recusado.
 | `description` | texto | sim | uma frase |
 | `version` | texto | não | padrão `"1.0"` |
 | `accent` | texto | não | cor `#RRGGBB` |
-| `baseUrl` | texto | sim | `https://dominio` (+ prefixo de caminho opcional, ex.: `https://api.x.com/v1`). Só HTTPS, porta 443, domínio completo. **Proibido**: http, IP, localhost, `.local`, `.internal`, usuário/senha, query `?` |
+| `baseUrl` | texto | sim, se o conector faz requisições/tempo real (conector só de cálculo não precisa) | `https://dominio` (+ prefixo de caminho opcional, ex.: `https://api.x.com/v1`). Só HTTPS, porta 443, domínio completo. **Proibido**: http, IP, localhost, `.local`, `.internal`, usuário/senha, query `?` |
 | `allowedHosts` | lista de domínios (≤8) | não | outros domínios HTTPS que o conector pode chamar via `"url"` (ex.: `accounts.spotify.com` para OAuth, outros sites de notícias) |
 | `headers` | objeto texto→texto | não | cabeçalhos de TODAS as requisições, exceto `login.request` |
 | `login` | objeto | não | omita para fontes públicas (RSS, APIs abertas); ver abaixo |
@@ -140,6 +140,12 @@ Os resultados entram nos modelos como `{{c.nome}}` e listas calculadas viram lin
     `bbw keltner(h,l,c,n,m)→{upper,middle,lower}` `donchian(h,l,n)` `adx(h,l,c,n)→{adx,pdi,mdi}` `aroon(h,l,n)→{up,down,osc}` `psar(h,l)`
     `supertrend(h,l,c,10,3)→{line,dir}` `ichimoku(h,l)→{tenkan,kijun,spanA,spanB}` `chop elder(h,l,c)→{bull,bear}` `pivots(h,l,c)→{p,r1,s1,r2,s2,r3,s3}`;
     volume `obv(c,v) vwap(h,l,c,v) adl cmf(h,l,c,v,n)`; preços `hl2 hlc3 ohlc4 heikin(o,h,l,c)→{open,high,low,close}`.
+  - **suíte pronta**: `indicators(velas)` (ou `indicators(o,h,l,c,v)`) → `{rows:[{nome,valor,sinal,grupo}], compras, vendas, neutros, resumo, preco, medias,
+    osciladores, velas}` com mais de 30 indicadores e o resumo técnico (Forte compra … Forte venda), nativo e rápido.
+    `candles(x)` normaliza velas de QUALQUER formato (texto da saída de get_candles, CSV, `[[t,o,h,l,c,v]]`, objetos `{open,high,low,close,volume}`,
+    colunas) em `{t,o,h,l,c,v}`. `json(texto)` converte texto JSON em valor.
+  - Conector de cálculo puro (sem `baseUrl`): uma ferramenta com parâmetro `velas` e `"compute": {"r": "indicators(velas)", "linhas": "c.r.rows"}`
+    recebe dados de OUTRO conector (o agente passa a saída de get_candles) e devolve tudo calculado.
     Séries devolvem listas do mesmo tamanho (nulos no aquecimento) — use `last(...)` para o valor atual.
 - Limites: 80 cálculos por item, 3 milhões de operações por avaliação, listas até 200 mil itens. Sem acesso a rede, arquivos ou segredos.
 - Exemplo (velas da Binance `[[t, o, h, l, c, v, ...], ...]`):

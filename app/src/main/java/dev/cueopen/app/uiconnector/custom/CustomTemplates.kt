@@ -252,315 +252,52 @@ object CustomTemplates {
 }
 """.trimIndent())
 
-    val TV_INDICATORS = Entry("Indicadores técnicos calculados (compute: estilo TradingView)", """
+    val TV_INDICATORS = Entry("Indicadores técnicos (recebe velas, sem buscar dados)", """
 {
  "id": "indicadores",
  "name": "Indicadores técnicos",
- "description": "Mais de 30 indicadores no padrão TradingView calculados no app (motor compute) sobre velas reais da Binance.",
- "version": "1.0",
- "baseUrl": "https://api.binance.com",
- "settings": [
-  {
-   "id": "par",
-   "label": "Par",
-   "description": "Par da Binance, ex.: BTCUSDT",
-   "type": "text",
-   "default": "BTCUSDT"
-  },
-  {
-   "id": "intervalo",
-   "label": "Tempo gráfico",
-   "description": "1m, 5m, 15m, 1h, 4h ou 1d",
-   "type": "text",
-   "default": "1h"
-  }
- ],
+ "description": "Suíte de indicadores no padrão TradingView: recebe velas de qualquer fonte (ex.: get_candles da IQ Option) e devolve todos os indicadores com sinal de compra/venda e o resumo. Não busca dados.",
+ "version": "2.0",
  "panels": [
   {
-   "type": "header",
-   "title": "{{s.par|upper}} · {{s.intervalo}}",
-   "subtitle": "Preço {{c.preco}} · Resumo técnico: {{c.resumo}}",
-   "badge": "{{c.compras}} compra · {{c.vendas}} venda",
-   "request": {
-    "path": "/api/v3/klines",
-    "query": {
-     "symbol": "{{s.par|upper}}",
-     "interval": "{{s.intervalo}}",
-     "limit": "300"
-    }
-   },
-   "compute": {
-    "op": "map(${'$'}, k -> num(k[1]))",
-    "hi": "map(${'$'}, k -> num(k[2]))",
-    "lo": "map(${'$'}, k -> num(k[3]))",
-    "cl": "map(${'$'}, k -> num(k[4]))",
-    "vol": "map(${'$'}, k -> num(k[5]))",
-    "tm": "map(${'$'}, k -> k[0])",
-    "preco": "last(c.cl)",
-    "sma10": "last(sma(c.cl, 10))",
-    "ema10": "last(ema(c.cl, 10))",
-    "sma20": "last(sma(c.cl, 20))",
-    "ema20": "last(ema(c.cl, 20))",
-    "sma50": "last(sma(c.cl, 50))",
-    "ema50": "last(ema(c.cl, 50))",
-    "sma100": "last(sma(c.cl, 100))",
-    "ema100": "last(ema(c.cl, 100))",
-    "sma200": "last(sma(c.cl, 200))",
-    "ema200": "last(ema(c.cl, 200))",
-    "vwma20": "last(vwma(c.cl, c.vol, 20))",
-    "hma9": "last(hma(c.cl, 9))",
-    "rsi": "last(rsi(c.cl, 14))",
-    "st": "stoch(c.hi, c.lo, c.cl, 14, 3, 3)",
-    "stk": "last(c.st.k)",
-    "std": "last(c.st.d)",
-    "srsi": "last(stochrsi(c.cl).k)",
-    "mc": "macd(c.cl)",
-    "mcl": "last(c.mc.macd)",
-    "mcs": "last(c.mc.signal)",
-    "cci": "last(cci(c.hi, c.lo, c.cl, 20))",
-    "ax": "adx(c.hi, c.lo, c.cl, 14)",
-    "adx": "last(c.ax.adx)",
-    "pdi": "last(c.ax.pdi)",
-    "mdi": "last(c.ax.mdi)",
-    "wr": "last(willr(c.hi, c.lo, c.cl, 14))",
-    "aos": "compact(ao(c.hi, c.lo))",
-    "mom": "last(mom(c.cl, 10))",
-    "uo": "last(uo(c.hi, c.lo, c.cl))",
-    "el": "elder(c.hi, c.lo, c.cl)",
-    "bbp": "last(c.el.bull) + last(c.el.bear)",
-    "mfi": "last(mfi(c.hi, c.lo, c.cl, c.vol, 14))",
-    "cmf": "last(cmf(c.hi, c.lo, c.cl, c.vol, 20))",
-    "bb": "last(bollinger(c.cl, 20, 2).pctb)",
-    "kij": "last(ichimoku(c.hi, c.lo).kijun)",
-    "supd": "last(supertrend(c.hi, c.lo, c.cl, 10, 3).dir)",
-    "sar": "last(psar(c.hi, c.lo))",
-    "atr": "last(atr(c.hi, c.lo, c.cl, 14))",
-    "masig": "m -> c.preco > m ? 'compra' : (c.preco < m ? 'venda' : 'neutro')",
-    "osc": "(cb, cv) -> cb ? 'compra' : (cv ? 'venda' : 'neutro')",
-    "indicadores": "[{nome: 'SMA(10)', valor: round(c.sma10, 4), sinal: call(c.masig, c.sma10)}, {nome: 'EMA(10)', valor: round(c.ema10, 4), sinal: call(c.masig, c.ema10)}, {nome: 'SMA(20)', valor: round(c.sma20, 4), sinal: call(c.masig, c.sma20)}, {nome: 'EMA(20)', valor: round(c.ema20, 4), sinal: call(c.masig, c.ema20)}, {nome: 'SMA(50)', valor: round(c.sma50, 4), sinal: call(c.masig, c.sma50)}, {nome: 'EMA(50)', valor: round(c.ema50, 4), sinal: call(c.masig, c.ema50)}, {nome: 'SMA(100)', valor: round(c.sma100, 4), sinal: call(c.masig, c.sma100)}, {nome: 'EMA(100)', valor: round(c.ema100, 4), sinal: call(c.masig, c.ema100)}, {nome: 'SMA(200)', valor: round(c.sma200, 4), sinal: call(c.masig, c.sma200)}, {nome: 'EMA(200)', valor: round(c.ema200, 4), sinal: call(c.masig, c.ema200)}, {nome: 'VWMA(20)', valor: round(c.vwma20, 4), sinal: call(c.masig, c.vwma20)}, {nome: 'Hull MA(9)', valor: round(c.hma9, 4), sinal: call(c.masig, c.hma9)}, {nome: 'Ichimoku (base)', valor: round(c.kij, 4), sinal: call(c.masig, c.kij)}, {nome: 'Parabolic SAR', valor: round(c.sar, 4), sinal: call(c.masig, c.sar)}, {nome: 'Supertrend(10,3)', valor: c.supd, sinal: call(c.osc, c.supd > 0, c.supd < 0)}, {nome: 'RSI(14)', valor: round(c.rsi, 2), sinal: call(c.osc, c.rsi < 30, c.rsi > 70)}, {nome: 'Estocástico %K(14,3,3)', valor: round(c.stk, 2), sinal: call(c.osc, c.stk < 20 && c.stk > c.std, c.stk > 80 && c.stk < c.std)}, {nome: 'Stoch RSI', valor: round(c.srsi, 2), sinal: call(c.osc, c.srsi < 20, c.srsi > 80)}, {nome: 'MACD(12,26)', valor: round(c.mcl, 4), sinal: call(c.osc, c.mcl > c.mcs, c.mcl < c.mcs)}, {nome: 'CCI(20)', valor: round(c.cci, 2), sinal: call(c.osc, c.cci < -100, c.cci > 100)}, {nome: 'ADX(14)', valor: round(c.adx, 2), sinal: call(c.osc, c.adx > 20 && c.pdi > c.mdi, c.adx > 20 && c.pdi < c.mdi)}, {nome: 'Williams %R(14)', valor: round(c.wr, 2), sinal: call(c.osc, c.wr < -80, c.wr > -20)}, {nome: 'Awesome Oscillator', valor: round(last(c.aos), 4), sinal: call(c.osc, last(c.aos) > 0 && last(c.aos) > at(c.aos, -2), last(c.aos) < 0 && last(c.aos) < at(c.aos, -2))}, {nome: 'Momentum(10)', valor: round(c.mom, 4), sinal: call(c.osc, c.mom > 0, c.mom < 0)}, {nome: 'Ultimate Oscillator', valor: round(c.uo, 2), sinal: call(c.osc, c.uo > 70, c.uo < 30)}, {nome: 'Bull/Bear Power', valor: round(c.bbp, 4), sinal: call(c.osc, c.bbp > 0, c.bbp < 0)}, {nome: 'MFI(14)', valor: round(c.mfi, 2), sinal: call(c.osc, c.mfi < 20, c.mfi > 80)}, {nome: 'Chaikin MF(20)', valor: round(c.cmf, 3), sinal: call(c.osc, c.cmf > 0, c.cmf < 0)}, {nome: 'Bollinger %B(20,2)', valor: round(c.bb, 3), sinal: call(c.osc, c.bb < 0, c.bb > 1)}, {nome: 'ATR(14)', valor: round(c.atr, 4), sinal: 'neutro'}]",
-    "compras": "count(c.indicadores, x -> x.sinal == 'compra')",
-    "vendas": "count(c.indicadores, x -> x.sinal == 'venda')",
-    "neutros": "count(c.indicadores, x -> x.sinal == 'neutro')",
-    "resumo": "c.compras - c.vendas >= 8 ? 'Forte compra' : (c.compras - c.vendas >= 3 ? 'Compra' : (c.vendas - c.compras >= 8 ? 'Forte venda' : (c.vendas - c.compras >= 3 ? 'Venda' : 'Neutro')))"
-   }
-  },
-  {
-   "type": "table",
-   "title": "Painel de indicadores",
-   "request": {
-    "path": "/api/v3/klines",
-    "query": {
-     "symbol": "{{s.par|upper}}",
-     "interval": "{{s.intervalo}}",
-     "limit": "300"
-    }
-   },
-   "compute": {
-    "op": "map(${'$'}, k -> num(k[1]))",
-    "hi": "map(${'$'}, k -> num(k[2]))",
-    "lo": "map(${'$'}, k -> num(k[3]))",
-    "cl": "map(${'$'}, k -> num(k[4]))",
-    "vol": "map(${'$'}, k -> num(k[5]))",
-    "tm": "map(${'$'}, k -> k[0])",
-    "preco": "last(c.cl)",
-    "sma10": "last(sma(c.cl, 10))",
-    "ema10": "last(ema(c.cl, 10))",
-    "sma20": "last(sma(c.cl, 20))",
-    "ema20": "last(ema(c.cl, 20))",
-    "sma50": "last(sma(c.cl, 50))",
-    "ema50": "last(ema(c.cl, 50))",
-    "sma100": "last(sma(c.cl, 100))",
-    "ema100": "last(ema(c.cl, 100))",
-    "sma200": "last(sma(c.cl, 200))",
-    "ema200": "last(ema(c.cl, 200))",
-    "vwma20": "last(vwma(c.cl, c.vol, 20))",
-    "hma9": "last(hma(c.cl, 9))",
-    "rsi": "last(rsi(c.cl, 14))",
-    "st": "stoch(c.hi, c.lo, c.cl, 14, 3, 3)",
-    "stk": "last(c.st.k)",
-    "std": "last(c.st.d)",
-    "srsi": "last(stochrsi(c.cl).k)",
-    "mc": "macd(c.cl)",
-    "mcl": "last(c.mc.macd)",
-    "mcs": "last(c.mc.signal)",
-    "cci": "last(cci(c.hi, c.lo, c.cl, 20))",
-    "ax": "adx(c.hi, c.lo, c.cl, 14)",
-    "adx": "last(c.ax.adx)",
-    "pdi": "last(c.ax.pdi)",
-    "mdi": "last(c.ax.mdi)",
-    "wr": "last(willr(c.hi, c.lo, c.cl, 14))",
-    "aos": "compact(ao(c.hi, c.lo))",
-    "mom": "last(mom(c.cl, 10))",
-    "uo": "last(uo(c.hi, c.lo, c.cl))",
-    "el": "elder(c.hi, c.lo, c.cl)",
-    "bbp": "last(c.el.bull) + last(c.el.bear)",
-    "mfi": "last(mfi(c.hi, c.lo, c.cl, c.vol, 14))",
-    "cmf": "last(cmf(c.hi, c.lo, c.cl, c.vol, 20))",
-    "bb": "last(bollinger(c.cl, 20, 2).pctb)",
-    "kij": "last(ichimoku(c.hi, c.lo).kijun)",
-    "supd": "last(supertrend(c.hi, c.lo, c.cl, 10, 3).dir)",
-    "sar": "last(psar(c.hi, c.lo))",
-    "atr": "last(atr(c.hi, c.lo, c.cl, 14))",
-    "masig": "m -> c.preco > m ? 'compra' : (c.preco < m ? 'venda' : 'neutro')",
-    "osc": "(cb, cv) -> cb ? 'compra' : (cv ? 'venda' : 'neutro')",
-    "indicadores": "[{nome: 'SMA(10)', valor: round(c.sma10, 4), sinal: call(c.masig, c.sma10)}, {nome: 'EMA(10)', valor: round(c.ema10, 4), sinal: call(c.masig, c.ema10)}, {nome: 'SMA(20)', valor: round(c.sma20, 4), sinal: call(c.masig, c.sma20)}, {nome: 'EMA(20)', valor: round(c.ema20, 4), sinal: call(c.masig, c.ema20)}, {nome: 'SMA(50)', valor: round(c.sma50, 4), sinal: call(c.masig, c.sma50)}, {nome: 'EMA(50)', valor: round(c.ema50, 4), sinal: call(c.masig, c.ema50)}, {nome: 'SMA(100)', valor: round(c.sma100, 4), sinal: call(c.masig, c.sma100)}, {nome: 'EMA(100)', valor: round(c.ema100, 4), sinal: call(c.masig, c.ema100)}, {nome: 'SMA(200)', valor: round(c.sma200, 4), sinal: call(c.masig, c.sma200)}, {nome: 'EMA(200)', valor: round(c.ema200, 4), sinal: call(c.masig, c.ema200)}, {nome: 'VWMA(20)', valor: round(c.vwma20, 4), sinal: call(c.masig, c.vwma20)}, {nome: 'Hull MA(9)', valor: round(c.hma9, 4), sinal: call(c.masig, c.hma9)}, {nome: 'Ichimoku (base)', valor: round(c.kij, 4), sinal: call(c.masig, c.kij)}, {nome: 'Parabolic SAR', valor: round(c.sar, 4), sinal: call(c.masig, c.sar)}, {nome: 'Supertrend(10,3)', valor: c.supd, sinal: call(c.osc, c.supd > 0, c.supd < 0)}, {nome: 'RSI(14)', valor: round(c.rsi, 2), sinal: call(c.osc, c.rsi < 30, c.rsi > 70)}, {nome: 'Estocástico %K(14,3,3)', valor: round(c.stk, 2), sinal: call(c.osc, c.stk < 20 && c.stk > c.std, c.stk > 80 && c.stk < c.std)}, {nome: 'Stoch RSI', valor: round(c.srsi, 2), sinal: call(c.osc, c.srsi < 20, c.srsi > 80)}, {nome: 'MACD(12,26)', valor: round(c.mcl, 4), sinal: call(c.osc, c.mcl > c.mcs, c.mcl < c.mcs)}, {nome: 'CCI(20)', valor: round(c.cci, 2), sinal: call(c.osc, c.cci < -100, c.cci > 100)}, {nome: 'ADX(14)', valor: round(c.adx, 2), sinal: call(c.osc, c.adx > 20 && c.pdi > c.mdi, c.adx > 20 && c.pdi < c.mdi)}, {nome: 'Williams %R(14)', valor: round(c.wr, 2), sinal: call(c.osc, c.wr < -80, c.wr > -20)}, {nome: 'Awesome Oscillator', valor: round(last(c.aos), 4), sinal: call(c.osc, last(c.aos) > 0 && last(c.aos) > at(c.aos, -2), last(c.aos) < 0 && last(c.aos) < at(c.aos, -2))}, {nome: 'Momentum(10)', valor: round(c.mom, 4), sinal: call(c.osc, c.mom > 0, c.mom < 0)}, {nome: 'Ultimate Oscillator', valor: round(c.uo, 2), sinal: call(c.osc, c.uo > 70, c.uo < 30)}, {nome: 'Bull/Bear Power', valor: round(c.bbp, 4), sinal: call(c.osc, c.bbp > 0, c.bbp < 0)}, {nome: 'MFI(14)', valor: round(c.mfi, 2), sinal: call(c.osc, c.mfi < 20, c.mfi > 80)}, {nome: 'Chaikin MF(20)', valor: round(c.cmf, 3), sinal: call(c.osc, c.cmf > 0, c.cmf < 0)}, {nome: 'Bollinger %B(20,2)', valor: round(c.bb, 3), sinal: call(c.osc, c.bb < 0, c.bb > 1)}, {nome: 'ATR(14)', valor: round(c.atr, 4), sinal: 'neutro'}]",
-    "compras": "count(c.indicadores, x -> x.sinal == 'compra')",
-    "vendas": "count(c.indicadores, x -> x.sinal == 'venda')",
-    "neutros": "count(c.indicadores, x -> x.sinal == 'neutro')",
-    "resumo": "c.compras - c.vendas >= 8 ? 'Forte compra' : (c.compras - c.vendas >= 3 ? 'Compra' : (c.vendas - c.compras >= 8 ? 'Forte venda' : (c.vendas - c.compras >= 3 ? 'Venda' : 'Neutro')))"
-   },
-   "rows": "c.indicadores",
-   "columns": [
-    {
-     "title": "Indicador",
-     "value": "{{${'$'}.nome}}"
-    },
-    {
-     "title": "Valor",
-     "value": "{{${'$'}.valor}}"
-    },
-    {
-     "title": "Sinal",
-     "value": "{{${'$'}.sinal}}"
-    }
-   ],
-   "empty": "Sem dados."
-  },
-  {
-   "type": "table",
-   "title": "Últimas velas",
-   "request": {
-    "path": "/api/v3/klines",
-    "query": {
-     "symbol": "{{s.par|upper}}",
-     "interval": "{{s.intervalo}}",
-     "limit": "300"
-    }
-   },
-   "compute": {
-    "op": "map(${'$'}, k -> num(k[1]))",
-    "hi": "map(${'$'}, k -> num(k[2]))",
-    "lo": "map(${'$'}, k -> num(k[3]))",
-    "cl": "map(${'$'}, k -> num(k[4]))",
-    "vol": "map(${'$'}, k -> num(k[5]))",
-    "tm": "map(${'$'}, k -> k[0])",
-    "preco": "last(c.cl)",
-    "rsiS": "rsi(c.cl, 14)",
-    "e20": "ema(c.cl, 20)",
-    "linhas": "reverse(zip_rows({hora: map(tail(c.tm, 20), t -> date(t)), fechamento: tail(c.cl, 20), rsi: map(tail(c.rsiS, 20), x -> round(x, 1)), ema20: map(tail(c.e20, 20), x -> round(x, 4)), volume: map(tail(c.vol, 20), x -> round(x, 2))}))"
-   },
-   "rows": "c.linhas",
-   "columns": [
-    {
-     "title": "Hora",
-     "value": "{{${'$'}.hora}}"
-    },
-    {
-     "title": "Fech.",
-     "value": "{{${'$'}.fechamento}}"
-    },
-    {
-     "title": "RSI",
-     "value": "{{${'$'}.rsi}}"
-    },
-    {
-     "title": "EMA20",
-     "value": "{{${'$'}.ema20}}"
-    }
-   ],
-   "empty": "Sem dados."
+   "type": "note",
+   "text": "Este conector não busca dados: o agente envia velas de outro conector (ex.: IQ Option get_candles) para a ferramenta analisar, que devolve mais de 30 indicadores — médias, osciladores e volatilidade — com sinal de compra/venda e o resumo técnico. Tudo calculado no aparelho, em milissegundos.",
+   "tone": "neutral"
   }
  ],
  "tools": [
   {
-   "name": "indicadores",
-   "description": "Calcula mais de 30 indicadores técnicos (médias, RSI, MACD, Estocástico, ADX, Bollinger, Ichimoku, Supertrend, PSAR…) com sinal de compra/venda e o resumo técnico, sobre velas reais.",
+   "name": "analisar",
+   "description": "Calcula a suíte completa de indicadores técnicos (SMA/EMA 10–200, VWMA, Hull, Ichimoku, PSAR, Supertrend, RSI, Estocástico, Stoch RSI, MACD, CCI, ADX, Williams %R, AO, Momentum, UO, Bull/Bear, MFI, CMF, Bollinger %B, CMO, ROC, TRIX, Aroon, ATR, Choppiness) sobre as velas recebidas, com sinal de compra/venda e o resumo. Passe as velas de outro conector (ex.: a saída de get_candles da IQ Option).",
    "params": [
     {
-     "name": "par",
-     "description": "Par da Binance, ex.: BTCUSDT"
+     "name": "velas",
+     "description": "Velas em qualquer formato: a saída de get_candles (texto), JSON [[t,o,h,l,c,v],…], lista de objetos {open,high,low,close,volume} ou colunas {open:[…],high:[…],low:[…],close:[…],volume:[…]}. Mínimo ~30 velas; 200+ para as médias longas."
     },
     {
-     "name": "intervalo",
-     "description": "Tempo gráfico",
-     "enum": [
-      "1m",
-      "5m",
-      "15m",
-      "1h",
-      "4h",
-      "1d"
-     ]
+     "name": "ativo",
+     "description": "Nome do ativo/tempo gráfico (só para o título)",
+     "required": false
     }
    ],
-   "request": {
-    "path": "/api/v3/klines",
-    "query": {
-     "symbol": "{{par|upper}}",
-     "interval": "{{intervalo}}",
-     "limit": "300"
-    }
-   },
    "compute": {
-    "op": "map(${'$'}, k -> num(k[1]))",
-    "hi": "map(${'$'}, k -> num(k[2]))",
-    "lo": "map(${'$'}, k -> num(k[3]))",
-    "cl": "map(${'$'}, k -> num(k[4]))",
-    "vol": "map(${'$'}, k -> num(k[5]))",
-    "tm": "map(${'$'}, k -> k[0])",
-    "preco": "last(c.cl)",
-    "sma10": "last(sma(c.cl, 10))",
-    "ema10": "last(ema(c.cl, 10))",
-    "sma20": "last(sma(c.cl, 20))",
-    "ema20": "last(ema(c.cl, 20))",
-    "sma50": "last(sma(c.cl, 50))",
-    "ema50": "last(ema(c.cl, 50))",
-    "sma100": "last(sma(c.cl, 100))",
-    "ema100": "last(ema(c.cl, 100))",
-    "sma200": "last(sma(c.cl, 200))",
-    "ema200": "last(ema(c.cl, 200))",
-    "vwma20": "last(vwma(c.cl, c.vol, 20))",
-    "hma9": "last(hma(c.cl, 9))",
-    "rsi": "last(rsi(c.cl, 14))",
-    "st": "stoch(c.hi, c.lo, c.cl, 14, 3, 3)",
-    "stk": "last(c.st.k)",
-    "std": "last(c.st.d)",
-    "srsi": "last(stochrsi(c.cl).k)",
-    "mc": "macd(c.cl)",
-    "mcl": "last(c.mc.macd)",
-    "mcs": "last(c.mc.signal)",
-    "cci": "last(cci(c.hi, c.lo, c.cl, 20))",
-    "ax": "adx(c.hi, c.lo, c.cl, 14)",
-    "adx": "last(c.ax.adx)",
-    "pdi": "last(c.ax.pdi)",
-    "mdi": "last(c.ax.mdi)",
-    "wr": "last(willr(c.hi, c.lo, c.cl, 14))",
-    "aos": "compact(ao(c.hi, c.lo))",
-    "mom": "last(mom(c.cl, 10))",
-    "uo": "last(uo(c.hi, c.lo, c.cl))",
-    "el": "elder(c.hi, c.lo, c.cl)",
-    "bbp": "last(c.el.bull) + last(c.el.bear)",
-    "mfi": "last(mfi(c.hi, c.lo, c.cl, c.vol, 14))",
-    "cmf": "last(cmf(c.hi, c.lo, c.cl, c.vol, 20))",
-    "bb": "last(bollinger(c.cl, 20, 2).pctb)",
-    "kij": "last(ichimoku(c.hi, c.lo).kijun)",
-    "supd": "last(supertrend(c.hi, c.lo, c.cl, 10, 3).dir)",
-    "sar": "last(psar(c.hi, c.lo))",
-    "atr": "last(atr(c.hi, c.lo, c.cl, 14))",
-    "masig": "m -> c.preco > m ? 'compra' : (c.preco < m ? 'venda' : 'neutro')",
-    "osc": "(cb, cv) -> cb ? 'compra' : (cv ? 'venda' : 'neutro')",
-    "indicadores": "[{nome: 'SMA(10)', valor: round(c.sma10, 4), sinal: call(c.masig, c.sma10)}, {nome: 'EMA(10)', valor: round(c.ema10, 4), sinal: call(c.masig, c.ema10)}, {nome: 'SMA(20)', valor: round(c.sma20, 4), sinal: call(c.masig, c.sma20)}, {nome: 'EMA(20)', valor: round(c.ema20, 4), sinal: call(c.masig, c.ema20)}, {nome: 'SMA(50)', valor: round(c.sma50, 4), sinal: call(c.masig, c.sma50)}, {nome: 'EMA(50)', valor: round(c.ema50, 4), sinal: call(c.masig, c.ema50)}, {nome: 'SMA(100)', valor: round(c.sma100, 4), sinal: call(c.masig, c.sma100)}, {nome: 'EMA(100)', valor: round(c.ema100, 4), sinal: call(c.masig, c.ema100)}, {nome: 'SMA(200)', valor: round(c.sma200, 4), sinal: call(c.masig, c.sma200)}, {nome: 'EMA(200)', valor: round(c.ema200, 4), sinal: call(c.masig, c.ema200)}, {nome: 'VWMA(20)', valor: round(c.vwma20, 4), sinal: call(c.masig, c.vwma20)}, {nome: 'Hull MA(9)', valor: round(c.hma9, 4), sinal: call(c.masig, c.hma9)}, {nome: 'Ichimoku (base)', valor: round(c.kij, 4), sinal: call(c.masig, c.kij)}, {nome: 'Parabolic SAR', valor: round(c.sar, 4), sinal: call(c.masig, c.sar)}, {nome: 'Supertrend(10,3)', valor: c.supd, sinal: call(c.osc, c.supd > 0, c.supd < 0)}, {nome: 'RSI(14)', valor: round(c.rsi, 2), sinal: call(c.osc, c.rsi < 30, c.rsi > 70)}, {nome: 'Estocástico %K(14,3,3)', valor: round(c.stk, 2), sinal: call(c.osc, c.stk < 20 && c.stk > c.std, c.stk > 80 && c.stk < c.std)}, {nome: 'Stoch RSI', valor: round(c.srsi, 2), sinal: call(c.osc, c.srsi < 20, c.srsi > 80)}, {nome: 'MACD(12,26)', valor: round(c.mcl, 4), sinal: call(c.osc, c.mcl > c.mcs, c.mcl < c.mcs)}, {nome: 'CCI(20)', valor: round(c.cci, 2), sinal: call(c.osc, c.cci < -100, c.cci > 100)}, {nome: 'ADX(14)', valor: round(c.adx, 2), sinal: call(c.osc, c.adx > 20 && c.pdi > c.mdi, c.adx > 20 && c.pdi < c.mdi)}, {nome: 'Williams %R(14)', valor: round(c.wr, 2), sinal: call(c.osc, c.wr < -80, c.wr > -20)}, {nome: 'Awesome Oscillator', valor: round(last(c.aos), 4), sinal: call(c.osc, last(c.aos) > 0 && last(c.aos) > at(c.aos, -2), last(c.aos) < 0 && last(c.aos) < at(c.aos, -2))}, {nome: 'Momentum(10)', valor: round(c.mom, 4), sinal: call(c.osc, c.mom > 0, c.mom < 0)}, {nome: 'Ultimate Oscillator', valor: round(c.uo, 2), sinal: call(c.osc, c.uo > 70, c.uo < 30)}, {nome: 'Bull/Bear Power', valor: round(c.bbp, 4), sinal: call(c.osc, c.bbp > 0, c.bbp < 0)}, {nome: 'MFI(14)', valor: round(c.mfi, 2), sinal: call(c.osc, c.mfi < 20, c.mfi > 80)}, {nome: 'Chaikin MF(20)', valor: round(c.cmf, 3), sinal: call(c.osc, c.cmf > 0, c.cmf < 0)}, {nome: 'Bollinger %B(20,2)', valor: round(c.bb, 3), sinal: call(c.osc, c.bb < 0, c.bb > 1)}, {nome: 'ATR(14)', valor: round(c.atr, 4), sinal: 'neutro'}]",
-    "compras": "count(c.indicadores, x -> x.sinal == 'compra')",
-    "vendas": "count(c.indicadores, x -> x.sinal == 'venda')",
-    "neutros": "count(c.indicadores, x -> x.sinal == 'neutro')",
-    "resumo": "c.compras - c.vendas >= 8 ? 'Forte compra' : (c.compras - c.vendas >= 3 ? 'Compra' : (c.vendas - c.compras >= 8 ? 'Forte venda' : (c.vendas - c.compras >= 3 ? 'Venda' : 'Neutro')))"
+    "r": "indicators(velas)",
+    "linhas": "c.r.rows",
+    "resumo": "c.r.resumo",
+    "compras": "c.r.compras",
+    "vendas": "c.r.vendas",
+    "neutros": "c.r.neutros",
+    "preco": "c.r.preco",
+    "medias": "c.r.medias",
+    "osciladores": "c.r.osciladores",
+    "n": "c.r.velas"
    },
    "list": {
-    "rows": "c.indicadores",
+    "rows": "c.linhas",
     "item": "{{${'$'}.nome}}: {{${'$'}.valor}} → {{${'$'}.sinal}}",
-    "max": 60
+    "max": 80
    },
-   "response": "{{par|upper}} {{intervalo}} — preço {{c.preco}} — resumo: {{c.resumo}} ({{c.compras}} compra, {{c.vendas}} venda, {{c.neutros}} neutro)"
+   "response": "{{ativo|default:Ativo}} — {{c.n}} velas — preço {{c.preco}} — RESUMO: {{c.resumo}} ({{c.compras}} compra, {{c.vendas}} venda, {{c.neutros}} neutro) · médias {{c.medias}} · osciladores {{c.osciladores}}"
   }
  ]
 }
