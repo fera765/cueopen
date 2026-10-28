@@ -162,7 +162,7 @@ fun ChatScreen(nav: NavController, sessionId: String) {
           }
             val plan = session.items.lastOrNull { it is ChatItem.Plan } as? ChatItem.Plan
             AnimatedVisibility(running || act.kind != Activity.Kind.IDLE || (plan != null && plan.phases.any { !it.done })) {
-                LiveComputerCard(act, agent?.name ?: "CueOpen", plan, active = running) { nav.navigate("computer/$sessionId") }
+                LiveComputerCard(act, agent?.name ?: "Fluwy Bot", plan, active = running) { nav.navigate("computer/$sessionId") }
             }
             mediaOpen?.let { p -> MediaDialog(java.io.File(p)) { mediaOpen = null } }
             Composer(
@@ -315,7 +315,7 @@ private fun AssistantText(i: ChatItem.Assistant, onSend: ((String) -> Unit)? = n
     Column(Modifier.fillMaxWidth()) {
         if (i.final) Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(bottom = 6.dp)) {
             AgentFace(c.accent, "smile", 20.dp); Spacer(Modifier.width(6.dp))
-            Text("CueOpen", fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
+            Text("Fluwy Bot", fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
         }
         CueMarkdown(i.text, onSend = onSend)
     }
@@ -499,7 +499,7 @@ fun lastAnswer(s: Session): String =
 
 fun copyText(ctx: android.content.Context, text: String) {
     val cm = ctx.getSystemService(android.content.ClipboardManager::class.java)
-    cm.setPrimaryClip(android.content.ClipData.newPlainText("CueOpen", text))
+    cm.setPrimaryClip(android.content.ClipData.newPlainText("Fluwy Bot", text))
     android.widget.Toast.makeText(ctx, "Copiado", android.widget.Toast.LENGTH_SHORT).show()
 }
 
@@ -619,7 +619,7 @@ fun sessionMarkdown(s: Session): String = buildString {
     s.items.forEach { i ->
         when (i) {
             is ChatItem.User -> appendLine("**Você:** ${i.text}\n")
-            is ChatItem.Assistant -> appendLine("**CueOpen:** ${i.text}\n")
+            is ChatItem.Assistant -> appendLine("**Fluwy Bot:** ${i.text}\n")
             is ChatItem.Step -> appendLine("> ${i.title}: `${i.args}`")
             is ChatItem.Plan -> { appendLine("**Plano:** ${i.goal}"); i.phases.forEach { appendLine("- [${if (it.done) "x" else " "}] ${it.title}") }; appendLine() }
             is ChatItem.Error -> appendLine("⚠️ ${i.text}\n")
@@ -627,7 +627,7 @@ fun sessionMarkdown(s: Session): String = buildString {
             is ChatItem.Media -> appendLine("🖼 ${i.caption} (${java.io.File(i.path).name})\n")
         }
     }
-    appendLine("\n— gerado com CueOpen")
+    appendLine("\n— gerado com Fluwy Bot")
 }
 
 /** Compartilhar = exporta a tarefa (replay em Markdown) + arquivos via share sheet do Android. */

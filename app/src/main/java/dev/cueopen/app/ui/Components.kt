@@ -28,38 +28,84 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.cueopen.app.ui.theme.Cue
 
-/** Avatar de Agent original do CueOpen: gota com contorno grosso e "rosto" (wink, smile, side, dot). */
+/**
+ * Avatar de bot do Fluwy Bot (estilo próprio): um CORPO de forma variada (bolha, hexágono, quadradinho,
+ * círculo, triângulo, pílula, gota, nuvem) com contorno grosso e um "rosto" simples. [face] guarda o estilo
+ * ("blob", "hex", "square", "circle", "triangle", "pill", "drop", "cloud"); valores antigos continuam válidos.
+ */
 @Composable
-fun AgentFace(color: Color, face: String = "wink", size: Dp = 40.dp, modifier: Modifier = Modifier) {
+fun AgentFace(color: Color, face: String = "blob", size: Dp = 40.dp, modifier: Modifier = Modifier) {
     val ink = Color(0xFF111111)
     Canvas(modifier.size(size)) {
         val w = this.size.width; val h = this.size.height; val sw = w * 0.07f
-        val body = Path().apply {
-            moveTo(w * .5f, h * .08f)
-            cubicTo(w * .82f, h * .08f, w * .94f, h * .3f, w * .94f, h * .52f)
-            cubicTo(w * .94f, h * .8f, w * .74f, h * .94f, w * .5f, h * .94f)
-            cubicTo(w * .26f, h * .94f, w * .06f, h * .8f, w * .06f, h * .52f)
-            cubicTo(w * .06f, h * .3f, w * .18f, h * .08f, w * .5f, h * .08f); close()
+        fun p(block: Path.() -> Unit) = Path().apply(block)
+        // corpo por estilo (coordenadas relativas 0..1). Compat: wink/smile/side/dot = formas antigas.
+        val style = when (face) { "wink", "blob" -> "blob"; "smile" -> "square"; "side" -> "pill"; "dot" -> "circle"; else -> face }
+        val body = when (style) {
+            "hex" -> p {
+                moveTo(w*.5f, h*.06f); lineTo(w*.92f, h*.3f); lineTo(w*.92f, h*.7f)
+                lineTo(w*.5f, h*.94f); lineTo(w*.08f, h*.7f); lineTo(w*.08f, h*.3f); close()
+            }
+            "square" -> p {
+                val r = w*.28f
+                moveTo(w*.12f+r, h*.12f); lineTo(w*.88f-r, h*.12f); cubicTo(w*.88f, h*.12f, w*.88f, h*.12f, w*.88f, h*.12f+r)
+                lineTo(w*.88f, h*.88f-r); cubicTo(w*.88f, h*.88f, w*.88f, h*.88f, w*.88f-r, h*.88f)
+                lineTo(w*.12f+r, h*.88f); cubicTo(w*.12f, h*.88f, w*.12f, h*.88f, w*.12f, h*.88f-r)
+                lineTo(w*.12f, h*.12f+r); cubicTo(w*.12f, h*.12f, w*.12f, h*.12f, w*.12f+r, h*.12f); close()
+            }
+            "circle" -> p { addOval(androidx.compose.ui.geometry.Rect(Offset(w*.1f, h*.1f), androidx.compose.ui.geometry.Size(w*.8f, h*.8f))) }
+            "triangle" -> p {
+                moveTo(w*.5f, h*.1f); cubicTo(w*.58f, h*.1f, w*.62f, h*.16f, w*.66f, h*.24f)
+                lineTo(w*.9f, h*.74f); cubicTo(w*.95f, h*.85f, w*.9f, h*.9f, w*.78f, h*.9f)
+                lineTo(w*.22f, h*.9f); cubicTo(w*.1f, h*.9f, w*.05f, h*.85f, w*.1f, h*.74f)
+                lineTo(w*.34f, h*.24f); cubicTo(w*.38f, h*.16f, w*.42f, h*.1f, w*.5f, h*.1f); close()
+            }
+            "pill" -> p {
+                val r = h*.34f
+                addRoundRect(androidx.compose.ui.geometry.RoundRect(w*.08f, h*.3f, w*.92f, h*.7f, androidx.compose.ui.geometry.CornerRadius(r, r)))
+            }
+            "drop" -> p {
+                moveTo(w*.5f, h*.06f); cubicTo(w*.82f, h*.34f, w*.92f, h*.52f, w*.92f, h*.64f)
+                cubicTo(w*.92f, h*.85f, w*.74f, h*.96f, w*.5f, h*.96f)
+                cubicTo(w*.26f, h*.96f, w*.08f, h*.85f, w*.08f, h*.64f)
+                cubicTo(w*.08f, h*.52f, w*.18f, h*.34f, w*.5f, h*.06f); close()
+            }
+            "cloud" -> p {
+                addOval(androidx.compose.ui.geometry.Rect(Offset(w*.06f, h*.34f), androidx.compose.ui.geometry.Size(w*.44f, h*.44f)))
+                addOval(androidx.compose.ui.geometry.Rect(Offset(w*.5f, h*.34f), androidx.compose.ui.geometry.Size(w*.44f, h*.44f)))
+                addOval(androidx.compose.ui.geometry.Rect(Offset(w*.28f, h*.16f), androidx.compose.ui.geometry.Size(w*.44f, h*.5f)))
+            }
+            else -> p { // blob
+                moveTo(w*.5f, h*.08f)
+                cubicTo(w*.82f, h*.08f, w*.94f, h*.3f, w*.94f, h*.52f)
+                cubicTo(w*.94f, h*.8f, w*.74f, h*.94f, w*.5f, h*.94f)
+                cubicTo(w*.26f, h*.94f, w*.06f, h*.8f, w*.06f, h*.52f)
+                cubicTo(w*.06f, h*.3f, w*.18f, h*.08f, w*.5f, h*.08f); close()
+            }
         }
         drawPath(body, color)
         drawPath(body, ink, style = Stroke(sw))
-        val eyeY = h * .5f
-        when (face) {
-            "smile" -> {
-                drawCircle(ink, w * .055f, Offset(w * .36f, eyeY)); drawCircle(ink, w * .055f, Offset(w * .64f, eyeY))
-                drawArc(ink, 20f, 140f, false, Offset(w * .36f, h * .52f), androidx.compose.ui.geometry.Size(w * .28f, h * .18f), style = Stroke(sw, cap = StrokeCap.Round))
+        val eyeY = h * .52f
+        // expressão por estilo (cada forma tem um "jeitão" próprio, mas original)
+        when (style) {
+            "hex" -> { // olhos ovais atentos
+                drawOval(ink, Offset(w*.3f, eyeY-h*.06f), androidx.compose.ui.geometry.Size(w*.1f, h*.13f))
+                drawOval(ink, Offset(w*.6f, eyeY-h*.06f), androidx.compose.ui.geometry.Size(w*.1f, h*.13f))
+                drawCircle(Color.White, w*.028f, Offset(w*.33f, eyeY-h*.02f)); drawCircle(Color.White, w*.028f, Offset(w*.63f, eyeY-h*.02f))
             }
-            "side" -> {
-                drawLine(ink, Offset(w * .28f, eyeY), Offset(w * .42f, eyeY), sw, StrokeCap.Round)
-                drawLine(ink, Offset(w * .58f, eyeY), Offset(w * .72f, eyeY), sw, StrokeCap.Round)
+            "square" -> { drawCircle(ink, w*.05f, Offset(w*.38f, eyeY)); drawCircle(ink, w*.05f, Offset(w*.62f, eyeY)) }
+            "circle" -> { // piscadinha
+                drawCircle(Color.White, w*.1f, Offset(w*.37f, eyeY)); drawCircle(ink, w*.1f, Offset(w*.37f, eyeY), style = Stroke(sw*.7f)); drawCircle(ink, w*.045f, Offset(w*.38f, eyeY))
+                drawLine(ink, Offset(w*.57f, eyeY-h*.06f), Offset(w*.7f, eyeY), sw, StrokeCap.Round); drawLine(ink, Offset(w*.7f, eyeY), Offset(w*.57f, eyeY+h*.06f), sw, StrokeCap.Round)
             }
-            "dot" -> drawCircle(ink, w * .08f, Offset(w * .5f, eyeY))
-            else -> { // wink
-                drawCircle(Color.White, w * .1f, Offset(w * .36f, eyeY)); drawCircle(ink, w * .1f, Offset(w * .36f, eyeY), style = Stroke(sw * .7f))
-                drawCircle(ink, w * .045f, Offset(w * .37f, eyeY))
-                drawLine(ink, Offset(w * .58f, eyeY - h * .07f), Offset(w * .7f, eyeY), sw, StrokeCap.Round)
-                drawLine(ink, Offset(w * .7f, eyeY), Offset(w * .58f, eyeY + h * .07f), sw, StrokeCap.Round)
+            "triangle" -> { // olhos ">" alerta
+                drawLine(ink, Offset(w*.3f, eyeY-h*.05f), Offset(w*.42f, eyeY), sw, StrokeCap.Round); drawLine(ink, Offset(w*.42f, eyeY), Offset(w*.3f, eyeY+h*.05f), sw, StrokeCap.Round)
+                drawLine(ink, Offset(w*.58f, eyeY-h*.05f), Offset(w*.7f, eyeY), sw, StrokeCap.Round); drawLine(ink, Offset(w*.7f, eyeY), Offset(w*.58f, eyeY+h*.05f), sw, StrokeCap.Round)
             }
+            "pill" -> { drawLine(ink, Offset(w*.32f, eyeY), Offset(w*.44f, eyeY), sw, StrokeCap.Round); drawLine(ink, Offset(w*.56f, eyeY), Offset(w*.68f, eyeY), sw, StrokeCap.Round) }
+            "drop" -> { drawCircle(ink, w*.055f, Offset(w*.37f, eyeY)); drawCircle(ink, w*.055f, Offset(w*.63f, eyeY)); drawArc(ink, 20f, 140f, false, Offset(w*.37f, h*.56f), androidx.compose.ui.geometry.Size(w*.26f, h*.16f), style = Stroke(sw, cap = StrokeCap.Round)) }
+            "cloud" -> { drawCircle(Color.White, w*.07f, Offset(w*.4f, eyeY)); drawCircle(ink, w*.035f, Offset(w*.4f, eyeY)); drawCircle(Color.White, w*.07f, Offset(w*.6f, eyeY)); drawCircle(ink, w*.035f, Offset(w*.6f, eyeY)) }
+            else -> { drawCircle(ink, w*.05f, Offset(w*.38f, eyeY)); drawCircle(ink, w*.05f, Offset(w*.62f, eyeY)); drawArc(ink, 20f, 140f, false, Offset(w*.38f, h*.54f), androidx.compose.ui.geometry.Size(w*.24f, h*.16f), style = Stroke(sw, cap = StrokeCap.Round)) }
         }
     }
 }
@@ -161,7 +207,7 @@ fun skillIcon(name: String): ImageVector = when (name) {
 }
 
 val agentColors = listOf(0xFFFF6B3D, 0xFF4D8DFF, 0xFF2FBF71, 0xFFFFC53D, 0xFFB57BFF, 0xFFFF5C8A, 0xFF2EC4C4, 0xFF9C978E)
-val agentFaces = listOf("wink", "smile", "side", "dot")
+val agentFaces = listOf("blob", "hex", "square", "circle", "triangle", "pill", "drop", "cloud")
 
 @Composable
 fun Divider() = HorizontalDivider(color = Cue.c.line, thickness = 1.dp)

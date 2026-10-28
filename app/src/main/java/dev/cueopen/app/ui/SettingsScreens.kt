@@ -45,7 +45,7 @@ fun SettingsScreen(nav: NavController) {
                 AgentFace(c.accent, "wink", 44.dp)
                 Spacer(Modifier.width(14.dp))
                 Column(Modifier.weight(1f)) {
-                    Text("CueOpen", color = c.bg, fontWeight = FontWeight.Bold, fontSize = 20.sp)
+                    Text("Fluwy Bot", color = c.bg, fontWeight = FontWeight.Bold, fontSize = 20.sp)
                     Text("Agente local · sem login · v3", color = c.bg.copy(alpha = .7f), fontSize = 12.sp)
                 }
             }
@@ -133,7 +133,7 @@ fun SettingsScreen(nav: NavController) {
                             val send = android.content.Intent(android.content.Intent.ACTION_SEND).apply {
                                 type = "text/plain"
                                 putExtra(android.content.Intent.EXTRA_STREAM, uri)
-                                putExtra(android.content.Intent.EXTRA_SUBJECT, "CueOpen — log de erros")
+                                putExtra(android.content.Intent.EXTRA_SUBJECT, "Fluwy Bot — log de erros")
                                 addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
                             }
                             nav.context.startActivity(android.content.Intent.createChooser(send, "Baixar / enviar log de erros").addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK))
@@ -141,7 +141,7 @@ fun SettingsScreen(nav: NavController) {
                     }) { Icon(Icons.Rounded.Download, null, Modifier.size(16.dp)); Spacer(Modifier.width(6.dp)); Text("Baixar / enviar") }
                     OutlinedButton(modifier = Modifier.weight(1f), onClick = {
                         val clip = nav.context.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
-                        clip.setPrimaryClip(android.content.ClipData.newPlainText("CueOpen log de erros", dev.cueopen.app.diag.ErrorLog.readAll(nav.context)))
+                        clip.setPrimaryClip(android.content.ClipData.newPlainText("Fluwy Bot log de erros", dev.cueopen.app.diag.ErrorLog.readAll(nav.context)))
                     }) { Icon(Icons.Rounded.ContentCopy, null, Modifier.size(16.dp)); Spacer(Modifier.width(6.dp)); Text("Copiar") }
                 }
                 TextButton(onClick = { dev.cueopen.app.diag.ErrorLog.clear(nav.context); logRefresh++ }) {
@@ -151,7 +151,7 @@ fun SettingsScreen(nav: NavController) {
             SectionLabel("Dados")
             SettingsLink(Icons.Rounded.DeleteSweep, "Apagar todas as tarefas", "Agents, skills e knowledge são mantidos", tint = c.err) { confirmClear = true }
             Spacer(Modifier.height(12.dp))
-            Text("CueOpen 1.0 · sem login, tudo local no seu aparelho.\nTerminal baseado na arquitetura do Acode (proot + Alpine + axs + xterm.js).",
+            Text("Fluwy Bot · sem login, tudo local no seu aparelho.",
                 fontSize = 12.sp, color = c.ink3)
             Spacer(Modifier.height(24.dp))
         }
@@ -244,7 +244,7 @@ fun OnboardingScreen(onDone: () -> Unit) {
                     Spacer(Modifier.height(24.dp))
                     Text("Seu agente, com um computador de verdade.", style = MaterialTheme.typography.headlineLarge)
                     Spacer(Modifier.height(12.dp))
-                    Text("O CueOpen planeja, pesquisa no browser, escreve e roda código num Linux dentro do seu celular — e entrega arquivos prontos. Sem conta, sem login.",
+                    Text("O Fluwy Bot planeja, pesquisa no browser, escreve e roda código num Linux dentro do seu celular — e entrega arquivos prontos. Sem conta, sem login.",
                         style = MaterialTheme.typography.bodyLarge, color = c.ink2)
                     Spacer(Modifier.height(20.dp))
                     CueField(st.settings.userName, { v -> app.store.updateSettings { it.copy(userName = v) } }, "Como devo te chamar?")
@@ -264,7 +264,7 @@ fun OnboardingScreen(onDone: () -> Unit) {
                     val log by app.sandbox.log.collectAsStateWithLifecycle()
                     Text("Instale o computador do agente", style = MaterialTheme.typography.headlineLarge)
                     Spacer(Modifier.height(12.dp))
-                    Text("Um Linux Alpine roda localmente via proot (mesma técnica do Acode). Leva 1–3 minutos com Wi-Fi.", style = MaterialTheme.typography.bodyLarge, color = c.ink2)
+                    Text("Um Linux Alpine roda localmente no aparelho. Leva 1–3 minutos com Wi-Fi.", style = MaterialTheme.typography.bodyLarge, color = c.ink2)
                     Spacer(Modifier.height(20.dp))
                     when (state) {
                         Sandbox.State.READY -> Row(verticalAlignment = Alignment.CenterVertically) { Icon(Icons.Rounded.CheckCircle, null, tint = c.ok); Spacer(Modifier.width(8.dp)); Text("Pronto!") }

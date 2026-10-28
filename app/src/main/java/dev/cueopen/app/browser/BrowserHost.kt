@@ -157,7 +157,7 @@ class BrowserHost(private val appCtx: Context) {
   <div class="url">$safeUrl</div>
   <button onclick="location.href='$safeUrl'">Tentar de novo</button>
   <div class="code">$safeCode</div>
-  <div class="brand">CueOpen · navegador do agente</div>
+  <div class="brand">Fluwy Bot · navegador do agente</div>
 </div></body></html>
         """.trimIndent()
     }

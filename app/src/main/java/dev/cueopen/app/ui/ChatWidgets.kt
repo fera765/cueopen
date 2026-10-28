@@ -27,6 +27,7 @@ sealed class CueWidget {
     data class Progress(val title: String, val items: List<Prog>) : CueWidget()
     data class Callout(val tone: String, val title: String, val text: String) : CueWidget()
     data class KeyValue(val title: String, val items: List<Pair<String, String>>) : CueWidget()
+    data class ConnectorPanel(val id: String, val title: String, val collapsed: Boolean) : CueWidget()
     object Skeleton : CueWidget() // JSON ainda chegando (stream)
 
     data class Btn(val label: String, val send: String, val copy: String, val url: String, val tone: String)
@@ -40,7 +41,7 @@ object CueUi {
     private val json = Json { isLenient = true; ignoreUnknownKeys = true }
 
     /** Tipos conhecidos — basta ver o "type" para mostrar o esqueleto certo durante o stream. */
-    val TYPES = setOf("buttons", "choices", "chart", "calculator", "calc", "table", "stats", "steps", "progress", "callout", "note", "keyvalue", "kv")
+    val TYPES = setOf("buttons", "choices", "chart", "calculator", "calc", "table", "stats", "steps", "progress", "callout", "note", "keyvalue", "kv", "connector", "painel")
 
     private fun JsonObject.str(vararg k: String, def: String = "") = k.firstNotNullOfOrNull { this[it] as? JsonPrimitive }?.contentOrNull ?: def
     private fun JsonObject.num(vararg k: String): Double? = k.firstNotNullOfOrNull { (this[it] as? JsonPrimitive)?.let { p -> p.doubleOrNull ?: p.contentOrNull?.toDoubleOrNull() } }
@@ -117,6 +118,7 @@ object CueUi {
             CueWidget.Prog(it.str("label", def = ""), (it.num("value", "percent", "pct") ?: 0.0).coerceIn(0.0, 100.0), it.str("tone", def = "neutral")) }
             ?: o.num("value", "percent")?.let { listOf(CueWidget.Prog(o.str("label"), it.coerceIn(0.0, 100.0), o.str("tone", def = "neutral"))) }.orEmpty())
         "callout", "note" -> CueWidget.Callout(o.str("tone", def = "info"), o.str("title"), o.str("text", "message", "body"))
+        "connector", "painel" -> CueWidget.ConnectorPanel(o.str("id", "connector", "conector"), o.str("title"), o.str("collapsed", "collapsado", def = "false").equals("true", true))
         "keyvalue", "kv" -> CueWidget.KeyValue(o.str("title"), o.arr("items", "pairs")?.mapNotNull { it as? JsonObject }?.map {
             it.str("key", "label", "name", def = "—") to it.str("value", "val", def = "—") }
             ?: (o["data"] as? JsonObject)?.entries?.map { it.key to ((it.value as? JsonPrimitive)?.contentOrNull ?: "") }.orEmpty())

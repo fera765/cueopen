@@ -381,11 +381,11 @@ fun WalletScreen(nav: NavController) {
                                 runCatching {
                                     val dir = java.io.File(context.cacheDir, "wallet").apply { mkdirs() }
                                     val f = java.io.File(dir, "cueopen-frase-recuperacao.txt")
-                                    f.writeText("CueOpen — Frase de recuperação (24 palavras)\nMantenha em segredo e offline. Quem tiver estas palavras controla a carteira.\nUse em qualquer wallet Solana compatível para acessar em outro dispositivo.\n\n$recoveryPhrase\n")
+                                    f.writeText("Fluwy Bot — Frase de recuperação (24 palavras)\nMantenha em segredo e offline. Quem tiver estas palavras controla a carteira.\nUse em qualquer wallet Solana compatível para acessar em outro dispositivo.\n\n$recoveryPhrase\n")
                                     val uri = androidx.core.content.FileProvider.getUriForFile(context, context.packageName + ".files", f)
                                     val send = android.content.Intent(android.content.Intent.ACTION_SEND)
                                         .setType("text/plain").putExtra(android.content.Intent.EXTRA_STREAM, uri)
-                                        .putExtra(android.content.Intent.EXTRA_SUBJECT, "CueOpen — frase de recuperação")
+                                        .putExtra(android.content.Intent.EXTRA_SUBJECT, "Fluwy Bot — frase de recuperação")
                                         .addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
                                     context.startActivity(android.content.Intent.createChooser(send, "Baixar/salvar frase de recuperação").addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK))
                                 }.onFailure { error = "Não foi possível exportar a frase: ${it.message}" }

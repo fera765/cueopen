@@ -185,11 +185,11 @@ private fun AgentSelector(agent: AgentProfile?, agents: List<AgentProfile>, onSe
     var open by remember { mutableStateOf(false) }
     Box {
         Row(Modifier.clip(CircleShape).clickable { open = true }.padding(horizontal = 10.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
-            Text(agent?.name ?: "CueOpen", style = MaterialTheme.typography.titleLarge)
+            Text(agent?.name ?: "Fluwy Bot", style = MaterialTheme.typography.titleLarge)
             Icon(Icons.Rounded.KeyboardArrowDown, null)
         }
         DropdownMenu(open, { open = false }) {
-            DropdownMenuItem(text = { Text("CueOpen (padrão)") }, leadingIcon = { AgentFace(Color(0xFFFF6B3D), "wink", 24.dp) }, onClick = { onSelect(null); open = false })
+            DropdownMenuItem(text = { Text("Fluwy Bot (padrão)") }, leadingIcon = { AgentFace(Color(0xFFFF6B3D), "wink", 24.dp) }, onClick = { onSelect(null); open = false })
             agents.forEach { a ->
                 DropdownMenuItem(text = { Text(a.name) }, leadingIcon = { AgentFace(Color(a.color), a.face, 24.dp) }, onClick = { onSelect(a.id); open = false })
             }
@@ -513,7 +513,7 @@ private fun SessionDrawer(nav: NavController, sessions: List<Session>, agents: L
     Column(Modifier.fillMaxSize().statusBarsPadding().padding(12.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             AgentFace(Color(0xFFFF6B3D), "wink", 32.dp); Spacer(Modifier.width(10.dp))
-            Text("CueOpen", style = MaterialTheme.typography.titleLarge)
+            Text("Fluwy Bot", style = MaterialTheme.typography.titleLarge)
         }
         Spacer(Modifier.height(12.dp))
         PillButton("Nova tarefa", Icons.Rounded.Edit, modifier = Modifier.fillMaxWidth()) { onNew() }

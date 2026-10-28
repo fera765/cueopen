@@ -53,6 +53,11 @@ class CueUiTest {
         truncs.forEach { assertTrue(CueUi.parse(it, false) is CueWidget) }
     }
 
+    @Test fun `painel de conector`() {
+        val w = CueUi.parse("""{"type":"connector","id":"iqoption","title":"Operações","collapsed":true}""", true) as CueWidget.ConnectorPanel
+        assertEquals("iqoption", w.id); assertEquals(true, w.collapsed)
+    }
+
     @Test fun `tipo desconhecido completo vira aviso, nao JSON cru`() {
         assertTrue(CueUi.parse("""{"type":"foobar","x":1}""", true) is CueWidget.Callout)
         assertTrue(CueUi.parse("texto que nao e json", true) is CueWidget.Callout)

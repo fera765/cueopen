@@ -36,7 +36,7 @@ class SandboxService : Service() {
             .addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP), PendingIntent.FLAG_IMMUTABLE)
         val stop = PendingIntent.getService(this, 1, Intent(this, SandboxService::class.java).setAction(ACTION_STOP), PendingIntent.FLAG_IMMUTABLE)
         val n = Notification.Builder(this, CH)
-            .setContentTitle("CueOpen")
+            .setContentTitle("Fluwy Bot")
             .setContentText(text)
             .setSmallIcon(android.R.drawable.ic_menu_manage)
             .setContentIntent(open)

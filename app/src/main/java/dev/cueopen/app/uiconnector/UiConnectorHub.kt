@@ -121,7 +121,7 @@ class UiConnectorHub(context: Context) {
     suspend fun importBackup(text: String): Result<ImportReport> = runCatching {
         val root = kotlinx.serialization.json.Json.parseToJsonElement(text.trim()) as? JsonObject
             ?: throw IllegalArgumentException("Arquivo inválido: não é um backup de UI Conectores.")
-        if ((root["format"] as? JsonPrimitive)?.contentOrNull != BACKUP_FORMAT) throw IllegalArgumentException("Arquivo inválido: não é um backup de UI Conectores do CueOpen.")
+        if ((root["format"] as? JsonPrimitive)?.contentOrNull != BACKUP_FORMAT) throw IllegalArgumentException("Arquivo inválido: não é um backup de UI Conectores do Fluwy Bot.")
         val installed = ArrayList<String>(); val errors = ArrayList<String>()
         (root["connectors"] as? JsonArray)?.forEach { el ->
             val o = el as? JsonObject

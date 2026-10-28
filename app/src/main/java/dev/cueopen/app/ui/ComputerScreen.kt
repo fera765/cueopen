@@ -184,7 +184,7 @@ private fun showIme(v: android.view.View) {
     imm?.showSoftInput(v, 0)
 }
 
-/** Linha de teclas extras (como no Termux/Acode), fica logo acima do teclado. */
+/** Linha de teclas extras, fica logo acima do teclado. */
 @Composable
 private fun ExtraKeys(
     ctrl: Boolean,
@@ -541,7 +541,7 @@ fun openExternal(ctx: android.content.Context, f: File, share: Boolean = false) 
     runCatching { ctx.startActivity(Intent.createChooser(i, f.name)) }
 }
 
-/** Terminal avulso (atalho da Home), como o terminal do Acode. */
+/** Terminal avulso (atalho da Home). */
 @Composable
 fun StandaloneTerminalScreen(nav: NavController) {
     val c = Cue.c

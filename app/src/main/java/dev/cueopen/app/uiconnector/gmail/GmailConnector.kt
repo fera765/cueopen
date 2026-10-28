@@ -175,11 +175,11 @@ class GmailConnector(private val ctx: Context) : UiConnector {
                     val (ok, msg) = when {
                         q["state"] != state && (q.containsKey("code") || q.containsKey("error")) -> false to "Resposta inválida (state)."
                         q["error"] != null -> false to "Login cancelado ou recusado: ${q["error"]}"
-                        q["code"] != null -> true to "Login concluído. Pode voltar ao CueOpen."
+                        q["code"] != null -> true to "Login concluído. Pode voltar ao Fluwy Bot."
                         else -> null to ""
                     }
                     val html = "<html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width'></head>" +
-                        "<body style='font-family:sans-serif;background:#111;color:#eee;padding:32px'><h2>CueOpen · Gmail</h2><p>${msg.ifEmpty { "Aguardando…" }}</p></body></html>"
+                        "<body style='font-family:sans-serif;background:#111;color:#eee;padding:32px'><h2>Fluwy Bot · Gmail</h2><p>${msg.ifEmpty { "Aguardando…" }}</p></body></html>"
                     val bytes = html.toByteArray(Charsets.UTF_8)
                     s.getOutputStream().apply {
                         write("HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: ${bytes.size}\r\nConnection: close\r\n\r\n".toByteArray())

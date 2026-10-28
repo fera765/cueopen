@@ -19,6 +19,7 @@ import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.*
+import kotlinx.coroutines.launch
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -32,6 +33,12 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.cueopen.app.ui.theme.Cue
+import dev.cueopen.app.CueApp
+import dev.cueopen.app.uiconnector.UiBlock
+import androidx.compose.material.icons.rounded.ExpandMore
+import androidx.compose.material.icons.rounded.ExpandLess
+import androidx.compose.material.icons.rounded.Refresh
+import kotlinx.coroutines.delay
 import kotlin.math.max
 import kotlin.math.min
 
@@ -156,6 +163,39 @@ fun CueWidgetView(w: CueWidget, onSend: ((String) -> Unit)?) {
                 Column {
                     if (w.title.isNotBlank()) { Text(w.title, fontWeight = FontWeight.SemiBold, fontSize = 14.sp, color = c.ink); Spacer(Modifier.height(2.dp)) }
                     if (w.text.isNotBlank()) Text(w.text, fontSize = 13.sp, color = c.ink2)
+                }
+            }
+        }
+
+        is CueWidget.ConnectorPanel -> {
+            val hub = CueApp.instance.uiConnectors
+            val conn = hub.get(w.id)
+            var expanded by remember(w.id) { mutableStateOf(!w.collapsed) }
+            var blocks by remember(w.id) { mutableStateOf<List<UiBlock>>(emptyList()) }
+            var loading by remember(w.id) { mutableStateOf(false) }
+            val scope = rememberCoroutineScope()
+            suspend fun load() {
+                if (conn == null) return
+                loading = true
+                blocks = runCatching { conn.snapshot(hub.settings(conn)) }.getOrElse { listOf(UiBlock.Note(it.message ?: "erro", dev.cueopen.app.uiconnector.Tone.BAD)) }
+                loading = false
+            }
+            // atualiza ao vivo enquanto está aberto (usa o intervalo do conector)
+            LaunchedEffect(w.id, expanded) { if (expanded && conn != null) { while (true) { load(); delay(conn.refreshMs().coerceIn(1000L, 60000L)) } } }
+            Column(card) {
+                Row(Modifier.fillMaxWidth().clickable { expanded = !expanded }, verticalAlignment = Alignment.CenterVertically) {
+                    Text(w.title.ifBlank { conn?.spec?.name ?: w.id }, Modifier.weight(1f), fontWeight = FontWeight.SemiBold, fontSize = 15.sp, color = c.ink)
+                    if (expanded && conn != null) Icon(Icons.Rounded.Refresh, "Atualizar", Modifier.size(18.dp).clickable { scope.launch { load() } }, tint = c.ink3)
+                    Spacer(Modifier.width(6.dp))
+                    Icon(if (expanded) Icons.Rounded.ExpandLess else Icons.Rounded.ExpandMore, if (expanded) "Recolher" else "Expandir", Modifier.size(22.dp), tint = c.ink2)
+                }
+                if (conn == null) { Spacer(Modifier.height(6.dp)); Text("Conector '${w.id}' não encontrado ou desativado.", fontSize = 13.sp, color = c.err) }
+                else if (expanded) {
+                    Spacer(Modifier.height(10.dp))
+                    if (blocks.isEmpty() && loading) Text("carregando…", fontSize = 13.sp, color = c.ink3)
+                    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        blocks.forEach { b -> UiBlockView(b) { actionId, args -> scope.launch { runCatching { conn.onAction(actionId, args, hub.settings(conn)); load() } } } }
+                    }
                 }
             }
         }

@@ -28,7 +28,7 @@ import kotlinx.coroutines.launch
 
 /**
  * Splash animada: o robozinho "Pip" (corpo em gota, estilo do ícone) cai com mola, a antena balança,
- * os olhos piscam, a boca vira um prompt ">_" que digita "CueOpen" — e tudo some em fade.
+ * os olhos piscam, a boca vira um prompt ">_" que digita "Fluwy Bot" — e tudo some em fade.
  */
 @Composable
 fun SplashScreen(onDone: () -> Unit) {
@@ -50,7 +50,7 @@ fun SplashScreen(onDone: () -> Unit) {
         delay(260)
         squash.animateTo(0.86f, tween(90)); squash.animateTo(1f, spring(dampingRatio = 0.35f, stiffness = 500f))
         launch { title.animateTo(1f, tween(380, easing = FastOutSlowInEasing)) }
-        "CueOpen".forEach { ch -> typed += ch; delay(55) }
+        "Fluwy Bot".forEach { ch -> typed += ch; delay(55) }
         delay(420)
         alphaAll.animateTo(0f, tween(260))
         onDone()

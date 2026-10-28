@@ -789,7 +789,7 @@ class AgentRunner(
         val date = SimpleDateFormat("EEEE, d 'de' MMMM 'de' yyyy", Locale("pt", "BR")).format(Date())
         return buildString {
             // ---- parte estável (favorece cache de prompt) ----
-            appendLine("Você é ${agent?.name ?: "Cue"}, um agente autônomo de uso geral rodando no app CueOpen (Android).")
+            appendLine("Você é ${agent?.name ?: "Cue"}, um agente autônomo de uso geral rodando no app Fluwy Bot (Android).")
             appendLine("Data: $date. Usuário: ${st.settings.userName.ifBlank { "não informado" }}.")
             appendLine()
             appendLine("Você tem um COMPUTADOR próprio:")
@@ -824,7 +824,7 @@ class AgentRunner(
                 "chart {title?, style:\"bar\"|\"line\", labels?:[...], series:[{name?, values:[n...], color?}]}; " +
                 "calculator {title?, expr:\"a*b+c\", unit?, vars:[{id, label?, default, min?, max?, step?}]} (expr usa os ids das vars; cálculo nativo seguro); " +
                 "table {title?, columns:[...], rows:[[...],...]}; stats {title?, items:[{label, value, tone?}]}; steps {title?, items:[\"...\"]}; " +
-                "progress {title?, items:[{label, value:0-100, tone?}]}; callout {tone:\"info\"|\"good\"|\"warn\"|\"bad\", title?, text}; keyvalue {title?, items:[{key, value}]}. " +
+                "progress {title?, items:[{label, value:0-100, tone?}]}; callout {tone:\"info\"|\"good\"|\"warn\"|\"bad\", title?, text}; keyvalue {title?, items:[{key, value}]}; connector {id:\"iqoption\", title?, collapsed?} (painel AO VIVO do conector dentro do chat — saldo/operações — que o usuário pode recolher). " +
                 "tone ∈ neutral|good|warn|bad|accent. Use com moderação, só quando agrega; texto normal continua em Markdown.")
             val walletPolicyForPrompt = WalletAgentPolicyStore(ctx.applicationContext)
             val walletHasGrants = agent != null && (
