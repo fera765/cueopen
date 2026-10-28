@@ -199,6 +199,11 @@ class UiConnectorHub(context: Context) {
     fun hasTradingTools(agent: AgentProfile?): Boolean =
         connectors.any { c -> usableBy(c, agent) && c.spec.tools.any { it.requiresSignal } }
 
+    /** Algum conector de ordem usável por este agente EXIGE o TypeSafe Jev? (setting require_jev on, ou conector sem essa setting). */
+    fun jevRequiredBy(agent: AgentProfile?): Boolean =
+        connectors.any { c -> usableBy(c, agent) && c.spec.tools.any { it.requiresSignal } &&
+            (c.spec.settings.none { it.id == "require_jev" } || settings(c).bool("require_jev")) }
+
     /** Definições de ferramenta (formato OpenAI/OpenRouter) dos conectores que este agente pode usar. */
     fun toolDefinitions(agent: AgentProfile?): List<JsonObject> =
         connectors.filter { usableBy(it, agent) }.flatMap { c ->

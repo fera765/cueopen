@@ -1084,8 +1084,9 @@ class AgentRunner(
             }
         }
         // Validação TypeSafe Jev: obrigatória antes de QUALQUER ordem (day trade Solana e conectores de trading).
+        // Só oferece a ferramenta quando ela é realmente exigida: day trade Solana, ou um conector de ordem com o Jev LIGADO.
         if (allowMultiAgent && (agent?.let { WalletAgentPolicyStore(ctx.applicationContext).canAgentDayTrade(it.id) } == true ||
-                runCatching { dev.cueopen.app.CueApp.instance.uiConnectors.hasTradingTools(agent) }.getOrDefault(false))) {
+                runCatching { dev.cueopen.app.CueApp.instance.uiConnectors.jevRequiredBy(agent) }.getOrDefault(false))) {
             add(tool("typesafe_jev_check", "OBRIGATÓRIO antes de QUALQUER ordem de COMPRA ou VENDA (Solana day trade e IQ Option): avalia a ACURÁCIA de cada sinal com o avaliador TypeSafe Jev. Só com ✅ OPERAR a ordem é liberada, e a aprovação vale para UMA ordem (5 min). Sem ela, wallet_swap e as ferramentas de ordem dos conectores são RECUSADOS. Envie dados REAIS (preço, velas, tendência, liquidez). Não invente números. Para venue=iqoption o app ANEXA SOZINHO o contexto real (35 indicadores, estratégias MHI com assertividade e sinal do quadrante, estado da vela e gerenciamento) — basta id, venue, direction e horizon_minutes.", buildJsonObject {
                 put("signals_json", str("JSON array de sinais: {\"id\":\"<mint Solana ou ticker, ex.: EURUSD>\",\"venue\":\"solana|iqoption\",\"direction\":\"buy|sell (Solana) ou call|put (IQ Option)\",\"horizon_minutes\":5,\"data\":\"resumo com preço, velas OHLCV, tendência, liquidez\"}"))
                 put("min_accuracy", int("Acurácia mínima (0-100); o piso de 70 não pode ser rebaixado"))
@@ -1607,8 +1608,8 @@ class AgentRunner(
                 "typesafe_jev_check" -> {
                     val ag = store.agent(store.session(sessionId)?.agentId)
                     val allowed = ag != null && (WalletAgentPolicyStore(ctx.applicationContext).canAgentDayTrade(ag.id) ||
-                        dev.cueopen.app.CueApp.instance.uiConnectors.hasTradingTools(ag))
-                    if (!allowed) "Acesso negado: nenhum recurso de trading (day trade ou conector de trading) está habilitado para este agente."
+                        dev.cueopen.app.CueApp.instance.uiConnectors.jevRequiredBy(ag))
+                    if (!allowed) "Indisponível: a validação TypeSafe Jev não é exigida por nenhum recurso deste agente (day trade Solana desligado e conectores com 'Exigir TypeSafe Jev' off). Opere direto pelas ferramentas do conector."
                     else jevAccuracyCheck(s("signals_json"), i("min_accuracy") ?: 70, ag!!.id)
                 }
                 "market_price", "market_candles", "market_liquidity", "market_discover", "market_token_info",
