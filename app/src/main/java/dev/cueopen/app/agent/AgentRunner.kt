@@ -767,7 +767,10 @@ class AgentRunner(
                 if (usable.isNotEmpty()) {
                     appendLine()
                     appendLine("## UI Connectors disponíveis")
-                    usable.forEach { appendLine("- ${it.spec.name}: ferramentas uic_${it.spec.id}_* (${it.spec.description})") }
+                    usable.forEach { uc ->
+                        val st = if (uc.isLoggedIn || hub.hasSavedCredentials(uc.spec.id)) "conectado" else "sem login — peça ao usuário para entrar em Conectores → ${uc.spec.name}"
+                        appendLine("- ${uc.spec.name} (${st}): ferramentas uic_${uc.spec.id}_* — ${uc.spec.description}. Use-as sempre que o pedido envolver este serviço.")
+                    }
                     if (hub.hasTradingTools(agent)) {
                         appendLine("- ORDENS (ex.: IQ Option buy): ANTES de CADA compra e CADA venda chame typesafe_jev_check (venue = id do conector, id = ticker, direction call/put) e só opere com ✅ OPERAR; o app recusa ordens sem validação (uso único, 5 min). Operações CURTAS usam compra (call) e venda (put); operações LONGAS (acima do limite de minutos curtos do conector) só de COMPRA (call).")
                         appendLine("- Solana day trade e conectores de trading têm capital e posições independentes: não use um para cobrir o outro. Se a resposta disser que outro agente está operando o ativo, aguarde ou escolha outro; faça uma ordem por vez.")
@@ -983,7 +986,7 @@ class AgentRunner(
             add(tool("device_overlay", "Mostra um balão flutuante sobre os outros apps.", buildJsonObject { put("text", str("Texto")) }, listOf("text")))
         if (allowMultiAgent) connectorTools().forEach { add(it) }
         // UI Connectors (ex.: IQ Option): só os que este agente pode usar (toggle por agente / "Agent required?").
-        if (allowMultiAgent) runCatching { dev.cueopen.app.CueApp.instance.uiConnectors.toolDefinitions(agent) }.getOrDefault(emptyList()).forEach { add(it) }
+        runCatching { dev.cueopen.app.CueApp.instance.uiConnectors.toolDefinitions(agent) }.getOrDefault(emptyList()).forEach { add(it) }
         if (allowMultiAgent) add(tool("ask_user", "Faz uma pergunta ao usuário e pausa a tarefa até ele responder.", buildJsonObject { put("question", str("Pergunta")) }, listOf("question")))
         add(tool("finish", "Conclui a tarefa com um resumo e a lista de entregáveis.", buildJsonObject {
             put("summary", str("Resumo do resultado")); put("files", strArray("Caminhos dos arquivos entregues"))

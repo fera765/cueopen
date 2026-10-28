@@ -181,7 +181,8 @@ class UiConnectorHub(context: Context) {
     fun usableBy(c: UiConnector, agent: AgentProfile?): Boolean {
         val id = c.spec.id
         if (!enabled(id)) return false
-        if (!c.isLoggedIn && !vault.has(id)) return false
+        // Login NÃO é exigido para expor as ferramentas: se a sessão caiu, a chamada responde pedindo login
+        // (ou reconecta sozinha com o cofre). Assim o agente nunca "perde" o conector em silêncio.
         val agentOptedIn = agent?.uiConnectorIds?.contains(id) == true
         return agentOptedIn || !agentRequired(id)
     }
