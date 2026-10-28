@@ -24,7 +24,7 @@ nome diferente ou valor fora das regras faz o conector ser recusado.
 2. Use **somente** as chaves listadas neste documento, com a grafia exata (camelCase: `baseUrl`, `requiresSignal`,
    `orderIntent`, `maxSetting`). Chaves inventadas são ignoradas e as obrigatórias ficam faltando.
    **NÃO EXISTEM**: `connector`, `authentication`, `auth`, `base_url`, `endpoints`, `dashboards`, `rate_limits`,
-   `errors`, `screens`, `ui`, `websocket`, `ws`, `stream`, `subscriptions`, `name` dentro de actions, `type` em tools.
+   `errors`, `screens`, `ui`, `script`, `code`, `javascript`, `formula`, `websocket`, `ws`, `stream`, `subscriptions`, `name` dentro de actions, `type` em tools.
 3. O objeto raiz é plano: `id`, `name`, `description`, `baseUrl` (e `login`, se houver) ficam **no nível raiz** (não aninhe
    dentro de "connector").
 4. Nunca invente endpoints: use os caminhos reais da API que o usuário indicou. Se não souber, pergunte.
@@ -116,6 +116,45 @@ heartbeat, **reconecta sozinha** e transforma cada mensagem recebida em **estado
 - Coleções são lidas por painéis/ferramentas com `"source": "nome"`: os dados viram `{"items": [...]}` com os **mais recentes primeiro**
   → use `"rows": "${D}.items[*]"`.
 
+### `compute` — processamento/computação (indicadores, estatística, transformação de dados)
+Painéis e ferramentas podem ter `"compute": {"nome": "expressão", ...}`: cálculos executados NO APP sobre a resposta
+(ou sobre o estado do tempo real / configurações / parâmetros), em ordem — cada um enxerga os anteriores em `c`.
+Os resultados entram nos modelos como `{{c.nome}}` e listas calculadas viram linhas com `"rows": "c.nome"`
+(em tabelas e em `list`). Painel/ferramenta pode ter `compute` **sem** request (cálculo puro sobre `s`, `rt`, parâmetros).
+- **Identificadores**: `$` (resposta inteira já convertida: JSON/XML/CSV…), `s.<setting>`, `rt.<estado>`, `c.<cálculo anterior>`,
+  e nas ferramentas cada parâmetro pelo nome. Credenciais/tokens **não** existem aqui.
+- **Sintaxe**: números, `'texto'` ou `"texto"`, `true/false/null`, `+ - * / % ^`, `== != < <= > >=`, `&& || !`, `cond ? a : b`,
+  `[lista]`, `{chave: valor}`, `obj.campo`, `lista[i]` (`-1` = último), lambdas `x -> x * 2` e `(a, b) -> a + b`.
+  Operações entre listas são elemento a elemento (`c.hi - c.lo`). `lista.campo` extrai o campo de cada item.
+- **Funções** (nada fora desta lista):
+  - matemática: `abs round(x,n) floor ceil sqrt ln log10 exp pow min max clamp sign`
+  - conversão/lógica: `num int str bool isnull coalesce if fixed(x,n) type call(f, ...)`
+  - texto: `upper lower trim contains startswith endswith replace split join substr len regex(texto,padrão) date(epoch[,padrão]) now`
+  - listas: `range sum avg mean median stdev variance first last at slice take tail reverse sort sort_by unique map filter reduce(l,f,ini)
+    find count any all flatten compact concat zip zip_rows({col: lista}) pluck keys values get index_of group_by diff change pct_change
+    cumsum shift fill repeat path(caminho) correl argmax argmin` (`first`/`last` ignoram nulos)
+  - janelas/séries: `highest lowest rsum rstdev linreg slope zscore rolling(l,n,f) crossover crossunder cross_series barssince signal`
+  - **indicadores (padrão TradingView)**: médias `sma ema rma wma dema tema hma vwma(c,v,n) alma kama`; osciladores `rsi(c,n)`
+    `stoch(h,l,c,k,d,suav)→{k,d}` `stochrsi(c)→{k,d}` `macd(c,12,26,9)→{macd,signal,hist}` `ppo` `cci(h,l,c,n)` `willr` `mfi(h,l,c,v,n)`
+    `roc mom trix cmo dpo tsi ao(h,l) uo(h,l,c) fisher(h,l,n)`; volatilidade/tendência `tr atr(h,l,c,n)` `bollinger(c,20,2)→{upper,middle,lower,width,pctb}`
+    `bbw keltner(h,l,c,n,m)→{upper,middle,lower}` `donchian(h,l,n)` `adx(h,l,c,n)→{adx,pdi,mdi}` `aroon(h,l,n)→{up,down,osc}` `psar(h,l)`
+    `supertrend(h,l,c,10,3)→{line,dir}` `ichimoku(h,l)→{tenkan,kijun,spanA,spanB}` `chop elder(h,l,c)→{bull,bear}` `pivots(h,l,c)→{p,r1,s1,r2,s2,r3,s3}`;
+    volume `obv(c,v) vwap(h,l,c,v) adl cmf(h,l,c,v,n)`; preços `hl2 hlc3 ohlc4 heikin(o,h,l,c)→{open,high,low,close}`.
+    Séries devolvem listas do mesmo tamanho (nulos no aquecimento) — use `last(...)` para o valor atual.
+- Limites: 40 cálculos por item, 3 milhões de operações por avaliação, listas até 200 mil itens. Sem acesso a rede, arquivos ou segredos.
+- Exemplo (velas da Binance `[[t, o, h, l, c, v, ...], ...]`):
+```
+"compute": {
+  "cl": "map(${D}, k -> num(k[4]))",
+  "hi": "map(${D}, k -> num(k[2]))", "lo": "map(${D}, k -> num(k[3]))",
+  "rsi": "last(rsi(c.cl, 14))",
+  "macd": "macd(c.cl)",
+  "sinal": "c.rsi < 30 && last(c.macd.hist) > 0 ? 'compra' : (c.rsi > 70 ? 'venda' : 'neutro')",
+  "tabela": "reverse(zip_rows({rsi: tail(rsi(c.cl, 14), 20), fech: tail(c.cl, 20)}))"
+}
+```
+  e então `"value": "{{c.rsi|num:2}}"` ou `"rows": "c.tabela"` com colunas `{{${D}.rsi}}`.
+
 ### `settings[]`
 `{"id": "maxValor", "label": "...", "description": "...", "type": "number|switch|text", "default": "10", "risky": true}`
 — `id` e `label` obrigatórios. `default` é texto: número em `number`, `"true"`/`"false"` em `switch`.
@@ -175,6 +214,7 @@ estado do tempo real com `{{rt.nome}}` (painéis sem request podem mostrar só `
   - `send.message` e `send.await.match`: variáveis da ferramenta + `rid` + `now`.
   - `orderIntent`: só parâmetros da ferramenta.
   Variável fora dessa lista = erro "variável desconhecida".
+- `{{c.nome}}` — resultado de um cálculo do `compute` do mesmo painel/ferramenta.
 - `{{${D}.a.b[0]}}` — lê a resposta JSON. Permitido em textos de painel, `message` e `response`; **proibido**
   em `path`, `query`, `headers` e `body`. Sintaxe: `.nome`, `['nome com ponto']`, `[n]`, `[-1]`, `[*]`, `.*`
   (sem `..`, sem filtros `?()`).
@@ -187,6 +227,8 @@ estado do tempo real com `{{rt.nome}}` (painéis sem request podem mostrar só `
 ## O que dá e o que não dá para fazer
 - ✅ APIs REST com JSON ou XML, feeds RSS/Atom, páginas de texto, login com e-mail/senha → token, chave de API,
   OAuth **client credentials**, cookies de sessão (`cookie:Nome` + header `Cookie`).
+- ✅ **Computação no app (`compute`)**: indicadores técnicos (todos os clássicos do TradingView), estatística, sinais de compra/venda,
+  agregações, conversões, filtros/ordenação, tabelas derivadas — sobre qualquer resposta (HTTP, tempo real) ou parâmetros.
 - ✅ **Tempo real (WebSocket wss://)**: corretoras de ações/Forex/cripto/opções, cotações ao vivo, saldo ao vivo, livros de ofertas,
   envio de ordens com resposta por `request_id`, protocolos JSON ou texto, heartbeat e reconexão automática. Combine com login HTTP
   (token extraído → `onOpen`/`url`).
@@ -215,6 +257,7 @@ estado do tempo real com `{{rt.nome}}` (painéis sem request podem mostrar só `
 - [ ] `realtime.url` é `wss://` com host de `baseUrl`/`allowedHosts`; cada regra tem `set` e/ou `push`
 - [ ] `source` aponta para um `push.to` existente; tabelas com `source` usam `"rows": "${D}.items[*]"`
 - [ ] cada ferramenta tem no máximo um entre `request`, `send`, `source`; `send` de ordem ⇒ `risky` + `requiresSignal` + `orderIntent` + `limits`
+- [ ] cada `compute` usa só funções listadas; `c.x` só depois de `x` ser calculado; `rows: "c.nome"` aponta para uma lista do compute
 - [ ] nenhuma chave fora deste documento; JSON sem comentários
 
 ## Exemplo válido completo
@@ -241,6 +284,11 @@ ${CustomTemplates.MARKET_WS.json}
 Troque host, mensagens e caminhos pelos do protocolo REAL da corretora (consulte a documentação dela).
 ```json
 ${CustomTemplates.BROKER_WS.json}
+```
+
+## Exemplo: indicadores técnicos calculados no app (compute, estilo TradingView)
+```json
+${CustomTemplates.TV_INDICATORS.json}
 ```
 
 ## Exemplo mínimo (API com chave, sem login por senha)

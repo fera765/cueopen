@@ -152,6 +152,17 @@ A especificação completa (a mesma do botão **Doc** do editor) está em `SdkPr
 * **Ordens**: ferramenta com `"requiresSignal": true` + `"orderIntent": {"asset": "{{par}}", "direction": "{{lado}}"}`
   só executa após validação TypeSafe Jev do ativo/lado (uso único, 5 min) — igual ao IQ Option.
 
+### Computação (`compute`)
+
+Painéis e ferramentas aceitam `"compute": {"nome": "expressão"}` — um motor de expressões puro (sem rede, arquivos
+ou segredos; orçamento de 3 milhões de operações) com aritmética, lógica, listas, objetos, lambdas
+(`map/filter/reduce/sort_by/zip_rows`) e uma biblioteca de análise técnica no padrão TradingView (SMA, EMA, WMA, HMA,
+VWMA, ALMA, KAMA, RSI, Estocástico, Stoch RSI, MACD, PPO, CCI, Williams %R, MFI, ROC, Momentum, TRIX, CMO, DPO, TSI,
+AO, UO, Fisher, ATR, Bollinger, Keltner, Donchian, ADX/DI, Aroon, PSAR, Supertrend, Ichimoku, Choppiness, Elder,
+Pivôs, OBV, VWAP, A/D, CMF, Heikin Ashi…). Resultados: `{{c.nome}}` nos modelos e `"rows": "c.nome"` em tabelas/listas.
+O modelo "Indicadores técnicos calculados" do editor monta mais de 30 indicadores com sinal e resumo técnico sobre
+velas reais da Binance.
+
 ### Tempo real (`realtime`)
 
 ```json

@@ -46,6 +46,36 @@ class CustomConnector(
         return r.collection(source)
     }
 
+    // ------------------------------------------------------------------ computação (bloco "compute")
+    /** Ambiente dos cálculos: s (configurações), rt (estado do tempo real) e parâmetros. NUNCA credenciais. */
+    private fun computeEnv(settings: ConnectorSettings?, args: Map<String, String>, params: Set<String>): Map<String, Any?> {
+        val sMap: Map<String, Any?> = def.settings.associate { st ->
+            val raw = settings?.text(st.id)?.ifEmpty { null } ?: st.default
+            st.id to when (st.type) {
+                dev.cueopen.app.uiconnector.SettingType.NUMBER -> Compute.numOrNull(raw) ?: raw
+                dev.cueopen.app.uiconnector.SettingType.SWITCH -> raw.equals("true", ignoreCase = true)
+                dev.cueopen.app.uiconnector.SettingType.TEXT -> raw
+            }
+        }
+        val rtMap: Map<String, Any?> = rt?.let { r -> r.stateSnapshot().mapValues { (_, v) -> Compute.numOrNull(v) ?: v } + mapOf("connected" to r.connected, "messages" to r.received.get().toDouble()) } ?: emptyMap()
+        val env = HashMap<String, Any?>()
+        env["s"] = sMap; env["rt"] = rtMap
+        params.forEach { p -> env[p] = args[p]?.let { v -> Compute.numOrNull(v) ?: v } }
+        return env
+    }
+
+    /** Roda os cálculos e devolve (valores, variáveis de modelo c.nome). */
+    private fun runCompute(comp: List<Pair<String, Compute.Node>>, json: JsonElement?, settings: ConnectorSettings?, args: Map<String, String>, params: Set<String>): Pair<Map<String, Any?>, Map<String, String>> {
+        if (comp.isEmpty()) return emptyMap<String, Any?>() to emptyMap()
+        val values = Compute.runAll(comp, computeEnv(settings, args, params), json)
+        return values to values.entries.associate { "c." + it.key to Compute.str(it.value) }
+    }
+
+    /** Linhas de tabela/lista: caminho na resposta ou "c.nome" (lista calculada). */
+    private fun rowsOf(spec: String, json: JsonElement?, computed: Map<String, Any?>): List<JsonElement> =
+        if (spec.startsWith("c.")) (computed[spec.removePrefix("c.")] as? List<*>)?.map { Compute.toJson(it) }.orEmpty()
+        else json?.let { JsonPath.select(it, spec) }.orEmpty()
+
     /** Fecha a conexão em tempo real e libera recursos (definição trocada/removida). */
     fun dispose() { rt?.dispose() }
 
@@ -172,14 +202,15 @@ class CustomConnector(
                     out.add(UiBlock.Note("${p.title.ifBlank { p.type }}: servidor respondeu HTTP ${reply.code}.", Tone.BAD))
                     continue
                 }
-                val ctx = Template.Ctx(sessionVars() + base, reply?.json)
+                val (cvals, cvars) = runCompute(p.compute, reply?.json, settings, emptyMap(), emptySet())
+                val ctx = Template.Ctx(sessionVars() + base + cvars, reply?.json)
                 fun r(t: String) = Template.render(t, ctx)
                 when (p.type) {
                     "header" -> out.add(UiBlock.Header(r(p.title), r(p.subtitle), r(p.badge), p.tone))
                     "note" -> out.add(UiBlock.Note(r(p.text), p.tone))
                     "stats" -> out.add(UiBlock.Stats(p.stats.map { Stat(r(it.label), r(it.value), it.tone) }))
                     "table" -> {
-                        val rows = reply?.json?.let { JsonPath.select(it, p.rows) }.orEmpty().take(100).map { row ->
+                        val rows = rowsOf(p.rows, reply?.json, cvals).take(100).map { row ->
                             val rc = Template.Ctx(ctx.vars, row)
                             p.columns.map { c -> Template.render(c.value, rc) }
                         }
@@ -255,18 +286,21 @@ class CustomConnector(
             }
             if (reply.code in 300..399) return "ERRO HTTP ${reply.code}: o servidor redirecionou para ${reply.headers["location"]?.firstOrNull() ?: "?"} — atualize o endereço na definição do conector."
             if (reply.code !in 200..299) return "ERRO HTTP ${reply.code}: ${reply.body.take(300)}"
+            val (cvals, cvars) = try { runCompute(t.compute, reply.json, settings, args, t.params.map { it.name }.toSet()) }
+                catch (e: Compute.ComputeError) { return "ERRO no cálculo: ${e.message}" }
             val lst = t.list
             if (lst != null) {
-                val ctxL = sessionVars() + vars
-                val rows = reply.json?.let { JsonPath.select(it, lst.rows) }.orEmpty()
+                val ctxL = sessionVars() + vars + cvars
+                val rows = rowsOf(lst.rows, reply.json, cvals)
                 if (rows.isEmpty()) return "ERRO: nenhum item em ${lst.rows} (HTTP ${reply.code}). Estrutura recebida:\n" + ResponseTree.outline(reply.json, 3).take(1500)
                 val lines = rows.take(lst.max).mapIndexed { n, row -> "${n + 1}. " + Template.render(lst.item, Template.Ctx(ctxL, row)) }
                 val head = if (t.response.isNotBlank()) Template.render(t.response, Template.Ctx(ctxL, reply.json)) + "\n" else ""
                 return head + lines.joinToString("\n")
             }
-            if (t.response.isNotBlank()) Template.render(t.response, Template.Ctx(sessionVars() + vars, reply.json)).ifBlank {
+            if (t.response.isNotBlank()) Template.render(t.response, Template.Ctx(sessionVars() + vars + cvars, reply.json)).ifBlank {
                 "ERRO: o modelo de resposta ficou vazio. Estrutura recebida:\n" + ResponseTree.outline(reply.json, 3).take(1500)
             }
+            else if (cvals.isNotEmpty()) cvals.entries.joinToString("\n") { "${it.key}: ${Compute.str(it.value).take(600)}" }
             else reply.body.take(4000)
         } catch (c: kotlinx.coroutines.CancellationException) {
             throw c
@@ -306,16 +340,22 @@ class CustomConnector(
         def.panels.forEachIndexed { idx, p ->
             val label = "painel $idx (${p.type}${if (p.title.isNotBlank()) " \"${p.title.take(30)}\"" else ""})"
             val r = p.request
-            if (r == null && p.source.isEmpty()) { sb.appendLine("✓ $label: sem requisição"); return@forEachIndexed }
+            if (r == null && p.source.isEmpty() && p.compute.isEmpty() && !p.stats.any { it.value.contains("rt.") }) { sb.appendLine("✓ $label: sem requisição"); return@forEachIndexed }
             try {
-                val reply = if (r != null) authed(r, base) else Reply(200, "", sourceJson(p.source, base), emptyMap())
+                val reply = when {
+                    r != null -> authed(r, base)
+                    p.source.isNotEmpty() -> Reply(200, "", sourceJson(p.source, base), emptyMap())
+                    else -> Reply(200, "", null, emptyMap())
+                }
                 if (reply.code !in 200..299) {
                     ok = false; sb.appendLine("✗ $label: HTTP ${reply.code} — ${reply.body.take(200)}"); return@forEachIndexed
                 }
-                val ctx = Template.Ctx(sessionVars() + base, reply.json)
+                val (cvals, cvars) = runCompute(p.compute, reply.json, settings, emptyMap(), emptySet())
+                if (cvals.isNotEmpty()) sb.appendLine("  cálculos: " + cvals.entries.joinToString("; ") { e -> e.key + "=" + Compute.str(if (e.value is List<*>) (e.value as List<*>).lastOrNull { it != null } else e.value).take(40) })
+                val ctx = Template.Ctx(sessionVars() + base + cvars, reply.json)
                 when (p.type) {
                     "table" -> {
-                        val rows = reply.json?.let { JsonPath.select(it, p.rows) }.orEmpty()
+                        val rows = rowsOf(p.rows, reply.json, cvals)
                         if (rows.isEmpty()) {
                             ok = false
                             sb.appendLine("✗ $label: 0 linhas em ${p.rows}. Estrutura recebida:\n" + ResponseTree.outline(reply.json, 3).take(1500))

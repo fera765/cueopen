@@ -37,6 +37,8 @@ data class PanelDef(
     val request: ReqDef?, val stats: List<StatDef>, val rows: String, val columns: List<ColDef>, val text: String, val empty: String,
     /** Coleção do tempo real usada como dados ({"items":[…]}, mais recentes primeiro) em vez de request. */
     val source: String = "",
+    /** Cálculos (nome → expressão) avaliados sobre a resposta; lidos como {{c.nome}} e em rows "c.nome". */
+    val compute: List<Pair<String, Compute.Node>> = emptyList(),
 )
 data class ActionDef(val id: String, val label: String, val risky: Boolean, val request: ReqDef, val message: String)
 data class LimitDef(val param: String, val maxSetting: String)
@@ -49,6 +51,7 @@ data class ToolDef(
     val send: SendDef? = null,
     /** Coleção do tempo real lida pela ferramenta. */
     val source: String = "",
+    val compute: List<Pair<String, Compute.Node>> = emptyList(),
 )
 data class LoginDef(val fields: List<LoginField>, val request: ReqDef?, val extract: Map<String, String>, val verify: ReqDef?)
 
@@ -345,7 +348,9 @@ object CustomDefParser {
             val panels = ArrayList<PanelDef>()
             arr(o, "panels", "$", 10).forEachIndexed { i, po ->
                 val p = "$.panels[$i]"
-                known(po, p, setOf("type", "title", "subtitle", "badge", "tone", "request", "items", "rows", "columns", "text", "empty", "source"))
+                known(po, p, setOf("type", "title", "subtitle", "badge", "tone", "request", "items", "rows", "columns", "text", "empty", "source", "compute"))
+                val pcomp = compute(obj(po, "compute", p), "$p.compute", emptySet())
+                val pvars = reqVars + pcomp.map { "c.${it.first}" }
                 val type = str(po, "type", p, required = true).lowercase()
                 if (type !in setOf("header", "stats", "table", "note")) errors.add("$p.type '$type' inválido (header, stats, table, note).")
                 val preq = req(obj(po, "request", p), "$p.request")
@@ -362,7 +367,7 @@ object CustomDefParser {
                 val text = str(po, "text", p)
                 val empty = str(po, "empty", p, def = "Nada por aqui.")
                 val tn = tone(str(po, "tone", p), "$p.tone")
-                for ((k, v) in listOf("title" to title, "subtitle" to subtitle, "badge" to badge, "text" to text, "empty" to empty)) tpl(v, "$p.$k", reqVars, true)
+                for ((k, v) in listOf("title" to title, "subtitle" to subtitle, "badge" to badge, "text" to text, "empty" to empty)) tpl(v, "$p.$k", pvars, true)
                 val stats = ArrayList<StatDef>()
                 val cols = ArrayList<ColDef>()
                 var rows = ""
@@ -372,25 +377,25 @@ object CustomDefParser {
                         known(so, sp, setOf("label", "value", "tone"))
                         val label = str(so, "label", sp, required = true)
                         val value = str(so, "value", sp, required = true)
-                        tpl(label, "$sp.label", reqVars, true)
-                        tpl(value, "$sp.value", reqVars, true)
+                        tpl(label, "$sp.label", pvars, true)
+                        tpl(value, "$sp.value", pvars, true)
                         stats.add(StatDef(label, value, tone(str(so, "tone", sp), "$sp.tone")))
                     }
                 }
                 if (type == "table") {
                     rows = str(po, "rows", p, required = true)
-                    if (rows.isNotEmpty() && !JsonPath.isValid(rows)) errors.add("$p.rows: caminho inválido '$rows' (ex.: \"\$.data[*]\").")
-                    if (preq == null && psource.isEmpty()) errors.add("$p: tabelas exigem \"request\" ou \"source\" (coleção do realtime).")
+                    rowsOk(rows, "$p.rows", pcomp)
+                    if (preq == null && psource.isEmpty() && !rows.startsWith("c.")) errors.add("$p: tabelas exigem \"request\" ou \"source\" (coleção do realtime).")
                     arr(po, "columns", p, 8, required = true).forEachIndexed { j, co ->
                         val cp = "$p.columns[$j]"
                         known(co, cp, setOf("title", "value"))
                         val ct = str(co, "title", cp, required = true)
                         val cv = str(co, "value", cp, required = true)
-                        tpl(cv, "$cp.value", reqVars, true)
+                        tpl(cv, "$cp.value", pvars, true)
                         cols.add(ColDef(ct, cv))
                     }
                 }
-                panels.add(PanelDef(type, title, subtitle, badge, tn, preq, stats, rows, cols, text, empty, psource))
+                panels.add(PanelDef(type, title, subtitle, badge, tn, preq, stats, rows, cols, text, empty, psource, pcomp))
             }
 
             // ações do usuário (botões)
@@ -415,7 +420,7 @@ object CustomDefParser {
             val tools = ArrayList<ToolDef>()
             arr(o, "tools", "$", 30).forEachIndexed { i, to ->
                 val p = "$.tools[$i]"
-                known(to, p, setOf("name", "description", "params", "risky", "requiresSignal", "orderIntent", "limits", "request", "response", "list", "send", "source"))
+                known(to, p, setOf("name", "description", "params", "risky", "requiresSignal", "orderIntent", "limits", "request", "response", "list", "send", "source", "compute"))
                 val params = ArrayList<ParamSpec>()
                 arr(to, "params", p, 12).forEachIndexed { j, pa ->
                     val pp = "$p.params[$j]"
@@ -426,7 +431,9 @@ object CustomDefParser {
                     params.add(ParamSpec(pn, str(pa, "description", pp, required = true), str(pa, "type", pp, def = "string"), bool(pa, "required", pp, true), en))
                 }
                 val paramVars = params.map { it.name }.toSet()
+                val tcomp = compute(obj(to, "compute", p), "$p.compute", paramVars)
                 val vars = reqVars + paramVars
+                val outVars = vars + tcomp.map { "c.${it.first}" }
                 val risky = bool(to, "risky", p, false)
                 val requiresSignal = bool(to, "requiresSignal", p, false)
                 val treq = req(obj(to, "request", p), "$p.request")
@@ -440,8 +447,8 @@ object CustomDefParser {
                 }
                 val modes = listOfNotNull(treq?.let { "request" }, tsend?.let { "send" }, tsource.ifEmpty { null }?.let { "source" })
                 if (modes.size > 1) errors.add("$p: use só um entre request, send e source (encontrado: ${modes.joinToString()}).")
-                if (modes.isEmpty() && rt == null && to["send"] == null) errors.add("$p.request é obrigatório (ou send/source com o bloco realtime).")
-                if (modes.isEmpty() && rt != null && str(to, "response", p).isBlank()) errors.add("$p: sem request/send/source, a ferramenta precisa de \"response\" lendo o estado (ex.: {{rt.saldo}}).")
+                if (modes.isEmpty() && rt == null && to["send"] == null && tcomp.isEmpty()) errors.add("$p.request é obrigatório (ou send/source com o bloco realtime).")
+                if (modes.isEmpty() && (rt != null || tcomp.isNotEmpty()) && str(to, "response", p).isBlank() && to["list"] == null) errors.add("$p: sem request/send/source, a ferramenta precisa de \"response\" lendo o estado (ex.: {{rt.saldo}}).")
                 if (tsend != null && !risky && ORDER_WORDS.containsMatchIn(str(to, "name", p) + " " + str(to, "description", p))) errors.add("$p: ferramenta que envia ordem/operação pelo tempo real exige \"risky\": true.")
                 val limits = ArrayList<LimitDef>()
                 arr(to, "limits", p, 6).forEachIndexed { j, lo2 ->
@@ -470,25 +477,51 @@ object CustomDefParser {
                 if (requiresSignal && intent == null) errors.add("$p: requiresSignal exige orderIntent {asset, direction}.")
                 if (requiresSignal && !risky) errors.add("$p: requiresSignal exige risky = true.")
                 val response = str(to, "response", p)
-                tpl(response, "$p.response", vars, true)
+                tpl(response, "$p.response", outVars, true)
                 var list: ListDef? = null
                 val lso = obj(to, "list", p)
                 if (lso != null) {
                     known(lso, "$p.list", setOf("rows", "item", "max"))
-                    if (treq == null && tsend == null && tsource.isEmpty()) errors.add("$p.list exige request, send ou source.")
+                    if (treq == null && tsend == null && tsource.isEmpty() && tcomp.isEmpty()) errors.add("$p.list exige request, send, source ou compute.")
                     val rows = str(lso, "rows", "$p.list", required = true)
-                    if (rows.isNotEmpty() && !JsonPath.isValid(rows)) errors.add("$p.list.rows: caminho inválido '$rows'.")
+                    rowsOk(rows, "$p.list.rows", tcomp)
                     val item = str(lso, "item", "$p.list", required = true)
-                    tpl(item, "$p.list.item", vars, true)
+                    tpl(item, "$p.list.item", outVars, true)
                     val mx = str(lso, "max", "$p.list", def = "20").toIntOrNull()
                     if (mx == null || mx !in 1..200) errors.add("$p.list.max deve ser de 1 a 200.")
                     list = ListDef(rows, item, (mx ?: 20).coerceIn(1, 200))
                 }
                 val tname = str(to, "name", p, required = true)
                 val tdesc = str(to, "description", p, required = true)
-                tools.add(ToolDef(tname, tdesc, params, risky, requiresSignal, intent, limits, treq, response, list, tsend, tsource))
+                tools.add(ToolDef(tname, tdesc, params, risky, requiresSignal, intent, limits, treq, response, list, tsend, tsource, tcomp))
             }
             return CustomDef(id, name, description, version, accent, baseUrl, host, headers, login, settings, panels, actions, tools, allowed, rt)
+        }
+
+        /** Bloco "compute": {nome: expressão}. Valida sintaxe, funções, identificadores e referências c.x. */
+        fun compute(o: JsonObject?, path: String, params: Set<String>): List<Pair<String, Compute.Node>> {
+            if (o == null) return emptyList()
+            if (o.size > 40) errors.add("$path: no máximo 40 cálculos.")
+            val out = ArrayList<Pair<String, Compute.Node>>()
+            val known = setOf("$", "s", "rt", "c") + params
+            val cref = Regex("\\bc\\.([A-Za-z_][A-Za-z0-9_]*)")
+            for ((name, v) in o.entries.take(40)) {
+                val src = (v as? JsonPrimitive)?.takeIf { it.isString }?.content
+                if (!IDENT.matches(name) || name in setOf("s", "rt", "c")) { errors.add("$path.$name: nome inválido (letra inicial; letras, números e _)."); continue }
+                if (src == null) { errors.add("$path.$name deve ser uma expressão em texto."); continue }
+                val probs = Compute.problems(src, known)
+                probs.forEach { errors.add("$path.$name: $it") }
+                cref.findAll(src).map { it.groupValues[1] }.filter { ref -> out.none { it.first == ref } }.toSet()
+                    .forEach { errors.add("$path.$name: c.$it não foi calculado antes (a ordem importa).") }
+                if (probs.isEmpty()) runCatching { out.add(name to Compute.parse(src)) }
+            }
+            return out
+        }
+
+        fun rowsOk(rows: String, path: String, comp: List<Pair<String, Compute.Node>>) {
+            if (rows.startsWith("c.")) {
+                if (comp.none { it.first == rows.removePrefix("c.") }) errors.add("$path: '$rows' não está no compute deste item.")
+            } else if (rows.isNotEmpty() && !JsonPath.isValid(rows)) errors.add("$path: caminho inválido '$rows' (ex.: \"\$.data[*]\" ou \"c.nome\").")
         }
 
         /** Mensagem do tempo real: objeto/array JSON ou string (texto cru). Valida os modelos. */
