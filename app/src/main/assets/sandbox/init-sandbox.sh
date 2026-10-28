@@ -70,6 +70,13 @@ ARGS="$ARGS -b $SESSION_PUBLIC_ROOT:/home"
 ARGS="$ARGS -b $SESSION_PUBLIC_ROOT:/root"
 ARGS="$ARGS -b $ALPINE_ROOT/tmp:/dev/shm"
 
+# Workspaces dos UI Connectors: montados em /root/connectors nas sessões de chat, para o
+# agente ler/copiar os arquivos que um conector gerou (ex.: /root/connectors/ytbaixar/workspace).
+if [ "$MOUNT_CONNECTORS" = "1" ] && [ -n "$CONNECTORS_ROOT" ]; then
+ mkdir -p "$CONNECTORS_ROOT"
+ ARGS="$ARGS -b $CONNECTORS_ROOT:/root/connectors"
+fi
+
 
 # PRoot canonicalizes every -b host path with realpath(3).  The magic links
 # under /proc/self/fd only resolve when the descriptor points at a real file:

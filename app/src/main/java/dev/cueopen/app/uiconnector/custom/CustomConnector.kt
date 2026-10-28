@@ -284,6 +284,13 @@ class CustomConnector(
             val stepReply: Reply? = when {
                 t.shell != null -> {
                     if (!bridge.granted(Capabilities.TERMINAL)) return capDenied(Capabilities.TERMINAL)
+                    // Prepara o ambiente uma vez (ex.: instalar yt-dlp) antes do 1º comando.
+                    def.setup?.let { su ->
+                        val setupCmd = Template.renderShell(su.run, Template.Ctx(settingVars(settings)))
+                        bridge.ensureSetup(setupCmd, su.timeoutSec)?.let { sr ->
+                            if (!sr.ok) return "ERRO ao preparar o conector (setup): " + Redactor.redact(sr.text.take(2000), secrets())
+                        }
+                    }
                     val cmd = Template.renderShell(t.shell.run, Template.Ctx(sessionVars() + vars))
                     val r = bridge.shell(cmd, t.shell.timeoutSec)
                     if (!r.ok) return "ERRO: " + Redactor.redact(r.text.take(2000), secrets())

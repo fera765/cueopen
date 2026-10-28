@@ -24,6 +24,29 @@ class AndroidHostBridge(
 
     private val app get() = CueApp.instance
 
+    // ------------------------------------------------------------------ setup (prepara o ambiente 1x)
+    override suspend fun ensureSetup(command: String, timeoutSec: Int): BridgeResult? {
+        val sandbox = app.sandbox
+        if (!sandbox.isInstalled()) return BridgeResult(false, "O sandbox Linux não está instalado. Abra Configurações → Sandbox para instalar o terminal.")
+        sandbox.ensureEnvironment(sessionId)
+        val marker = java.io.File(sandbox.publicFor(sessionId), ".setup-ok")
+        val tag = Integer.toHexString(command.hashCode())
+        if (runCatching { marker.readText().trim() == tag }.getOrDefault(false)) return null // já preparado
+        return try {
+            val r = app.terminals.get(sessionId).runAgentCommand(command, BridgeSecurity.clampSetupTimeout(timeoutSec).toLong(), background = false)
+            if (!r.timedOut && r.exitCode == 0) {
+                runCatching { marker.writeText(tag) }
+                BridgeResult(true, r.output.takeLast(4_000))
+            } else {
+                BridgeResult(false, (if (r.timedOut) "setup excedeu o tempo-limite. " else "setup falhou (exit ${r.exitCode}). ") + r.output.takeLast(4_000))
+            }
+        } catch (c: kotlinx.coroutines.CancellationException) {
+            throw c
+        } catch (t: Throwable) {
+            BridgeResult(false, t.message ?: t.javaClass.simpleName)
+        }
+    }
+
     // ------------------------------------------------------------------ terminal
     override suspend fun shell(command: String, timeoutSec: Int): BridgeResult {
         val cmd = command.take(BridgeSecurity.MAX_CMD_CHARS)

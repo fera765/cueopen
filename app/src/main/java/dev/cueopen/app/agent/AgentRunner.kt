@@ -887,6 +887,7 @@ class AgentRunner(
                         appendLine("- Solana day trade e conectores de trading têm capital e posições independentes: não use um para cobrir o outro. Se a resposta disser que outro agente está operando o ativo, aguarde ou escolha outro; faça uma ordem por vez.")
                     }
                     appendLine("- A sessão e as credenciais são gerenciadas pelo app; você nunca vê nem pede senha. Se uma ferramenta responder que é preciso fazer login, avise o usuário.")
+                    appendLine("- ARQUIVOS DE CONECTORES: um conector que usa terminal/arquivos guarda o que gera numa pasta própria visível para você em /root/connectors/<id do conector>/workspace (ex.: /root/connectors/ytbaixar/workspace). Você PODE ler, listar e copiar de lá: ex. `ls /root/connectors/ytbaixar/workspace` e `cp /root/connectors/ytbaixar/workspace/<arquivo> /root/workspace/` para trazer ao seu workspace e entregar ao usuário. Se uma capacidade (terminal/arquivos/browser) do conector não estiver autorizada, a ferramenta responde pedindo para o usuário ativar em Conectores → (conector) → Permissões.")
                     appendLine("- Respostas começando com RECUSADO são limites de segurança definidos pelo usuário: respeite-os, não tente contornar (nem trocar de conta/valor para burlar) e explique ao usuário. Operar envolve risco de perda; nunca prometa lucro.")
                 }
             }

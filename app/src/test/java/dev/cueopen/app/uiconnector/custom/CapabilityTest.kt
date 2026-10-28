@@ -64,6 +64,16 @@ class CapabilityTest {
         assertTrue(errs(bad).contains("evil.com"))
     }
 
+    @Test fun setupRequiresTerminalCapability() {
+        val bad = """{"id":"t","name":"T","description":"d","setup":{"run":"pip install x"},"tools":[]}"""
+        assertTrue(errs(bad).contains("terminal"))
+    }
+
+    @Test fun setupTimeoutRange() {
+        val bad = """{"id":"t","name":"T","description":"d","capabilities":["terminal"],"setup":{"run":"x","timeoutSec":5000},"tools":[]}"""
+        assertTrue(errs(bad).contains("timeoutSec"))
+    }
+
     @Test fun capabilityMustBeKnown() {
         val bad = """{"id":"t","name":"T","description":"d","capabilities":["root"],"tools":[]}"""
         assertTrue(errs(bad).contains("capabilities"))

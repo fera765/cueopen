@@ -49,6 +49,7 @@ nome diferente ou valor fora das regras faz o conector ser recusado.
 | `tools` | lista (≤30) | não | ferramentas que o AGENTE chama |
 | `realtime` | objeto | não | conexão em **tempo real** (WebSocket `wss://`) — ver seção própria |
 | `capabilities` | lista | não | capacidades do aparelho que o conector usa: `"terminal"`, `"files"`, `"browser"` — ver seção **Capacidades**. Exigem autorização do usuário |
+| `setup` | objeto | não | `{"run": "...", "timeoutSec": 1–900}` — prepara o ambiente uma vez (instalar dependências). Exige `terminal` |
 
 Todo o tráfego de rede vai **só** para o host de `baseUrl` e os de `allowedHosts`.
 
@@ -170,7 +171,16 @@ numa ferramenta. **Cada capacidade só funciona depois que o usuário autoriza n
 "capabilities": ["terminal", "files", "browser"]
 ```
 Cada conector tem um **workspace isolado** (uma pasta própria no sandbox). O terminal roda nessa pasta; os arquivos
-ficam confinados a ela (não dá para ler/gravar fora). Nada é compartilhado com outros conectores nem com os chats.
+ficam confinados a ela (não dá para ler/gravar fora). O **agente do chat enxerga** esse workspace em
+`/root/connectors/<id>/workspace` e pode copiar os arquivos gerados para o próprio workspace e entregar ao usuário —
+então os downloads/arquivos NÃO ficam presos no conector.
+
+**`setup` (preparar o ambiente uma vez)** — instala/configura dependências antes do 1º comando de terminal (exige `terminal`):
+```
+"setup": {"run": "command -v yt-dlp >/dev/null 2>&1 || { apk add --no-cache python3 py3-pip ffmpeg; pip install --break-system-packages -q yt-dlp; }", "timeoutSec": 600}
+```
+Roda só na 1ª vez (fica marcado; re-roda se você mudar o comando). Use-o para `apk add`/`pip install` — assim a ferramenta
+`shell` fica só com o comando principal (ex.: `yt-dlp {{url}}`), sem reinstalar a cada chamada.
 
 **Passo de terminal** (`shell`) — exige `"terminal"` em `capabilities` e `"risky": true`:
 ```

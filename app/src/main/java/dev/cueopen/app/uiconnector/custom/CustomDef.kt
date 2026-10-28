@@ -75,6 +75,8 @@ data class CustomDef(
     val realtime: RtDef? = null,
     /** Capacidades do aparelho que o conector usa (terminal | files | browser). Exigem autorização do usuário. */
     val capabilities: Set<String> = emptySet(),
+    /** Preparação única do ambiente (instalar/configurar dependências) rodada antes do 1º comando de terminal. */
+    val setup: ShellStep? = null,
 ) {
     /** Todos os hosts que o conector pode chamar. */
     val hosts: Set<String> get() = (listOf(host) + allowedHosts).map { it.lowercase() }.toSet()
@@ -258,7 +260,7 @@ object CustomDefParser {
         }
 
         fun build(o: JsonObject): CustomDef? {
-            known(o, "$", setOf("id", "name", "description", "version", "accent", "baseUrl", "allowedHosts", "headers", "login", "settings", "panels", "actions", "tools", "realtime", "capabilities"))
+            known(o, "$", setOf("id", "name", "description", "version", "accent", "baseUrl", "allowedHosts", "headers", "login", "settings", "panels", "actions", "tools", "realtime", "capabilities", "setup"))
             val id = str(o, "id", "$", required = true)
             if (id.isNotEmpty() && !ID.matches(id)) errors.add("$.id '$id' inválido: use [a-z0-9], começando com letra (2–20).")
             val name = str(o, "name", "$", required = true)
@@ -317,6 +319,20 @@ object CustomDefParser {
                 settings.add(SettingSpec(sid, str(so, "label", p, required = true), str(so, "description", p, def = ""), type, str(so, "default", p, def = if (type == SettingType.SWITCH) "false" else ""), bool(so, "risky", p, false)))
             }
             val settingVars = settings.map { "s.${it.id}" }.toSet()
+
+            // setup: preparação única do ambiente (ex.: instalar yt-dlp). Só configurações como variáveis.
+            var setup: ShellStep? = null
+            val so2 = obj(o, "setup", "$")
+            if (so2 != null) {
+                if (Capabilities.TERMINAL !in capabilities) errors.add("$.setup exige \"terminal\" na lista capabilities do conector.")
+                known(so2, "$.setup", setOf("run", "timeoutSec"))
+                val run = str(so2, "run", "$.setup", required = true)
+                tpl(run, "$.setup.run", settingVars, false)
+                val ts = str(so2, "timeoutSec", "$.setup", def = "600").toIntOrNull()
+                if (ts == null || ts !in BridgeSecurity.MIN_TIMEOUT..BridgeSecurity.MAX_SETUP_TIMEOUT)
+                    errors.add("$.setup.timeoutSec deve ser de ${BridgeSecurity.MIN_TIMEOUT} a ${BridgeSecurity.MAX_SETUP_TIMEOUT}.")
+                setup = ShellStep(run, BridgeSecurity.clampSetupTimeout(ts ?: 600))
+            }
 
             // login
             val lo = obj(o, "login", "$")
@@ -534,7 +550,7 @@ object CustomDefParser {
                 tools.add(ToolDef(tname, tdesc, params, risky, requiresSignal, intent, limits, treq, response, list, tsend, tsource, tcomp, tshell, tfile, tfetch))
             }
             if (baseUrl.isEmpty() && (usesNetwork || rt != null)) errors.add("$.baseUrl é obrigatório quando o conector faz requisições ou usa tempo real.")
-            return CustomDef(id, name, description, version, accent, baseUrl, host, headers, login, settings, panels, actions, tools, allowed, rt, capabilities)
+            return CustomDef(id, name, description, version, accent, baseUrl, host, headers, login, settings, panels, actions, tools, allowed, rt, capabilities, setup)
         }
 
         /** Passo de terminal: comando [run] (modelo shell-seguro) rodado no sandbox do conector. */

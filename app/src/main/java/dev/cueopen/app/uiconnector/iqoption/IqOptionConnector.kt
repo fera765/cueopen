@@ -445,7 +445,8 @@ class IqOptionConnector(private val kv: KvStore? = null) : UiConnector {
             }
             withTimeout(timeoutMs) { w.deferred.await() }
         } catch (t: TimeoutCancellationException) {
-            err("timeout aguardando ${names.joinToString("/")}; mensagens recentes: ${recentNames()}")
+            // Não logar aqui: inundava o log (cada mercado, a cada atualização). Quem precisa registra
+            // um resumo único (ex.: "indisponível nesta conta/região; pausado por 10 min" no loadAllAssets).
             error("A IQ Option não respondeu a tempo.")
         } finally {
             waiters.remove(w)

@@ -20,6 +20,12 @@ interface HostBridge {
     /** O usuário autorizou esta capacidade para este conector? (terminal | files | browser) */
     fun granted(capability: String): Boolean
 
+    /**
+     * Prepara o ambiente do conector UMA vez (instala/configura dependências). Devolve null se já foi
+     * feito (ou não há setup); senão o resultado do setup (ok=false aborta a ferramenta).
+     */
+    suspend fun ensureSetup(command: String, timeoutSec: Int): BridgeResult? = null
+
     /** Roda um comando no sandbox do conector (cwd = workspace do conector). */
     suspend fun shell(command: String, timeoutSec: Int): BridgeResult
 
@@ -74,9 +80,12 @@ object BridgeSecurity {
     const val MAX_FILE_BYTES = 8 * 1024 * 1024
     const val MIN_TIMEOUT = 1
     const val MAX_TIMEOUT = 300
+    /** O setup (instalar dependências) pode demorar mais que um comando comum. */
+    const val MAX_SETUP_TIMEOUT = 900
     val FILE_OPS = setOf("read", "write", "list", "delete")
 
     fun clampTimeout(sec: Int): Int = sec.coerceIn(MIN_TIMEOUT, MAX_TIMEOUT)
+    fun clampSetupTimeout(sec: Int): Int = sec.coerceIn(MIN_TIMEOUT, MAX_SETUP_TIMEOUT)
 
     /**
      * Resolve um caminho relativo DENTRO de [root], recusando qualquer coisa que escape do workspace

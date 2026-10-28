@@ -310,27 +310,30 @@ object CustomTemplates {
  "description": "Baixa vídeo ou áudio do YouTube com yt-dlp no terminal e salva no workspace isolado do conector.",
  "version": "1.0",
  "capabilities": ["terminal", "files"],
+ "setup": {
+  "run": "command -v yt-dlp >/dev/null 2>&1 || { apk add --no-cache python3 py3-pip ffmpeg >/dev/null 2>&1; pip install --break-system-packages -q yt-dlp >/dev/null 2>&1; }; command -v yt-dlp >/dev/null 2>&1 && echo OK",
+  "timeoutSec": 600
+ },
  "settings": [
   {"id": "qualidade", "label": "Qualidade do vídeo", "description": "ex.: 720, 1080 ou best", "type": "text", "default": "best"}
  ],
  "tools": [
   {
    "name": "baixar",
-   "description": "Baixa um vídeo (mp4) ou o áudio (mp3) de uma URL do YouTube e salva no workspace do conector. Use quando o usuário pedir para baixar um vídeo/música do YouTube.",
+   "description": "Baixa um vídeo de uma URL do YouTube e salva no workspace do conector. Use quando o usuário pedir para baixar um vídeo/música do YouTube. Os arquivos ficam acessíveis ao agente em /root/connectors/ytbaixar/workspace.",
    "params": [
-    {"name": "url", "description": "URL do vídeo do YouTube", "type": "string", "required": true},
-    {"name": "tipo", "description": "video = mp4, audio = mp3", "type": "string", "required": false, "enum": ["video", "audio"]}
+    {"name": "url", "description": "URL do vídeo do YouTube", "type": "string", "required": true}
    ],
    "risky": true,
    "shell": {
-    "run": "command -v yt-dlp >/dev/null 2>&1 || pip install -q --break-system-packages yt-dlp >/dev/null 2>&1; yt-dlp --no-playlist -o 'download.%(ext)s' {{url}} && ls -la",
+    "run": "yt-dlp --no-playlist -f 'best[ext=mp4]/best' -o 'download.%(ext)s' {{url}} && ls -la",
     "timeoutSec": 280
    },
-   "response": "Processado no workspace do conector.\n{{${'$'}.body|trunc:1800}}"
+   "response": "Pronto. Os arquivos estão em /root/connectors/ytbaixar/workspace (o agente pode copiá-los para /root/workspace).\n{{${'$'}.body|trunc:1800}}"
   },
   {
    "name": "arquivos",
-   "description": "Lista os arquivos já baixados no workspace do conector.",
+   "description": "Lista os arquivos já baixados no workspace do conector (/root/connectors/ytbaixar/workspace).",
    "params": [],
    "file": {"op": "list", "path": ""}
   }

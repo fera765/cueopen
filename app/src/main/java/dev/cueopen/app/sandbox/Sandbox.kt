@@ -37,16 +37,31 @@ class Sandbox(private val ctx: Context) {
     val alpineDir = File(prefix, "alpine")
     /** Dados separados por chat; a base Alpine nunca deve receber escritas de sessões. */
     private val environmentsDir = File(prefix, "chat-environments")
+    /**
+     * Raiz COMPARTILHADA dos UI Connectors: cada conector tem `connectors/<id>` aqui. Esta pasta é
+     * montada como `/root/connectors` em TODA sessão de chat, então o agente lê/copia os arquivos que
+     * um conector gerou (ex.: vídeo baixado em `/root/connectors/ytbaixar/workspace`).
+     */
+    val connectorsDir = File(prefix, "connectors").apply { mkdirs() }
     /** Compatibilidade para chamadas legadas sem sessionId. */
     val publicDir = File(prefix, "public").apply { mkdirs() }
     val workspaceRoot = File(publicDir, "workspace").apply { mkdirs() }
 
     private fun safeId(sessionId: String): String = sessionId.filter { it.isLetterOrDigit() || it == '-' || it == '_' }.take(80).ifBlank { "default" }
-    fun environmentRoot(sessionId: String): File = File(environmentsDir, safeId(sessionId))
+
+    /** Sessões de UI Connector usam o prefixo `__uic__`; ganham raiz própria em connectors/<id>. */
+    fun isConnectorSession(sessionId: String): Boolean = sessionId.startsWith("__uic__")
+    fun connectorId(sessionId: String): String = safeId(sessionId.removePrefix("__uic__"))
+
+    fun environmentRoot(sessionId: String): File =
+        if (isConnectorSession(sessionId)) File(connectorsDir, connectorId(sessionId))
+        else File(environmentsDir, safeId(sessionId))
     // Todos os chats reutilizam o Alpine já instalado; dados de usuário continuam separados por chat.
     // Não copiar centenas/milhares de arquivos no primeiro comando ou ao criar uma conversa.
     fun rootfsFor(sessionId: String): File = alpineDir
-    fun publicFor(sessionId: String): File = File(environmentRoot(sessionId), "public").apply { mkdirs() }
+    // Conector: a própria raiz é o "public" (/root = connectors/<id>); chat: subpasta "public".
+    fun publicFor(sessionId: String): File =
+        (if (isConnectorSession(sessionId)) environmentRoot(sessionId) else File(environmentRoot(sessionId), "public")).apply { mkdirs() }
     fun environmentReady(sessionId: String): Boolean =
         File(environmentRoot(sessionId), ".ready").isFile && File(alpineDir, "bin/busybox").isFile
 
@@ -117,6 +132,7 @@ class Sandbox(private val ctx: Context) {
         "TMPDIR" to ctx.cacheDir.absolutePath,
         "ANDROID_TZ" to TimeZone.getDefault().id,
         "PATH" to "/system/bin:/system/xbin",
+        "CONNECTORS_ROOT" to connectorsDir.absolutePath,
     )
 
     fun prepareScripts() = writeScripts()
@@ -125,6 +141,9 @@ class Sandbox(private val ctx: Context) {
         "TERM" to "xterm-256color", "LANG" to "C.UTF-8", "COLORTERM" to "truecolor",
         "ALPINE_ROOT" to (sessionId?.let { rootfsFor(it).absolutePath } ?: alpineDir.absolutePath),
         "SESSION_PUBLIC_ROOT" to (sessionId?.let { publicFor(it).absolutePath } ?: publicDir.absolutePath),
+        // Monta os workspaces dos conectores (/root/connectors) só nas sessões de CHAT, para o agente
+        // ler/copiar os arquivos. A própria sessão de um conector não precisa (já está dentro dela).
+        "MOUNT_CONNECTORS" to (if (sessionId != null && isConnectorSession(sessionId)) "0" else "1"),
     ))
         .map { (k, v) -> "$k=$v" }.toTypedArray()
 
@@ -287,6 +306,7 @@ class Sandbox(private val ctx: Context) {
         stopAxs()
         alpineDir.deleteRecursively()
         environmentsDir.deleteRecursively()
+        connectorsDir.deleteRecursively()
         File(prefix, ".configured").deleteRecursively()
         _state.value = State.NOT_INSTALLED
     }
