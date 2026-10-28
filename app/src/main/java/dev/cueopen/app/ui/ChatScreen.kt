@@ -664,9 +664,7 @@ private fun ConnectorProposalCard(p: ChatItem.ConnectorProposal, sessionId: Stri
         if (p.tools.isNotEmpty()) Text("Ferramentas do agente: " + p.tools.joinToString(), fontSize = 12.sp, color = c.ink3)
         error?.let { Text(it, fontSize = 12.sp, color = c.err) }
         if (p.installed) {
-            OutlinedButton(onClick = { nav?.navigate("uiconnector/${p.connectorId}") }, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(14.dp)) {
-                Text("Abrir conector")
-            }
+            Text("Pronto: ative-o no agente em Agents → editar → UI Conectores.", fontSize = 12.sp, color = c.ink2)
         } else {
             Button(
                 onClick = {
@@ -675,7 +673,6 @@ private fun ConnectorProposalCard(p: ChatItem.ConnectorProposal, sessionId: Stri
                         app.uiConnectors.saveCustom(p.json)
                             .onSuccess {
                                 if (sessionId != null) app.store.replaceItem(sessionId, p.copy(installed = true))
-                                nav?.navigate("uiconnector/${p.connectorId}")
                             }
                             .onFailure { error = it.message ?: "Falha ao instalar." }
                         busy = false

@@ -760,7 +760,7 @@ class AgentRunner(
             }
             if (session.connectorBuilder) appendLine()
             if (session.connectorBuilder) appendLine("## Criar UI Connectors (esta conversa é o criador de conectores)")
-            if (session.connectorBuilder) appendLine("- Quando o usuário pedir um conector (UI Connector), NÃO escreva o JSON no chat: chame connector_spec, monte a definição, valide com connector_validate e corrija até zero erros (repita sozinho, sem perguntar), depois chame connector_propose. Só diga que deu certo depois de connector_propose; a instalação é feita pelo usuário no card. Se faltar a URL base ou os endpoints reais da API, pesquise na documentação oficial (web) ou pergunte.")
+            if (session.connectorBuilder) appendLine("- Quando o usuário pedir um conector (UI Connector), NÃO escreva o JSON no chat: chame connector_spec, monte a definição, valide com connector_validate e corrija até zero erros (repita sozinho, sem perguntar), depois TESTE DE VERDADE com connector_test (requisições reais; corrija caminhos pela estrutura que ele mostra até PASSOU) e só então chame connector_propose. Não use o browser/web para "testar" — só connector_test vale. Só diga que deu certo depois de connector_propose; a instalação é feita pelo usuário no card. Se faltar a URL base ou os endpoints reais da API, pesquise na documentação oficial (web) ou pergunte.")
             runCatching {
                 val hub = dev.cueopen.app.CueApp.instance.uiConnectors
                 val usable = hub.connectors.filter { hub.usableBy(it, agent) }
@@ -878,7 +878,11 @@ class AgentRunner(
         if (builder) add(tool("connector_validate", "Valida uma definição JSON de UI Connector com o parser real do app. Retorna OK ou a lista exata de erros (caminho + motivo). Corrija e valide de novo até zero erros.", buildJsonObject {
             put("json", str("Definição JSON completa do conector"))
         }, listOf("json")))
-        if (builder) add(tool("connector_propose", "Valida e mostra ao usuário o card 'Instalar conector' no chat. Só aceita definição com zero erros. Use quando connector_validate disser OK.", buildJsonObject {
+        if (builder) add(tool("connector_test", "TESTA DE VERDADE o conector (requisições reais): busca cada painel, confere se tabelas têm linhas e colunas preenchidas e executa cada ferramenta não sensível. Mostra a estrutura real da resposta quando um caminho falha, para você corrigir. Obrigatório passar antes de connector_propose (conectores sem login).", buildJsonObject {
+            put("json", str("Definição JSON completa do conector"))
+            put("args_json", str("Opcional: exemplos de argumentos por ferramenta, ex.: {\"buscar\":{\"termo\":\"anitta\",\"tipo\":\"artist\"}}"))
+        }, listOf("json")))
+        if (builder) add(tool("connector_propose", "Mostra ao usuário o card 'Instalar conector' no chat. Só aceita definição com zero erros e, se não tiver login, que tenha passado em connector_test com o MESMO JSON.", buildJsonObject {
             put("json", str("Definição JSON completa e válida do conector"))
         }, listOf("json")))
         if (allowMultiAgent) add(tool("sleep", "Modo contínuo: pausa por N minutos e depois retoma automaticamente (monitoramento).", buildJsonObject {
@@ -1101,7 +1105,10 @@ class AgentRunner(
     }
 
     /** Ferramentas do criador de UI Connectors (só em sessões abertas pelo editor de conectores). */
-    private fun connectorTool(sessionId: String, name: String, json: String): String {
+    /** Hash do último JSON que passou em connector_test, por sessão do criador. */
+    private val builderPassed = java.util.concurrent.ConcurrentHashMap<String, Int>()
+
+    private suspend fun connectorTool(sessionId: String, name: String, json: String, argsJson: String = ""): String {
         if (store.session(sessionId)?.connectorBuilder != true)
             return "Indisponível: crie conectores pela página Conectores → Novo conector → Criar com a IA."
         if (name == "connector_spec") return dev.cueopen.app.uiconnector.custom.SdkPrompt.MARKDOWN
@@ -1116,9 +1123,24 @@ class AgentRunner(
                         (if (parsed.warnings.isNotEmpty()) "\nAvisos:\n" + parsed.warnings.joinToString("\n") { "- $it" } else "")
                 else when {
                     clash -> "INVÁLIDO: o id '${d.id}' pertence a um conector do app. Troque o id."
+                    name == "connector_test" -> {
+                        val toolArgs = runCatching {
+                            (this.json.parseToJsonElement(argsJson.ifBlank { "{}" }) as JsonObject).mapValues { (_, v) ->
+                                (v as? JsonObject)?.mapValues { (_, x) -> (x as? kotlinx.serialization.json.JsonPrimitive)?.contentOrNull ?: x.toString() }.orEmpty()
+                            }
+                        }.getOrDefault(emptyMap())
+                        val conn = dev.cueopen.app.uiconnector.custom.CustomConnector(d)
+                        val settings = dev.cueopen.app.uiconnector.ConnectorSettings { k -> d.settings.firstOrNull { it.id == k }?.default }
+                        val (passed, report) = runCatching { conn.selfTest(settings, toolArgs) }.getOrElse { false to "Falha no teste: ${it.message}" }
+                        if (passed) builderPassed[sessionId] = raw.hashCode()
+                        (if (passed) "PASSOU — o conector funciona com dados reais.\n" else "FALHOU — corrija a definição (caminhos/endpoints) e rode connector_test de novo:\n") + report.take(6000) +
+                            (if (passed) "\nAgora chame connector_propose com o MESMO JSON." else "")
+                    }
+                    name == "connector_propose" && d.login.fields.isEmpty() && builderPassed[sessionId] != raw.hashCode() ->
+                        "BLOQUEADO: rode connector_test com este MESMO JSON e só proponha quando PASSOU."
                     name == "connector_validate" -> "OK — definição válida (host ${d.host}, ${d.tools.size} ferramenta(s), ${d.panels.size} painel(is))." +
                         (if (parsed.warnings.isNotEmpty()) "\nAvisos (não bloqueiam; corrija se fizer sentido):\n" + parsed.warnings.joinToString("\n") { "- $it" } else "") +
-                        "\nAgora chame connector_propose com o MESMO JSON."
+                        "\nAgora chame connector_test com o MESMO JSON" + (if (d.login.fields.isNotEmpty()) " (conector com login: o teste real só ocorre após o usuário entrar; pode propor)." else ".")
                     else -> {
                         store.addItem(sessionId, ChatItem.ConnectorProposal(
                             connectorId = d.id, name = d.name, description = d.description, host = d.host,
@@ -1190,7 +1212,7 @@ class AgentRunner(
                 store.addItem(sessionId, ChatItem.Step(tool = "sleep", title = "Aguardando $m min", args = s("reason"), result = "", status = StepStatus.OK))
                 return ToolResult(s("reason").ifBlank { "verificação" }, sleepMinutes = m)
             }
-            "connector_spec", "connector_validate", "connector_propose" -> return ToolResult(connectorTool(sessionId, call.name, s("json")))
+            "connector_spec", "connector_validate", "connector_test", "connector_propose" -> return ToolResult(connectorTool(sessionId, call.name, s("json"), s("args_json")))
             "skill_load" -> {
                 val sk = store.state.value.skills.firstOrNull { it.name.equals(s("name"), true) }
                     ?: store.state.value.skills.firstOrNull { it.name.contains(s("name"), true) }

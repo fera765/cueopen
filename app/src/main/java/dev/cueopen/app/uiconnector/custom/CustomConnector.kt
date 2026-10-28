@@ -206,23 +206,87 @@ class CustomConnector(
         return try {
             val vars = settingVars(settings) + args.filterValues { it.isNotEmpty() }
             val reply = authed(t.request, vars)
+            if (reply.code in 300..399) return "ERRO HTTP ${reply.code}: o servidor redirecionou para ${reply.headers["location"]?.firstOrNull() ?: "?"} — atualize o endereço na definição do conector."
             if (reply.code !in 200..299) return "ERRO HTTP ${reply.code}: ${reply.body.take(300)}"
             val lst = t.list
             if (lst != null) {
                 val ctxL = sessionVars() + vars
                 val rows = reply.json?.let { JsonPath.select(it, lst.rows) }.orEmpty()
-                if (rows.isEmpty()) return "Nenhum item encontrado (${lst.rows})."
+                if (rows.isEmpty()) return "ERRO: nenhum item em ${lst.rows} (HTTP ${reply.code}). Estrutura recebida:\n" + ResponseTree.outline(reply.json, 3).take(1500)
                 val lines = rows.take(lst.max).mapIndexed { n, row -> "${n + 1}. " + Template.render(lst.item, Template.Ctx(ctxL, row)) }
                 val head = if (t.response.isNotBlank()) Template.render(t.response, Template.Ctx(ctxL, reply.json)) + "\n" else ""
                 return head + lines.joinToString("\n")
             }
-            if (t.response.isNotBlank()) Template.render(t.response, Template.Ctx(sessionVars() + vars, reply.json))
+            if (t.response.isNotBlank()) Template.render(t.response, Template.Ctx(sessionVars() + vars, reply.json)).ifBlank {
+                "ERRO: o modelo de resposta ficou vazio. Estrutura recebida:\n" + ResponseTree.outline(reply.json, 3).take(1500)
+            }
             else reply.body.take(4000)
         } catch (c: kotlinx.coroutines.CancellationException) {
             throw c
         } catch (e: Throwable) {
             "ERRO: ${e.message ?: e.javaClass.simpleName}"
         }
+    }
+
+    /**
+     * Teste real do conector (usado pelo criador com IA antes de liberar a instalação): busca cada painel,
+     * confere se tabelas têm linhas e colunas preenchidas e executa cada ferramenta NÃO sensível.
+     * Devolve (passou, relatório). Ferramentas sensíveis (risky) nunca são executadas no teste.
+     */
+    suspend fun selfTest(settings: ConnectorSettings, toolArgs: Map<String, Map<String, String>>): Pair<Boolean, String> {
+        if (!isLoggedIn) return false to "Conector exige login: o teste real só é possível após instalar e entrar."
+        val sb = StringBuilder()
+        var ok = true
+        val base = settingVars(settings)
+        def.panels.forEachIndexed { idx, p ->
+            val label = "painel $idx (${p.type}${if (p.title.isNotBlank()) " \"${p.title.take(30)}\"" else ""})"
+            val r = p.request
+            if (r == null) { sb.appendLine("✓ $label: sem requisição"); return@forEachIndexed }
+            try {
+                val reply = authed(r, base)
+                if (reply.code !in 200..299) {
+                    ok = false; sb.appendLine("✗ $label: HTTP ${reply.code} — ${reply.body.take(200)}"); return@forEachIndexed
+                }
+                val ctx = Template.Ctx(sessionVars() + base, reply.json)
+                when (p.type) {
+                    "table" -> {
+                        val rows = reply.json?.let { JsonPath.select(it, p.rows) }.orEmpty()
+                        if (rows.isEmpty()) {
+                            ok = false
+                            sb.appendLine("✗ $label: 0 linhas em ${p.rows}. Estrutura recebida:\n" + ResponseTree.outline(reply.json, 3).take(1500))
+                        } else {
+                            val first = p.columns.map { c -> Template.render(c.value, Template.Ctx(ctx.vars, rows[0])) }
+                            if (first.all { it.isBlank() }) { ok = false; sb.appendLine("✗ $label: ${rows.size} linhas, mas todas as colunas vieram vazias (confira os caminhos das colunas relativos a cada linha). 1ª linha:\n" + ResponseTree.outline(rows[0], 2).take(800)) }
+                            else sb.appendLine("✓ $label: ${rows.size} linhas; 1ª: " + first.joinToString(" | ").take(200))
+                        }
+                    }
+                    "stats" -> {
+                        val vals = p.stats.map { Template.render(it.value, ctx) }
+                        if (vals.all { it.isBlank() || it == "-" }) { ok = false; sb.appendLine("✗ $label: valores vazios. Estrutura:\n" + ResponseTree.outline(reply.json, 3).take(1200)) }
+                        else sb.appendLine("✓ $label: " + vals.joinToString(" | ").take(200))
+                    }
+                    else -> {
+                        val txt = Template.render(p.title + " " + p.text, ctx).trim()
+                        if (txt.isBlank()) { ok = false; sb.appendLine("✗ $label: texto vazio. Estrutura:\n" + ResponseTree.outline(reply.json, 3).take(1200)) }
+                        else sb.appendLine("✓ $label: " + txt.take(200))
+                    }
+                }
+            } catch (c: kotlinx.coroutines.CancellationException) {
+                throw c
+            } catch (t: Throwable) {
+                ok = false; sb.appendLine("✗ $label: ${t.message ?: t.javaClass.simpleName}")
+            }
+        }
+        for (t in def.tools) {
+            if (t.risky) { sb.appendLine("• ferramenta ${t.name}: sensível — não executada no teste"); continue }
+            val args = toolArgs[t.name].orEmpty()
+            val missing = t.params.filter { it.required && args[it.name].isNullOrBlank() }.map { it.name }
+            if (missing.isNotEmpty()) { ok = false; sb.appendLine("✗ ferramenta ${t.name}: informe exemplos em args_json para ${missing.joinToString()}"); continue }
+            val out = callTool(t.name, args, settings)
+            if (out.startsWith("ERRO") || out.startsWith("RECUSAD") || out.isBlank()) { ok = false; sb.appendLine("✗ ferramenta ${t.name}: " + out.take(1500)) }
+            else sb.appendLine("✓ ferramenta ${t.name}: " + out.replace("\n", " ⏎ ").take(300))
+        }
+        return ok to Redactor.redact(sb.toString().trim(), secrets())
     }
 
     override fun orderIntents(tool: String, args: Map<String, String>): List<OrderIntent> {

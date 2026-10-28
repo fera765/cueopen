@@ -268,4 +268,34 @@ class CustomEngineTest {
         val ipHost = CustomTemplates.SPOTIFY.json.replace("accounts.spotify.com\" ]", "10.0.0.1\" ]")
         assertTrue(CustomDefParser.parse(ipHost).errors.any { it.contains("allowedHosts") })
     }
+
+    @Test fun `xml truncado e entidades ainda sao lidos`() {
+        val t = ResponseTree.parse(rss.substring(0, rss.indexOf("<item><title>Manchete dois")) + "<item><title>Corta&amp;do")
+        assertEquals("https://g1.globo.com/a", JsonPath.text(JsonPath.first(t, "$.rss.channel.item[0].link")))
+        assertEquals("Corta&do", JsonPath.text(JsonPath.first(t, "$.rss.channel.item[1].title")))
+        assertEquals("é", JsonPath.text(JsonPath.first(ResponseTree.parse("<a>&#233;</a>"), "$.a")))
+        // html nao vira xml
+        assertTrue(JsonPath.text(JsonPath.first(ResponseTree.parse("<!DOCTYPE html><html><body>x</body></html>"), "$.body")).contains("<html>"))
+    }
+
+    @Test fun `autoteste aprova rss valido e reprova caminho errado com estrutura`() = runBlocking {
+        val f = Fake { HttpRes(200, mapOf("content-type" to listOf("text/xml")), rss) }
+        val okDef = CustomDefParser.parse(CustomTemplates.RSS.json).def!!
+        val (ok, rep) = CustomConnector(okDef, f, permissive = true).selfTest(ConnectorSettings { null }, emptyMap())
+        assertTrue(rep, ok)
+        val badDef = CustomDefParser.parse(CustomTemplates.RSS.json.replace("$.rss.channel.item[*]", "$.channel.item[*]")).def!!
+        val (bad, rep2) = CustomConnector(badDef, f, permissive = true).selfTest(ConnectorSettings { null }, emptyMap())
+        assertFalse(bad)
+        assertTrue(rep2, rep2.contains("rss") && rep2.contains("✗"))
+    }
+
+    @Test fun `autoteste exige exemplos para parametros obrigatorios`() = runBlocking {
+        val f = Fake { HttpRes(200, emptyMap(), """{"artists":{"items":[{"name":"A","external_urls":{"spotify":"u"}}]}}""") }
+        val def = CustomDefParser.parse(CustomTemplates.SPOTIFY.json.replace("\"login\"", "\"loginX\"")).def
+        // sem login a definicao do Spotify fica invalida (token desconhecido) — usa o conector logado
+        assertNull(def)
+        val sp = CustomConnector(CustomDefParser.parse(CustomTemplates.SPOTIFY.json).def!!, f, permissive = true)
+        val (ok0, msg0) = sp.selfTest(ConnectorSettings { null }, emptyMap())
+        assertFalse(ok0); assertTrue(msg0.contains("login"))
+    }
 }

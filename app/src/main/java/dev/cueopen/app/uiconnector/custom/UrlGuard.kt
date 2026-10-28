@@ -92,8 +92,9 @@ interface HttpExec {
     suspend fun exec(r: HttpReq): HttpRes
 }
 
-/** Executor real (OkHttp): sem redirecionamentos, 20 s, resposta limitada a 256 KB. */
+/** Executor real (OkHttp): sem redirecionamentos, 20 s, resposta limitada a 2 MB (feeds RSS grandes). */
 class OkHttpExec(permissive: Boolean = false) : HttpExec {
+    companion object { const val MAX_BODY = 2L * 1024 * 1024 }
     private val client: OkHttpClient = OkHttpClient.Builder()
         .followRedirects(false)
         .followSslRedirects(false)
@@ -111,7 +112,7 @@ class OkHttpExec(permissive: Boolean = false) : HttpExec {
             r.headers.forEach { (k, v) -> header(k, v) }
         }.build()
         client.newCall(req).execute().use { res ->
-            HttpRes(res.code, res.headers.toMultimap(), res.peekBody(262_144).string())
+            HttpRes(res.code, res.headers.toMultimap(), res.peekBody(MAX_BODY).string())
         }
     }
 }

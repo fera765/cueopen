@@ -5,6 +5,7 @@ import android.app.TimePickerDialog
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -123,7 +124,8 @@ fun AgentEditScreen(nav: NavController, id: String) {
                 }
             }
             CueField(a.name, { a = a.copy(name = it) }, "Nome do Agent")
-            CueField(a.instructions, { a = a.copy(instructions = it) }, "Instruções (como deve agir, tom, objetivos)", minLines = 5)
+            // Caixa de tamanho fixo: prompts grandes rolam por dentro em vez de esticar a tela.
+            CueField(a.instructions, { a = a.copy(instructions = it) }, "Instruções (como deve agir, tom, objetivos)", modifier = Modifier.height(200.dp), minLines = 5)
             ModelPicker(a.model ?: "", { a = a.copy(model = it.ifBlank { null }) }, "Modelo (vazio = padrão do app)", allowEmpty = true)
             SectionLabel("Autonomia")
             ToggleRow("Pode trabalhar de forma autônoma", "Quando ligado, o próprio agente decide, pela conversa, se e de quanto em quanto tempo deve acordar para seguir uma tarefa contínua. Sem um pedido assim, ele fica dormindo.", a.autonomous) { a = a.copy(autonomous = it) }
@@ -138,69 +140,91 @@ fun AgentEditScreen(nav: NavController, id: String) {
                 ToggleRow("Notificar quando agir", "Avisa quando um ciclo fizer algo (silencioso quando nada muda)", a.notifyOnAction) { a = a.copy(notifyOnAction = it) }
             }
             DevicePermissionsCard(a) { a = it }
-            SectionLabel("Ferramentas")
-            ToggleRow("Terminal Linux", "Executar comandos no sandbox", a.useTerminal) { a = a.copy(useTerminal = it) }
-            ToggleRow("Browser", "Navegar e interagir com sites", a.useBrowser) { a = a.copy(useBrowser = it) }
-            // UI Connectors (SDK): um toggle por conector. Login, limites e "Agent required ?" ficam na tela do conector.
-            val uiHub = dev.cueopen.app.CueApp.instance.uiConnectors
-            if (uiHub.connectors.isNotEmpty()) {
-                SectionLabel("UI Conectores")
-                uiHub.connectors.forEach { uc ->
-                    ToggleRow(
-                        "Usar ${uc.spec.name}",
-                        "Libera as ferramentas de ${uc.spec.name} para este agente. Sessão, limites e credenciais ficam em Conectores → UI Conectores; o agente nunca vê a senha.",
-                        uc.spec.id in a.uiConnectorIds,
-                    ) { on ->
-                        a = a.copy(uiConnectorIds = if (on) (a.uiConnectorIds + uc.spec.id).distinct() else a.uiConnectorIds - uc.spec.id)
-                    }
-                }
+            SectionLabel("Capacidades")
+            var capTab by remember { mutableStateOf(0) }
+            Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                val nUic = a.uiConnectorIds.size
+                Chip("Ferramentas", capTab == 0) { capTab = 0 }
+                Chip("UI Conectores" + if (nUic > 0) " ($nUic)" else "", capTab == 1) { capTab = 1 }
+                Chip("Carteira" + if (walletAccess) " ✓" else "", capTab == 2) { capTab = 2 }
             }
-            SectionLabel("Carteira Solana")
-            ToggleRow(
-                "Permitir acesso à carteira",
-                "Ative para este agente apenas as capacidades selecionadas abaixo. Chaves privadas e frase de recuperação nunca são disponibilizadas.",
-                walletAccess
-            ) { walletAccess = it }
-            if (walletAccess) {
-                Column(
-                    Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(c.surface2).padding(12.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    ToggleRow("Consultar endereço público", "Permite ler o endereço público da carteira local.", walletReadAddress) { walletReadAddress = it }
-                    ToggleRow("Consultar saldo SOL", "Permite consultar o saldo on-chain da rede selecionada.", walletReadBalance) { walletReadBalance = it }
-                    ToggleRow("Solicitar transferência", "Permite criar um pedido de envio de SOL. Por padrão, cada pedido exige aprovação manual.", walletRequestTransfer) { walletRequestTransfer = it; if (!it) walletAutonomousTransfer = false }
-                    if (walletRequestTransfer) {
-                        ToggleRow(
-                            "Transferência automática (sem aprovação manual)",
-                            "O agente assina e envia transferências sozinho, sem confirmar a cada vez, para qualquer destinatário. Sempre respeita os limites por transação e diário deste agente. Use com cautela.",
-                            walletAutonomousTransfer
-                        ) { walletAutonomousTransfer = it }
-                        if (walletAutonomousTransfer) {
+            Column(
+                Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).background(c.surface).border(1.dp, c.line, RoundedCornerShape(16.dp)).padding(12.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+            when (capTab) {
+                0 -> {
+                    ToggleRow("Terminal Linux", "Executar comandos no sandbox", a.useTerminal) { a = a.copy(useTerminal = it) }
+                    ToggleRow("Browser", "Navegar e interagir com sites", a.useBrowser) { a = a.copy(useBrowser = it) }
+
+                }
+                1 -> {
+                    // UI Connectors (SDK): um toggle por conector. Login, limites e "Agent required ?" ficam na tela do conector.
+                    val uiHub = dev.cueopen.app.CueApp.instance.uiConnectors
+                    if (uiHub.connectors.isEmpty()) Text("Nenhum UI Conector ainda. Crie em Conectores → UI Conectores.", fontSize = 13.sp, color = c.ink3)
+                    else {
+                        uiHub.connectors.forEach { uc ->
+                            ToggleRow(
+                                "Usar ${uc.spec.name}",
+                                uc.spec.description.take(90),
+                                uc.spec.id in a.uiConnectorIds,
+                            ) { on ->
+                                a = a.copy(uiConnectorIds = if (on) (a.uiConnectorIds + uc.spec.id).distinct() else a.uiConnectorIds - uc.spec.id)
+                            }
+                        }
+                    }
+
+                }
+                else -> {
+                    ToggleRow(
+                        "Permitir acesso à carteira",
+                        "Ative para este agente apenas as capacidades selecionadas abaixo. Chaves privadas e frase de recuperação nunca são disponibilizadas.",
+                        walletAccess
+                    ) { walletAccess = it }
+                    if (walletAccess) {
+                        Column(
+                            Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(c.surface2).padding(12.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            ToggleRow("Consultar endereço público", "Permite ler o endereço público da carteira local.", walletReadAddress) { walletReadAddress = it }
+                            ToggleRow("Consultar saldo SOL", "Permite consultar o saldo on-chain da rede selecionada.", walletReadBalance) { walletReadBalance = it }
+                            ToggleRow("Solicitar transferência", "Permite criar um pedido de envio de SOL. Por padrão, cada pedido exige aprovação manual.", walletRequestTransfer) { walletRequestTransfer = it; if (!it) walletAutonomousTransfer = false }
+                            if (walletRequestTransfer) {
+                                ToggleRow(
+                                    "Transferência automática (sem aprovação manual)",
+                                    "O agente assina e envia transferências sozinho, sem confirmar a cada vez, para qualquer destinatário. Sempre respeita os limites por transação e diário deste agente. Use com cautela.",
+                                    walletAutonomousTransfer
+                                ) { walletAutonomousTransfer = it }
+                                if (walletAutonomousTransfer) {
+                                    Text(
+                                        "⚠ Modo autônomo ativo: o agente pode enviar para qualquer endereço, sem aprovação manual. A allowlist é opcional (em Carteira → Mais); se vazia, qualquer destinatário é permitido. Os limites por transação/dia são o único teto de segurança — mantenha-os.",
+                                        fontSize = 12.sp,
+                                        color = c.warn
+                                    )
+                                }
+                            }
+                            ToggleRow(
+                                "Day trade (mercado + swaps + regras)",
+                                "Libera dados de mercado reais (preço, velas, liquidez), listar tokens, executar trocas e armar stop-loss/take-profit. Entradas em SOL respeitam o limite por operação. Não concede envio de SOL a terceiros.",
+                                walletDayTrade
+                            ) { walletDayTrade = it }
+                            if (walletDayTrade) {
+                                Text(
+                                    "⚠ Day trade envolve risco de perda. O agente opera com dados 100% reais e só relata execução com a assinatura on-chain; nunca promete lucro. O teto por operação (em SOL) limita cada entrada.",
+                                    fontSize = 12.sp,
+                                    color = c.warn
+                                )
+                            }
                             Text(
-                                "⚠ Modo autônomo ativo: o agente pode enviar para qualquer endereço, sem aprovação manual. A allowlist é opcional (em Carteira → Mais); se vazia, qualquer destinatário é permitido. Os limites por transação/dia são o único teto de segurança — mantenha-os.",
+                                "Chaves privadas e a frase de recuperação nunca são expostas ao agente. Os limites locais são sempre aplicados no assinador.",
                                 fontSize = 12.sp,
-                                color = c.warn
+                                color = c.ink2
                             )
                         }
                     }
-                    ToggleRow(
-                        "Day trade (mercado + swaps + regras)",
-                        "Libera dados de mercado reais (preço, velas, liquidez), listar tokens, executar trocas e armar stop-loss/take-profit. Entradas em SOL respeitam o limite por operação. Não concede envio de SOL a terceiros.",
-                        walletDayTrade
-                    ) { walletDayTrade = it }
-                    if (walletDayTrade) {
-                        Text(
-                            "⚠ Day trade envolve risco de perda. O agente opera com dados 100% reais e só relata execução com a assinatura on-chain; nunca promete lucro. O teto por operação (em SOL) limita cada entrada.",
-                            fontSize = 12.sp,
-                            color = c.warn
-                        )
-                    }
-                    Text(
-                        "Chaves privadas e a frase de recuperação nunca são expostas ao agente. Os limites locais são sempre aplicados no assinador.",
-                        fontSize = 12.sp,
-                        color = c.ink2
-                    )
+
                 }
+            }
             }
             SectionLabel("Skills (vazio = todas ativas)")
             FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
