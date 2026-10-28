@@ -91,7 +91,7 @@ object Compute {
                 }
                 ch.isLetter() || ch == '_' || ch == '$' -> {
                     val st = i
-                    if (ch == '$') i++ else while (i < src.length && (src[i].isLetterOrDigit() || src[i] == '_')) i++
+                    if (ch == '$') { i++ } else { while (i < src.length && (src[i].isLetterOrDigit() || src[i] == '_')) i++ }
                     out.add(Tok('i', src.substring(st, i), st))
                 }
                 else -> {
