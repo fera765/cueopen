@@ -38,11 +38,13 @@ class ContextManager(private val store: Store, private val sandbox: Sandbox, pri
     fun storeToolOutput(sessionId: String, callId: String, output: String, limit: Int = 8_000): String {
         if (output.length <= limit) return output
         val dir = File(sandbox.workspaceFor(sessionId), ".cue/out").apply { mkdirs() }
-        val f = File(dir, "${callId.takeLast(12)}.txt")
-        f.writeText(output)
+        // nome pelo CONTEÚDO: a mesma saída sempre cai no mesmo arquivo (nada de cópias em cadeia)
+        val f = File(dir, "o" + Integer.toHexString(output.hashCode()) + "_" + output.length + ".txt")
+        if (!f.exists()) f.writeText(output)
         val head = output.take(limit / 2)
         val tail = output.takeLast(limit / 2)
-        return "$head\n…[${output.length - limit} caracteres omitidos — saída completa em .cue/out/${f.name} no seu workspace; use file_read]…\n$tail"
+        val headLines = head.count { it == '\n' } + 1
+        return "$head\n…[${output.length - limit} caracteres omitidos — saída completa em .cue/out/${f.name}. Para ver o trecho omitido use file_read path=.cue/out/${f.name} offset=$headLines (lê por partes; não releia do início)]…\n$tail"
     }
 
     /** Antes de cada chamada: limpa resultados de ferramentas antigos (mantém os mais recentes). */

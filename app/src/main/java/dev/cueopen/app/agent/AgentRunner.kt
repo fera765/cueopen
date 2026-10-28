@@ -164,6 +164,7 @@ class AgentRunner(
         var lastToolSig = ""
         // Detecção de loop de ferramentas: mesma chamada (nome+args) repetida sem progresso.
         val toolSigWindow = ArrayDeque<String>()
+        val resultSigWindow = ArrayDeque<String>()
         var toolLoopNudges = 0
         val controlTools = setOf("sleep", "set_schedule", "ask_user", "finish", "complete_step", "notes_write", "notes_read")
         while (scope.isActive) {
@@ -269,6 +270,7 @@ class AgentRunner(
             var stopLoop: SessionStatus? = null
             var sleepReq: Pair<Int, String>? = null
             val resultHashes = HashMap<String, Int>()
+            val resultLong = HashSet<String>()
             for (call in reply.toolCalls) {
                 // Auto-recuperação: uma exceção em qualquer ferramenta vira um erro acionável devolvido
                 // ao modelo (nunca derruba o loop do agente).
@@ -281,6 +283,7 @@ class AgentRunner(
                     ToolResult(output = "ERRO ao executar a ferramenta \"${call.name}\": ${t.message?.take(300) ?: t.javaClass.simpleName}. Diagnostique a causa, ajuste os argumentos/abordagem e tente de outra forma; não repita a mesma chamada. Se estiver bloqueado, chame finish explicando.")
                 }
                 resultHashes[call.id] = result.output.hashCode()
+                if (result.output.length > 200) resultLong.add(call.id)
                 val ctxOut = ctxMgr.storeToolOutput(sessionId, call.id, result.output)
                 store.editSession(sessionId) {
                     it.copy(llm = it.llm + LlmMessage("tool", ctxOut, toolCallId = call.id, name = call.name))
@@ -299,6 +302,13 @@ class AgentRunner(
                     toolSigWindow.addLast(sig)
                     while (toolSigWindow.size > 10) toolSigWindow.removeFirst()
                     if (toolSigWindow.count { it == sig } >= 3) tripped = call.name
+                    // mesmo conteúdo longo devolvido de novo e de novo (ex.: reler a mesma coisa por caminhos diferentes)
+                    if (call.id in resultLong) {
+                        val rsig = call.name + "#" + resultHashes[call.id]
+                        resultSigWindow.addLast(rsig)
+                        while (resultSigWindow.size > 10) resultSigWindow.removeFirst()
+                        if (resultSigWindow.count { it == rsig } >= 3) tripped = call.name
+                    }
                 }
                 if (tripped != null) {
                     if (++toolLoopNudges >= 2) {
@@ -308,7 +318,7 @@ class AgentRunner(
                         return
                     }
                     store.editSession(sessionId) {
-                        it.copy(llm = it.llm + LlmMessage("user", "[Sistema] Você chamou \"$tripped\" com os mesmos argumentos repetidamente e obteve o mesmo resultado. PARE de repetir: releia o resultado anterior, mude a abordagem (outro caminho/comando/argumento) ou, se a tarefa estiver concluída ou bloqueada, chame finish explicando o motivo. Não repita a mesma chamada."))
+                        it.copy(llm = it.llm + LlmMessage("user", "[Sistema] Você chamou \"$tripped\" repetidamente e obteve o MESMO resultado. PARE de repetir: releia o resultado anterior, mude a abordagem (outro caminho/comando/argumento) ou, se a tarefa estiver concluída ou bloqueada, chame finish explicando o motivo. Não repita a mesma chamada."))
                     }
                 }
             }
@@ -487,6 +497,39 @@ class AgentRunner(
     }
 
     private fun today() = SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date())
+
+    /**
+     * Leitura paginada de arquivo: devolve linhas numeradas [offset, offset+limit) com no máximo ~7000 caracteres
+     * (abaixo do limite de armazenamento de saídas, então NUNCA gera um novo .cue/out — o que antes causava um
+     * ciclo infinito: ler a saída truncada gerava outra saída truncada em outro arquivo) e diz onde continuar.
+     */
+    private fun readFileChunk(f: java.io.File, shown: String, offset: Int, limit: Int): String {
+        if (!f.exists()) return "ERRO: arquivo não existe: $shown. Use file_list para ver o diretório."
+        if (f.isDirectory) return "ERRO: $shown é um diretório. Use file_list."
+        val head = f.inputStream().use { ins -> ByteArray(4096).let { b -> val n = ins.read(b); if (n <= 0) ByteArray(0) else b.copyOf(n) } }
+        if (head.any { it == 0.toByte() }) return "Arquivo binário (${f.length()} bytes): $shown — não dá para ler como texto."
+        val start = offset.coerceAtLeast(1)
+        val max = limit.coerceIn(1, 1000)
+        val sb = StringBuilder()
+        var total = 0
+        var last = start - 1
+        var full = false
+        f.bufferedReader().useLines { seq ->
+            seq.forEach { line ->
+                total++
+                if (total < start || full) return@forEach
+                if (total >= start + max) { full = true; return@forEach }
+                val l = if (line.length > 500) line.take(500) + " …(+${line.length - 500} chars)" else line
+                if (sb.length + l.length > 7_000) { full = true; return@forEach }
+                sb.append(total.toString().padStart(6)).append("│ ").append(l).append('\n')
+                last = total
+            }
+        }
+        if (total == 0) return "$shown — arquivo vazio."
+        if (start > total) return "$shown tem só $total linhas; offset=$start está além do fim. Nada novo para ler."
+        val tail = if (last < total) "[continua: chame file_read com path=$shown offset=${last + 1} para as próximas linhas]" else "[fim do arquivo]"
+        return "$shown — linhas $start–$last de $total (${f.length() / 1024} KB)\n" + sb.toString() + tail
+    }
 
     /** Normaliza argumentos JSON (chaves ordenadas, espaços ignorados) para comparar chamadas. */
     private fun normArgs(raw: String): String {
@@ -870,7 +913,9 @@ class AgentRunner(
         add(tool("show_file", "Mostra um arquivo gerado (imagem, SVG, HTML, PDF, código) direto no chat para o usuário.", buildJsonObject {
             put("path", str("Caminho do arquivo")); put("caption", str("Legenda curta"))
         }, listOf("path")))
-        add(tool("file_read", "Lê um arquivo de texto.", buildJsonObject { put("path", str("Caminho")) }, listOf("path")))
+        add(tool("file_read", "Lê um arquivo de texto POR PARTES, com números de linha. Arquivos grandes: leia em sequência usando offset (o resultado diz a próxima linha). Não releia trechos que você já leu.", buildJsonObject {
+            put("path", str("Caminho")); put("offset", int("Linha inicial (1 = início; padrão 1)")); put("limit", int("Quantidade de linhas (padrão 250, máx. 1000)"))
+        }, listOf("path")))
         add(tool("file_list", "Lista arquivos de um diretório.", buildJsonObject { put("path", str("Diretório (padrão: workspace)")) }))
         if (web) {
             add(tool("browser_navigate", "Abre uma URL (ou termos de busca) no browser.", buildJsonObject { put("url", str("URL ou busca")) }, listOf("url")))
@@ -1761,7 +1806,7 @@ class AgentRunner(
                         }
                     }
                 }
-                "file_read" -> sandbox.hostFile(s("path"), sessionId).let { if (it.exists()) it.readText().take(20_000) else "Arquivo não existe." }
+                "file_read" -> readFileChunk(sandbox.hostFile(s("path"), sessionId), s("path"), i("offset") ?: 1, i("limit") ?: 250)
                 "file_list" -> {
                     val d = if (s("path").isBlank()) sandbox.workspaceFor(sessionId) else sandbox.hostFile(s("path"), sessionId)
                     d.walkTopDown().maxDepth(3).filter { it != d }.take(300)
