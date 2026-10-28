@@ -89,7 +89,7 @@ fun UiConnectorEditorScreen(nav: NavController, id: String) {
         LazyColumn(Modifier.padding(pad), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             item {
                 Text(
-                    "Descreva o conector em JSON (login, painéis, ações e ferramentas do agente). Só requisições HTTPS ao host de baseUrl — nada mais roda no aparelho. Toque em Doc para baixar o prompt do SDK e usar em qualquer IA, ou em "Criar com a IA" para o chat criar, validar e instalar.",
+                    "Descreva o conector em JSON (login, painéis, ações e ferramentas do agente). Só requisições HTTPS ao host de baseUrl — nada mais roda no aparelho. Toque em Doc para baixar o prompt do SDK e usar em qualquer IA, ou em Criar com a IA para o chat criar, validar e instalar.",
                     fontSize = 13.sp, color = c.ink2,
                 )
             }
