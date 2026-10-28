@@ -82,7 +82,7 @@ class SniperConnector(private val ctx: Context) : UiConnector {
     )
 
     private val wallet = SolanaWalletRepository(ctx.applicationContext)
-    private val market = SolanaMarketDataClient(ctx.applicationContext)
+    private val market = SolanaMarketDataClient()
     private val store = SniperStore(ctx.applicationContext)
     private val bg = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val tradeMutex = Mutex()
