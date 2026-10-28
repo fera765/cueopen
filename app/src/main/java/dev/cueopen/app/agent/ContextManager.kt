@@ -42,22 +42,48 @@ class ContextManager(private val store: Store, private val sandbox: Sandbox, pri
         val f = File(dir, "o" + Integer.toHexString(output.hashCode()) + "_" + output.length + ".txt")
         if (!f.exists()) f.writeText(output) else f.setLastModified(System.currentTimeMillis())
         // limpeza: mantém só as 20 saídas mais recentes (evita acúmulo de arquivos quase iguais)
-        runCatching { dir.listFiles()?.sortedByDescending { it.lastModified() }?.drop(20)?.forEach { it.delete() } }
+        runCatching { dir.listFiles()?.sortedByDescending { it.lastModified() }?.drop(40)?.forEach { it.delete() } }
         val head = output.take(limit / 2)
         val tail = output.takeLast(limit / 2)
         val headLines = head.count { it == '\n' } + 1
         return "$head\n…[${output.length - limit} caracteres omitidos — saída completa em .cue/out/${f.name}. Para ver o trecho omitido use file_read path=.cue/out/${f.name} offset=$headLines (lê por partes; não releia do início)]…\n$tail"
     }
 
-    /** Antes de cada chamada: limpa resultados de ferramentas antigos (mantém os mais recentes). */
-    fun microCompact(h: List<LlmMessage>, keepRecentTools: Int = 6): List<LlmMessage> {
+    /**
+     * Antes de cada chamada: encolhe o que é antigo e irrelevante para NÃO inflar o input, mas sem PERDER nada.
+     * Mantém inteiras as últimas [keepRecentTools] respostas de ferramenta; as mais antigas (> 240 chars) viram
+     * um resumo curto com um ponteiro file_read para a saída completa salva em .cue/out — o agente só traz de volta
+     * o que precisar. Narrações antigas do assistente também são encurtadas (não têm valor de estado). As mensagens
+     * do usuário e os resultados recentes ficam intactos, preservando a qualidade.
+     */
+    fun microCompact(h: List<LlmMessage>, sessionId: String? = null, keepRecentTools: Int = 6): List<LlmMessage> {
         val toolIdx = h.indices.filter { h[it].role == "tool" }
-        val old = toolIdx.dropLast(keepRecentTools).toSet()
+        val oldTools = toolIdx.dropLast(keepRecentTools).toSet()
+        val lastAssistant = h.indexOfLast { it.role == "assistant" }
         return h.mapIndexed { i, m ->
-            if (i in old && (m.content?.length ?: 0) > 300)
-                m.copy(content = (m.content ?: "").take(220).trimEnd() + "\n…[resultado antigo compactado]")
-            else m
+            when {
+                i in oldTools && (m.content?.length ?: 0) > 240 -> {
+                    val full = m.content ?: ""
+                    val ptr = if (sessionId != null) stash(sessionId, full) else null
+                    val head = full.take(200).trimEnd()
+                    m.copy(content = head + "\n…[resultado antigo recolhido para não inflar o contexto" +
+                        (if (ptr != null) " — recupere o conteúdo completo com file_read path=$ptr" else "") + "]")
+                }
+                // narração antiga do assistente (sem ferramentas): só o começo basta como fio da meada
+                m.role == "assistant" && i != lastAssistant && m.toolCallsJson.isNullOrBlank() && (m.content?.length ?: 0) > 280 ->
+                    m.copy(content = (m.content ?: "").take(200).trimEnd() + " …[resumido]")
+                else -> m
+            }
         }
+    }
+
+    /** Salva um conteúdo (endereçado pelo hash) em .cue/out e devolve o caminho relativo para file_read. */
+    private fun stash(sessionId: String, content: String): String {
+        val dir = File(sandbox.workspaceFor(sessionId), ".cue/out").apply { mkdirs() }
+        val f = File(dir, "o" + Integer.toHexString(content.hashCode()) + "_" + content.length + ".txt")
+        if (!f.exists()) runCatching { f.writeText(content) } else f.setLastModified(System.currentTimeMillis())
+        runCatching { dir.listFiles()?.sortedByDescending { it.lastModified() }?.drop(40)?.forEach { it.delete() } }
+        return ".cue/out/${f.name}"
     }
 
     // ---------- Camada 2 ----------

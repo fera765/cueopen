@@ -82,6 +82,9 @@ class IqOptionConnector(private val kv: KvStore? = null) : UiConnector {
                 "Até este tempo a operação é curta: o agente pode comprar (call) e vender (put). Acima disso é LONGA: só compra (call).",
                 SettingType.NUMBER, "5",
             ),
+            SettingSpec("require_jev", "Exigir validação TypeSafe Jev",
+                "Desligado (padrão): o agente opera usando só os dados e filtros do próprio conector (confluência, entrada contra o candle, janela da vela), SEM consultar o avaliador TypeSafe Jev. Ligado: toda ordem passa obrigatoriamente pelo Jev.",
+                SettingType.SWITCH, "false", risky = true),
             SettingSpec("mm_enabled", "Ativar Masaniello (sobrescreve o valor de entrada)",
                 "Ligado: o Masaniello assume o VALOR de todas as entradas do agente (ignora o valor pedido e o 'Valor máximo por operação') e o MODO de operar (uma operação por vez, ignora 'Máx. de operações abertas'). " +
                 "O risco passa a ser limitado pela banca do ciclo: um ciclo nunca perde mais que ela. Desligado: valem o valor e os limites normais.",

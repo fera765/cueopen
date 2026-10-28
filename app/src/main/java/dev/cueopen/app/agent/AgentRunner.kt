@@ -192,7 +192,7 @@ class AgentRunner(
                 s = ctxMgr.compactIfNeeded(s)
             }
             val sys = LlmMessage("system", systemPrompt(sessionId, agent, s))
-            var history = ctxMgr.microCompact(s.llm)
+            var history = ctxMgr.microCompact(s.llm, sessionId)
             if (history.firstOrNull()?.role != "user") history = listOf(LlmMessage("user", "[Contexto anterior compactado no resumo da sessão. Continue de onde parou.]")) + history
             // Resiliência: tenta a chamada; em erro, reenvia (backoff) e só desiste após 3 falhas.
             val replyTokenLimit = tokenBudgetOverride?.let { budget ->
@@ -878,7 +878,11 @@ class AgentRunner(
                         appendLine("- ${uc.spec.name} (${st}): ferramentas uic_${uc.spec.id}_* — ${uc.spec.description}. Use-as sempre que o pedido envolver este serviço.")
                     }
                     if (hub.hasTradingTools(agent)) {
-                        appendLine("- ORDENS (ex.: IQ Option buy): ANTES de CADA compra e CADA venda chame typesafe_jev_check (venue = id do conector, id = ticker, direction call/put) e só opere com ✅ OPERAR; o app recusa ordens sem validação (uso único, 5 min). Operações CURTAS usam compra (call) e venda (put); operações LONGAS (acima do limite de minutos curtos do conector) só de COMPRA (call).")
+                        // conectores de ordem que dispensam o Jev (setting require_jev OFF) vs. os que exigem
+                        val noJev = usable.filter { it.spec.tools.any { t -> t.requiresSignal } && it.spec.settings.any { s2 -> s2.id == "require_jev" } && !hub.settings(it).bool("require_jev") }.map { it.spec.name }
+                        val needJev = usable.filter { it.spec.tools.any { t -> t.requiresSignal } && (it.spec.settings.none { s2 -> s2.id == "require_jev" } || hub.settings(it).bool("require_jev")) }.map { it.spec.name }
+                        if (needJev.isNotEmpty()) appendLine("- ORDENS em ${needJev.joinToString()}: ANTES de CADA compra e CADA venda chame typesafe_jev_check (venue = id do conector, id = ticker, direction call/put) e só opere com ✅ OPERAR; o app recusa ordens sem validação (uso único, 5 min). Operações CURTAS usam compra (call) e venda (put); operações LONGAS (acima do limite de minutos curtos do conector) só de COMPRA (call).")
+                        if (noJev.isNotEmpty()) appendLine("- ORDENS em ${noJev.joinToString()}: a validação TypeSafe Jev está DESLIGADA nas configurações — NÃO chame typesafe_jev_check para este conector; decida pela confluência dos indicadores, estratégias e filtros do próprio conector, e opere direto (os demais filtros do app — janela da vela, entrada contra o candle, regras de risco — continuam valendo).")
                         appendLine("- Solana day trade e conectores de trading têm capital e posições independentes: não use um para cobrir o outro. Se a resposta disser que outro agente está operando o ativo, aguarde ou escolha outro; faça uma ordem por vez.")
                     }
                     appendLine("- A sessão e as credenciais são gerenciadas pelo app; você nunca vê nem pede senha. Se uma ferramenta responder que é preciso fazer login, avise o usuário.")

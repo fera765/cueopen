@@ -240,7 +240,12 @@ class UiConnectorHub(context: Context) {
         val strArgs = args.entries.associate { (k, v) -> k to ((v as? JsonPrimitive)?.contentOrNull ?: v.toString()) }
         val out = try {
             ensureLoggedIn(id).getOrThrow()
-            if (ts.requiresSignal) guardedCall(c, tool, agentKey, strArgs) else c.callTool(tool, strArgs, settings(c))
+            if (ts.requiresSignal) {
+                // "require_jev": se o conector tem a setting e ela está OFF, pula o filtro TypeSafe Jev,
+                // mas mantém a coordenação (uma ordem por vez, reserva do ativo). Sem a setting = sempre exige (padrão seguro).
+                val requireJev = c.spec.settings.none { it.id == "require_jev" } || settings(c).bool("require_jev")
+                guardedCall(c, tool, agentKey, strArgs, requireJev)
+            } else c.callTool(tool, strArgs, settings(c))
         } catch (t: kotlinx.coroutines.CancellationException) {
             throw t
         } catch (t: Throwable) {
@@ -256,7 +261,7 @@ class UiConnectorHub(context: Context) {
      * (3) reserva o ativo para este agente (outro agente não opera o mesmo ativo ao mesmo tempo);
      * (4) se a ordem não saiu (recusada/erro), devolve a aprovação para não gastar uma validação à toa.
      */
-    private suspend fun guardedCall(c: UiConnector, tool: String, agentKey: String, args: Map<String, String>): String {
+    private suspend fun guardedCall(c: UiConnector, tool: String, agentKey: String, args: Map<String, String>, requireValidation: Boolean = true): String {
         val venue = c.spec.id
         val intents = c.orderIntents(tool, args)
         if (intents.isEmpty()) return "RECUSADO: não foi possível identificar o ativo e o lado (compra/venda) da ordem. Confira os argumentos."
@@ -265,12 +270,14 @@ class UiConnectorHub(context: Context) {
             val consumed = ArrayList<SignalGate.Approval>()
             fun undo() { consumed.forEach { gate.restore(it) } }
             for (intent in intents) {
-                val approval = gate.consume(agentKey, venue, setOf(intent.asset), intent.side)
-                if (approval == null) {
-                    undo()
-                    return@withLock missingValidation(venue, intent, gate)
+                if (requireValidation) {
+                    val approval = gate.consume(agentKey, venue, setOf(intent.asset), intent.side)
+                    if (approval == null) {
+                        undo()
+                        return@withLock missingValidation(venue, intent, gate)
+                    }
+                    consumed.add(approval)
                 }
-                consumed.add(approval)
                 val holder = TradeCoordinator.claim(venue, intent.asset, agentKey)
                 if (holder != null) {
                     undo()
