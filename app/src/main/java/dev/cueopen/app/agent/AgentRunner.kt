@@ -168,6 +168,7 @@ class AgentRunner(
         val toolSigWindow = ArrayDeque<String>()
         val resultSigWindow = ArrayDeque<String>()
         var toolLoopNudges = 0
+        var cleanRounds = 0
         val controlTools = setOf("sleep", "set_schedule", "ask_user", "finish", "complete_step", "notes_write", "notes_read")
         while (scope.isActive) {
             val workerUsed = if (tokenBudgetOverride != null) {
@@ -294,34 +295,44 @@ class AgentRunner(
                 if (result.stop != null) stopLoop = result.stop
                 if (result.sleepSeconds != null) sleepReq = result.sleepSeconds to result.output
             }
-            // Loop de ferramentas: mesma ação repetida sem progresso → corrige e, se insistir, interrompe.
+            // Loop de ferramentas: mesma ação repetida SEM progresso → avisa o modelo e, só se insistir muito, interrompe.
+            // Ferramentas de ambiente (browser, aparelho, shell, conectores) mudam de estado entre chamadas — rolar,
+            // executar script, consultar posições: repetir é legítimo. Elas têm limite bem maior e nunca contam
+            // "mesmo resultado com argumentos diferentes". Leituras puras (arquivo, memória, spec) seguem o limite rígido.
             run {
                 var tripped: String? = null
+                var trippedRepeatable = true
                 for (call in reply.toolCalls) {
                     if (call.name in controlTools) continue
-                    // Assinatura = ferramenta + argumentos normalizados + resultado. Argumentos
-                    // diferentes ou resultado novo = progresso; só conta se tudo for idêntico.
+                    val repeatable = isRepeatableTool(call.name)
                     val sig = call.name + "|" + normArgs(call.argsJson) + "|" + (resultHashes[call.id] ?: 0)
                     toolSigWindow.addLast(sig)
-                    while (toolSigWindow.size > 10) toolSigWindow.removeFirst()
-                    if (toolSigWindow.count { it == sig } >= 3) tripped = call.name
-                    // mesmo conteúdo longo devolvido de novo e de novo (ex.: reler a mesma coisa por caminhos diferentes)
-                    if (call.id in resultLong) {
+                    while (toolSigWindow.size > 16) toolSigWindow.removeFirst()
+                    val same = toolSigWindow.count { it == sig }
+                    if (same >= (if (repeatable) 6 else 3)) { tripped = call.name; trippedRepeatable = trippedRepeatable && repeatable }
+                    // mesmo conteúdo longo por caminhos diferentes (ex.: reler cópias do mesmo arquivo) — só para leituras puras
+                    if (!repeatable && call.id in resultLong) {
                         val rsig = call.name + "#" + resultHashes[call.id]
                         resultSigWindow.addLast(rsig)
                         while (resultSigWindow.size > 10) resultSigWindow.removeFirst()
-                        if (resultSigWindow.count { it == rsig } >= 3) tripped = call.name
+                        if (resultSigWindow.count { it == rsig } >= 3) { tripped = call.name; trippedRepeatable = false }
                     }
                 }
-                if (tripped != null) {
-                    if (++toolLoopNudges >= 2) {
+                if (tripped == null) {
+                    if (++cleanRounds >= 5) { toolLoopNudges = 0; cleanRounds = 0 } // voltou a progredir: zera os avisos
+                } else {
+                    cleanRounds = 0
+                    val limit = if (trippedRepeatable) 4 else 2
+                    if (++toolLoopNudges >= limit) {
                         runCatching { dev.cueopen.app.diag.ErrorLog.log("agent", "Loop de ferramenta sem progresso: $tripped (interrompido).", sessionId, tripped) }
-                        store.addItem(sessionId, ChatItem.Error(text = "O agente repetiu a mesma ação ($tripped) várias vezes sem progresso. Interrompi para evitar um loop de baixa qualidade. Ajuste o pedido/abordagem ou troque de modelo."))
+                        store.addItem(sessionId, ChatItem.Error(text = "O agente repetiu exatamente a mesma ação ($tripped), com os mesmos argumentos e o mesmo resultado, várias vezes seguidas. Interrompi para evitar um loop. Ajuste o pedido/abordagem ou troque de modelo."))
                         store.editSession(sessionId) { it.copy(status = SessionStatus.WAITING_USER) }
                         return
                     }
                     store.editSession(sessionId) {
-                        it.copy(llm = it.llm + LlmMessage("user", "[Sistema] Você chamou \"$tripped\" repetidamente e obteve o MESMO resultado. PARE de repetir: releia o resultado anterior, mude a abordagem (outro caminho/comando/argumento) ou, se a tarefa estiver concluída ou bloqueada, chame finish explicando o motivo. Não repita a mesma chamada."))
+                        it.copy(llm = it.llm + LlmMessage("user", "[Sistema] Você chamou \"$tripped\" várias vezes com os MESMOS argumentos e recebeu o MESMO resultado — nada mudou. " +
+                            "Se está esperando algo acontecer (página carregar, requisição chegar), espere de outro jeito (ex.: um passo diferente, outro seletor/script, browser_read) ou mude a abordagem; " +
+                            "se a tarefa estiver concluída ou bloqueada, chame finish explicando."))
                     }
                 }
             }
@@ -537,6 +548,13 @@ class AgentRunner(
     private object CustomDefParserFence { fun strip(t: String) = dev.cueopen.app.uiconnector.custom.CustomDefParser.stripFences(t) }
 
     private fun tfLabel(tf: Int) = when { tf % 3600 == 0 -> "${tf / 3600}h"; tf % 60 == 0 -> "${tf / 60} min"; else -> "${tf}s" }
+
+    /** Ferramentas cujo resultado depende do estado do ambiente (repetir pode ser legítimo). */
+    private fun isRepeatableTool(name: String): Boolean {
+        val pure = setOf("file_read", "file_list", "memory_search", "notes_read", "connector_spec", "skill_load", "connector_validate")
+        if (name in pure) return false
+        return true // browser_*, device_*, shell, uic_*, mcp_*, wallet/market e demais ferramentas de ambiente
+    }
 
     /** Normaliza argumentos JSON (chaves ordenadas, espaços ignorados) para comparar chamadas. */
     private fun normArgs(raw: String): String {
