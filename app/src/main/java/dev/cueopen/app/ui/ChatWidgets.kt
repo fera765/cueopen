@@ -89,9 +89,13 @@ object CueUi {
 
     private fun build(type: String, o: JsonObject): CueWidget = when (type) {
         "buttons", "choices" -> CueWidget.Buttons(
-            (o.arr("items", "buttons", "options")?.mapNotNull { it as? JsonObject }?.map { b ->
-                CueWidget.Btn(b.str("label", "text", def = "—"), b.str("send", "message", "value"), b.str("copy"), b.str("url", "link"), b.str("tone", def = "neutral"))
-            } ?: strList(o.arr("items")).map { CueWidget.Btn(it, it, "", "", "neutral") }).filter { it.label.isNotBlank() })
+            (o.arr("items", "buttons", "options")?.map { e ->
+                when (e) {
+                    is JsonObject -> CueWidget.Btn(e.str("label", "text", def = "—"), e.str("send", "message", "value"), e.str("copy"), e.str("url", "link"), e.str("tone", def = "neutral"))
+                    is JsonPrimitive -> e.contentOrNull.orEmpty().let { CueWidget.Btn(it, it, "", "", "neutral") }
+                    else -> CueWidget.Btn("", "", "", "", "neutral")
+                }
+            } ?: emptyList()).filter { it.label.isNotBlank() })
         "chart" -> {
             val series = o.arr("series")?.mapNotNull { it as? JsonObject }?.map {
                 CueWidget.Ser(it.str("name"), numList(it.arr("values", "data", "points")), it.str("color"))
