@@ -284,7 +284,8 @@ class AgentRunner(
                 }
                 resultHashes[call.id] = result.output.hashCode()
                 if (result.output.length > 200) resultLong.add(call.id)
-                val ctxOut = ctxMgr.storeToolOutput(sessionId, call.id, result.output)
+                // a especificação do SDK (connector_spec) vai inteira: cortá-la fazia o agente ler a sobra por arquivo em loop
+                val ctxOut = ctxMgr.storeToolOutput(sessionId, call.id, result.output, limit = if (call.name == "connector_spec") 60_000 else 8_000)
                 store.editSession(sessionId) {
                     it.copy(llm = it.llm + LlmMessage("tool", ctxOut, toolCallId = call.id, name = call.name))
                 }

@@ -40,7 +40,9 @@ class ContextManager(private val store: Store, private val sandbox: Sandbox, pri
         val dir = File(sandbox.workspaceFor(sessionId), ".cue/out").apply { mkdirs() }
         // nome pelo CONTEÚDO: a mesma saída sempre cai no mesmo arquivo (nada de cópias em cadeia)
         val f = File(dir, "o" + Integer.toHexString(output.hashCode()) + "_" + output.length + ".txt")
-        if (!f.exists()) f.writeText(output)
+        if (!f.exists()) f.writeText(output) else f.setLastModified(System.currentTimeMillis())
+        // limpeza: mantém só as 20 saídas mais recentes (evita acúmulo de arquivos quase iguais)
+        runCatching { dir.listFiles()?.sortedByDescending { it.lastModified() }?.drop(20)?.forEach { it.delete() } }
         val head = output.take(limit / 2)
         val tail = output.takeLast(limit / 2)
         val headLines = head.count { it == '\n' } + 1
