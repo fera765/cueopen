@@ -164,6 +164,10 @@ class AgentRunner(
         var repeats = 0
         var lastContent = ""
         var lastToolSig = ""
+        // Janela das últimas respostas de texto (detecta repetição mesmo alternando frases).
+        val recentTexts = ArrayDeque<String>()
+        // Quantas vezes seguidas o modelo ANUNCIOU uma ação ("vou pesquisar…") sem chamar ferramenta.
+        var intentNoActionTurns = 0
         // Detecção de loop de ferramentas: mesma chamada (nome+args) repetida sem progresso.
         val toolSigWindow = ArrayDeque<String>()
         val resultSigWindow = ArrayDeque<String>()
@@ -247,7 +251,10 @@ class AgentRunner(
             val curToolSig = reply.toolCalls.joinToString(";") { it.name + "|" + normArgs(it.argsJson) }
             val sameActions = reply.toolCalls.isEmpty() || curToolSig == lastToolSig
             lastToolSig = curToolSig
-            if (cNow.length > 40 && sameActions && similar(cNow, lastContent)) {
+            // Repetição de texto: compara com a JANELA das últimas respostas (não só a anterior), para pegar
+            // o modelo que fica alternando 2–3 frases quase iguais sem progredir. Só conta como repetição se
+            // as AÇÕES também forem as mesmas (mesma ferramenta+args, ou nenhuma) — URLs/args diferentes = progresso.
+            if (cNow.length > 15 && sameActions && recentTexts.any { similar(cNow, it) }) {
                 if (++repeats >= 2) {
                     runCatching { dev.cueopen.app.diag.ErrorLog.log("agent", "Modelo entrou em repetição (interrompido).", sessionId, "llm") }
                     store.addItemUnique(sessionId, ChatItem.Error(text = "O modelo entrou em repetição. Interrompi para não gastar tokens à toa. Reformule o pedido ou troque de modelo."))
@@ -255,6 +262,7 @@ class AgentRunner(
                     return
                 }
             } else repeats = 0
+            if (cNow.isNotEmpty()) { recentTexts.addLast(cNow); while (recentTexts.size > 3) recentTexts.removeFirst() }
             lastContent = cNow
             if (!reply.content.isNullOrBlank()) {
                 val txt = reply.content.trim()
@@ -267,6 +275,25 @@ class AgentRunner(
                 else store.addItem(sessionId, ChatItem.Assistant(text = txt, final = isFinal))
             }
             if (reply.toolCalls.isEmpty()) {
+                // Regra de AÇÃO OBRIGATÓRIA: o modelo ANUNCIOU uma ação ("vou pesquisar/verificar/testar…") mas
+                // não chamou nenhuma ferramenta. Em vez de encerrar (ou só dormir) sem agir, força a execução na
+                // próxima volta; se insistir, interrompe. Isso quebra o loop de "anúncios" sem progresso.
+                if (cNow.isNotBlank() && hasActionIntent(cNow)) {
+                    if (++intentNoActionTurns >= 3) {
+                        runCatching { dev.cueopen.app.diag.ErrorLog.log("agent", "Modelo anunciou ações sem executá-las (interrompido).", sessionId, "llm") }
+                        store.addItemUnique(sessionId, ChatItem.Error(text = "O modelo ficou anunciando ações (\"vou pesquisar…\") sem executá-las. Interrompi para não gastar tokens à toa. Reformule o pedido ou troque de modelo."))
+                        store.editSession(sessionId) { it.copy(status = SessionStatus.WAITING_USER) }
+                        return
+                    }
+                    store.editSession(sessionId) { it.copy(llm = it.llm + LlmMessage("user",
+                        "[Sistema] Você anunciou uma ação mas NÃO chamou nenhuma ferramenta. Toda intenção de agir (\"vou pesquisar/verificar/testar/abrir/rodar…\") precisa vir COM a chamada de ferramenta correspondente na MESMA resposta. Execute a ferramenta AGORA (ex.: browser_navigate, shell, file_write, uic_*). Se a tarefa já acabou, dê o resultado final SEM anunciar passos; se está bloqueado, chame finish.")) }
+                    if (++steps >= maxSteps) {
+                        if (store.session(sessionId)?.continuous == true) { sleepAndWake(sessionId, 60, "pausa após $maxSteps passos"); steps = 0 }
+                        else { store.addItemUnique(sessionId, ChatItem.Error(text = "Limite de $maxSteps passos atingido. Envie \"continue\" para seguir.")); store.editSession(sessionId) { it.copy(status = SessionStatus.WAITING_USER) }; return }
+                    }
+                    continue
+                }
+                intentNoActionTurns = 0
                 if (store.session(sessionId)?.continuous == true) {
                     // modo contínuo: sem ferramenta = lembra de dormir até a próxima verificação
                     store.editSession(sessionId) { it.copy(llm = it.llm + LlmMessage("user", "[Sistema] Você está em modo contínuo. Use `sleep` para aguardar a próxima verificação ou `finish` se o usuário pediu para encerrar.")) }
@@ -277,6 +304,7 @@ class AgentRunner(
                 if (tokenBudgetOverride == null) store.session(sessionId)?.let { done -> scope.launch { ctxMgr.extractMemories(done) } }
                 return
             }
+            intentNoActionTurns = 0
             var stopLoop: SessionStatus? = null
             var sleepReq: Pair<Int, String>? = null // (segundos, motivo)
             val resultHashes = HashMap<String, Int>()
@@ -573,15 +601,29 @@ class AgentRunner(
         return runCatching { canon(kotlinx.serialization.json.Json.parseToJsonElement(raw)) }.getOrElse { raw.trim() }
     }
 
-    /** Semelhança grosseira entre dois textos (para detectar repetição/degeneração do modelo). */
-    private fun similar(a: String, b: String): Boolean {
-        if (b.isEmpty()) return false
-        if (a == b) return true
-        val wa = a.lowercase().split(Regex("\\s+")).toSet()
-        val wb = b.lowercase().split(Regex("\\s+")).toSet()
-        if (wa.isEmpty() || wb.isEmpty()) return false
-        val inter = wa.intersect(wb).size.toDouble()
-        return inter / maxOf(wa.size, wb.size) > 0.8
+    /** Detectores puros de loop/degeneração (sem Android) — testáveis na JVM. */
+    companion object LoopGuards {
+        private val ACTION_INTENT = Regex(
+            "(?i)\\b(vou|irei|vamos|deixa eu|deixe-me|agora vou|primeiro vou|em seguida vou|let me|i['’ ]?ll|i will|i'?m going to|going to|gonna)\\b" +
+                "[^.\\n]{0,45}?\\b(pesquis|busc|procur|verific|chec|test|analis|olh|consult|abrir|abro|naveg|acess|execut|rod|cria|crio|ger|baix|instal|configur|valid|compil|ler|leia|list|escrev|salv|implement|corrig|investig|continu|search|fetch|open|navigat|run|execut|check|download|install|creat|read|writ|analyz|look)")
+
+        /**
+         * O texto ANUNCIA uma ação que deveria usar uma ferramenta ("vou pesquisar/verificar/testar/abrir/rodar…"),
+         * em PT ou EN? Serve para a regra de ação obrigatória: anúncio de ação sem chamada de ferramenta = sem progresso.
+         * Conservador de propósito: só dispara em verbos de ação que exigem ferramenta (não em "vou te explicar/resumir").
+         */
+        fun hasActionIntent(text: String): Boolean = ACTION_INTENT.containsMatchIn(text)
+
+        /** Semelhança grosseira entre dois textos (para detectar repetição/degeneração do modelo). */
+        fun similar(a: String, b: String): Boolean {
+            if (b.isEmpty()) return false
+            if (a == b) return true
+            val wa = a.lowercase().split(Regex("\\s+")).toSet()
+            val wb = b.lowercase().split(Regex("\\s+")).toSet()
+            if (wa.isEmpty() || wb.isEmpty()) return false
+            val inter = wa.intersect(wb).size.toDouble()
+            return inter / maxOf(wa.size, wb.size) > 0.8
+        }
     }
 
     private fun autonomyTick() {
@@ -800,6 +842,7 @@ class AgentRunner(
             appendLine("Modo de trabalho:")
             appendLine("1. Tarefas com várias etapas: chame `update_plan` e atualize ao concluir fases.")
             appendLine("2. Aja com ferramentas em vez de descrever. Verifique resultados.")
+            appendLine("2z. AÇÃO OBRIGATÓRIA: NUNCA anuncie um passo (\"vou pesquisar/verificar/testar/abrir/rodar…\") sem, na MESMA resposta, emitir a chamada de ferramenta correspondente. Anúncio sem ferramenta = desperdício e vira loop. Se não vai usar ferramenta, entregue a resposta final direto (sem anunciar) ou chame finish. Não repita a mesma frase de intenção.")
             appendLine("2a. ENTREGA: nunca diga que algo foi feito/funciona sem evidência real da ferramenta (saída, arquivo, status). Antes de `finish`, confira o resultado (ls/file_read/execução). Se não conseguiu validar, diga isso claramente em vez de afirmar sucesso.")
             appendLine("2b. ERRO: se uma ferramenta falhar, leia a mensagem, diagnostique e MUDE a abordagem (outro caminho/comando/argumento). Nunca repita a mesma chamada que falhou. Se ficar bloqueado, finalize explicando o motivo em vez de entrar em loop.")
             appendLine("3. Economize contexto: leia só o necessário (head/grep), mande saídas longas para arquivo.")
