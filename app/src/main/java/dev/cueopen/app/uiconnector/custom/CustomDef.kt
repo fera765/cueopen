@@ -44,8 +44,13 @@ data class ActionDef(val id: String, val label: String, val risky: Boolean, val 
 data class LimitDef(val param: String, val maxSetting: String)
 data class IntentDef(val asset: String, val direction: String)
 
-/** Passo de TERMINAL: roda [run] (modelo shell-seguro) no sandbox do conector, com tempo-limite. */
-data class ShellStep(val run: String, val timeoutSec: Int)
+/** Arquivo gravado (de forma segura, sem shell) no workspace do conector antes de rodar um comando. */
+data class FileWrite(val path: String, val content: String)
+/**
+ * Passo de TERMINAL: grava [files] no workspace (opcional, sem heredoc — à prova de erro) e então roda
+ * [run] (modelo shell-seguro) no sandbox do conector, com tempo-limite.
+ */
+data class ShellStep(val run: String, val timeoutSec: Int, val files: List<FileWrite> = emptyList())
 /** Passo de ARQUIVO no workspace do conector: op read|write|list|delete; [content] só para write. */
 data class FileStep(val op: String, val path: String, val content: String?)
 /** Passo de BROWSER: abre [url] (host declarado) e devolve o texto renderizado da página. */
@@ -558,13 +563,24 @@ object CustomDefParser {
             if (o == null) return null
             if (Capabilities.TERMINAL !in caps) errors.add("$path exige \"terminal\" na lista capabilities do conector.")
             if (!risky) errors.add("$path: ferramenta de terminal exige \"risky\": true.")
-            known(o, path, setOf("run", "timeoutSec"))
+            known(o, path, setOf("run", "timeoutSec", "files"))
             val run = str(o, "run", path, required = true)
             tpl(run, "$path.run", vars, false)
             val ts = str(o, "timeoutSec", path, def = "120").toIntOrNull()
             if (ts == null || ts !in BridgeSecurity.MIN_TIMEOUT..BridgeSecurity.MAX_TIMEOUT)
                 errors.add("$path.timeoutSec deve ser de ${BridgeSecurity.MIN_TIMEOUT} a ${BridgeSecurity.MAX_TIMEOUT}.")
-            return ShellStep(run, (ts ?: 120).coerceIn(BridgeSecurity.MIN_TIMEOUT, BridgeSecurity.MAX_TIMEOUT))
+            // Arquivos gravados ANTES do comando (sem heredoc): forma à prova de erro de criar scripts/dados.
+            val files = ArrayList<FileWrite>()
+            arr(o, "files", path, 10).forEachIndexed { i, fo ->
+                val fp = "$path.files[$i]"
+                known(fo, fp, setOf("path", "content"))
+                val fpath = str(fo, "path", fp, required = true)
+                val content = str(fo, "content", fp, required = true)
+                tpl(fpath, "$fp.path", vars, false)
+                tpl(content, "$fp.content", vars, false)
+                files.add(FileWrite(fpath, content))
+            }
+            return ShellStep(run, (ts ?: 120).coerceIn(BridgeSecurity.MIN_TIMEOUT, BridgeSecurity.MAX_TIMEOUT), files)
         }
 
         /** Passo de arquivo no workspace isolado do conector. */

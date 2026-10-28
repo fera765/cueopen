@@ -291,6 +291,13 @@ class CustomConnector(
                             if (!sr.ok) return "ERRO ao preparar o conector (setup): " + Redactor.redact(sr.text.take(2000), secrets())
                         }
                     }
+                    // Grava os arquivos declarados (sem heredoc — à prova de erro) antes de rodar o comando.
+                    val fctx = Template.Ctx(sessionVars() + vars)
+                    for (fw in t.shell.files) {
+                        val wp = Template.render(fw.path, fctx)
+                        val wr = bridge.fileOp("write", wp, Template.render(fw.content, fctx))
+                        if (!wr.ok) return "ERRO ao criar o arquivo '$wp': " + Redactor.redact(wr.text.take(800), secrets())
+                    }
                     val cmd = Template.renderShell(t.shell.run, Template.Ctx(sessionVars() + vars))
                     val r = bridge.shell(cmd, t.shell.timeoutSec)
                     if (!r.ok) return "ERRO: " + Redactor.redact(r.text.take(2000), secrets())

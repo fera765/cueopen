@@ -16,6 +16,8 @@ class CueApp : Application() {
     private val browsers = java.util.concurrent.ConcurrentHashMap<String, BrowserHost>()
     /** Cada chat mantém seu próprio WebView, cookies, URL, histórico e estado de rede. */
     fun browserFor(sessionId: String): BrowserHost = browsers.computeIfAbsent(sessionId) { BrowserHost(this) }
+    /** Fecha e descarta o browser isolado de uma sessão (ex.: subagente que terminou). */
+    fun closeBrowser(sessionId: String) { browsers.remove(sessionId)?.dispose() }
     val browser: BrowserHost get() = browserFor("__legacy__")
     lateinit var llm: OpenRouter; private set
     lateinit var agent: AgentRunner; private set

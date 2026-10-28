@@ -79,6 +79,25 @@ class CapabilityTest {
         assertTrue(errs(bad).contains("capabilities"))
     }
 
+    @Test fun shellFilesParseAndRunBeforeCommand() = runBlocking {
+        val json = """{"id":"g","name":"G","description":"gera","capabilities":["terminal"],
+            "tools":[{"name":"gerar","description":"gera arquivo","params":[{"name":"txt","description":"t"}],
+              "risky":true,"shell":{"files":[{"path":"a.py","content":"print('x')"}],"run":"python3 a.py"},"response":"{{$.body}}"}]}"""
+        val p = CustomDefParser.parse(json)
+        assertEquals(p.errors.toString(), emptyList<String>(), p.errors)
+        val def = p.def!!
+        val writes = ArrayList<String>()
+        val bridge = object : HostBridge {
+            override fun granted(capability: String) = true
+            override suspend fun shell(command: String, timeoutSec: Int) = BridgeResult(true, "ok")
+            override suspend fun fileOp(op: String, path: String, content: String?): BridgeResult { writes.add("$op:$path"); return BridgeResult(true, "w") }
+            override suspend fun fetch(url: String, waitSec: Int) = BridgeResult(true, "")
+        }
+        val out = CustomConnector(def, http = NoHttp, bridge = bridge).callTool("gerar", mapOf("txt" to "oi"), noSettings())
+        assertTrue(writes.toString(), writes.contains("write:a.py")) // arquivo gravado ANTES do comando
+        assertTrue(out, out.contains("ok"))
+    }
+
     @Test fun validTerminalConnectorParses() {
         val ok = """{"id":"yt","name":"YT","description":"baixa","capabilities":["terminal","files"],
             "tools":[

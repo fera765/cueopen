@@ -288,6 +288,15 @@ class BrowserHost(private val appCtx: Context) {
 
     fun home() { _view?.loadUrl(HOME) }
 
+    /** Libera os WebViews (usado ao encerrar uma sessão isolada de subagente). */
+    fun dispose() {
+        android.os.Handler(android.os.Looper.getMainLooper()).post {
+            runCatching { _view?.destroy() }
+            runCatching { _agentView?.destroy() }
+            _view = null; _agentView = null
+        }
+    }
+
     suspend fun uiBack() = onMain { if (_view?.canGoBack() == true) { pageDone = CompletableDeferred(); _view?.goBack() } }
     suspend fun uiReload() = onMain { pageDone = CompletableDeferred(); _view?.reload() }
 

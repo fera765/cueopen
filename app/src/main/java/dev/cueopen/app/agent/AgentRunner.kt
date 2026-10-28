@@ -909,6 +909,7 @@ class AgentRunner(
             if (session.connectorBuilder) appendLine("## Criar UI Connectors (esta conversa é o criador de conectores)")
             if (session.connectorBuilder) appendLine("- Quando o usuário pedir um conector (UI Connector), NÃO escreva o JSON no chat: chame connector_spec, monte a definição, valide com connector_validate e corrija até zero erros (repita sozinho, sem perguntar), depois TESTE DE VERDADE com connector_test (requisições reais; corrija caminhos pela estrutura que ele mostra até PASSOU) e só então chame connector_propose. Não use o browser/web para testar — só connector_test vale. Só diga que deu certo depois de connector_propose; a instalação é feita pelo usuário no card. Se faltar a URL base ou os endpoints reais da API, pesquise na documentação oficial (web) ou pergunte.")
             if (session.connectorBuilder) appendLine("- Serviços em TEMPO REAL (corretoras de ações/Forex/cripto/opções, cotações e saldo ao vivo, streams) usam o bloco realtime (WebSocket wss://) do SDK: login HTTP extrai o token, onOpen autentica/assina, rules montam estado (rt.*) e coleções (source), e ordens usam tools com send + await por request_id, sempre com risky, limits, requiresSignal e orderIntent. Use as mensagens REAIS do protocolo do serviço (documentação oficial); nunca invente.")
+            if (session.connectorBuilder) appendLine("- CAPACIDADES DO APARELHO (terminal, arquivos, browser): o SDK permite conectores que rodam comandos (bloco capabilities + passo shell), criam/leem arquivos (passo file) e abrem páginas (passo fetch). Dá para fazer QUALQUER tipo de conector — baixar vídeo, gerar slides/HTML, copy, converter arquivos, especialista em JS/UI-UX que roda ferramentas, etc. Regras de ouro: (1) instale dependências no bloco setup (apk add/pip install), não dentro de cada ferramenta; (2) para CRIAR arquivos/scripts use o passo file (op write) ou o campo files do shell — NUNCA heredoc/echo multilinha no run (quebra o shell); (3) passe dados variáveis como argumento entre aspas ou via variável de ambiente (ex.: VAR={{param}} python3 gerar.py), nunca interpolados crus no meio do comando; (4) os arquivos do conector ficam no workspace isolado dele, acessível ao agente em /root/connectors/<id>/workspace.")
             if (session.connectorBuilder) appendLine("- CÁLCULOS (indicadores técnicos, estatística, sinais, tabelas derivadas, conversões): use o bloco compute do SDK — expressões com a biblioteca de funções do app (sma, ema, rsi, macd, bollinger, stoch, adx, ichimoku, supertrend, psar, vwap… e map/filter/reduce/zip_rows). Busque os dados reais (ex.: velas) com request/source e calcule tudo no compute; nunca peça ao usuário para calcular nem invente valores. Pedidos como 'todos os indicadores do TradingView' = um conector com compute cobrindo médias, osciladores, volatilidade, tendência e volume, com sinal e resumo (veja o exemplo de indicadores na especificação).")
             runCatching {
                 val hub = dev.cueopen.app.CueApp.instance.uiConnectors
@@ -2179,9 +2180,11 @@ class AgentRunner(
                     LlmMessage(
                         "user",
                         "Você é um subagente temporário do CueOpen. Tarefa: " + task +
-                            "\n\nTrabalhe somente no seu workspace/branch. Não faça merge nem push; não chame multi_agents. " +
+                            "\n\nVocê roda em MODO ISOLADO: tem seu PRÓPRIO terminal, seu PRÓPRIO browser e seu PRÓPRIO workspace — " +
+                            "nada do que você fizer no terminal/browser afeta o agente principal nem os outros workers. " +
+                            "Trabalhe somente no seu workspace. Não faça merge nem push; não chame multi_agents. " +
                             "Não afirme que testes passaram sem executá-los. Ao concluir, reporte resumo, arquivos alterados, " +
-                            "comandos de teste executados, resultados e riscos."
+                            "comandos de teste executados, resultados e riscos — o agente principal integra tudo e fecha seu ambiente."
                     )
                 )
             )
@@ -2384,6 +2387,11 @@ class AgentRunner(
         workers.forEachIndexed { index, child ->
             val outcome = outcomes[child.id]
             val clean = outcome?.completed == true && integrationFailures == 0
+            // Encerra os recursos ISOLADOS do subagente (terminal próprio + browser próprio): cada worker
+            // roda em modo isolado e, ao terminar, devolve o controle ao agente principal sem deixar
+            // sessão de terminal/WebView viva consumindo recursos.
+            runCatching { terminals.close(child.id) }
+            runCatching { dev.cueopen.app.CueApp.instance.closeBrowser(child.id) }
             if (clean) {
                 if (gitRoot != null && baseSha != null) {
                     terminal.runAgentCommand(

@@ -341,7 +341,37 @@ object CustomTemplates {
 }
 """.trimIndent())
 
-    val ALL = listOf(TOKEN_LOGIN, API_KEY, RSS, SPOTIFY, MARKET_WS, BROKER_WS, TV_INDICATORS, YT_DOWNLOAD, MINIMAL)
+    val FILE_GEN = Entry("Terminal: gerar arquivo com script (files + run)", """
+{
+ "id": "slides",
+ "name": "Gerador de Slides (HTML)",
+ "description": "Gera uma apresentação HTML a partir de um título e tópicos, roda no terminal e salva no workspace do conector. Exemplo de conector que CRIA arquivos com segurança (files + run, sem heredoc).",
+ "version": "1.0",
+ "capabilities": ["terminal"],
+ "setup": {"run": "command -v python3 >/dev/null 2>&1 || apk add --no-cache python3 >/dev/null 2>&1; command -v python3 >/dev/null 2>&1 && echo OK", "timeoutSec": 300},
+ "tools": [
+  {
+   "name": "criar_slides",
+   "description": "Gera uma apresentação HTML (um slide por tópico) com o título e os tópicos informados e salva em slides.html no workspace do conector.",
+   "params": [
+    {"name": "titulo", "description": "Título da apresentação", "type": "string", "required": true},
+    {"name": "topicos", "description": "Tópicos separados por ; (cada um vira um slide)", "type": "string", "required": true}
+   ],
+   "risky": true,
+   "shell": {
+    "files": [
+     {"path": "gerar.py", "content": "import os,html\nt=os.environ.get('TITULO','')\ntops=[x.strip() for x in os.environ.get('TOPICOS','').split(';') if x.strip()]\nbody=''.join('<section><h2>'+html.escape(x)+'</h2></section>' for x in tops)\nopen('slides.html','w').write('<!doctype html><meta charset=utf-8><title>'+html.escape(t)+'</title><h1>'+html.escape(t)+'</h1>'+body)\nprint('slides.html com',len(tops),'slides')\n"}
+    ],
+    "run": "TITULO={{titulo}} TOPICOS={{topicos}} python3 gerar.py && ls -la slides.html",
+    "timeoutSec": 120
+   },
+   "response": "Pronto: {{${'$'}.body}}\nArquivo em /root/connectors/slides/workspace/slides.html (o agente pode copiar para /root/workspace)."
+  }
+ ]
+}
+""".trimIndent())
+
+    val ALL = listOf(TOKEN_LOGIN, API_KEY, RSS, SPOTIFY, MARKET_WS, BROKER_WS, TV_INDICATORS, YT_DOWNLOAD, FILE_GEN, MINIMAL)
 
     /** Rascunho enviado ao chat para a IA escrever a definição (o usuário só descreve o serviço). */
     val AI_PROMPT = """Crie um UI Connector em JSON para o serviço: <DESCREVA AQUI: nome, URL base da API e o que quer ver/fazer>.

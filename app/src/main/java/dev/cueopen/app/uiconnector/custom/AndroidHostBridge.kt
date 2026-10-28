@@ -55,10 +55,12 @@ class AndroidHostBridge(
         sandbox.ensureEnvironment(sessionId)
         return try {
             val r = app.terminals.get(sessionId).runAgentCommand(cmd, BridgeSecurity.clampTimeout(timeoutSec).toLong(), background = false)
+            val failedQuiet = !r.timedOut && r.exitCode != 0 && r.output.isBlank()
             val body = buildString {
                 append(r.output.ifBlank { "(sem saída)" })
                 if (r.timedOut) append("\n[timeout após ${BridgeSecurity.clampTimeout(timeoutSec)}s]")
                 append("\n[exit ${r.exitCode}]")
+                if (failedQuiet) append("\nDica: o comando falhou sem imprimir nada. Confirme se as dependências foram instaladas (use o bloco setup) e rode o comando com '2>&1' para ver o erro; evite '>/dev/null' ao diagnosticar.")
             }.takeLast(BridgeSecurity.MAX_OUTPUT_CHARS)
             BridgeResult(!r.timedOut && r.exitCode == 0, body)
         } catch (c: kotlinx.coroutines.CancellationException) {

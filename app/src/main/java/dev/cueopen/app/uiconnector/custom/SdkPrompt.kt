@@ -191,6 +191,18 @@ Roda só na 1ª vez (fica marcado; re-roda se você mudar o comando). Use-o para
   argumento entra sempre como um único token, então `;`, `|`, `${D}()`, espaços etc. vindos de um parâmetro NÃO viram
   comando. Você escreve a estrutura do comando; os valores entram seguros. Use `&&` para encadear.
 - `timeoutSec`: 1–300 (padrão 120). A saída (stdout+stderr, até ~24 KB) vira `{{${D}.body}}` (texto) e alimenta `response`/`list`/`compute`.
+- `files` (opcional): grava arquivos no workspace ANTES de rodar — **a forma correta de criar scripts/dados**. NUNCA use
+  heredoc (`<<EOF`) nem `echo`/`printf` multilinha no `run`: conteúdo com várias linhas quebra o shell (cada linha vira
+  "command not found"). Em vez disso:
+```
+"shell": {
+  "files": [{"path": "gerar.py", "content": "import sys\nprint('ola')\n"}],
+  "run": "python3 gerar.py > saida.txt && cat saida.txt",
+  "timeoutSec": 120
+}
+```
+  Cada arquivo é gravado direto no filesystem (sem passar pelo shell), confinado ao workspace do conector. `path` relativo
+  (sem `/` inicial, sem `..`); `content` pode usar `{{param}}` e `{{s.setting}}`. Conteúdo grande com muitas linhas: sempre `files`.
 
 **Passo de arquivo** (`file`) — exige `"files"`; `write`/`delete` exigem `"risky": true`:
 ```
@@ -361,6 +373,11 @@ ${CustomTemplates.TV_INDICATORS.json}
 ## Exemplo: terminal — baixar vídeo do YouTube (capability `terminal` + `files`)
 ```json
 ${CustomTemplates.YT_DOWNLOAD.json}
+```
+
+## Exemplo: gerar arquivo com script no terminal (files + run, SEM heredoc)
+```json
+${CustomTemplates.FILE_GEN.json}
 ```
 
 ## Exemplo mínimo (API com chave, sem login por senha)
