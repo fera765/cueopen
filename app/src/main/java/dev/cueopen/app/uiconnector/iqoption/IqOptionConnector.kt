@@ -15,6 +15,7 @@ import dev.cueopen.app.uiconnector.UiConnector
 import dev.cueopen.app.uiconnector.UiConnectorSpec
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
+import dev.cueopen.app.uiconnector.custom.TechnicalSuite
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
@@ -56,7 +57,7 @@ import java.util.concurrent.atomic.AtomicLong
  *  - o agente respeita valor máximo por operação e máximo de operações abertas;
  *  - "operações em execução" mostra o que foi aberto por este app e é fechado por eventos reais do servidor.
  */
-class IqOptionConnector : UiConnector {
+class IqOptionConnector(private val kv: KvStore? = null) : UiConnector {
 
     override val spec = UiConnectorSpec(
         id = "iqoption",
@@ -80,6 +81,20 @@ class IqOptionConnector : UiConnector {
                 "Até este tempo a operação é curta: o agente pode comprar (call) e vender (put). Acima disso é LONGA: só compra (call).",
                 SettingType.NUMBER, "5",
             ),
+            SettingSpec("mm_enabled", "Gerenciamento Masaniello (agente)",
+                "Ligado: o VALOR de cada operação do agente é calculado pelo Masaniello (ciclo de N operações buscando K acertos) e as operações são uma por vez. O ciclo nunca perde mais que a banca do ciclo.",
+                SettingType.SWITCH, "true", risky = true),
+            SettingSpec("mm_bank", "Masaniello: banca do ciclo", "Valor máximo que um ciclo pode perder. Ao acertar K de N, o ciclo fecha no lucro-alvo.", SettingType.NUMBER, "10"),
+            SettingSpec("mm_trades", "Masaniello: operações por ciclo (N)", "Quantidade de operações do ciclo.", SettingType.NUMBER, "10"),
+            SettingSpec("mm_wins", "Masaniello: acertos esperados (K)", "Acertos necessários dentro das N. Use uma taxa abaixo da sua taxa real de acerto (ex.: 5 de 10).", SettingType.NUMBER, "5"),
+            SettingSpec("payout_pct", "Payout médio (%)", "Retorno da corretora em caso de acerto (ex.: 85). Usado no Masaniello e no backtest.", SettingType.NUMBER, "85"),
+            SettingSpec("daily_stop_loss", "Stop loss diário", "Perda no dia (moeda da conta) que pausa o agente até amanhã. 0 = sem limite.", SettingType.NUMBER, "10"),
+            SettingSpec("daily_take_profit", "Meta diária (stop gain)", "Lucro no dia que encerra as operações do agente até amanhã. 0 = sem meta.", SettingType.NUMBER, "10"),
+            SettingSpec("max_consec_losses", "Perdas seguidas para pausar", "Após N perdas seguidas o agente pausa pelo tempo abaixo.", SettingType.NUMBER, "3"),
+            SettingSpec("cooldown_min", "Pausa após perdas seguidas (min)", "Tempo de pausa depois de atingir as perdas seguidas.", SettingType.NUMBER, "30"),
+            SettingSpec("require_confluence", "Exigir confluência dos indicadores",
+                "Ligado: CALL só se o resumo técnico (35 indicadores, velas de 1 min) for de compra; PUT só se for de venda.", SettingType.SWITCH, "true"),
+            SettingSpec("confluence_strong", "Confluência só com sinal FORTE", "Ligado: exige 'Forte compra'/'Forte venda' (menos operações, mais seletivas).", SettingType.SWITCH, "false"),
             SettingSpec(
                 "max_entry_delay_sec", "Janela de entrada no início da vela (s)",
                 "O agente só abre operação nos primeiros N segundos da vela de 1 min (assim a operação cobre a vela analisada, do começo). Fora disso a ordem é recusada e ele espera a próxima vela. 0 = desliga.",
@@ -112,6 +127,13 @@ class IqOptionConnector : UiConnector {
                 ParamSpec("timeframe", "Tamanho da vela em segundos (60=1min, 300=5min…) ou 1m/5m/1h. Padrão 60.", required = false),
                 ParamSpec("count", "Quantidade de velas (1–200). Padrão 30.", "integer", required = false),
             )),
+            ToolSpec("mm_status", "Gerenciamento e regras: ciclo Masaniello (acertos/operações restantes, banca, próxima entrada, lucro-alvo), resultado do dia, perdas seguidas e se o agente está pausado."),
+            ToolSpec("backtest", "Backtest com velas REAIS do ativo: aplica a suíte técnica vela a vela e simula operações de 1 vela, com taxa de acerto, ponto de equilíbrio pelo payout, resultado com valor fixo e com Masaniello. Use para escolher ativo/tempo gráfico ANTES de operar.", listOf(
+                ParamSpec("asset", "Ticker do ativo"),
+                ParamSpec("timeframe", "Tempo gráfico (60, 300… ou 1m/5m). Padrão 60.", required = false),
+                ParamSpec("count", "Velas (300–1000). Padrão 600.", "integer", required = false),
+                ParamSpec("strong", "true = só sinais fortes", "boolean", required = false),
+            )),
             ToolSpec("candle_clock", "Relógio da vela pelo horário do SERVIDOR da IQ Option: quando a vela atual abriu, quantos segundos faltam para a próxima, se dá para entrar agora e quantos segundos dormir (sleep seconds) para acordar logo antes da próxima vela. Use SEMPRE antes de esperar/entrar.", listOf(
                 ParamSpec("timeframe", "Tempo gráfico (60, 300, 900… s ou 1m/5m/15m). Padrão 60.", required = false),
             )),
@@ -123,7 +145,9 @@ class IqOptionConnector : UiConnector {
             ToolSpec("buy", "Abre uma operação (call = compra/sobe, put = venda/desce) na conta ativa, respeitando os limites do usuário. " +
                 "EXIGE validação prévia com typesafe_jev_check (venue=iqoption, id=ticker, direction=call|put). " +
                 "Curta (até o limite do usuário): call e put. Longa: somente call. " +
-                "Entrada contra o candle de 1 min: call só abaixo da abertura, put só acima (senão RECUSADO; espere e tente de novo).", listOf(
+                "Entrada contra o candle de 1 min: call só abaixo da abertura, put só acima (senão RECUSADO; espere e tente de novo). " +
+                "REGRAS DURAS: com o Masaniello ligado o VALOR é definido pelo gerenciamento (o amount informado é ignorado) e é uma operação por vez; " +
+                "stop loss/meta diária, pausa após perdas seguidas e confluência dos indicadores são impostos pelo app. Consulte mm_status antes de operar.", listOf(
                 ParamSpec("asset", "Ticker do ativo, ex.: EURUSD"),
                 ParamSpec("direction", "call (compra/sobe) ou put (venda/desce)", allowed = listOf("call", "put")),
                 ParamSpec("amount", "Valor da operação na moeda da conta", "number"),
@@ -151,6 +175,7 @@ class IqOptionConnector : UiConnector {
         val expSec: Long, val demo: Boolean, val currency: String,
         val result: String? = null, val profit: Double? = null,
         val activeId: Int = 0, val entry: Double? = null,
+        val byAgent: Boolean = false, val mm: Boolean = false, val odds: Double = 1.85, val settled: Boolean = false,
     )
 
     private val client = OkHttpClient.Builder()
@@ -350,7 +375,11 @@ class IqOptionConnector : UiConnector {
             "option-closed", "socket-option-closed" -> {
                 val c = IqProtocol.parseOptionClosed(root)
                 val t = if (c != null) tracked[c.optionId] else null
-                if (c != null && t != null) tracked[c.optionId] = t.copy(result = c.result, profit = c.profit)
+                if (c != null && t != null) {
+                    val done = t.copy(result = c.result, profit = c.profit)
+                    tracked[c.optionId] = done
+                    if (done.byAgent && !done.settled) { settle(done); tracked[c.optionId] = done.copy(settled = true) }
+                }
             }
             "candle-generated" -> {
                 val q = if (msg != null) IqProtocol.parseQuote(msg) else null
@@ -557,6 +586,129 @@ class IqOptionConnector : UiConnector {
         }.trim()
     }
 
+    // ------------------------------------------------------------------ gerenciamento (Masaniello) e regras duras
+    private fun today(): String = SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date())
+
+    private fun loadRisk(): RiskState {
+        val r = IqRules.decodeRisk(kv?.get("iq_risk")) ?: RiskState()
+        return if (r.day == today()) r else RiskState(day = today(), consecLosses = r.consecLosses, pausedUntil = r.pausedUntil)
+    }
+    private fun saveRisk(r: RiskState) { kv?.put("iq_risk", IqRules.encodeRisk(r)) ; memRisk = r }
+    @Volatile private var memRisk: RiskState? = null
+    private fun risk(): RiskState = if (kv != null) loadRisk() else (memRisk?.takeIf { it.day == today() } ?: RiskState(day = today()))
+
+    @Volatile private var memMm: MmState? = null
+    private fun mmFresh(settings: ConnectorSettings?): MmState {
+        val n = (settings?.num("mm_trades", 10.0) ?: 10.0).toInt().coerceIn(2, 50)
+        val k = (settings?.num("mm_wins", 5.0) ?: 5.0).toInt().coerceIn(1, n)
+        val b = (settings?.num("mm_bank", 10.0) ?: 10.0).coerceAtLeast(1.0)
+        return MmState(n, k, b, b)
+    }
+    private fun mmState(settings: ConnectorSettings?): MmState {
+        val saved = if (kv != null) IqRules.decodeMm(kv.get("iq_mm")) else memMm
+        val fresh = mmFresh(settings)
+        // configurações mudaram e o ciclo ainda não começou → adota os novos N/K/banca
+        if (saved == null || (saved.wins + saved.losses == 0 && (saved.n != fresh.n || saved.k != fresh.k || saved.startBank != fresh.startBank)))
+            return fresh.copy(cycle = saved?.cycle ?: 1, cyclesWon = saved?.cyclesWon ?: 0, cyclesLost = saved?.cyclesLost ?: 0).also { saveMm(it) }
+        return saved
+    }
+    private fun saveMm(m: MmState) { kv?.put("iq_mm", IqRules.encodeMm(m)); memMm = m }
+    private fun odds(settings: ConnectorSettings?) = 1 + (settings?.num("payout_pct", 85.0) ?: 85.0).coerceIn(10.0, 100.0) / 100.0
+
+    /** Resultado real de uma operação do agente → atualiza o dia, a sequência de perdas e o ciclo Masaniello. */
+    private fun settle(t: Tracked) = synchronized(this) {
+        val pnl = IqRules.netPnl(t.result, t.amount, t.profit)
+        val res = resultLabel(t.result)
+        var r = risk()
+        r = r.copy(dayPnl = r.dayPnl + pnl, dayTrades = r.dayTrades + 1, dayWins = r.dayWins + if (res == "WIN") 1 else 0,
+            consecLosses = when (res) { "LOSS" -> r.consecLosses + 1; "WIN" -> 0; else -> r.consecLosses })
+        saveRisk(r)
+        if (t.mm) {
+            var m = (if (kv != null) IqRules.decodeMm(kv.get("iq_mm")) else memMm) ?: return@synchronized
+            m = when (res) {
+                "WIN" -> m.copy(n = m.n - 1, k = m.k - 1, bank = m.bank + pnl, wins = m.wins + 1, lastResult = "WIN")
+                "LOSS" -> m.copy(n = m.n - 1, bank = m.bank + pnl, losses = m.losses + 1, lastResult = "LOSS")
+                else -> m.copy(lastResult = "EMPATE")
+            }
+            if (m.k <= 0) m = MmState(m.startBank.let { _ -> m.n + m.wins + m.losses }, m.wins, m.startBank, m.startBank, m.cycle + 1, cyclesWon = m.cyclesWon + 1, cyclesLost = m.cyclesLost, lastResult = "CICLO GANHO (+${String.format(Locale.US, "%.2f", m.bank - m.startBank)})")
+            else if (m.k > m.n || m.bank <= 0.01) m = MmState(m.n + m.wins + m.losses, m.k + m.wins, m.startBank, m.startBank, m.cycle + 1, cyclesWon = m.cyclesWon, cyclesLost = m.cyclesLost + 1, lastResult = "CICLO ENCERRADO (${String.format(Locale.US, "%.2f", m.bank - m.startBank)})")
+            saveMm(m)
+        }
+    }
+
+    /** Regras duras antes de qualquer operação do agente. null = liberado. */
+    private fun riskCheck(settings: ConnectorSettings?): String? {
+        val r = risk()
+        val now = System.currentTimeMillis()
+        if (r.pausedUntil > now) return "RECUSADO (regra de proteção): agente em pausa até ${SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(r.pausedUntil))} após perdas seguidas. Não opere; aguarde."
+        val sl = settings?.num("daily_stop_loss", 10.0) ?: 10.0
+        val tp = settings?.num("daily_take_profit", 10.0) ?: 10.0
+        if (sl > 0 && r.dayPnl <= -sl) return "RECUSADO (stop loss diário): resultado do dia ${String.format(Locale.US, "%.2f", r.dayPnl)} atingiu o limite de −$sl. Operações do agente encerradas até amanhã."
+        if (tp > 0 && r.dayPnl >= tp) return "RECUSADO (meta diária atingida): +${String.format(Locale.US, "%.2f", r.dayPnl)} ≥ $tp. Operações do agente encerradas até amanhã — preserve o lucro."
+        val maxL = (settings?.num("max_consec_losses", 3.0) ?: 3.0).toInt()
+        if (maxL > 0 && r.consecLosses >= maxL) {
+            val until = now + ((settings?.num("cooldown_min", 30.0) ?: 30.0) * 60_000).toLong()
+            saveRisk(r.copy(pausedUntil = until, consecLosses = 0))
+            return "RECUSADO (regra de proteção): ${r.consecLosses} perdas seguidas. Agente pausado até ${SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(until))}."
+        }
+        return null
+    }
+
+    private fun mmText(settings: ConnectorSettings?): String {
+        val r = risk()
+        return buildString {
+            if (settings?.bool("mm_enabled") != false) {
+                val m = mmState(settings); val o = odds(settings)
+                val st = Masaniello.stake(m.bank, m.n, m.k, o)
+                appendLine("Masaniello — ciclo ${m.cycle}: faltam ${m.k} acerto(s) em ${m.n} operação(ões) · banca ${String.format(Locale.US, "%.2f", m.bank)} (início ${String.format(Locale.US, "%.2f", m.startBank)}) · " +
+                    "próxima entrada ${st?.let { String.format(Locale.US, "%.2f", it) } ?: "—"} · alvo do ciclo ${String.format(Locale.US, "%.2f", Masaniello.target(m.startBank, m.n + m.wins + m.losses, m.k + m.wins, o))} · ciclos ganhos/encerrados ${m.cyclesWon}/${m.cyclesLost}" +
+                    if (m.lastResult.isNotBlank()) " · último: ${m.lastResult}" else "")
+            } else appendLine("Masaniello desligado.")
+            append("Hoje: ${String.format(Locale.US, "%.2f", r.dayPnl)} em ${r.dayTrades} operação(ões) (${r.dayWins} acerto(s)) · perdas seguidas ${r.consecLosses}" +
+                (if (r.pausedUntil > System.currentTimeMillis()) " · PAUSADO até ${SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(r.pausedUntil))}" else "") +
+                " · stop ${settings?.num("daily_stop_loss", 10.0)} · meta ${settings?.num("daily_take_profit", 10.0)}")
+        }
+    }
+
+    /** Confluência: o resumo dos 35 indicadores (velas de 1 min) precisa concordar com a direção. null = ok. */
+    private suspend fun confluenceCheck(a: IqProtocol.Asset, dir: String, settings: ConnectorSettings?): String? {
+        if (settings?.text("require_confluence")?.ifEmpty { "true" } == "false") return null
+        val id = reqId()
+        val root = runCatching { request(id, IqProtocol.getCandlesMessage(id, a.id, 60, 150, serverNowSec()), "candles", timeoutMs = 6_000) }.getOrNull()
+            ?: return "RECUSADO: não consegui ler as velas para conferir a confluência. Tente de novo."
+        val list = IqProtocol.parseCandles(root["msg"] as? JsonObject ?: JsonObject(emptyMap())).sortedBy { it.from }
+        if (list.size < 60) return "RECUSADO: poucas velas para conferir a confluência (${list.size})."
+        val r = TechnicalSuite.analyze(TechnicalSuite.Candles(list.map { it.from.toDouble() }, list.map { it.open }, list.map { it.max }, list.map { it.min }, list.map { it.close }, list.map { it.volume }))
+        val want = IqRules.direction(r.summary, settings?.bool("confluence_strong") == true)
+        return if (want == dir) null else
+            "RECUSADO (sem confluência): o resumo técnico de ${a.ticker} está '${r.summary}' (${r.buys} compra × ${r.sells} venda) — não confirma ${dir.uppercase()}. Não force a entrada; procure outro ativo ou espere."
+    }
+
+    private suspend fun backtestText(asset: String, tf: String?, count: Int?, strong: Boolean, settings: ConnectorSettings): String {
+        val a = IqProtocol.resolveAsset(loadAssets(), asset) ?: return "Ativo '$asset' não encontrado."
+        val size = IqProtocol.timeframeSeconds(tf ?: "60") ?: return "timeframe inválido."
+        val n = (count ?: 600).coerceIn(300, 1000)
+        val id = reqId()
+        val root = request(id, IqProtocol.getCandlesMessage(id, a.id, size, n, serverNowSec()), "candles", timeoutMs = 20_000)
+        val list = IqProtocol.parseCandles(root["msg"] as? JsonObject ?: JsonObject(emptyMap())).sortedBy { it.from }
+        if (list.size < 200) return "Poucas velas para backtest (${list.size})."
+        val payout = odds(settings) - 1
+        val m = mmFresh(settings)
+        val b = withContext(Dispatchers.Default) {
+            IqRules.backtest(list.map { IqRules.Bar(it.open, it.max, it.min, it.close, it.volume) }, payout, strong, 120, m.n, m.k, m.bank)
+        }
+        val edge = b.winRate - b.breakEven
+        return buildString {
+            appendLine("Backtest ${a.ticker} · ${size}s · ${list.size} velas reais · sinais ${if (strong) "FORTES" else "compra/venda"} · payout ${String.format(Locale.US, "%.0f", payout * 100)}%")
+            appendLine("Operações ${b.trades} (call ${b.calls} / put ${b.puts}) · acertos ${b.wins} · erros ${b.losses} · empates ${b.ties}")
+            appendLine("Taxa de acerto ${String.format(Locale.US, "%.1f", b.winRate * 100)}% · equilíbrio ${String.format(Locale.US, "%.1f", b.breakEven * 100)}% · vantagem ${String.format(Locale.US, "%+.1f", edge * 100)} p.p. · maior sequência de erros ${b.maxLossStreak}")
+            appendLine("Valor fixo 1: ${String.format(Locale.US, "%+.2f", b.flatPnl)} · Masaniello ${m.k}/${m.n} banca ${m.bank}: ${String.format(Locale.US, "%+.2f", b.mmFinal - m.bank)} (ciclos ganhos ${b.mmCyclesWon}, encerrados ${b.mmCyclesLost})")
+            append(if (b.trades < 30) "Amostra pequena: não conclua nada com menos de 30 operações."
+                else if (edge > 0.03) "Sinal com vantagem neste período: candidato a operar (resultado passado não garante o futuro)."
+                else "SEM vantagem estatística neste período: NÃO opere este ativo/tempo gráfico com esta estratégia.")
+        }
+    }
+
     private fun serverNowMs(): Long = System.currentTimeMillis() + serverOffsetMs
 
     private fun hms(epochSec: Long): String = SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date(epochSec * 1000))
@@ -644,7 +796,7 @@ class IqOptionConnector : UiConnector {
             if (acc.isReal && !settings.bool("allow_real_agent"))
                 return "RECUSADO: a conta ativa é REAL e o usuário não liberou o agente para operar nela. Troque para demo (set_account) ou peça ao usuário para liberar nas configurações do conector."
             val maxAmount = settings.num("max_amount", 1.0)
-            if (amount > maxAmount) return "RECUSADO: valor $amount excede o máximo permitido por operação ($maxAmount). Reduza o valor."
+            if (amount > maxAmount && !settings.bool("mm_enabled")) return "RECUSADO: valor $amount excede o máximo permitido por operação ($maxAmount). Reduza o valor."
             val maxOpen = settings.num("max_open", 3.0).toInt()
             if (openCount() >= maxOpen) return "RECUSADO: já existem ${openCount()} operações abertas (máximo $maxOpen). Aguarde fechar."
             val shortMax = settings.num("short_max_minutes", 5.0).toInt().coerceAtLeast(1)
@@ -657,21 +809,38 @@ class IqOptionConnector : UiConnector {
         }
         if (!a.open) return "O ativo ${a.ticker} está fechado/suspenso agora."
         if (byAgent) entryWindowCheck(settings)?.let { return it }
+        var finalAmount = amount
+        var useMm = false
+        if (byAgent) {
+            riskCheck(settings)?.let { return it }
+            if (settings?.bool("mm_enabled") != false) {
+                if (tracked.values.any { it.byAgent && it.result == null && it.expSec + 120 > serverNowSec() })
+                    return "RECUSADO (Masaniello): já existe uma operação do agente em aberto; no gerenciamento as operações são UMA POR VEZ. Aguarde o resultado."
+                val m = mmState(settings)
+                val st = Masaniello.stake(m.bank, m.n, m.k, odds(settings)) ?: return "RECUSADO: ciclo Masaniello encerrado; consulte mm_status."
+                finalAmount = maxOf(1.0, Math.round(st * 100) / 100.0) // mínimo da corretora: 1
+                val maxAmount = settings?.num("max_amount", 1.0) ?: 1.0
+                if (finalAmount > maxAmount) return "RECUSADO: a entrada do Masaniello agora é ${String.format(Locale.US, "%.2f", finalAmount)}, acima do seu limite por operação ($maxAmount). Aumente o limite ou reduza a banca do ciclo nas configurações."
+                useMm = true
+            }
+            confluenceCheck(a, dir, settings)?.let { return it }
+        }
         if (byAgent && (settings?.text("entry_against_candle")?.ifEmpty { "true" } ?: "true") == "true") {
             entryCheck(a, dir)?.let { return it }
         }
         val exp = IqProtocol.expirationFor(serverNowSec(), minutes)
         subscribeQuotes(a.id) // cotação ao vivo para acompanhar ganhando/perdendo
         val id = reqId()
-        val root = request(id, IqProtocol.openOptionMessage(id, acc.id, a.id, dir, exp, amount, IqProtocol.isTurbo(minutes)), "option", "option-rejected", timeoutMs = 15_000)
+        val root = request(id, IqProtocol.openOptionMessage(id, acc.id, a.id, dir, exp, finalAmount, IqProtocol.isTurbo(minutes)), "option", "option-rejected", timeoutMs = 15_000)
         val ack = IqProtocol.parseOptionAck(root)
         val optId = ack.optionId
         if (optId == null) {
             err("ordem recusada: ${ack.error}")
             return "RECUSADA pela IQ Option: ${ack.error}"
         }
-        tracked[optId] = Tracked(optId, a.ticker, dir, amount, exp, acc.isPractice, acc.currency, activeId = a.id, entry = ack.openPrice ?: quotes[a.id])
-        return "Ordem ABERTA na conta ${acc.label}: ${a.ticker} ${dir.uppercase()} ${money(acc.copy(amount = amount))} · expira em ~${minutes} min (id $optId). O resultado chega do servidor; consulte positions."
+        tracked[optId] = Tracked(optId, a.ticker, dir, finalAmount, exp, acc.isPractice, acc.currency, activeId = a.id, entry = ack.openPrice ?: quotes[a.id],
+            byAgent = byAgent, mm = useMm, odds = odds(settings))
+        return "Ordem ABERTA na conta ${acc.label}: ${a.ticker} ${dir.uppercase()} ${money(acc.copy(amount = finalAmount))}" + (if (useMm) " (valor do Masaniello)" else "") + " · expira em ~${minutes} min (id $optId). O resultado chega do servidor; consulte positions."
     }
 
     private fun positionsText(): String {
@@ -681,7 +850,7 @@ class IqOptionConnector : UiConnector {
         return buildString {
             appendLine("== Em execução (${open.size}) ==")
             if (open.isEmpty()) appendLine("nenhuma")
-            open.forEach { appendLine("${it.id} ${it.asset} ${it.direction.uppercase()} ${it.amount} ${if (it.demo) "DEMO" else "REAL"} · entrada ${fmtPx(it.entry)} · agora ${fmtPx(quotes[it.activeId])} · " + liveStatus(it, now)) }
+            open.forEach { appendLine("${it.id} ${it.asset} ${it.direction.uppercase()} ${it.amount} ${if (it.demo) "DEMO" else "REAL"} · entrada ${fmtPx(it.entry)} · agora ${fmtPx(quotes[it.activeId])} · ${IqRules.favorDiff(it.asset, it.direction, it.entry, quotes[it.activeId])} · " + liveStatus(it, now)) }
             appendLine("== Últimas fechadas ==")
             if (closed.isEmpty()) appendLine("nenhuma")
             closed.forEach { appendLine("${it.id} ${it.asset} ${it.direction.uppercase()} ${it.amount} ${if (it.demo) "DEMO" else "REAL"} → ${resultLabel(it.result)}" + (it.profit?.let { p -> " (" + String.format(Locale.US, "%.2f", p) + ")" } ?: "")) }
@@ -728,9 +897,9 @@ class IqOptionConnector : UiConnector {
         pruneQuotes()
         open.forEach { if (it.activeId != 0) subscribeQuotes(it.activeId) }
         blocks += UiBlock.Table(
-            "Operações em execução (ao vivo)", listOf("Ativo", "Dir.", "Valor", "Entrada → Agora", "Situação"),
+            "Operações em execução (ao vivo)", listOf("Ativo", "Dir.", "Valor", "Situação", "Pips", "Entrada → Agora"),
             open.map { listOf(it.asset, it.direction.uppercase(), String.format(Locale.US, "%.2f", it.amount),
-                "${fmtPx(it.entry)} → ${fmtPx(quotes[it.activeId])}", liveStatus(it, now)) },
+                liveStatus(it, now), IqRules.favorDiff(it.asset, it.direction, it.entry, quotes[it.activeId]), "${fmtPx(it.entry)} → ${fmtPx(quotes[it.activeId])}") },
             empty = "Nenhuma operação em execução.",
         )
         blocks += UiBlock.Table(
@@ -739,6 +908,23 @@ class IqOptionConnector : UiConnector {
                 resultLabel(it.result) + (it.profit?.let { p -> " " + String.format(Locale.US, "%.2f", p) } ?: "")) },
             empty = "Sem operações fechadas nesta sessão.",
         )
+        // gerenciamento e regras do agente
+        run {
+            val rk = risk()
+            val items = ArrayList<Stat>()
+            if (settings.bool("mm_enabled") || settings.text("mm_enabled").isEmpty()) {
+                val m = mmState(settings)
+                val st = Masaniello.stake(m.bank, m.n, m.k, odds(settings))
+                items += Stat("Masaniello", "${m.k} acertos em ${m.n}", Tone.NEUTRAL)
+                items += Stat("Próx. entrada", st?.let { String.format(Locale.US, "%.2f", maxOf(1.0, it)) } ?: "—")
+                items += Stat("Banca do ciclo", String.format(Locale.US, "%.2f", m.bank), if (m.bank >= m.startBank) Tone.GOOD else Tone.BAD)
+            }
+            items += Stat("Hoje", String.format(Locale.US, "%+.2f", rk.dayPnl), if (rk.dayPnl > 0) Tone.GOOD else if (rk.dayPnl < 0) Tone.BAD else Tone.NEUTRAL)
+            items += Stat("Perdas seguidas", rk.consecLosses.toString(), if (rk.consecLosses >= 2) Tone.WARN else Tone.NEUTRAL)
+            if (rk.pausedUntil > System.currentTimeMillis()) items += Stat("Pausado até", SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(rk.pausedUntil)), Tone.WARN)
+            blocks += UiBlock.Stats(items.take(6))
+            blocks += UiBlock.Button("mm_reset", "Reiniciar ciclo Masaniello", risky = true)
+        }
         if (marginIds.isNotEmpty()) {
             val mp = runCatching { withTimeout(4_000) { marginPositions() } }.getOrNull()
             if (mp != null) blocks += UiBlock.Table("Forex / CFD / Cripto", listOf("Ativo", "Lado", "Valor", "P/L"),
@@ -770,6 +956,7 @@ class IqOptionConnector : UiConnector {
     override suspend fun onAction(actionId: String, args: Map<String, String>, settings: ConnectorSettings): Result<String> = try {
         when (actionId) {
             "account" -> Result.success(switchAccount(if (args["value"] == "real") "real" else "demo"))
+            "mm_reset" -> { val m = mmState(settings); saveMm(mmFresh(settings).copy(cycle = m.cycle + 1, cyclesWon = m.cyclesWon, cyclesLost = m.cyclesLost)); Result.success("Novo ciclo Masaniello iniciado.") }
             else -> Result.failure(IllegalArgumentException("Ação desconhecida: $actionId"))
         }
     } catch (t: Throwable) {
@@ -817,6 +1004,8 @@ class IqOptionConnector : UiConnector {
                     l.take(120).joinToString(", ") { it.ticker }
             }
         }
+        "mm_status" -> mmText(settings)
+        "backtest" -> backtestText(args["asset"].orEmpty(), args["timeframe"], args["count"]?.toDoubleOrNull()?.toInt(), args["strong"] == "true", settings)
         "candle_clock" -> clockText(IqProtocol.timeframeSeconds(args["timeframe"] ?: "60") ?: 60, settings)
         "indicators" -> indicatorsText(args["asset"].orEmpty(), args["timeframe"], args["count"]?.toDoubleOrNull()?.toInt())
         "get_candles" -> candlesText(args["asset"].orEmpty(), args["timeframe"], args["count"]?.toDoubleOrNull()?.toInt())
