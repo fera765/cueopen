@@ -330,7 +330,7 @@ object IqProtocol {
         val msg = root["msg"]
         val m = msg.obj()
         val id = m?.get("id").lng()
-        if (id != null && (status == null || status in 2000..2999)) return OptionAck(id, null, m["value"].dbl()?.takeIf { it > 0 })
+        if (id != null && (status == null || status in 2000..2999)) return OptionAck(id, null, m?.get("value").dbl()?.takeIf { it > 0 })
         val text = m?.get("message").str() ?: msg.str() ?: m?.get("error").str()
         return OptionAck(null, text ?: "A IQ Option recusou a ordem" + (status?.let { " (status $it)" } ?: "") + ".")
     }

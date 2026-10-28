@@ -121,7 +121,7 @@ Painéis e ferramentas podem ter `"compute": {"nome": "expressão", ...}`: cálc
 (ou sobre o estado do tempo real / configurações / parâmetros), em ordem — cada um enxerga os anteriores em `c`.
 Os resultados entram nos modelos como `{{c.nome}}` e listas calculadas viram linhas com `"rows": "c.nome"`
 (em tabelas e em `list`). Painel/ferramenta pode ter `compute` **sem** request (cálculo puro sobre `s`, `rt`, parâmetros).
-- **Identificadores**: `$` (resposta inteira já convertida: JSON/XML/CSV…), `s.<setting>`, `rt.<estado>`, `c.<cálculo anterior>`,
+- **Identificadores**: `${D}` (resposta inteira já convertida: JSON/XML/CSV…), `s.<setting>`, `rt.<estado>`, `c.<cálculo anterior>`,
   e nas ferramentas cada parâmetro pelo nome. Credenciais/tokens **não** existem aqui.
 - **Sintaxe**: números, `'texto'` ou `"texto"`, `true/false/null`, `+ - * / % ^`, `== != < <= > >=`, `&& || !`, `cond ? a : b`,
   `[lista]`, `{chave: valor}`, `obj.campo`, `lista[i]` (`-1` = último), lambdas `x -> x * 2` e `(a, b) -> a + b`.
