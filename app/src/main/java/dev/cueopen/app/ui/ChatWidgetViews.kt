@@ -182,6 +182,7 @@ private fun IconStep(icon: androidx.compose.ui.graphics.vector.ImageVector, onCl
 }
 
 @Composable
+@OptIn(ExperimentalLayoutApi::class)
 private fun ChartCanvas(w: CueWidget.Chart, tone: (String) -> Color) {
     val c = Cue.c
     val palette = listOf(c.accent, c.ok, c.warn, c.err, c.ink2)
