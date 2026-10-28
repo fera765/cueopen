@@ -80,7 +80,7 @@ class CapabilityTest {
     }
 
     @Test fun shellFilesParseAndRunBeforeCommand() = runBlocking {
-        val json = """{"id":"g","name":"G","description":"gera","capabilities":["terminal"],
+        val json = """{"id":"gen","name":"G","description":"gera","capabilities":["terminal"],
             "tools":[{"name":"gerar","description":"gera arquivo","params":[{"name":"txt","description":"t"}],
               "risky":true,"shell":{"files":[{"path":"a.py","content":"print('x')"}],"run":"python3 a.py"},"response":"{{$.body}}"}]}"""
         val p = CustomDefParser.parse(json)
