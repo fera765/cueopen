@@ -75,13 +75,23 @@ class IqOptionConnector : UiConnector {
                 "Até este tempo a operação é curta: o agente pode comprar (call) e vender (put). Acima disso é LONGA: só compra (call).",
                 SettingType.NUMBER, "5",
             ),
+            SettingSpec(
+                "allow_margin_agent", "Agente pode operar Forex/CFD/Cripto (margem)",
+                "Desligado: o agente só opera opções. Ligado: ele pode abrir posições alavancadas em Forex, CFD e cripto, sempre com stop loss e take profit.",
+                SettingType.SWITCH, "false", risky = true,
+            ),
+            SettingSpec("max_margin_amount", "Valor máximo por posição de margem (agente)", "Teto do valor investido em cada posição Forex/CFD/cripto aberta pelo agente.", SettingType.NUMBER, "1"),
+            SettingSpec("max_leverage", "Alavancagem máxima (agente)", "Maior alavancagem que o agente pode usar em Forex/CFD/cripto.", SettingType.NUMBER, "10"),
+            SettingSpec("max_stop_loss_pct", "Stop loss máximo (%)", "Perda máxima permitida por posição de margem, em % do valor investido.", SettingType.NUMBER, "50"),
         ),
         tools = listOf(
             ToolSpec("balance", "Saldo das contas DEMO e REAL e qual está ativa."),
             ToolSpec("set_account", "Troca a conta ativa (demo ou real). A conta real só é aceita se o usuário liberou o agente para ela.",
                 listOf(ParamSpec("account", "demo ou real", allowed = listOf("demo", "real"))), risky = true),
-            ToolSpec("open_assets", "Lista os ativos abertos para operar agora.",
-                listOf(ParamSpec("filter", "Filtro opcional de texto (ex.: EUR)", required = false))),
+            ToolSpec("open_assets", "Lista TODOS os ativos abertos agora, por tipo: turbo e binária (inclui OTC), digital, forex, CFD (ações, índices, commodities) e cripto.",
+                listOf(ParamSpec("filter", "Filtro opcional de texto (ex.: EUR)", required = false),
+                    ParamSpec("kind", "Tipo: all, options (turbo+binária), digital, forex, cfd, crypto. Padrão all.", required = false,
+                        allowed = listOf("all", "options", "turbo", "binary", "digital", "forex", "cfd", "crypto")))),
             ToolSpec("get_candles", "Velas OHLC reais de um ativo (abertura, máxima, mínima, fechamento, volume).", listOf(
                 ParamSpec("asset", "Ticker do ativo, ex.: EURUSD"),
                 ParamSpec("timeframe", "Tamanho da vela em segundos (60=1min, 300=5min…) ou 1m/5m/1h. Padrão 60.", required = false),
@@ -95,7 +105,17 @@ class IqOptionConnector : UiConnector {
                 ParamSpec("amount", "Valor da operação na moeda da conta", "number"),
                 ParamSpec("minutes", "Expiração em minutos (1–60). Padrão 1.", "integer", required = false),
             ), risky = true, requiresSignal = true),
-            ToolSpec("positions", "Operações em execução e as últimas fechadas (abertas por este app)."),
+            ToolSpec("open_position", "Abre uma posição alavancada a mercado em FOREX, CFD ou CRIPTO (buy = compra, sell = venda), com stop loss e take profit obrigatórios em %. " +
+                "Só funciona se o usuário liberou margem para o agente. EXIGE validação prévia com typesafe_jev_check (venue=iqoption, id=ativo, direction=buy|sell).", listOf(
+                ParamSpec("asset", "Ativo de margem (ex.: EURUSD, XAUUSD, AAPL, BTCUSD) — veja open_assets kind=forex/cfd/crypto"),
+                ParamSpec("side", "buy (compra) ou sell (venda)", allowed = listOf("buy", "sell")),
+                ParamSpec("amount", "Valor investido (margem) na moeda da conta", "number"),
+                ParamSpec("leverage", "Alavancagem (ex.: 10). Limitada pelo usuário.", "integer"),
+                ParamSpec("stop_loss_pct", "Stop loss em % do valor investido (ex.: 20)", "number"),
+                ParamSpec("take_profit_pct", "Take profit em % do valor investido (ex.: 30)", "number"),
+            ), risky = true, requiresSignal = true),
+            ToolSpec("close_position", "Fecha uma posição de margem (Forex/CFD/cripto) pelo id.", listOf(ParamSpec("id", "Id da posição", "integer")), risky = true),
+            ToolSpec("positions", "Operações em execução com resultado AO VIVO (ganhando/perdendo agora), as últimas fechadas e as posições de Forex/CFD/cripto."),
         ),
     )
 
@@ -106,6 +126,7 @@ class IqOptionConnector : UiConnector {
         val id: Long, val asset: String, val direction: String, val amount: Double,
         val expSec: Long, val demo: Boolean, val currency: String,
         val result: String? = null, val profit: Double? = null,
+        val activeId: Int = 0, val entry: Double? = null,
     )
 
     private val client = OkHttpClient.Builder()
@@ -116,6 +137,11 @@ class IqOptionConnector : UiConnector {
     private val waiters = CopyOnWriteArrayList<Waiter>()
     private val balances = ConcurrentHashMap<Long, IqProtocol.Balance>()
     private val tracked = ConcurrentHashMap<Long, Tracked>()
+    private val quotes = ConcurrentHashMap<Int, Double>()
+    private val subscribed = java.util.Collections.newSetFromMap(ConcurrentHashMap<Int, Boolean>())
+    private val marginIds = java.util.Collections.newSetFromMap(ConcurrentHashMap<Long, Boolean>())
+    @Volatile private var allAssets: List<IqProtocol.Asset> = emptyList()
+    @Volatile private var allAssetsAt = 0L
     private val seen = ArrayDeque<String>()
 
     @Volatile private var ssid: String? = null
@@ -206,6 +232,7 @@ class IqOptionConnector : UiConnector {
     }
 
     private fun dropConnection(reason: String) {
+        subscribed.clear()
         authenticated = false
         ws = null
         val failure = IOException("Conexão com a IQ Option perdida: $reason")
@@ -218,6 +245,7 @@ class IqOptionConnector : UiConnector {
         runCatching { ws?.close(1000, null) }
         ws = null
         authenticated = false
+        subscribed.clear()
     }
 
     override suspend fun logout() {
@@ -226,7 +254,10 @@ class IqOptionConnector : UiConnector {
         creds = null
         balances.clear()
         tracked.clear()
+        quotes.clear()
+        marginIds.clear()
         assets = emptyList()
+        allAssets = emptyList()
         activeBalanceId = null
     }
 
@@ -236,6 +267,19 @@ class IqOptionConnector : UiConnector {
         mutex.withLock {
             if (!(authenticated && ws != null)) connectLocked(c["email"].orEmpty(), c["password"].orEmpty())
         }
+        // reconectou: volta a assinar as cotações das operações em aberto (resultado ao vivo)
+        tracked.values.filter { it.result == null && it.activeId != 0 }.forEach { subscribeQuotes(it.activeId) }
+    }
+
+    private fun subscribeQuotes(activeId: Int) {
+        if (activeId == 0 || !subscribed.add(activeId)) return
+        if (ws?.send(IqProtocol.subscribeQuotesMessage(activeId)) != true) subscribed.remove(activeId)
+    }
+
+    /** Larga a assinatura de cotações quando não há mais operação aberta naquele ativo. */
+    private fun pruneQuotes() {
+        val needed = tracked.values.filter { it.result == null && it.expSec + 120 > serverNowSec() }.map { it.activeId }.toSet()
+        subscribed.filter { it !in needed }.forEach { id -> subscribed.remove(id); runCatching { ws?.send(IqProtocol.unsubscribeQuotesMessage(id)) }; quotes.remove(id) }
     }
 
     // ------------------------------------------------------------------ mensagens
@@ -270,6 +314,26 @@ class IqOptionConnector : UiConnector {
                 val c = IqProtocol.parseOptionClosed(root)
                 val t = if (c != null) tracked[c.optionId] else null
                 if (c != null && t != null) tracked[c.optionId] = t.copy(result = c.result, profit = c.profit)
+            }
+            "candle-generated" -> {
+                val q = if (msg != null) IqProtocol.parseQuote(msg) else null
+                if (q != null) {
+                    quotes[q.activeId] = q.price
+                    // operação sem preço de entrada confirmado: usa a 1ª cotação após a abertura
+                    tracked.values.filter { it.activeId == q.activeId && it.entry == null && it.result == null }
+                        .forEach { tracked[it.id] = it.copy(entry = q.price) }
+                }
+            }
+            "socket-option-opened", "option-opened" -> {
+                // operações abertas fora do app (web/celular) também aparecem e são acompanhadas ao vivo
+                val o = IqProtocol.parseOptionOpened(root)
+                if (o != null && !tracked.containsKey(o.optionId)) {
+                    val acc = activeBalance()
+                    val ticker = (allAssets + assets).firstOrNull { it.id == o.activeId }?.ticker ?: "#${o.activeId}"
+                    tracked[o.optionId] = Tracked(o.optionId, ticker, o.direction, o.amount, o.expSec, acc?.isPractice ?: true, acc?.currency ?: "",
+                        activeId = o.activeId, entry = o.openPrice)
+                    subscribeQuotes(o.activeId)
+                }
             }
         }
         val rid = (root["request_id"] as? JsonPrimitive)?.contentOrNull
@@ -310,6 +374,93 @@ class IqOptionConnector : UiConnector {
         assetsAt = System.currentTimeMillis()
         return list
     }
+
+    /** Todos os mercados: opções (turbo/binária, inclui OTC) + digital + forex + CFD + cripto. Cada fonte é opcional. */
+    private suspend fun loadAllAssets(force: Boolean = false): List<IqProtocol.Asset> {
+        if (!force && allAssets.isNotEmpty() && System.currentTimeMillis() - allAssetsAt < 60_000) return allAssets
+        val out = ArrayList(loadAssets(force))
+        val now = serverNowSec()
+        runCatching {
+            val id = reqId()
+            val root = request(id, IqProtocol.underlyingListMessage(id), "underlying-list", timeoutMs = 12_000)
+            out += IqProtocol.parseUnderlying(root["msg"] as? JsonObject ?: JsonObject(emptyMap()), now)
+        }.onFailure { err("digital: ${it.message}") }
+        for (type in listOf("forex", "cfd", "crypto")) runCatching {
+            val id = reqId()
+            val root = request(id, IqProtocol.instrumentsMessage(id, type), "instruments", timeoutMs = 12_000)
+            out += IqProtocol.parseInstruments(root["msg"] as? JsonObject ?: JsonObject(emptyMap()), type, now)
+        }.onFailure { err("$type: ${it.message}") }
+        allAssets = out
+        allAssetsAt = System.currentTimeMillis()
+        return out
+    }
+
+    private fun kindLabel(k: String) = when (k) { "turbo" -> "Turbo"; "binary" -> "Binária"; "digital" -> "Digital"; "forex" -> "Forex"; "cfd" -> "CFD"; "crypto" -> "Cripto"; else -> k }
+
+    private fun countdown(sec: Long) = "${sec / 60}:${String.format(Locale.US, "%02d", sec % 60)}"
+
+    /** Situação ao vivo de uma opção aberta: tempo restante + ganhando/perdendo agora pela cotação real. */
+    private fun liveStatus(t: Tracked, now: Long): String {
+        val price = quotes[t.activeId]
+        val outcome = IqProtocol.liveOutcome(t.direction, t.entry, price)
+        val time = if (t.expSec > now) countdown(t.expSec - now) else "resultado…"
+        val arrow = when (outcome) { "WIN" -> " ▲ ganhando"; "LOSS" -> " ▼ perdendo"; "EMPATE" -> " = empate"; else -> " · aguardando cotação" }
+        return time + arrow
+    }
+
+    private fun fmtPx(v: Double?) = v?.let { java.math.BigDecimal(it).setScale(6, java.math.RoundingMode.HALF_UP).stripTrailingZeros().toPlainString() } ?: "—"
+
+    // ------------------------------------------------------------------ margem (Forex / CFD / cripto)
+    private suspend fun marginPositions(): List<IqProtocol.MarginPos> {
+        val acc = activeBalance() ?: return emptyList()
+        val id = reqId()
+        val root = request(id, IqProtocol.getPositionsMessage(id, acc.id), "positions", timeoutMs = 12_000)
+        return IqProtocol.parsePositions(root["msg"] as? JsonObject ?: JsonObject(emptyMap()))
+    }
+
+    private suspend fun openMargin(args: Map<String, String>, settings: ConnectorSettings): String {
+        ensureConnected()
+        if (!settings.bool("allow_margin_agent")) return "RECUSADO: o usuário não liberou o agente para operar Forex/CFD/cripto (configurações do conector IQ Option)."
+        val acc = activeBalance() ?: return "Nenhuma conta ativa."
+        if (acc.isReal && !settings.bool("allow_real_agent")) return "RECUSADO: a conta ativa é REAL e o agente não foi liberado para ela."
+        val side = args["side"].orEmpty().lowercase()
+        if (side != "buy" && side != "sell") return "side deve ser buy ou sell."
+        val amount = args["amount"]?.replace(',', '.')?.toDoubleOrNull() ?: 0.0
+        val lev = args["leverage"]?.toDoubleOrNull()?.toInt() ?: 0
+        val sl = args["stop_loss_pct"]?.replace(',', '.')?.toDoubleOrNull() ?: 0.0
+        val tp = args["take_profit_pct"]?.replace(',', '.')?.toDoubleOrNull() ?: 0.0
+        if (amount <= 0) return "amount deve ser maior que zero."
+        val maxAmount = settings.num("max_margin_amount", 1.0)
+        if (amount > maxAmount) return "RECUSADO: valor $amount excede o máximo por posição ($maxAmount)."
+        val maxLev = settings.num("max_leverage", 10.0).toInt().coerceAtLeast(1)
+        if (lev < 1 || lev > maxLev) return "RECUSADO: alavancagem deve ser de 1 a $maxLev."
+        val maxSl = settings.num("max_stop_loss_pct", 50.0)
+        if (sl <= 0 || sl > maxSl) return "RECUSADO: stop loss obrigatório, entre 0 e $maxSl%."
+        if (tp <= 0) return "RECUSADO: take profit obrigatório (> 0%)."
+        val q = args["asset"].orEmpty()
+        fun norm(x: String) = x.uppercase().replace("/", "").replace(" ", "").replace("_", "")
+        val a = loadAllAssets().filter { it.instrumentId.isNotEmpty() }.let { l -> l.firstOrNull { norm(it.ticker) == norm(q) || norm(it.instrumentId) == norm(q) } }
+            ?: return "Ativo de margem '$q' não encontrado. Use open_assets kind=forex/cfd/crypto."
+        if (!a.open) return "O ativo ${a.ticker} está fechado agora."
+        val id = reqId()
+        val root = request(id, IqProtocol.placeMarginOrderMessage(id, acc.id, a.kind, a.instrumentId, side, amount, lev, sl, tp),
+            "order-placed-temp", "result", timeoutMs = 15_000)
+        val ack = IqProtocol.parseOrderAck(root)
+        val oid = ack.optionId ?: run { err("margem recusada: ${ack.error}"); return "RECUSADA pela IQ Option: ${ack.error}" }
+        marginIds += oid
+        return "Ordem de ${kindLabel(a.kind)} ENVIADA na conta ${acc.label}: ${a.ticker} ${side.uppercase()} ${String.format(Locale.US, "%.2f", amount)} ×$lev · SL $sl% · TP $tp% (ordem $oid). Acompanhe em positions."
+    }
+
+    private suspend fun closeMargin(idRaw: String?): String {
+        ensureConnected()
+        val pid = idRaw?.toDoubleOrNull()?.toLong() ?: return "id inválido."
+        val id = reqId()
+        val root = request(id, IqProtocol.closePositionMessage(id, pid), "result", "position-closed", timeoutMs = 12_000)
+        val status = (root["status"] as? JsonPrimitive)?.contentOrNull?.toIntOrNull()
+        return if (status == null || status in 2000..2999) "Fechamento da posição $pid solicitado." else "A IQ Option recusou fechar a posição $pid (status $status)."
+    }
+
+    override fun refreshMs(): Long = if (tracked.values.any { it.result == null }) 1_000 else 4_000
 
     // ------------------------------------------------------------------ ações de negócio
     private fun money(b: IqProtocol.Balance) = String.format(Locale.US, "%.2f %s", b.amount, b.currency).trim()
@@ -371,9 +522,13 @@ class IqOptionConnector : UiConnector {
             if (minutes > shortMax && dir != "call")
                 return "RECUSADO: operação LONGA (mais de $shortMax min) só pode ser de COMPRA (call). Venda (put) só em operações curtas (até $shortMax min)."
         }
-        val a = IqProtocol.resolveAsset(loadAssets(), asset) ?: return "Ativo '$asset' não encontrado. Use open_assets."
+        val a = IqProtocol.resolveAsset(loadAssets(), asset) ?: run {
+            val m = runCatching { loadAllAssets() }.getOrDefault(emptyList()).firstOrNull { it.instrumentId.isNotEmpty() && it.ticker.equals(asset.trim(), true) }
+            return if (m != null) "${m.ticker} é ${kindLabel(m.kind)} (margem): use open_position em vez de buy." else "Ativo '$asset' não encontrado. Use open_assets."
+        }
         if (!a.open) return "O ativo ${a.ticker} está fechado/suspenso agora."
         val exp = IqProtocol.expirationFor(serverNowSec(), minutes)
+        subscribeQuotes(a.id) // cotação ao vivo para acompanhar ganhando/perdendo
         val id = reqId()
         val root = request(id, IqProtocol.openOptionMessage(id, acc.id, a.id, dir, exp, amount, IqProtocol.isTurbo(minutes)), "option", "option-rejected", timeoutMs = 15_000)
         val ack = IqProtocol.parseOptionAck(root)
@@ -382,7 +537,7 @@ class IqOptionConnector : UiConnector {
             err("ordem recusada: ${ack.error}")
             return "RECUSADA pela IQ Option: ${ack.error}"
         }
-        tracked[optId] = Tracked(optId, a.ticker, dir, amount, exp, acc.isPractice, acc.currency)
+        tracked[optId] = Tracked(optId, a.ticker, dir, amount, exp, acc.isPractice, acc.currency, activeId = a.id, entry = ack.openPrice ?: quotes[a.id])
         return "Ordem ABERTA na conta ${acc.label}: ${a.ticker} ${dir.uppercase()} ${money(acc.copy(amount = amount))} · expira em ~${minutes} min (id $optId). O resultado chega do servidor; consulte positions."
     }
 
@@ -393,10 +548,10 @@ class IqOptionConnector : UiConnector {
         return buildString {
             appendLine("== Em execução (${open.size}) ==")
             if (open.isEmpty()) appendLine("nenhuma")
-            open.forEach { appendLine("${it.id} ${it.asset} ${it.direction.uppercase()} ${it.amount} ${if (it.demo) "DEMO" else "REAL"} · " + (if (it.expSec > now) "expira em ${it.expSec - now}s" else "aguardando resultado")) }
+            open.forEach { appendLine("${it.id} ${it.asset} ${it.direction.uppercase()} ${it.amount} ${if (it.demo) "DEMO" else "REAL"} · entrada ${fmtPx(it.entry)} · agora ${fmtPx(quotes[it.activeId])} · " + liveStatus(it, now)) }
             appendLine("== Últimas fechadas ==")
             if (closed.isEmpty()) appendLine("nenhuma")
-            closed.forEach { appendLine("${it.id} ${it.asset} ${it.direction.uppercase()} ${it.amount} ${if (it.demo) "DEMO" else "REAL"} → ${resultLabel(it.result)}") }
+            closed.forEach { appendLine("${it.id} ${it.asset} ${it.direction.uppercase()} ${it.amount} ${if (it.demo) "DEMO" else "REAL"} → ${resultLabel(it.result)}" + (it.profit?.let { p -> " (" + String.format(Locale.US, "%.2f", p) + ")" } ?: "")) }
             append("Obs.: lista as operações abertas por este app, confirmadas pelo servidor.")
         }.trim()
     }
@@ -437,19 +592,36 @@ class IqOptionConnector : UiConnector {
             Stat("Em execução", open.size.toString()),
             Stat("Sessão W/L", "$wins/$losses", if (wins > losses) Tone.GOOD else if (losses > wins) Tone.BAD else Tone.NEUTRAL),
         ))
+        pruneQuotes()
+        open.forEach { if (it.activeId != 0) subscribeQuotes(it.activeId) }
         blocks += UiBlock.Table(
-            "Operações em execução", listOf("Ativo", "Dir.", "Valor", "Expira"),
+            "Operações em execução (ao vivo)", listOf("Ativo", "Dir.", "Valor", "Entrada → Agora", "Situação"),
             open.map { listOf(it.asset, it.direction.uppercase(), String.format(Locale.US, "%.2f", it.amount),
-                if (it.expSec > now) "${(it.expSec - now) / 60}:${String.format(Locale.US, "%02d", (it.expSec - now) % 60)}" else "resultado…") },
+                "${fmtPx(it.entry)} → ${fmtPx(quotes[it.activeId])}", liveStatus(it, now)) },
             empty = "Nenhuma operação em execução.",
         )
         blocks += UiBlock.Table(
             "Últimas operações", listOf("Ativo", "Dir.", "Valor", "Resultado"),
-            closed.sortedByDescending { it.expSec }.take(8).map { listOf(it.asset, it.direction.uppercase(), String.format(Locale.US, "%.2f", it.amount), resultLabel(it.result)) },
+            closed.sortedByDescending { it.expSec }.take(8).map { listOf(it.asset, it.direction.uppercase(), String.format(Locale.US, "%.2f", it.amount),
+                resultLabel(it.result) + (it.profit?.let { p -> " " + String.format(Locale.US, "%.2f", p) } ?: "")) },
             empty = "Sem operações fechadas nesta sessão.",
         )
-        val assetRows = runCatching { loadAssets().filter { it.open }.take(15).map { listOf(it.ticker, if (it.kind == "turbo") "Turbo" else "Binária") } }.getOrNull()
-        if (assetRows != null) blocks += UiBlock.Table("Ativos abertos", listOf("Ativo", "Tipo"), assetRows, empty = "Nenhum ativo aberto agora.")
+        if (marginIds.isNotEmpty()) {
+            val mp = runCatching { marginPositions() }.getOrNull()
+            if (mp != null) blocks += UiBlock.Table("Forex / CFD / Cripto", listOf("Ativo", "Lado", "Valor", "P/L"),
+                mp.map { listOf(it.instrument, it.side.uppercase(), "${String.format(Locale.US, "%.2f", it.amount)} ×${it.leverage}", it.pnl?.let { p -> String.format(Locale.US, "%.2f", p) } ?: it.status) },
+                empty = "Nenhuma posição de margem aberta.")
+        }
+        val all = runCatching { loadAllAssets() }.getOrNull()
+        if (all != null) {
+            val openA = all.filter { it.open }
+            blocks += UiBlock.Stats(listOf("turbo", "binary", "digital", "forex", "cfd", "crypto").mapNotNull { k ->
+                val n = openA.count { it.kind == k }; if (all.none { it.kind == k }) null else Stat(kindLabel(k), n.toString())
+            }.take(6))
+            blocks += UiBlock.Table("Ativos abertos (${openA.size})", listOf("Ativo", "Tipo"),
+                openA.sortedWith(compareBy({ listOf("turbo", "binary", "digital", "forex", "cfd", "crypto").indexOf(it.kind) }, { it.ticker })).take(60).map { listOf(it.ticker, kindLabel(it.kind)) },
+                empty = "Nenhum ativo aberto agora.")
+        }
         blocks += UiBlock.Note("Mostra as operações abertas por este app; resultados vêm de eventos reais do servidor. Operar envolve risco de perda.", Tone.NEUTRAL)
         return blocks
     }
@@ -472,9 +644,9 @@ class IqOptionConnector : UiConnector {
 
     // ------------------------------------------------------------------ portão de validação
     override fun orderIntents(tool: String, args: Map<String, String>): List<dev.cueopen.app.uiconnector.OrderIntent> {
-        if (tool != "buy") return emptyList()
+        if (tool != "buy" && tool != "open_position") return emptyList()
         val asset = args["asset"].orEmpty().trim()
-        val side = dev.cueopen.app.trading.Sides.parse(args["direction"])
+        val side = dev.cueopen.app.trading.Sides.parse(if (tool == "buy") args["direction"] else args["side"])
         if (asset.isEmpty() || side == null) return emptyList()
         return listOf(dev.cueopen.app.uiconnector.OrderIntent(asset, side))
     }
@@ -498,9 +670,16 @@ class IqOptionConnector : UiConnector {
         }
         "open_assets" -> {
             val f = args["filter"].orEmpty().trim().uppercase()
-            val list = loadAssets().filter { it.open && (f.isEmpty() || it.ticker.uppercase().contains(f)) }
-            if (list.isEmpty()) "Nenhum ativo aberto" + (if (f.isNotEmpty()) " para '$f'" else "") + "."
-            else "Ativos abertos (${list.size}): " + list.take(80).joinToString(", ") { "${it.ticker}${if (it.kind == "turbo") "" else "·bin"}" }
+            val k = args["kind"].orEmpty().ifBlank { "all" }.lowercase()
+            val list = loadAllAssets().filter { a ->
+                a.open && (f.isEmpty() || a.ticker.uppercase().contains(f)) &&
+                    (k == "all" || a.kind == k || (k == "options" && (a.kind == "turbo" || a.kind == "binary")))
+            }
+            if (list.isEmpty()) "Nenhum ativo aberto" + (if (f.isNotEmpty()) " para '$f'" else "") + (if (k != "all") " ($k)" else "") + "."
+            else list.groupBy { it.kind }.entries.joinToString("\n") { (kind, l) ->
+                "${kindLabel(kind)} (${l.size})${if (kind in setOf("turbo", "binary")) " — use buy" else if (kind == "digital") " — listado (opere via buy se também existir em turbo/binária)" else " — use open_position"}: " +
+                    l.take(120).joinToString(", ") { it.ticker }
+            }
         }
         "get_candles" -> candlesText(args["asset"].orEmpty(), args["timeframe"], args["count"]?.toDoubleOrNull()?.toInt())
         "buy" -> buy(
@@ -509,7 +688,16 @@ class IqOptionConnector : UiConnector {
             args["minutes"]?.toDoubleOrNull()?.toInt() ?: 1,
             settings, byAgent = true,
         )
-        "positions" -> positionsText()
+        "positions" -> {
+            ensureConnected()
+            val base = positionsText()
+            val margin = if (marginIds.isEmpty()) emptyList() else runCatching { marginPositions() }.getOrDefault(emptyList())
+            if (margin.isEmpty()) base else base + "\n== Forex/CFD/cripto ==\n" + margin.joinToString("\n") {
+                "${it.id} ${it.instrument} ${it.side.uppercase()} ${it.amount} ×${it.leverage} · ${it.status} · P/L ${it.pnl?.let { p -> String.format(Locale.US, "%.2f", p) } ?: "—"}"
+            }
+        }
+        "open_position" -> openMargin(args, settings)
+        "close_position" -> closeMargin(args["id"])
         else -> "Ferramenta desconhecida: $name"
     }
 

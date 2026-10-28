@@ -453,7 +453,8 @@ fun Composer(
             Spacer(Modifier.weight(1f))
             // Com o agente ativo e sem texto digitado → botão PARAR. Ao digitar → botão ENVIAR.
             if (running && value.isBlank()) {
-                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                // alinhado à direita: o botão PARAR fica sempre no mesmo lugar do botão ENVIAR
+                Column(horizontalAlignment = Alignment.End) {
                     // Balão de cronômetro real: conta o tempo exato até o próximo ciclo agendado.
                     if (nextCycleAt != null) {
                         var now by remember(nextCycleAt) { mutableStateOf(System.currentTimeMillis()) }

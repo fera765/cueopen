@@ -140,6 +140,9 @@ interface UiConnector {
      * Conectores OAuth devolvem o refresh token (o login interativo não pode se repetir sozinho em segundo plano).
      */
     fun persistedCredentials(): Map<String, String>? = null
+
+    /** Intervalo de atualização da tela do conector (ms). Conectores em tempo real devolvem menos (ex.: 1000 com operação aberta). */
+    fun refreshMs(): Long = 5_000
 }
 
 /**

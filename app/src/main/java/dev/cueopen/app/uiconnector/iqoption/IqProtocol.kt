@@ -43,9 +43,14 @@ object IqProtocol {
     }
 
     data class Profile(val balances: List<Balance>, val activeBalanceId: Long?)
-    data class Asset(val id: Int, val ticker: String, val kind: String, val open: Boolean)
+    /** kind: turbo | binary | digital | forex | cfd | crypto. [instrumentId] = id do instrumento de margem (forex/cfd/crypto). */
+    data class Asset(val id: Int, val ticker: String, val kind: String, val open: Boolean, val instrumentId: String = "")
+    data class Quote(val activeId: Int, val price: Double)
+    data class OptionOpened(val optionId: Long, val activeId: Int, val direction: String, val amount: Double, val expSec: Long, val openPrice: Double?)
+    data class MarginPos(val id: Long, val instrument: String, val type: String, val side: String, val amount: Double, val leverage: Int,
+                         val openPrice: Double?, val pnl: Double?, val status: String)
     data class Candle(val from: Long, val open: Double, val close: Double, val min: Double, val max: Double, val volume: Double)
-    data class OptionAck(val optionId: Long?, val error: String?)
+    data class OptionAck(val optionId: Long?, val error: String?, val openPrice: Double? = null)
     data class OptionClosed(val optionId: Long, val result: String, val profit: Double?)
 
     sealed interface LoginOutcome {
@@ -137,7 +142,138 @@ object IqProtocol {
             put("value", 0)
         })
 
+    /** Ativos de opções digitais. */
+    fun underlyingListMessage(reqId: String): String = sendMessage(reqId, "get-underlying-list", "2.0", buildJsonObject { put("type", "digital-option") })
+
+    /** Instrumentos de margem: type = forex | cfd | crypto. */
+    fun instrumentsMessage(reqId: String, type: String): String = sendMessage(reqId, "get-instruments", "4.0", buildJsonObject { put("type", type) })
+
+    /** Assina as cotações (velas de 1 s) de um ativo — usadas para o resultado AO VIVO das operações. */
+    fun subscribeQuotesMessage(activeId: Int): String = buildJsonObject {
+        put("name", "subscribeMessage")
+        putJsonObject("msg") {
+            put("name", "candle-generated")
+            putJsonObject("params") { putJsonObject("routingFilters") { put("active_id", activeId); put("size", 1) } }
+        }
+    }.toString()
+
+    fun unsubscribeQuotesMessage(activeId: Int): String = buildJsonObject {
+        put("name", "unsubscribeMessage")
+        putJsonObject("msg") {
+            put("name", "candle-generated")
+            putJsonObject("params") { putJsonObject("routingFilters") { put("active_id", activeId); put("size", 1) } }
+        }
+    }.toString()
+
+    /** Ordem a mercado em forex/CFD/cripto com stop loss e take profit em % (obrigatórios). */
+    fun placeMarginOrderMessage(reqId: String, balanceId: Long, type: String, instrumentId: String, side: String, amount: Double,
+                                leverage: Int, stopLossPct: Double, takeProfitPct: Double): String =
+        sendMessage(reqId, "place-order-temp", "4.0", buildJsonObject {
+            put("user_balance_id", balanceId)
+            put("client_platform_id", 9)
+            put("instrument_type", type)
+            put("instrument_id", instrumentId)
+            put("side", side.lowercase())
+            put("type", "market")
+            put("amount", amount)
+            put("leverage", leverage)
+            put("limit_price", JsonNull)
+            put("stop_price", JsonNull)
+            put("stop_lose_kind", "percent")
+            put("stop_lose_value", stopLossPct)
+            put("take_profit_kind", "percent")
+            put("take_profit_value", takeProfitPct)
+            put("use_trail_stop", false)
+            put("auto_margin_call", false)
+            put("use_token_for_commission", false)
+        })
+
+    fun closePositionMessage(reqId: String, positionId: Long): String = sendMessage(reqId, "close-position", "1.0", buildJsonObject { put("position_id", positionId) })
+
+    fun getPositionsMessage(reqId: String, balanceId: Long): String = sendMessage(reqId, "get-positions", "3.0", buildJsonObject {
+        put("instrument_types", JsonArray(listOf("forex", "cfd", "crypto").map { JsonPrimitive(it) }))
+        put("user_balance_id", balanceId)
+    })
+
     // ------------------------------------------------------------------ mensagens de entrada
+    private fun openNow(a: JsonObject, nowSec: Long): Boolean {
+        val enabled = (a["enabled"] as? JsonPrimitive)?.booleanOrNull ?: true
+        val suspended = (a["is_suspended"] as? JsonPrimitive)?.booleanOrNull ?: false
+        if (!enabled || suspended) return false
+        val sched = a["schedule"].arr() ?: return true
+        if (sched.isEmpty()) return true
+        return sched.any { w -> val p = w.arr(); val st = p?.getOrNull(0).lng(); val en = p?.getOrNull(1).lng(); st != null && en != null && nowSec in st until en }
+    }
+
+    fun parseUnderlying(msg: JsonObject, nowSec: Long): List<Asset> =
+        (msg["underlying"].arr() ?: msg["underlying_list"].arr()).orEmpty().mapNotNull { e ->
+            val a = e.obj() ?: return@mapNotNull null
+            val id = a["active_id"].lng()?.toInt() ?: return@mapNotNull null
+            val name = (a["name"].str() ?: a["underlying"].str() ?: return@mapNotNull null).removePrefix("front.")
+            Asset(id, name, "digital", openNow(a, nowSec))
+        }
+
+    fun parseInstruments(msg: JsonObject, type: String, nowSec: Long): List<Asset> =
+        msg["instruments"].arr().orEmpty().mapNotNull { e ->
+            val a = e.obj() ?: return@mapNotNull null
+            val instId = a["id"].str() ?: return@mapNotNull null
+            val id = a["active_id"].lng()?.toInt() ?: 0
+            val name = (a["ticker"].str() ?: a["name"].str() ?: instId).removePrefix("front.")
+            Asset(id, name, type, openNow(a, nowSec), instId)
+        }
+
+    fun parseQuote(msg: JsonObject): Quote? {
+        val id = msg["active_id"].lng()?.toInt() ?: return null
+        val p = msg["close"].dbl() ?: msg["value"].dbl() ?: return null
+        return Quote(id, p)
+    }
+
+    /** Operação aberta em qualquer lugar (app, web, celular): `socket-option-opened` / `option-opened`. */
+    fun parseOptionOpened(root: JsonObject): OptionOpened? {
+        val m = root["msg"].obj() ?: return null
+        val id = m["option_id"].lng() ?: m["id"].lng() ?: return null
+        val active = m["active_id"].lng()?.toInt() ?: return null
+        val dir = (m["direction"].str() ?: m["dir"].str() ?: return null).lowercase()
+        val amount = m["amount"].dbl() ?: m["price"].dbl() ?: m["sum"].dbl() ?: 0.0
+        val exp = m["expiration_time"].lng() ?: m["expired"].lng() ?: m["exp"].lng() ?: return null
+        val open = m["value"].dbl() ?: m["open_quote"].dbl()
+        return OptionOpened(id, active, dir, amount, if (exp > 1e11) exp / 1000 else exp, open)
+    }
+
+    fun parseOrderAck(root: JsonObject): OptionAck {
+        val status = root["status"].lng()
+        val m = root["msg"].obj()
+        val id = m?.get("id").lng()
+        if (id != null && (status == null || status in 2000..2999)) return OptionAck(id, null)
+        val text = m?.get("message").str() ?: root["msg"].str() ?: m?.get("error").str()
+        return OptionAck(null, text ?: "A IQ Option recusou a ordem" + (status?.let { " (status $it)" } ?: "") + ".")
+    }
+
+    fun parsePositions(msg: JsonObject): List<MarginPos> =
+        (msg["positions"].arr() ?: msg["items"].arr()).orEmpty().mapNotNull { e ->
+            val p = e.obj() ?: return@mapNotNull null
+            val id = p["id"].lng() ?: return@mapNotNull null
+            val raw = p["raw_event"].obj()
+            MarginPos(
+                id = id,
+                instrument = (p["instrument_id"].str() ?: p["instrument_name"].str() ?: raw?.get("instrument_id").str() ?: "?").removePrefix("front."),
+                type = p["instrument_type"].str() ?: "?",
+                side = (p["side"].str() ?: raw?.get("side").str() ?: p["direction"].str() ?: "?").lowercase(),
+                amount = p["invest"].dbl() ?: p["margin"].dbl() ?: p["amount"].dbl() ?: 0.0,
+                leverage = (p["leverage"].lng() ?: raw?.get("leverage").lng() ?: 1L).toInt(),
+                openPrice = p["open_quote"].dbl() ?: p["open_price"].dbl() ?: raw?.get("open_quote").dbl(),
+                pnl = p["pnl_net"].dbl() ?: p["pnl"].dbl() ?: p["close_profit"].dbl() ?: raw?.get("pnl").dbl(),
+                status = p["status"].str() ?: "open",
+            )
+        }
+
+    /** Resultado ao vivo de uma opção: call ganha se o preço atual > entrada; put se < entrada. */
+    fun liveOutcome(direction: String, entry: Double?, price: Double?): String = when {
+        entry == null || price == null -> "—"
+        price == entry -> "EMPATE"
+        (direction.lowercase() == "call") == (price > entry) -> "WIN"
+        else -> "LOSS"
+    }
     private fun parseBalance(o: JsonObject, fallbackCurrency: String): Balance? {
         val id = o["id"].lng() ?: return null
         val type = o["type"].lng()?.toInt() ?: return null
@@ -194,7 +330,7 @@ object IqProtocol {
         val msg = root["msg"]
         val m = msg.obj()
         val id = m?.get("id").lng()
-        if (id != null && (status == null || status in 2000..2999)) return OptionAck(id, null)
+        if (id != null && (status == null || status in 2000..2999)) return OptionAck(id, null, m["value"].dbl()?.takeIf { it > 0 })
         val text = m?.get("message").str() ?: msg.str() ?: m?.get("error").str()
         return OptionAck(null, text ?: "A IQ Option recusou a ordem" + (status?.let { " (status $it)" } ?: "") + ".")
     }

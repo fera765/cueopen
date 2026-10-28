@@ -160,10 +160,15 @@ fun UiConnectorScreen(nav: NavController, id: String) {
         }
     }
     // Painel ao vivo: atualiza a cada 5 s enquanto logado e a tela está aberta.
-    LaunchedEffect(loggedIn) {
-        // conectores em tempo real (só estado/coleções, sem HTTP nos painéis) atualizam a tela mais rápido
-        val live = (connector as? dev.cueopen.app.uiconnector.custom.CustomConnector)?.let { cc -> cc.rt != null && cc.def.panels.none { it.request != null } } == true
-        while (loggedIn) { refresh(); delay(if (live) 1_500 else 5_000) }
+    // Sincronização contínua: segue o estado REAL do conector (o agente pode ter entrado/operado em segundo plano)
+    // e usa o intervalo pedido pelo conector (tempo real: 1 s com operação aberta).
+    LaunchedEffect(id) {
+        while (true) {
+            val live = connector.isLoggedIn
+            if (live != loggedIn) loggedIn = live
+            if (live) refresh()
+            delay(connector.refreshMs().coerceIn(500L, 60_000L))
+        }
     }
 
     Scaffold(containerColor = c.bg, topBar = {

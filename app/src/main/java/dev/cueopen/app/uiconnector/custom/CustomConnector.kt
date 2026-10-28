@@ -76,6 +76,8 @@ class CustomConnector(
         if (spec.startsWith("c.")) (computed[spec.removePrefix("c.")] as? List<*>)?.map { Compute.toJson(it) }.orEmpty()
         else json?.let { JsonPath.select(it, spec) }.orEmpty()
 
+    override fun refreshMs(): Long = if (rt != null && def.panels.none { it.request != null }) 1_500 else 5_000
+
     /** Fecha a conexão em tempo real e libera recursos (definição trocada/removida). */
     fun dispose() { rt?.dispose() }
 
