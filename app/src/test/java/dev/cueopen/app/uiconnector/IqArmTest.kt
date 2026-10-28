@@ -1,6 +1,6 @@
 package dev.cueopen.app.uiconnector
 
-import dev.cueopen.app.uiconnector.iqoption.IqRules
+import dev.cueopen.app.uiconnector.iqoption.IqProtocol
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -9,7 +9,7 @@ import org.junit.Test
 class IqArmTest {
     @Test fun `gatilho de preco por direcao`() {
         // call dispara quando preço ABAIXO da abertura (favorece subir depois)
-        assertEquals("WIN", IqRules.liveOutcome("call", 1.10000, 1.10010)) // já subiu = a favor
+        assertEquals("WIN", IqProtocol.liveOutcome("call", 1.10000, 1.10010)) // já subiu = a favor
         // sentido de ENTRADA: call entra se preço < abertura
         fun callEntra(open: Double, price: Double) = price < open
         fun putEntra(open: Double, price: Double) = price > open
