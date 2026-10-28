@@ -60,7 +60,19 @@ object CustomDefParser {
 
     data class Parsed(val def: CustomDef?, val errors: List<String>, val warnings: List<String>)
 
-    fun parse(text: String): Parsed {
+    /** Remove cercas de Markdown (```json … ```) que IAs costumam colocar em volta do JSON. */
+    fun stripFences(raw: String): String {
+        var t = raw.trim()
+        if (t.startsWith("```")) {
+            t = t.substringAfter('\n', "")
+            val end = t.lastIndexOf("```")
+            if (end >= 0) t = t.substring(0, end)
+        }
+        return t.trim()
+    }
+
+    fun parse(input: String): Parsed {
+        val text = stripFences(input)
         if (text.length > MAX_CHARS) return Parsed(null, listOf("Definição maior que 64 KB."), emptyList())
         val root = try { Json.parseToJsonElement(text) } catch (t: Exception) {
             return Parsed(null, listOf("JSON inválido: ${(t.message ?: "erro de sintaxe").take(180)}"), emptyList())

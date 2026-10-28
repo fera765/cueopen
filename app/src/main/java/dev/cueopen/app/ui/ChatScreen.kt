@@ -137,7 +137,7 @@ fun ChatScreen(nav: NavController, sessionId: String) {
           Box(Modifier.weight(1f).fillMaxWidth()) {
             LazyColumn(Modifier.fillMaxSize(), state = list, contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 items(session.items.filter { it !is ChatItem.Plan }, key = { it.id }) { item ->
-                    TimelineItem(item, onOpenComputer = { tab -> nav.navigate("computer/$sessionId?tab=$tab") }, onOpenMedia = { mediaOpen = it })
+                    TimelineItem(item, onOpenComputer = { tab -> nav.navigate("computer/$sessionId?tab=$tab") }, onOpenMedia = { mediaOpen = it }, sessionId = sessionId, nav = nav)
                 }
                 if (running) item { ThinkingRow(act) }
                 if (session.status == SessionStatus.SLEEPING) item {
@@ -270,7 +270,7 @@ fun ChatScreen(nav: NavController, sessionId: String) {
 }
 
 @Composable
-fun TimelineItem(item: ChatItem, onOpenComputer: (String) -> Unit, onOpenMedia: (String) -> Unit = {}) {
+fun TimelineItem(item: ChatItem, onOpenComputer: (String) -> Unit, onOpenMedia: (String) -> Unit = {}, sessionId: String? = null, nav: androidx.navigation.NavController? = null) {
     when (item) {
         is ChatItem.User -> UserBubble(item)
         is ChatItem.Assistant -> AssistantText(item)
@@ -278,6 +278,7 @@ fun TimelineItem(item: ChatItem, onOpenComputer: (String) -> Unit, onOpenMedia: 
         is ChatItem.Plan -> {}  // o plano fica no card do computador, acima do composer
         is ChatItem.Media -> MediaCard(item, onOpenMedia)
         is ChatItem.Error -> InfoRow(Icons.Rounded.ErrorOutline, item.text, Cue.c.err)
+        is ChatItem.ConnectorProposal -> ConnectorProposalCard(item, sessionId, nav)
     }
 }
 
@@ -615,6 +616,7 @@ fun sessionMarkdown(s: Session): String = buildString {
             is ChatItem.Step -> appendLine("> ${i.title}: `${i.args}`")
             is ChatItem.Plan -> { appendLine("**Plano:** ${i.goal}"); i.phases.forEach { appendLine("- [${if (it.done) "x" else " "}] ${it.title}") }; appendLine() }
             is ChatItem.Error -> appendLine("⚠️ ${i.text}\n")
+            is ChatItem.ConnectorProposal -> appendLine("🧩 Conector ${i.name} (${i.host})${if (i.installed) " — instalado" else ""}\n")
             is ChatItem.Media -> appendLine("🖼 ${i.caption} (${java.io.File(i.path).name})\n")
         }
     }
@@ -633,4 +635,55 @@ fun shareSession(ctx: android.content.Context, s: Session) {
     val i = Intent(Intent.ACTION_SEND_MULTIPLE).setType("*/*").putParcelableArrayListExtra(Intent.EXTRA_STREAM, uris)
         .putExtra(Intent.EXTRA_TEXT, sessionMarkdown(s).take(4000)).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
     ctx.startActivity(Intent.createChooser(i, "Compartilhar tarefa"))
+}
+
+/** Card de instalação de um UI Connector que o agente criou e validou. */
+@Composable
+private fun ConnectorProposalCard(p: ChatItem.ConnectorProposal, sessionId: String?, nav: NavController?) {
+    val c = Cue.c
+    val app = CueApp.instance
+    val scope = rememberCoroutineScope()
+    var busy by remember(p.id) { mutableStateOf(false) }
+    var error by remember(p.id) { mutableStateOf<String?>(null) }
+    val exists = remember(p.id, p.installed) { app.uiConnectors.isCustom(p.connectorId) }
+    Column(
+        Modifier.fillMaxWidth().clip(RoundedCornerShape(18.dp)).background(c.surface)
+            .border(1.dp, if (p.installed) c.ok else c.accent, RoundedCornerShape(18.dp)).padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Icon(if (p.installed) Icons.Rounded.CheckCircle else Icons.Rounded.Extension, null, tint = if (p.installed) c.ok else c.accent)
+            Spacer(Modifier.width(10.dp))
+            Column(Modifier.weight(1f)) {
+                Text(p.name, fontWeight = FontWeight.SemiBold, fontSize = 16.sp)
+                Text(if (p.installed) "Conector instalado" else "Conector validado · pronto para instalar", fontSize = 12.sp, color = if (p.installed) c.ok else c.ink2)
+            }
+        }
+        Text(p.description, fontSize = 13.sp, color = c.ink2)
+        Text("Host: ${p.host}", fontSize = 12.sp, color = c.ink3)
+        if (p.tools.isNotEmpty()) Text("Ferramentas do agente: " + p.tools.joinToString(), fontSize = 12.sp, color = c.ink3)
+        error?.let { Text(it, fontSize = 12.sp, color = c.err) }
+        if (p.installed) {
+            OutlinedButton(onClick = { nav?.navigate("uiconnector/${p.connectorId}") }, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(14.dp)) {
+                Text("Abrir conector")
+            }
+        } else {
+            Button(
+                onClick = {
+                    scope.launch {
+                        busy = true; error = null
+                        app.uiConnectors.saveCustom(p.json)
+                            .onSuccess {
+                                if (sessionId != null) app.store.replaceItem(sessionId, p.copy(installed = true))
+                                nav?.navigate("uiconnector/${p.connectorId}")
+                            }
+                            .onFailure { error = it.message ?: "Falha ao instalar." }
+                        busy = false
+                    }
+                },
+                enabled = !busy, modifier = Modifier.fillMaxWidth().height(48.dp), shape = RoundedCornerShape(14.dp),
+            ) { Text(if (exists) "Atualizar conector" else "Instalar conector", fontWeight = FontWeight.SemiBold) }
+            Text("Só fala com ${p.host} (HTTPS). O agente só usa o conector se você ativar nele.", fontSize = 11.sp, color = c.ink3)
+        }
+    }
 }

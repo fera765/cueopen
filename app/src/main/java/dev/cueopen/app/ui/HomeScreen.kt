@@ -620,6 +620,7 @@ fun previewOf(i: dev.cueopen.app.data.ChatItem): String = when (i) {
     is dev.cueopen.app.data.ChatItem.Step -> i.title + " · " + i.args
     is dev.cueopen.app.data.ChatItem.Plan -> i.goal
     is dev.cueopen.app.data.ChatItem.Error -> i.text
+    is dev.cueopen.app.data.ChatItem.ConnectorProposal -> "🧩 Conector " + i.name
     is dev.cueopen.app.data.ChatItem.Media -> "🖼 " + (i.caption.ifBlank { java.io.File(i.path).name })
 }.lineSequence().firstOrNull().orEmpty()
 

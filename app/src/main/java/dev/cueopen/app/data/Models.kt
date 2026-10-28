@@ -62,6 +62,20 @@ sealed class ChatItem {
         val caption: String = "",
     ) : ChatItem()
 
+    /** Conector UI gerado e validado pelo agente, aguardando o usuário tocar em Instalar. */
+    @Serializable
+    data class ConnectorProposal(
+        override val id: String = newId(),
+        override val time: Long = now(),
+        val connectorId: String,
+        val name: String,
+        val description: String,
+        val host: String,
+        val tools: List<String> = emptyList(),
+        val json: String,
+        val installed: Boolean = false,
+    ) : ChatItem()
+
     @Serializable
     data class Error(
         override val id: String = newId(),

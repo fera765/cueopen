@@ -193,4 +193,12 @@ class CustomEngineTest {
         val i = CustomConnector(def2, fake(), permissive = true).orderIntents("enviar", mapOf("destino" to "EURUSD", "valor" to "5"))
         assertEquals(1, i.size); assertEquals(Side.BUY, i[0].side); assertEquals("EURUSD", i[0].asset)
     }
+
+    @Test fun `prompt do sdk contem exemplos validos e aceita cercas markdown`() {
+        assertTrue(SdkPrompt.MARKDOWN.contains("\"baseUrl\""))
+        assertTrue(SdkPrompt.MARKDOWN.contains(CustomTemplates.TOKEN_LOGIN.json))
+        assertFalse(SdkPrompt.MARKDOWN.contains("${'$'}{"))
+        val fenced = "```json\n" + CustomTemplates.MINIMAL.json + "\n```"
+        assertEquals(emptyList<String>(), CustomDefParser.parse(fenced).errors)
+    }
 }

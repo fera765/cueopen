@@ -758,6 +758,9 @@ class AgentRunner(
             } else {
                 appendLine("- Este agente não possui permissões de carteira concedidas. Não tente consultar nem movimentar fundos; peça ao usuário para habilitar somente as capacidades necessárias nas configurações do agente.")
             }
+            appendLine()
+            appendLine("## Criar UI Connectors")
+            appendLine("- Quando o usuário pedir um conector (UI Connector), NÃO escreva o JSON no chat: chame connector_spec, monte a definição, valide com connector_validate e corrija até zero erros (repita sozinho, sem perguntar), depois chame connector_propose. Só diga que deu certo depois de connector_propose; a instalação é feita pelo usuário no card. Se faltar a URL base ou os endpoints reais da API, pesquise na documentação oficial (web) ou pergunte.")
             runCatching {
                 val hub = dev.cueopen.app.CueApp.instance.uiConnectors
                 val usable = hub.connectors.filter { hub.usableBy(it, agent) }
@@ -868,6 +871,13 @@ class AgentRunner(
         }, listOf("fact")))
         add(tool("memory_search", "Busca na memória de longo prazo.", buildJsonObject { put("query", str("Busca")) }, listOf("query")))
         add(tool("skill_load", "Carrega as instruções completas de uma skill.", buildJsonObject { put("name", str("Nome da skill")) }, listOf("name")))
+        add(tool("connector_spec", "Retorna a especificação COMPLETA do formato JSON de UI Connectors do CueOpen (esquema, regras, filtros, exemplos). Chame ANTES de escrever um conector.", buildJsonObject {}))
+        add(tool("connector_validate", "Valida uma definição JSON de UI Connector com o parser real do app. Retorna OK ou a lista exata de erros (caminho + motivo). Corrija e valide de novo até zero erros.", buildJsonObject {
+            put("json", str("Definição JSON completa do conector"))
+        }, listOf("json")))
+        add(tool("connector_propose", "Valida e mostra ao usuário o card 'Instalar conector' no chat. Só aceita definição com zero erros. Use quando connector_validate disser OK.", buildJsonObject {
+            put("json", str("Definição JSON completa e válida do conector"))
+        }, listOf("json")))
         if (allowMultiAgent) add(tool("sleep", "Modo contínuo: pausa por N minutos e depois retoma automaticamente (monitoramento).", buildJsonObject {
             put("minutes", int("Minutos até a próxima verificação (1-1440)")); put("reason", str("O que fazer ao acordar"))
         }, listOf("minutes", "reason")))
@@ -1146,6 +1156,30 @@ class AgentRunner(
                 val m = (i("minutes") ?: 5).coerceIn(1, 1440)
                 store.addItem(sessionId, ChatItem.Step(tool = "sleep", title = "Aguardando $m min", args = s("reason"), result = "", status = StepStatus.OK))
                 return ToolResult(s("reason").ifBlank { "verificação" }, sleepMinutes = m)
+            }
+            "connector_spec" -> dev.cueopen.app.uiconnector.custom.SdkPrompt.MARKDOWN
+            "connector_validate", "connector_propose" -> {
+                val raw = s("json").trim().removePrefix("```json").removePrefix("```").removeSuffix("```").trim()
+                val parsed = dev.cueopen.app.uiconnector.custom.CustomDefParser.parse(raw)
+                val hub = dev.cueopen.app.CueApp.instance.uiConnectors
+                val d = parsed.def
+                val clash = d != null && hub.get(d.id) != null && !hub.isCustom(d.id)
+                if (d == null) "INVÁLIDO — ${parsed.errors.size} erro(s). Corrija TODOS e chame connector_validate de novo (consulte connector_spec se preciso):\n" +
+                        parsed.errors.joinToString("\n") { "- $it" } +
+                        (if (parsed.warnings.isNotEmpty()) "\nAvisos:\n" + parsed.warnings.joinToString("\n") { "- $it" } else "")
+                else when {
+                    clash -> "INVÁLIDO: o id '${d.id}' pertence a um conector do app. Troque o id."
+                    call.name == "connector_validate" -> "OK — definição válida (host ${d.host}, ${d.tools.size} ferramenta(s), ${d.panels.size} painel(is))." +
+                        (if (parsed.warnings.isNotEmpty()) "\nAvisos (não bloqueiam; corrija se fizer sentido):\n" + parsed.warnings.joinToString("\n") { "- $it" } else "") +
+                        "\nAgora chame connector_propose com o MESMO JSON."
+                    else -> {
+                        store.addItem(sessionId, ChatItem.ConnectorProposal(
+                            connectorId = d.id, name = d.name, description = d.description, host = d.host,
+                            tools = d.tools.map { it.name }, json = raw,
+                        ))
+                        "Card de instalação exibido ao usuário (conector '${d.name}', id ${d.id}). Diga em 1–2 frases que o conector foi validado e que ele deve tocar em 'Instalar conector'. Não afirme que já foi instalado."
+                    }
+                }
             }
             "skill_load" -> {
                 val sk = store.state.value.skills.firstOrNull { it.name.equals(s("name"), true) }

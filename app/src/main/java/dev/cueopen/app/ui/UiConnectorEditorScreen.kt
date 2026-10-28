@@ -51,6 +51,17 @@ fun UiConnectorEditorScreen(nav: NavController, id: String) {
     val scope = rememberCoroutineScope()
     val clipboard = LocalClipboardManager.current
     val editing = id != "new"
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val docLauncher = androidx.activity.compose.rememberLauncherForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.CreateDocument("text/markdown")
+    ) { uri ->
+        if (uri != null) {
+            val ok = runCatching {
+                context.contentResolver.openOutputStream(uri)?.use { it.write(dev.cueopen.app.uiconnector.custom.SdkPrompt.MARKDOWN.toByteArray()) } != null
+            }.getOrDefault(false)
+            android.widget.Toast.makeText(context, if (ok) "Documentação do SDK salva." else "Não foi possível salvar o arquivo.", android.widget.Toast.LENGTH_SHORT).show()
+        }
+    }
 
     var text by remember { mutableStateOf(if (editing) hub.customJson(id).orEmpty() else CustomTemplates.MINIMAL.json) }
     var parsed by remember { mutableStateOf<CustomDefParser.Parsed?>(null) }
@@ -69,13 +80,16 @@ fun UiConnectorEditorScreen(nav: NavController, id: String) {
 
     Scaffold(containerColor = c.bg, topBar = {
         CueTopBar(if (editing) "Editar conector" else "Novo conector", { nav.popBackStack() }) {
+            TextButton({ docLauncher.launch("cueopen-ui-connector-sdk.md") }) {
+                Icon(Icons.Rounded.Description, null, Modifier.size(18.dp)); Spacer(Modifier.width(4.dp)); Text("Doc")
+            }
             if (editing) IconButton({ confirmDelete = true }) { Icon(Icons.Rounded.Delete, "Excluir", tint = c.err) }
         }
     }) { pad ->
         LazyColumn(Modifier.padding(pad), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             item {
                 Text(
-                    "Descreva o conector em JSON (login, painéis, ações e ferramentas do agente). Só requisições HTTPS ao host de baseUrl — nada mais roda no aparelho. Referência: docs/ui-connector-sdk.md.",
+                    "Descreva o conector em JSON (login, painéis, ações e ferramentas do agente). Só requisições HTTPS ao host de baseUrl — nada mais roda no aparelho. Toque em Doc para baixar o prompt do SDK e usar em qualquer IA, ou em "Criar com a IA" para o chat criar, validar e instalar.",
                     fontSize = 13.sp, color = c.ink2,
                 )
             }
@@ -102,7 +116,7 @@ fun UiConnectorEditorScreen(nav: NavController, id: String) {
                     }, shape = RoundedCornerShape(12.dp)) { Text("Colar") }
                     OutlinedButton({ clipboard.setText(AnnotatedString(text)); message = "JSON copiado." }, shape = RoundedCornerShape(12.dp)) { Text("Copiar") }
                     OutlinedButton({
-                        nav.navigate("home?draft=" + Uri.encode(CustomTemplates.AI_PROMPT))
+                        nav.navigate("home?draft=" + Uri.encode("Crie, valide e instale um UI Connector para: "))
                     }, shape = RoundedCornerShape(12.dp)) { Icon(Icons.Rounded.AutoAwesome, null, Modifier.size(18.dp)); Spacer(Modifier.width(6.dp)); Text("Criar com a IA") }
                 }
             }
