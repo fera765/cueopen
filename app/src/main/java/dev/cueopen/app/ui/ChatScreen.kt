@@ -57,6 +57,12 @@ fun ChatScreen(nav: NavController, sessionId: String) {
     val app = CueApp.instance
     val st by app.store.state.collectAsStateWithLifecycle()
     val session = st.sessions.firstOrNull { it.id == sessionId } ?: run { LaunchedEffect(Unit) { nav.popBackStack() }; return }
+    // Chat do criador de UI conector: voltar leva direto à página inicial (limpa a pilha).
+    val goBack: () -> Unit = {
+        if (session.connectorBuilder) nav.navigate("home") { popUpTo(0) { inclusive = true }; launchSingleTop = true }
+        else nav.popBackStack()
+    }
+    androidx.activity.compose.BackHandler(enabled = session.connectorBuilder) { goBack() }
     val agent = st.agents.firstOrNull { it.id == session.agentId }
     val activity by app.agent.activity.collectAsStateWithLifecycle()
     val act = activity[sessionId] ?: Activity()
@@ -96,7 +102,7 @@ fun ChatScreen(nav: NavController, sessionId: String) {
     Scaffold(containerColor = c.bg, topBar = {
         TopAppBar(
             colors = TopAppBarDefaults.topAppBarColors(containerColor = c.bg),
-            navigationIcon = { IconButton({ nav.popBackStack() }) { Icon(Icons.AutoMirrored.Rounded.ArrowBack, "Voltar") } },
+            navigationIcon = { IconButton({ goBack() }) { Icon(Icons.AutoMirrored.Rounded.ArrowBack, "Voltar") } },
             title = {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     if (agent != null) { AgentFace(Color(agent.color), agent.face, 24.dp); Spacer(Modifier.width(8.dp)) }

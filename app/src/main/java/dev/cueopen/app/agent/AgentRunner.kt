@@ -161,6 +161,7 @@ class AgentRunner(
         var steps = 0
         var repeats = 0
         var lastContent = ""
+        var lastToolSig = ""
         // Detecção de loop de ferramentas: mesma chamada (nome+args) repetida sem progresso.
         val toolSigWindow = ArrayDeque<String>()
         var toolLoopNudges = 0
@@ -235,8 +236,14 @@ class AgentRunner(
                     hasPricedUsage = it.hasPricedUsage || (callCostUsd != null && callCostUsd > 0.0))
             }
             // Anti-repetição: se o modelo repetir quase o mesmo texto várias vezes, interrompe.
+            // Só é repetição real se o texto for quase igual E as ações também forem as mesmas
+            // (mesmas ferramentas com os mesmos argumentos). Mesma ferramenta com argumentos
+            // diferentes (ex.: navegar em URLs distintas) é progresso, não loop.
             val cNow = reply.content?.trim().orEmpty()
-            if (cNow.length > 40 && similar(cNow, lastContent)) {
+            val curToolSig = reply.toolCalls.joinToString(";") { it.name + "|" + normArgs(it.argsJson) }
+            val sameActions = reply.toolCalls.isEmpty() || curToolSig == lastToolSig
+            lastToolSig = curToolSig
+            if (cNow.length > 40 && sameActions && similar(cNow, lastContent)) {
                 if (++repeats >= 2) {
                     runCatching { dev.cueopen.app.diag.ErrorLog.log("agent", "Modelo entrou em repetição (interrompido).", sessionId, "llm") }
                     store.addItem(sessionId, ChatItem.Error(text = "O modelo entrou em repetição. Interrompi para não gastar tokens à toa. Reformule o pedido ou troque de modelo."))
@@ -261,6 +268,7 @@ class AgentRunner(
             }
             var stopLoop: SessionStatus? = null
             var sleepReq: Pair<Int, String>? = null
+            val resultHashes = HashMap<String, Int>()
             for (call in reply.toolCalls) {
                 // Auto-recuperação: uma exceção em qualquer ferramenta vira um erro acionável devolvido
                 // ao modelo (nunca derruba o loop do agente).
@@ -272,6 +280,7 @@ class AgentRunner(
                     runCatching { dev.cueopen.app.diag.ErrorLog.log(errorSource(call.name), "${t.javaClass.simpleName}: ${t.message.orEmpty()}", sessionId, call.name) }
                     ToolResult(output = "ERRO ao executar a ferramenta \"${call.name}\": ${t.message?.take(300) ?: t.javaClass.simpleName}. Diagnostique a causa, ajuste os argumentos/abordagem e tente de outra forma; não repita a mesma chamada. Se estiver bloqueado, chame finish explicando.")
                 }
+                resultHashes[call.id] = result.output.hashCode()
                 val ctxOut = ctxMgr.storeToolOutput(sessionId, call.id, result.output)
                 store.editSession(sessionId) {
                     it.copy(llm = it.llm + LlmMessage("tool", ctxOut, toolCallId = call.id, name = call.name))
@@ -284,7 +293,9 @@ class AgentRunner(
                 var tripped: String? = null
                 for (call in reply.toolCalls) {
                     if (call.name in controlTools) continue
-                    val sig = call.name + "|" + call.argsJson.trim()
+                    // Assinatura = ferramenta + argumentos normalizados + resultado. Argumentos
+                    // diferentes ou resultado novo = progresso; só conta se tudo for idêntico.
+                    val sig = call.name + "|" + normArgs(call.argsJson) + "|" + (resultHashes[call.id] ?: 0)
                     toolSigWindow.addLast(sig)
                     while (toolSigWindow.size > 10) toolSigWindow.removeFirst()
                     if (toolSigWindow.count { it == sig } >= 3) tripped = call.name
@@ -476,6 +487,16 @@ class AgentRunner(
     }
 
     private fun today() = SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date())
+
+    /** Normaliza argumentos JSON (chaves ordenadas, espaços ignorados) para comparar chamadas. */
+    private fun normArgs(raw: String): String {
+        fun canon(e: kotlinx.serialization.json.JsonElement): String = when (e) {
+            is kotlinx.serialization.json.JsonObject -> e.entries.sortedBy { it.key }.joinToString(",", "{", "}") { "\"" + it.key + "\":" + canon(it.value) }
+            is kotlinx.serialization.json.JsonArray -> e.joinToString(",", "[", "]") { canon(it) }
+            else -> e.toString()
+        }
+        return runCatching { canon(kotlinx.serialization.json.Json.parseToJsonElement(raw)) }.getOrElse { raw.trim() }
+    }
 
     /** Semelhança grosseira entre dois textos (para detectar repetição/degeneração do modelo). */
     private fun similar(a: String, b: String): Boolean {
