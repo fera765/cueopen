@@ -141,7 +141,7 @@ Os resultados entram nos modelos como `{{c.nome}}` e listas calculadas viram lin
     `supertrend(h,l,c,10,3)→{line,dir}` `ichimoku(h,l)→{tenkan,kijun,spanA,spanB}` `chop elder(h,l,c)→{bull,bear}` `pivots(h,l,c)→{p,r1,s1,r2,s2,r3,s3}`;
     volume `obv(c,v) vwap(h,l,c,v) adl cmf(h,l,c,v,n)`; preços `hl2 hlc3 ohlc4 heikin(o,h,l,c)→{open,high,low,close}`.
     Séries devolvem listas do mesmo tamanho (nulos no aquecimento) — use `last(...)` para o valor atual.
-- Limites: 40 cálculos por item, 3 milhões de operações por avaliação, listas até 200 mil itens. Sem acesso a rede, arquivos ou segredos.
+- Limites: 80 cálculos por item, 3 milhões de operações por avaliação, listas até 200 mil itens. Sem acesso a rede, arquivos ou segredos.
 - Exemplo (velas da Binance `[[t, o, h, l, c, v, ...], ...]`):
 ```
 "compute": {

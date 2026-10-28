@@ -501,11 +501,11 @@ object CustomDefParser {
         /** Bloco "compute": {nome: expressão}. Valida sintaxe, funções, identificadores e referências c.x. */
         fun compute(o: JsonObject?, path: String, params: Set<String>): List<Pair<String, Compute.Node>> {
             if (o == null) return emptyList()
-            if (o.size > 40) errors.add("$path: no máximo 40 cálculos.")
+            if (o.size > 80) errors.add("$path: no máximo 80 cálculos.")
             val out = ArrayList<Pair<String, Compute.Node>>()
             val known = setOf("$", "s", "rt", "c") + params
             val cref = Regex("\\bc\\.([A-Za-z_][A-Za-z0-9_]*)")
-            for ((name, v) in o.entries.take(40)) {
+            for ((name, v) in o.entries.take(80)) {
                 val src = (v as? JsonPrimitive)?.takeIf { it.isString }?.content
                 if (!IDENT.matches(name) || name in setOf("s", "rt", "c")) { errors.add("$path.$name: nome inválido (letra inicial; letras, números e _)."); continue }
                 if (src == null) { errors.add("$path.$name deve ser uma expressão em texto."); continue }
