@@ -34,48 +34,47 @@ import java.util.Locale
 /**
  * Sniper Trader — caçador de meme coins novas na Solana, usando a carteira do próprio app.
  *
- * Compra logo após o lançamento (filtrando liquidez mínima e idade máxima) e sai sozinho no take-profit
- * ou stop-loss. A chave privada NUNCA sai do cofre nem chega ao LLM (as trocas são assinadas pelo mesmo
- * executor seguro da carteira). Só opera na Mainnet. Todo valor é limitado pelo teto por operação e pelo
- * teto diário definidos pelo usuário. ALTO RISCO: tokens recém-lançados têm forte chance de perda total
- * (rug pull / baixa liquidez); por isso o trade vem DESLIGADO por padrão.
+ * Compra logo após o lançamento (filtrando liquidez mínima e idade máxima) e sai sozinho protegendo o lucro.
+ * TUDO é medido pelo SOL que a venda realmente devolveria AGORA (cotação real na Jupiter), não por um preço
+ * teórico — assim o take profit considera taxas e slippage de compra e venda e nunca "fecha no lucro" e devolve
+ * menos SOL do que entrou. A chave privada nunca sai do cofre nem chega ao LLM. Só Mainnet. ALTO RISCO.
  */
 class SniperConnector(private val ctx: Context) : UiConnector {
 
     override val spec = UiConnectorSpec(
         id = "sniper",
         name = "Sniper Trader",
-        description = "Caçador de meme coins novas na Solana: compra recém-lançadas (com filtros) e vende no alvo de lucro ou stop. Usa a carteira do app.",
-        version = "1.0.0",
+        description = "Caçador de meme coins novas na Solana: compra recém-lançadas (com filtros) e sai protegendo o lucro (trailing a partir do take profit, stop no zero-a-zero). Usa a carteira do app.",
+        version = "1.1.0",
         loginFields = emptyList(),
         settings = listOf(
             SettingSpec("enable_trading", "Permitir o agente comprar/vender (REAL)",
-                "DESLIGADO (padrão): o agente só pesquisa e simula. LIGADO: ele compra e vende meme coins com SOL REAL da sua carteira. ALTO RISCO: tokens novos podem ir a zero.",
+                "DESLIGADO (padrão): o agente só pesquisa. LIGADO: ele compra e vende meme coins com SOL REAL da sua carteira. ALTO RISCO: tokens novos podem ir a zero.",
                 SettingType.SWITCH, "false", risky = true),
-            SettingSpec("buy_sol", "SOL por entrada", "Quanto SOL gastar em cada compra de meme coin.", SettingType.NUMBER, "0.02", risky = true),
-            SettingSpec("max_positions", "Máx. de posições abertas", "Quantas meme coins o agente pode segurar ao mesmo tempo.", SettingType.NUMBER, "3"),
-            SettingSpec("take_profit_pct", "Take profit (%)", "Vende automaticamente quando o lucro atingir esta porcentagem.", SettingType.NUMBER, "60"),
-            SettingSpec("stop_loss_pct", "Stop loss (%)", "Vende automaticamente quando a perda atingir esta porcentagem.", SettingType.NUMBER, "35"),
-            SettingSpec("trailing_pct", "Trailing stop (%)", "0 = desligado. Protege o lucro: vende se o preço cair esta % a partir do topo alcançado.", SettingType.NUMBER, "0"),
-            SettingSpec("min_liquidity_usd", "Liquidez mínima (US$)", "Ignora tokens com menos liquidez que isto (quanto menor, mais arriscado).", SettingType.NUMBER, "8000"),
+            SettingSpec("buy_sol", "SOL por entrada", "Quanto SOL gastar em cada compra.", SettingType.NUMBER, "0.02", risky = true),
+            SettingSpec("max_positions", "Máx. de posições abertas", "Quantas meme coins segurar ao mesmo tempo.", SettingType.NUMBER, "3"),
+            SettingSpec("take_profit_pct", "Take profit / ativação do trailing (%)", "Ao atingir este lucro REAL (em SOL, já com taxas), o alvo deixa de ser fixo: passa a seguir o topo (trailing) para capturar altas de 100%, 1000%… e o stop sobe para o zero-a-zero.", SettingType.NUMBER, "60"),
+            SettingSpec("stop_loss_pct", "Stop loss (%)", "Antes de ativar o trailing, vende se a perda REAL atingir esta porcentagem.", SettingType.NUMBER, "35"),
+            SettingSpec("trailing_pct", "Trailing stop (%)", "Depois do take profit, vende se cair esta % a partir do topo. 0 = usa metade do take profit.", SettingType.NUMBER, "0"),
+            SettingSpec("breakeven_floor_pct", "Piso do zero-a-zero (%)", "Depois do take profit, o stop nunca desce abaixo deste lucro mínimo (cobre as taxas de venda).", SettingType.NUMBER, "1"),
+            SettingSpec("min_liquidity_usd", "Liquidez mínima (US$)", "Ignora tokens com menos liquidez que isto.", SettingType.NUMBER, "8000"),
             SettingSpec("max_age_min", "Idade máxima do token (min)", "Só considera tokens lançados há no máximo este tempo.", SettingType.NUMBER, "120"),
-            SettingSpec("daily_cap_sol", "Teto diário de compras (SOL)", "Soma máxima de SOL que o agente pode gastar em compras por dia. 0 = sem teto.", SettingType.NUMBER, "0.2"),
-            SettingSpec("slippage_bps", "Slippage (bps)", "Tolerância de deslize (300 = 3%). Tokens novos costumam exigir mais.", SettingType.NUMBER, "300"),
-            SettingSpec("auto_sell", "Saída automática (TP/SL)", "Ligado: o app vende sozinho ao atingir take profit, stop loss ou trailing, sem o agente no loop.",
-                SettingType.SWITCH, "true"),
+            SettingSpec("daily_cap_sol", "Teto diário de compras (SOL)", "Soma máxima de SOL em compras por dia. 0 = sem teto.", SettingType.NUMBER, "0.2"),
+            SettingSpec("slippage_bps", "Slippage (bps)", "Tolerância de deslize (300 = 3%).", SettingType.NUMBER, "300"),
+            SettingSpec("auto_sell", "Saída automática (trailing/stop)", "Ligado: o app vende sozinho no trailing/stop, sem o agente no loop.", SettingType.SWITCH, "true"),
         ),
         tools = listOf(
-            ToolSpec("scan", "Lista meme coins REAIS recém-lançadas na Solana que passam nos filtros (liquidez mínima, idade máxima): mint, símbolo, liquidez, idade, preço e variação. Não compra nada.", listOf(
+            ToolSpec("scan", "Lista meme coins REAIS recém-lançadas na Solana que passam nos filtros: mint, símbolo, liquidez, idade, preço e variação. Não compra.", listOf(
                 ParamSpec("limit", "Quantidade (1–30). Padrão 15.", "integer", required = false),
-                ParamSpec("min_liquidity_usd", "Sobrepõe a liquidez mínima das configurações.", "number", required = false),
-                ParamSpec("max_age_min", "Sobrepõe a idade máxima das configurações.", "integer", required = false),
+                ParamSpec("min_liquidity_usd", "Sobrepõe a liquidez mínima.", "number", required = false),
+                ParamSpec("max_age_min", "Sobrepõe a idade máxima.", "integer", required = false),
             )),
-            ToolSpec("snipe", "COMPRA uma meme coin pelo mint, gastando o SOL configurado (compra real, assinada localmente). Respeita teto por operação, teto diário, máx. de posições e liquidez mínima. Registra a posição com alvo de lucro/stop.", listOf(
+            ToolSpec("snipe", "COMPRA uma meme coin pelo mint, gastando o SOL configurado (compra real, assinada localmente). Respeita teto por operação, teto diário, máx. de posições e liquidez. Registra a posição com saída automática.", listOf(
                 ParamSpec("mint", "Endereço (mint) do token na Solana"),
             ), risky = true),
-            ToolSpec("positions", "Posições abertas do sniper com preço de entrada, preço atual, lucro/prejuízo %, topo alcançado e alvos de saída; e as últimas fechadas."),
+            ToolSpec("positions", "Posições abertas com o lucro/prejuízo REAL agora (quanto SOL a venda devolveria), topo alcançado e o stop atual; e as últimas fechadas."),
             ToolSpec("sell", "VENDE agora uma posição aberta (troca o token de volta para SOL).", listOf(
-                ParamSpec("mint", "Mint do token da posição a vender"),
+                ParamSpec("mint", "Mint do token da posição"),
             ), risky = true),
         ),
         accent = 0xFF18C29C,
@@ -83,14 +82,17 @@ class SniperConnector(private val ctx: Context) : UiConnector {
 
     private val wallet = SolanaWalletRepository(ctx.applicationContext)
     private val market = SolanaMarketDataClient()
+    private val swap = SolanaSwapClient()
     private val store = SniperStore(ctx.applicationContext)
     private val bg = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val tradeMutex = Mutex()
     @Volatile private var autoJob: Job? = null
     private val network = SolanaNetwork.MAINNET
 
+    init { if (store.open().isNotEmpty() && store.settingsOrNull()?.bool("auto_sell") != false) startAutoLoop() }
+
     override val isLoggedIn: Boolean get() = wallet.hasWallet() && wallet.backupConfirmed()
-    override fun secrets(): List<String> = emptyList() // a chave nunca passa por aqui
+    override fun secrets(): List<String> = emptyList()
 
     override suspend fun login(credentials: Map<String, String>): Result<Unit> =
         if (isLoggedIn) Result.success(Unit) else Result.failure(IllegalStateException("Crie/importe a carteira Solana no app (tela Carteira) e confirme o backup."))
@@ -98,6 +100,7 @@ class SniperConnector(private val ctx: Context) : UiConnector {
 
     private fun usd(v: Double?): String = v?.let { "US$ " + String.format(Locale.US, if (it < 1.0) "%.8f" else "%.4f", it) } ?: "—"
     private fun sol(v: Double): String = String.format(Locale.US, "%.4f SOL", v)
+    private fun pct(v: Double?): String = v?.let { String.format(Locale.US, "%+.1f%%", it) } ?: "—"
     private fun ageMin(createdAt: String?): Long? {
         val t = createdAt ?: return null
         val ms = runCatching { java.time.Instant.parse(t).toEpochMilli() }.getOrNull() ?: return null
@@ -105,30 +108,38 @@ class SniperConnector(private val ctx: Context) : UiConnector {
     }
     private fun today() = java.text.SimpleDateFormat("yyyy-MM-dd", Locale.US).format(java.util.Date())
 
+    /** SOL que a venda de toda a posição devolveria AGORA (cotação real), já com slippage/impacto. null se sem rota. */
+    private suspend fun quoteSellSol(pos: SniperPos, slippageBps: Int): Double? = runCatching {
+        swap.quote(pos.mint, SolanaSwapClient.SOL_MINT, pos.amountTokenRaw, slippageBps.coerceIn(1, 5000)).outAmountRaw / 1e9
+    }.getOrNull()
+
+    /** Lucro/prejuízo REAL em % sobre o SOL investido (o único número que decide TP/SL). */
+    private fun realizedPct(pos: SniperPos, sellSol: Double?): Double? =
+        if (sellSol == null || pos.buySol <= 0) null else (sellSol - pos.buySol) / pos.buySol * 100
+
     // ------------------------------------------------------------------ descoberta
-    private suspend fun candidates(settings: ConnectorSettings, limit: Int, minLiq: Double, maxAge: Long): List<TokenCand> {
-        val list = market.discoverTokens("new", 60)
-        return list.mapNotNull { t ->
+    private suspend fun candidates(limit: Int, minLiq: Double, maxAge: Long): List<TokenCand> =
+        market.discoverTokens("new", 60).mapNotNull { t ->
             val liq = t.liquidityUsd ?: 0.0
             val age = ageMin(t.poolCreatedAt)
             if (liq < minLiq) return@mapNotNull null
             if (age != null && age > maxAge) return@mapNotNull null
             TokenCand(t.mint, t.symbol, liq, age, t.priceUsd, t.priceChange24hPct)
         }.take(limit)
-    }
 
     // ------------------------------------------------------------------ ferramentas do agente
     override suspend fun callTool(name: String, args: Map<String, String>, settings: ConnectorSettings): String = try {
+        store.saveSettings(settings)
         when (name) {
             "scan" -> {
                 val minLiq = args["min_liquidity_usd"]?.toDoubleOrNull() ?: settings.num("min_liquidity_usd", 8000.0)
-                val maxAge = (args["max_age_min"]?.toLongOrNull() ?: settings.num("max_age_min", 120.0).toLong())
+                val maxAge = args["max_age_min"]?.toLongOrNull() ?: settings.num("max_age_min", 120.0).toLong()
                 val lim = (args["limit"]?.toIntOrNull() ?: 15).coerceIn(1, 30)
-                val cs = candidates(settings, lim, minLiq, maxAge)
+                val cs = candidates(lim, minLiq, maxAge)
                 if (cs.isEmpty()) "Nenhuma meme coin nova dentro dos filtros (liquidez ≥ ${usd(minLiq)}, idade ≤ ${maxAge}min) agora."
-                else "Meme coins novas (filtros: liq ≥ ${usd(minLiq)}, idade ≤ ${maxAge}min):\n" + cs.mapIndexed { i, t ->
+                else "Meme coins novas:\n" + cs.mapIndexed { i, t ->
                     "${i + 1}. ${t.symbol} ${t.mint} · liq ${usd(t.liquidity)} · ${t.ageMin?.let { "${it}min" } ?: "?"} · ${usd(t.priceUsd)}${t.change24h?.let { " · 24h ${String.format(Locale.US, "%+.1f", it)}%" } ?: ""}"
-                }.joinToString("\n") + "\nALTO RISCO: confira você mesmo antes; use snipe <mint> para comprar."
+                }.joinToString("\n") + "\nALTO RISCO: confira antes; use snipe <mint> para comprar."
             }
             "snipe" -> snipe(args["mint"].orEmpty().trim(), settings)
             "sell" -> sellPosition(args["mint"].orEmpty().trim(), settings, "manual")
@@ -148,15 +159,14 @@ class SniperConnector(private val ctx: Context) : UiConnector {
         val buySol = settings.num("buy_sol", 0.02)
         if (buySol <= 0.0) return "Configure 'SOL por entrada' maior que zero."
         val maxPos = settings.num("max_positions", 3.0).toInt()
-        if (store.open().size >= maxPos) return "RECUSADO: já há ${store.open().size} posições abertas (máx. $maxPos). Venda alguma antes."
+        if (store.open().size >= maxPos) return "RECUSADO: já há ${store.open().size} posições abertas (máx. $maxPos)."
         if (store.open().any { it.mint == mint }) return "Já existe uma posição aberta neste token."
         val dailyCap = settings.num("daily_cap_sol", 0.2)
         if (dailyCap > 0 && store.spentToday(today()) + buySol > dailyCap + 1e-9)
-            return "RECUSADO: teto diário de compras (${sol(dailyCap)}) seria excedido. Já gastou ${sol(store.spentToday(today()))} hoje."
+            return "RECUSADO: teto diário (${sol(dailyCap)}) seria excedido. Já gastou ${sol(store.spentToday(today()))} hoje."
         return tradeMutex.withLock {
             TradeCoordinator.venueLock("sniper").withLock {
-                val holder = TradeCoordinator.claim("sniper", mint, "sniper")
-                if (holder != null) return@withLock "RECUSADO: já há uma operação em andamento neste token."
+                if (TradeCoordinator.claim("sniper", mint, "sniper") != null) return@withLock "RECUSADO: já há uma operação em andamento neste token."
                 try {
                     val entryPrice = market.priceUsd(mint)
                     val lamports = Math.round(buySol * 1e9)
@@ -168,10 +178,10 @@ class SniperConnector(private val ctx: Context) : UiConnector {
                             val info = runCatching { market.tokenInfo(mint) }.getOrNull()
                             store.add(SniperPos(mint, info?.symbol ?: mint.take(6), entryPrice ?: info?.priceUsd, r.outAmountRaw, buySol,
                                 System.currentTimeMillis(), settings.num("take_profit_pct", 60.0), settings.num("stop_loss_pct", 35.0),
-                                settings.num("trailing_pct", 0.0), peakPct = 0.0))
+                                settings.num("trailing_pct", 0.0)))
                             store.addSpent(today(), buySol)
                             if (settings.bool("auto_sell")) startAutoLoop()
-                            "COMPRADO ${info?.symbol ?: mint.take(6)} com ${sol(buySol)} · entrada ${usd(entryPrice ?: info?.priceUsd)} · recebeu ${r.outAmountRaw} (unidades) · TP ${settings.num("take_profit_pct", 60.0).toInt()}% / SL ${settings.num("stop_loss_pct", 35.0).toInt()}%. Assinatura: ${r.signature}. ${network.transactionExplorerUrl(r.signature)}"
+                            "COMPRADO ${info?.symbol ?: mint.take(6)} com ${sol(buySol)} · recebeu ${r.outAmountRaw} (unidades) · take profit ${settings.num("take_profit_pct", 60.0).toInt()}% (depois trailing) / stop ${settings.num("stop_loss_pct", 35.0).toInt()}%. Assinatura: ${r.signature}. ${network.transactionExplorerUrl(r.signature)}"
                         }
                         is SwapResult.Rejected -> { TradeCoordinator.release("sniper", mint, "sniper"); "Compra recusada: ${r.reason}" }
                     }
@@ -191,12 +201,11 @@ class SniperConnector(private val ctx: Context) : UiConnector {
                     val exec = SolanaSwapExecutor(ctx.applicationContext, wallet, rpc)
                     when (val r = TradeCoordinator.walletMutex.withLock { exec.executeSwap(mint, SolanaSwapClient.SOL_MINT, pos.amountTokenRaw, slippage, network) }) {
                         is SwapResult.Submitted -> {
-                            val exitPrice = market.priceUsd(mint)
                             val solOut = r.outAmountRaw / 1e9
-                            store.close(mint, exitPrice, solOut, reason)
+                            store.close(mint, market.priceUsd(mint), solOut, reason)
                             TradeCoordinator.release("sniper", mint, "sniper")
                             val pnlSol = solOut - pos.buySol
-                            "VENDIDO ${pos.symbol} ($reason) · recebeu ${sol(solOut)} (entrada ${sol(pos.buySol)}, resultado ${String.format(Locale.US, "%+.4f", pnlSol)} SOL) · saída ${usd(exitPrice)}. Assinatura: ${r.signature}. ${network.transactionExplorerUrl(r.signature)}"
+                            "VENDIDO ${pos.symbol} ($reason) · recebeu ${sol(solOut)} (entrada ${sol(pos.buySol)}, resultado ${String.format(Locale.US, "%+.4f", pnlSol)} SOL · ${pct(realizedPct(pos, solOut))}). Assinatura: ${r.signature}. ${network.transactionExplorerUrl(r.signature)}"
                         }
                         is SwapResult.Rejected -> "Venda recusada: ${r.reason} (a posição segue aberta)."
                     }
@@ -205,17 +214,25 @@ class SniperConnector(private val ctx: Context) : UiConnector {
         }
     }
 
+    /** Stop atual (em % de lucro real) de uma posição, já considerando o trailing/zero-a-zero. */
+    private fun currentStopPct(pos: SniperPos, settings: ConnectorSettings): Double {
+        if (!pos.tpArmed) return -pos.slPct
+        val floor = settings.num("breakeven_floor_pct", 1.0)
+        val trail = settings.num("trailing_pct", 0.0).let { if (it > 0) it else pos.tpPct / 2 }
+        return maxOf(floor, pos.peakPct - trail)
+    }
+
     private suspend fun positionsText(settings: ConnectorSettings): String {
         val open = store.open(); val closed = store.closed().takeLast(8).reversed()
         if (open.isEmpty() && closed.isEmpty()) return "Nenhuma posição. Use scan e snipe."
-        val prices = runCatching { market.pricesUsd(open.map { it.mint }) }.getOrDefault(emptyMap())
+        val slip = settings.num("slippage_bps", 300.0).toInt()
         return buildString {
-            appendLine("== Abertas (${open.size}) ==")
+            appendLine("== Abertas (${open.size}) — lucro REAL se vender agora ==")
             if (open.isEmpty()) appendLine("nenhuma")
             open.forEach { p ->
-                val now = prices[p.mint]
-                val pnl = if (p.entryPriceUsd != null && p.entryPriceUsd > 0 && now != null) (now - p.entryPriceUsd) / p.entryPriceUsd * 100 else null
-                appendLine("${p.symbol} ${p.mint} · entrada ${usd(p.entryPriceUsd)} · agora ${usd(now)} · ${pnl?.let { String.format(Locale.US, "%+.1f%%", it) } ?: "—"} · TP ${p.tpPct.toInt()}% / SL ${p.slPct.toInt()}%${if (p.trailingPct > 0) " / trail ${p.trailingPct.toInt()}% (topo ${String.format(Locale.US, "%+.1f%%", p.peakPct)})" else ""}")
+                val sell = quoteSellSol(p, slip)
+                val r = realizedPct(p, sell)
+                appendLine("${p.symbol} ${p.mint} · venderia por ${sell?.let { sol(it) } ?: "—"} (entrou ${sol(p.buySol)}) · ${pct(r)} · ${if (p.tpArmed) "trailing (topo ${pct(p.peakPct)}, stop ${pct(currentStopPct(p, settings))})" else "TP ${p.tpPct.toInt()}% / stop -${p.slPct.toInt()}%"}")
             }
             appendLine("== Fechadas (recentes) ==")
             if (closed.isEmpty()) appendLine("nenhuma")
@@ -223,37 +240,35 @@ class SniperConnector(private val ctx: Context) : UiConnector {
         }.trim()
     }
 
-    // ------------------------------------------------------------------ saída automática (TP/SL/trailing)
+    // ------------------------------------------------------------------ saída automática (trailing/stop), independente da UI
     private fun startAutoLoop() {
         if (autoJob?.isActive == true) return
         autoJob = bg.launch {
             while (true) {
-                val settings = store.lastSettings() ?: break
+                val settings = store.settingsOrNull() ?: break
+                if (!settings.bool("auto_sell")) break
                 val open = store.open()
                 if (open.isEmpty()) break
-                if (!settings.autoSell) break
-                val prices = runCatching { market.pricesUsd(open.map { it.mint }) }.getOrDefault(emptyMap())
+                val slip = settings.num("slippage_bps", 300.0).toInt()
                 for (p in open) {
-                    val now = prices[p.mint] ?: continue
-                    val entry = p.entryPriceUsd ?: continue
-                    if (entry <= 0) continue
-                    val pnl = (now - entry) / entry * 100
+                    val sell = quoteSellSol(p, slip) ?: continue
+                    val pnl = realizedPct(p, sell) ?: continue
+                    // atualiza o topo e arma o trailing ao cruzar o take profit
                     if (pnl > p.peakPct) store.updatePeak(p.mint, pnl)
-                    val peak = maxOf(p.peakPct, pnl)
-                    val hitTp = pnl >= p.tpPct
-                    val hitSl = pnl <= -p.slPct
-                    val hitTrail = p.trailingPct > 0 && peak > 0 && pnl <= peak - p.trailingPct && peak >= p.tpPct * 0.5
-                    if (hitTp || hitSl || hitTrail) {
-                        val reason = if (hitTp) "take profit" else if (hitSl) "stop loss" else "trailing stop"
-                        runCatching { sellPosition(p.mint, settings.cs, reason) }
+                    if (!p.tpArmed && pnl >= p.tpPct) store.armTp(p.mint)
+                    val cur = store.open().firstOrNull { it.mint == p.mint } ?: continue
+                    val reason = when {
+                        !cur.tpArmed && pnl <= -cur.slPct -> "stop loss"
+                        cur.tpArmed && pnl <= currentStopPct(cur, settings) -> if (currentStopPct(cur, settings) > 0) "trailing (lucro protegido)" else "stop"
+                        else -> null
                     }
+                    if (reason != null) runCatching { sellPosition(p.mint, settings, reason) }
                 }
-                delay(15_000)
+                delay(12_000)
             }
         }
     }
 
-    /** Religa a saída automática ao abrir a tela (processo reiniciado) e guarda as configurações para o loop. */
     fun armAuto(settings: ConnectorSettings) {
         store.saveSettings(settings)
         if (settings.bool("auto_sell") && store.open().isNotEmpty()) startAutoLoop()
@@ -271,22 +286,23 @@ class SniperConnector(private val ctx: Context) : UiConnector {
         val bal = runCatching { SolanaRpcClient.balanceWithFallback(network, addr) }.getOrNull()
         blocks += UiBlock.Header("Sniper Trader", addr.take(4) + "…" + addr.takeLast(4), if (settings.bool("enable_trading")) "TRADE LIGADO" else "só leitura", if (settings.bool("enable_trading")) Tone.WARN else Tone.GOOD)
         val open = store.open()
-        val prices = runCatching { market.pricesUsd(open.map { it.mint }) }.getOrDefault(emptyMap())
+        val slip = settings.num("slippage_bps", 300.0).toInt()
         blocks += UiBlock.Stats(listOf(
             Stat("Saldo", bal?.let { String.format(Locale.US, "%.4f SOL", it / 1e9) } ?: "—"),
             Stat("Posições", "${open.size}/${settings.num("max_positions", 3.0).toInt()}"),
             Stat("Gasto hoje", sol(store.spentToday(today()))),
         ))
-        if (open.isNotEmpty()) blocks += UiBlock.Table("Posições abertas", listOf("Token", "Entrada→Agora", "P/L", "Alvos"),
+        if (open.isNotEmpty()) blocks += UiBlock.Table("Posições abertas (lucro real)", listOf("Token", "Venderia por", "P/L", "Proteção"),
             open.map { p ->
-                val now = prices[p.mint]
-                val pnl = if (p.entryPriceUsd != null && p.entryPriceUsd > 0 && now != null) (now - p.entryPriceUsd) / p.entryPriceUsd * 100 else null
-                listOf(p.symbol, "${usd(p.entryPriceUsd)} → ${usd(now)}", pnl?.let { String.format(Locale.US, "%+.1f%% ", it) } ?: "—", "TP ${p.tpPct.toInt()}/SL ${p.slPct.toInt()}")
+                val sell = quoteSellSol(p, slip)
+                val r = realizedPct(p, sell)
+                listOf(p.symbol, "${sell?.let { sol(it) } ?: "—"} (de ${sol(p.buySol)})", pct(r),
+                    if (p.tpArmed) "trailing · stop ${pct(currentStopPct(p, settings))}" else "TP ${p.tpPct.toInt()}/SL -${p.slPct.toInt()}")
             }, empty = "Nenhuma posição aberta.")
         val closed = store.closed().takeLast(6).reversed()
         if (closed.isNotEmpty()) blocks += UiBlock.Table("Últimas fechadas", listOf("Token", "Motivo", "Resultado"),
             closed.map { listOf(it.symbol, it.exitReason, String.format(Locale.US, "%+.4f SOL", (it.exitSol ?: 0.0) - it.buySol)) })
-        blocks += UiBlock.Note("Tokens recém-lançados são de altíssimo risco (rug pull, baixa liquidez). O trade só roda se você ligar e dentro dos tetos por operação e diário.", Tone.WARN)
+        blocks += UiBlock.Note("Lucro/stop medidos pelo SOL que a venda devolveria agora (já com taxas e slippage). Depois do take profit o stop sobe para o zero-a-zero e segue o topo. Tokens novos são altíssimo risco.", Tone.WARN)
         return blocks
     }
 
@@ -299,46 +315,41 @@ class SniperConnector(private val ctx: Context) : UiConnector {
 @Serializable
 data class SniperPos(
     val mint: String, val symbol: String, val entryPriceUsd: Double?, val amountTokenRaw: Long, val buySol: Double,
-    val openedAt: Long, val tpPct: Double, val slPct: Double, val trailingPct: Double, val peakPct: Double,
+    val openedAt: Long, val tpPct: Double, val slPct: Double, val trailingPct: Double,
+    val peakPct: Double = 0.0, val tpArmed: Boolean = false,
     val closed: Boolean = false, val exitPriceUsd: Double? = null, val exitSol: Double? = null, val exitReason: String = "",
 )
 
-/** Snapshot das configurações para o loop automático (fora do ciclo do agente). */
-class SettingsSnapshot(private val map: Map<String, String>) {
-    val cs = ConnectorSettings { map[it] }
-    val autoSell get() = cs.bool("auto_sell")
-    fun bool(k: String) = cs.bool(k)
-    fun num(k: String, d: Double) = cs.num(k, d)
-}
-
-/** Persistência das posições e do gasto diário do sniper. */
+/** Persistência das posições, do gasto diário e das últimas configurações (para a saída automática rodar sem a UI). */
 class SniperStore(context: Context) {
     private val sp = context.getSharedPreferences("sniper_state", Context.MODE_PRIVATE)
     private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
-    @Volatile private var settingsKeys: Map<String, String>? = null
+    private val ser = kotlinx.serialization.builtins.ListSerializer(SniperPos.serializer())
 
     @Synchronized private fun all(): MutableList<SniperPos> =
-        runCatching { json.decodeFromString(kotlinx.serialization.builtins.ListSerializer(SniperPos.serializer()), sp.getString("positions", "[]")!!) }.getOrDefault(emptyList()).toMutableList()
-    @Synchronized private fun save(list: List<SniperPos>) { sp.edit().putString("positions", json.encodeToString(kotlinx.serialization.builtins.ListSerializer(SniperPos.serializer()), list)).apply() }
+        runCatching { json.decodeFromString(ser, sp.getString("positions", "[]")!!) }.getOrDefault(emptyList()).toMutableList()
+    @Synchronized private fun save(list: List<SniperPos>) { sp.edit().putString("positions", json.encodeToString(ser, list)).apply() }
 
     fun open(): List<SniperPos> = all().filter { !it.closed }
     fun closed(): List<SniperPos> = all().filter { it.closed }
     @Synchronized fun add(p: SniperPos) { val l = all(); l.add(p); save(l) }
     @Synchronized fun updatePeak(mint: String, peak: Double) { save(all().map { if (it.mint == mint && !it.closed) it.copy(peakPct = maxOf(it.peakPct, peak)) else it }) }
+    @Synchronized fun armTp(mint: String) { save(all().map { if (it.mint == mint && !it.closed) it.copy(tpArmed = true) else it }) }
     @Synchronized fun close(mint: String, exitPrice: Double?, exitSol: Double?, reason: String) {
         save(all().map { if (it.mint == mint && !it.closed) it.copy(closed = true, exitPriceUsd = exitPrice, exitSol = exitSol, exitReason = reason) else it })
     }
 
     fun spentToday(day: String): Double = if (sp.getString("spent_day", "") == day) sp.getFloat("spent_sol", 0f).toDouble() else 0.0
-    @Synchronized fun addSpent(day: String, sol: Double) {
-        val cur = spentToday(day)
-        sp.edit().putString("spent_day", day).putFloat("spent_sol", (cur + sol).toFloat()).apply()
-    }
+    @Synchronized fun addSpent(day: String, sol: Double) { sp.edit().putString("spent_day", day).putFloat("spent_sol", (spentToday(day) + sol).toFloat()).apply() }
 
+    private val keys = listOf("enable_trading", "buy_sol", "max_positions", "take_profit_pct", "stop_loss_pct", "trailing_pct",
+        "breakeven_floor_pct", "min_liquidity_usd", "max_age_min", "daily_cap_sol", "slippage_bps", "auto_sell")
     fun saveSettings(s: ConnectorSettings) {
-        val keys = listOf("enable_trading", "buy_sol", "max_positions", "take_profit_pct", "stop_loss_pct", "trailing_pct",
-            "min_liquidity_usd", "max_age_min", "daily_cap_sol", "slippage_bps", "auto_sell")
-        settingsKeys = keys.associateWith { s.text(it) }
+        val e = sp.edit(); keys.forEach { e.putString("set_$it", s.text(it)) }; e.apply()
     }
-    fun lastSettings(): SettingsSnapshot? = settingsKeys?.let { SettingsSnapshot(it) }
+    /** Configurações persistidas (ou null se nunca salvas). Usadas pela saída automática sem a tela aberta. */
+    fun settingsOrNull(): ConnectorSettings? {
+        if (!sp.contains("set_enable_trading")) return null
+        return ConnectorSettings { k -> sp.getString("set_$k", null) }
+    }
 }
