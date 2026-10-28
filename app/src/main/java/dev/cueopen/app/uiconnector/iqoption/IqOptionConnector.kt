@@ -207,6 +207,8 @@ class IqOptionConnector(private val kv: KvStore? = null) : UiConnector {
     private val marginIds = java.util.Collections.newSetFromMap(ConcurrentHashMap<Long, Boolean>())
     @Volatile private var allAssets: List<IqProtocol.Asset> = emptyList()
     @Volatile private var allAssetsAt = 0L
+    private val marketFails = java.util.concurrent.ConcurrentHashMap<String, Int>()
+    private val marketBackoff = java.util.concurrent.ConcurrentHashMap<String, Long>()
     /** Tarefas de fundo (carregar ativos) — a tela nunca espera por elas. */
     private val bg = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     @Volatile private var loadingAll = false
@@ -470,24 +472,37 @@ class IqOptionConnector(private val kv: KvStore? = null) : UiConnector {
         }
         val out = ArrayList(loadAssets(force))
         val now = serverNowSec()
-        // as 4 fontes extras em PARALELO e com tempo curto: uma fonte lenta/indisponível não atrasa as outras
-        val extra = kotlinx.coroutines.coroutineScope {
-            val jobs = listOf("digital", "forex", "cfd", "crypto").map { type ->
-                async {
-                    runCatching {
-                        val id = reqId()
-                        if (type == "digital") {
-                            val root = request(id, IqProtocol.underlyingListMessage(id), "underlying-list", timeoutMs = 6_000)
-                            IqProtocol.parseUnderlying(root["msg"] as? JsonObject ?: JsonObject(emptyMap()), now)
-                        } else {
-                            val root = request(id, IqProtocol.instrumentsMessage(id, type), "instruments", timeoutMs = 6_000)
-                            IqProtocol.parseInstruments(root["msg"] as? JsonObject ?: JsonObject(emptyMap()), type, now)
+        // Mercados extras (digital/forex/cfd/crypto): muitas contas/regiões não respondem a get-instruments/underlying-list.
+        // São BEST-EFFORT, rodam no escopo do conector (não no da tela, para não gerar "scope left the composition"),
+        // e entram em BACKOFF quando falham, para não repetir timeouts nem inundar o log a cada atualização.
+        val extra = runCatching {
+            bg.async {
+                listOf("digital", "forex", "cfd", "crypto").map { type ->
+                    async {
+                        if (System.currentTimeMillis() < (marketBackoff[type] ?: 0L)) return@async emptyList<IqProtocol.Asset>()
+                        try {
+                            val id = reqId()
+                            val list = if (type == "digital") {
+                                val root = request(id, IqProtocol.underlyingListMessage(id), "underlying-list", timeoutMs = 6_000)
+                                IqProtocol.parseUnderlying(root["msg"] as? JsonObject ?: JsonObject(emptyMap()), now)
+                            } else {
+                                val root = request(id, IqProtocol.instrumentsMessage(id, type), "instruments", timeoutMs = 6_000)
+                                IqProtocol.parseInstruments(root["msg"] as? JsonObject ?: JsonObject(emptyMap()), type, now)
+                            }
+                            marketFails.remove(type); marketBackoff.remove(type)
+                            list
+                        } catch (c: kotlinx.coroutines.CancellationException) {
+                            emptyList() // tela saiu: ignora em silêncio
+                        } catch (t: Throwable) {
+                            val f = (marketFails[type] ?: 0) + 1
+                            marketFails[type] = f
+                            if (f >= 2) { marketBackoff[type] = System.currentTimeMillis() + 10 * 60_000; if (f == 2) err("$type indisponível nesta conta/região; pausado por 10 min.") }
+                            emptyList()
                         }
-                    }.getOrElse { err("$type: ${it.message}"); emptyList() }
-                }
-            }
-            jobs.awaitAll().flatten()
-        }
+                    }
+                }.awaitAll().flatten()
+            }.await()
+        }.getOrDefault(emptyList())
         out += extra
         allAssets = out
         allAssetsAt = System.currentTimeMillis()

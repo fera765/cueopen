@@ -62,12 +62,18 @@ object TechnicalSuite {
             }
             is String -> {
                 val t = ArrayList<Any?>(); val o = ArrayList<Double?>(); val h = ArrayList<Double?>(); val l = ArrayList<Double?>(); val c = ArrayList<Double?>(); val v = ArrayList<Double?>()
-                data.lineSequence().forEachIndexed { i, line ->
+                val singles = ArrayList<Double>()
+                data.lineSequence().forEach { line ->
                     val nums = line.split(Regex("[\\s,;|]+")).mapNotNull { it.trim().toDoubleOrNull() }
-                    if (nums.size >= 5) { val x = nums.takeLast(5); t += i.toDouble(); o += x[0]; h += x[1]; l += x[2]; c += x[3]; v += x[4] }
-                    else if (nums.size == 4) { t += i.toDouble(); o += nums[0]; h += nums[1]; l += nums[2]; c += nums[3]; v += 0.0 }
+                    when {
+                        nums.size >= 5 -> { val x = nums.takeLast(5); t += t.size.toDouble(); o += x[0]; h += x[1]; l += x[2]; c += x[3]; v += x[4] }
+                        nums.size == 4 -> { t += t.size.toDouble(); o += nums[0]; h += nums[1]; l += nums[2]; c += nums[3]; v += 0.0 }
+                        nums.size == 1 -> singles += nums[0]
+                    }
                 }
-                if (c.size < 2) throw Compute.ComputeError("velas: texto sem linhas com open high low close (volume)")
+                // só fechamentos (um preço por linha): vira série achatada O=H=L=C
+                if (c.size < 2 && singles.size >= 2) singles.forEach { px -> t += t.size.toDouble(); o += px; h += px; l += px; c += px; v += 0.0 }
+                if (c.size < 2) throw Compute.ComputeError("velas: não reconheci o formato. Envie a saída de get_candles, ou linhas com open high low close [volume], ou só os fechamentos (um por linha), ou JSON [[t,o,h,l,c,v]].")
                 return Candles(t, o, h, l, c, v)
             }
             else -> throw Compute.ComputeError("velas: formato não reconhecido")

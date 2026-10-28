@@ -119,7 +119,10 @@ class SniperConnector(private val ctx: Context) : UiConnector {
 
     // ------------------------------------------------------------------ descoberta
     private suspend fun candidates(limit: Int, minLiq: Double, maxAge: Long): List<TokenCand> =
-        market.discoverTokens("new", 60).mapNotNull { t ->
+        (runCatching { market.discoverTokens("new", 60) }.getOrElse {
+            // 429/limite de requisições: espera curta e tenta de novo uma vez
+            kotlinx.coroutines.delay(1500); market.discoverTokens("new", 60)
+        }).mapNotNull { t ->
             val liq = t.liquidityUsd ?: 0.0
             val age = ageMin(t.poolCreatedAt)
             if (liq < minLiq) return@mapNotNull null
