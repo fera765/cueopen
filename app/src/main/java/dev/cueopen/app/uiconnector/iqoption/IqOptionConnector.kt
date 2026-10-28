@@ -132,6 +132,12 @@ class IqOptionConnector(private val kv: KvStore? = null) : UiConnector {
                 ParamSpec("timeframe", "Tamanho da vela em segundos (60=1min, 300=5min…) ou 1m/5m/1h. Padrão 60.", required = false),
                 ParamSpec("count", "Quantidade de velas (1–200). Padrão 30.", "integer", required = false),
             )),
+            ToolSpec("catalog", "Cataloga um horário: olha a vela daquele minuto (ex.: 14:40) nos últimos N dias e mostra a cor de cada dia (verde=subiu/CALL, vermelho=caiu/PUT) e a tendência dominante. Use para decidir a direção de uma entrada por repetição de padrão no mesmo horário.", listOf(
+                ParamSpec("asset", "Ticker do ativo, ex.: EURUSD-OTC"),
+                ParamSpec("time", "Horário HH:MM (hora local). Padrão: a próxima vela.", required = false),
+                ParamSpec("days", "Quantos dias olhar para trás (1–20). Padrão 5.", "integer", required = false),
+                ParamSpec("timeframe", "Tamanho da vela (60, 300… ou 1m/5m). Padrão 60.", required = false),
+            )),
             ToolSpec("strategies", "Estratégias MHI (1, 2 e 3 — minoria e maioria) no ativo: assertividade histórica em velas REAIS de 1 min (G0, G1, G2) e os próximos sinais com horário de entrada. Simples: diz qual estratégia está melhor e quando entrar.", listOf(
                 ParamSpec("asset", "Ticker do ativo, ex.: EURUSD-OTC"),
             )),
@@ -836,6 +842,49 @@ class IqOptionConnector(private val kv: KvStore? = null) : UiConnector {
         }
     }
 
+    // ------------------------------------------------------------------ catalogador (mesmo horário nos últimos dias)
+    /** Epoch (s) do início da vela de [tf] que contém o HH:MM de hoje menos [daysBack] dias (hora local). */
+    private fun targetEpoch(hhmm: String?, tf: Int, daysBack: Int): Long {
+        val cal = java.util.Calendar.getInstance()
+        if (!hhmm.isNullOrBlank() && Regex("^\d{1,2}:\d{2}$").matches(hhmm.trim())) {
+            val (h, m) = hhmm.trim().split(":").map { it.toInt() }
+            cal.set(java.util.Calendar.HOUR_OF_DAY, h); cal.set(java.util.Calendar.MINUTE, m); cal.set(java.util.Calendar.SECOND, 0)
+        } else {
+            // próxima vela
+            val sec = (serverNowMs() / 1000 / tf + 1) * tf
+            cal.timeInMillis = sec * 1000
+        }
+        cal.add(java.util.Calendar.DAY_OF_YEAR, -daysBack)
+        val base = cal.timeInMillis / 1000
+        return base / tf * tf
+    }
+
+    private suspend fun catalogText(asset: String, time: String?, daysArg: Int?, tf: Int): String {
+        val a = IqProtocol.resolveAsset(loadAssets(), asset) ?: return "Ativo '$asset' não encontrado. Use open_assets."
+        val days = (daysArg ?: 5).coerceIn(1, 20)
+        val label = time?.takeIf { it.isNotBlank() } ?: SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(((serverNowMs() / 1000 / tf + 1) * tf) * 1000))
+        data class Day(val date: String, val color: Int, val open: Double, val close: Double)
+        val rows = ArrayList<Day>()
+        for (d in 1..days) {
+            val target = targetEpoch(time, tf, d)
+            val root = runCatching { request(reqId(), IqProtocol.getCandlesMessage(reqId(), a.id, tf, 3, target + tf), "candles", timeoutMs = 8_000) }.getOrNull() ?: continue
+            val cdl = IqProtocol.parseCandles(root["msg"] as? JsonObject ?: JsonObject(emptyMap())).firstOrNull { it.from == target }
+                ?: IqProtocol.parseCandles(root["msg"] as? JsonObject ?: JsonObject(emptyMap())).maxByOrNull { it.from } ?: continue
+            val color = if (cdl.close > cdl.open) 1 else if (cdl.close < cdl.open) -1 else 0
+            rows.add(Day(SimpleDateFormat("dd/MM", Locale.getDefault()).format(Date(target * 1000)), color, cdl.open, cdl.close))
+        }
+        if (rows.isEmpty()) return "Catálogo ${a.ticker} às $label: a IQ Option não devolveu as velas desse horário nos últimos $days dias."
+        val greens = rows.count { it.color == 1 }; val reds = rows.count { it.color == -1 }; val dojis = rows.count { it.color == 0 }
+        val dir = when { greens > reds -> "CALL (subiu mais vezes)"; reds > greens -> "PUT (caiu mais vezes)"; else -> "sem tendência clara" }
+        val streak = run { var c = 0; for (r in rows) { if (r.color == rows.first().color && r.color != 0) c++ else break }; c }
+        return buildString {
+            appendLine("Catálogo ${a.ticker} · vela das $label · últimos $days dias (vela de ${tf}s):")
+            rows.forEach { appendLine("${it.date}: ${if (it.color > 0) "▲ CALL" else if (it.color < 0) "▼ PUT" else "• doji"} (${fmtPx(it.open)}→${fmtPx(it.close)})") }
+            appendLine("Resumo: $greens verde(s) / $reds vermelho(s)${if (dojis > 0) " / $dojis doji" else ""} · tendência: $dir")
+            append("Sequência atual no topo da lista: $streak dia(s) na mesma cor. Padrão de repetição não garante o próximo resultado.")
+        }
+    }
+
     // ------------------------------------------------------------------ estratégias MHI
     private data class StratCache(val at: Long, val ticker: String, val stats: List<Mhi.Stats>, val candles: List<Mhi.M1>)
     private val stratCache = ConcurrentHashMap<String, StratCache>()
@@ -1134,12 +1183,12 @@ class IqOptionConnector(private val kv: KvStore? = null) : UiConnector {
             if (settings.bool("mm_enabled")) {
                 val m = mmState(settings)
                 val st = Masaniello.stake(m.bank, m.n, m.k, odds(settings))
-                items += Stat("Masaniello", "${m.k} acertos em ${m.n}", Tone.NEUTRAL)
+                items += Stat("Masaniello", "${m.wins}/${m.k} de ${m.n}", Tone.NEUTRAL)
                 items += Stat("Próx. entrada", st?.let { String.format(Locale.US, "%.2f", maxOf(1.0, it)) } ?: "—")
-                items += Stat("Banca do ciclo", String.format(Locale.US, "%.2f", m.bank), if (m.bank >= m.startBank) Tone.GOOD else Tone.BAD)
+                items += Stat("Banca ciclo", String.format(Locale.US, "%.2f", m.bank), if (m.bank >= m.startBank) Tone.GOOD else Tone.BAD)
             }
             items += Stat("Hoje", String.format(Locale.US, "%+.2f", rk.dayPnl), if (rk.dayPnl > 0) Tone.GOOD else if (rk.dayPnl < 0) Tone.BAD else Tone.NEUTRAL)
-            items += Stat("Perdas seguidas", rk.consecLosses.toString(), if (rk.consecLosses >= 2) Tone.WARN else Tone.NEUTRAL)
+            items += Stat("Perdas seq.", rk.consecLosses.toString(), if (rk.consecLosses >= 2) Tone.WARN else Tone.NEUTRAL)
             if (rk.pausedUntil > System.currentTimeMillis()) items += Stat("Pausado até", SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(rk.pausedUntil)), Tone.WARN)
             blocks += UiBlock.Stats(items.take(6))
             blocks += UiBlock.Button("mm_reset", "Reiniciar ciclo Masaniello", risky = true)
@@ -1225,6 +1274,7 @@ class IqOptionConnector(private val kv: KvStore? = null) : UiConnector {
         }
         "mm_status" -> mmText(settings)
         "strategies" -> strategiesText(args["asset"].orEmpty())
+        "catalog" -> catalogText(args["asset"].orEmpty(), args["time"], args["days"]?.toIntOrNull(), IqProtocol.timeframeSeconds(args["timeframe"] ?: "60") ?: 60)
         "backtest" -> backtestText(args["asset"].orEmpty(), args["timeframe"], args["count"]?.toDoubleOrNull()?.toInt(), args["strong"] == "true", settings)
         "arm_signal" -> armSignal(args, settings)
         "armed_list" -> armedListText()

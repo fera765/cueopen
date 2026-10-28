@@ -325,11 +325,20 @@ internal fun UiBlockView(b: UiBlock, onAction: (String, Map<String, String>) -> 
                     modifier = Modifier.clip(CircleShape).border(1.dp, col, CircleShape).padding(horizontal = 12.dp, vertical = 6.dp))
             }
         }
-        is UiBlock.Stats -> Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            b.items.forEachIndexed { i, s ->
-                Column(Modifier.weight(if (i == 0) 1.5f else 1f).clip(RoundedCornerShape(14.dp)).background(c.surface).border(1.dp, c.line, RoundedCornerShape(14.dp)).padding(12.dp)) {
-                    Text(s.label, fontSize = 11.sp, color = c.ink3, maxLines = 1)
-                    Text(s.value, fontSize = 16.sp, fontWeight = FontWeight.SemiBold, color = toneColor(s.tone), maxLines = 1, overflow = TextOverflow.Ellipsis)
+        is UiBlock.Stats -> {
+            // até 3 por linha, quebrando em várias linhas: nada de valor truncado quando há muitos tiles
+            val perRow = if (b.items.size <= 3) b.items.size.coerceAtLeast(1) else 3
+            Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                b.items.chunked(perRow).forEach { row ->
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        row.forEach { s ->
+                            Column(Modifier.weight(1f).clip(RoundedCornerShape(14.dp)).background(c.surface).border(1.dp, c.line, RoundedCornerShape(14.dp)).padding(12.dp)) {
+                                Text(s.label, fontSize = 11.sp, color = c.ink3, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                Text(s.value, fontSize = 15.sp, fontWeight = FontWeight.SemiBold, color = toneColor(s.tone), maxLines = 2, overflow = TextOverflow.Ellipsis)
+                            }
+                        }
+                        repeat(perRow - row.size) { Spacer(Modifier.weight(1f)) }
+                    }
                 }
             }
         }

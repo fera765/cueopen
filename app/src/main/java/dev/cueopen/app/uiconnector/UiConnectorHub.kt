@@ -44,7 +44,7 @@ class UiConnectorHub(context: Context) {
         private val sp = context.applicationContext.getSharedPreferences("iq_state", Context.MODE_PRIVATE)
         override fun get(key: String): String? = sp.getString(key, null)
         override fun put(key: String, value: String) { sp.edit().putString(key, value).apply() }
-    }), dev.cueopen.app.uiconnector.gmail.GmailConnector(ctx), dev.cueopen.app.uiconnector.sniper.SniperConnector(ctx)).filter { c ->
+    }), dev.cueopen.app.uiconnector.gmail.GmailConnector(ctx)).filter { c ->
         val problems = SpecValidator.validate(c.spec)
         if (problems.isNotEmpty()) ErrorLog.log("uiconnector", "spec inválido (${c.spec.id}): " + problems.joinToString("; "))
         problems.isEmpty()
