@@ -846,7 +846,7 @@ class IqOptionConnector(private val kv: KvStore? = null) : UiConnector {
     /** Epoch (s) do início da vela de [tf] que contém o HH:MM de hoje menos [daysBack] dias (hora local). */
     private fun targetEpoch(hhmm: String?, tf: Int, daysBack: Int): Long {
         val cal = java.util.Calendar.getInstance()
-        if (!hhmm.isNullOrBlank() && Regex("^\d{1,2}:\d{2}$").matches(hhmm.trim())) {
+        if (!hhmm.isNullOrBlank() && Regex("^\\d{1,2}:\\d{2}$").matches(hhmm.trim())) {
             val (h, m) = hhmm.trim().split(":").map { it.toInt() }
             cal.set(java.util.Calendar.HOUR_OF_DAY, h); cal.set(java.util.Calendar.MINUTE, m); cal.set(java.util.Calendar.SECOND, 0)
         } else {
