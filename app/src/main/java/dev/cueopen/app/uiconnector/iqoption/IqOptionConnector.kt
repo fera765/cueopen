@@ -142,6 +142,14 @@ class IqOptionConnector(private val kv: KvStore? = null) : UiConnector {
                 ParamSpec("count", "Velas (300–1000). Padrão 600.", "integer", required = false),
                 ParamSpec("strong", "true = só sinais fortes", "boolean", required = false),
             )),
+            ToolSpec("arm_signal", "ARMA um sinal JÁ VALIDADO para entrar AUTOMÁTICO no início da próxima vela (faça isto ~2 min antes). O único gatilho restante é o PREÇO: call entra quando o preço cai abaixo da abertura da vela; put quando sobe acima. Pode armar vários ativos; assim que o PRIMEIRO disparar, os outros são invalidados (uma entrada por vez). Informe os ativos validados por você.", listOf(
+                ParamSpec("asset", "Ticker do ativo validado, ex.: EURUSD-OTC"),
+                ParamSpec("direction", "call (compra) ou put (venda)", allowed = listOf("call", "put")),
+                ParamSpec("minutes", "Expiração em minutos (1–60). Padrão 1.", "integer", required = false),
+                ParamSpec("amount", "Valor da operação (ignorado se o Masaniello estiver ligado).", "number", required = false),
+            ), risky = true),
+            ToolSpec("armed_list", "Lista os sinais armados aguardando o gatilho de preço e quais já dispararam/expiraram."),
+            ToolSpec("disarm", "Cancela sinais armados. Informe o ativo para cancelar um, ou 'all' para cancelar todos.", listOf(ParamSpec("asset", "Ticker ou 'all'"))),
             ToolSpec("candle_clock", "Relógio da vela pelo horário do SERVIDOR da IQ Option: quando a vela atual abriu, quantos segundos faltam para a próxima, se dá para entrar agora e quantos segundos dormir (sleep seconds) para acordar logo antes da próxima vela. Use SEMPRE antes de esperar/entrar.", listOf(
                 ParamSpec("timeframe", "Tempo gráfico (60, 300, 900… s ou 1m/5m/15m). Padrão 60.", required = false),
             )),
@@ -324,6 +332,7 @@ class IqOptionConnector(private val kv: KvStore? = null) : UiConnector {
         creds = null
         balances.clear()
         tracked.clear()
+        armed.clear(); armJob?.cancel(); firedOpens.clear()
         quotes.clear()
         marginIds.clear()
         assets = emptyList()
@@ -717,6 +726,101 @@ class IqOptionConnector(private val kv: KvStore? = null) : UiConnector {
         }
     }
 
+    // ------------------------------------------------------------------ gatilhos armados (entrada automática no início da vela)
+    private data class Armed(
+        val asset: String, val activeId: Int, val dir: String, val minutes: Int, val amount: Double,
+        val targetOpen: Long, val settings: ConnectorSettings, val armedAt: Long = System.currentTimeMillis(),
+        @Volatile var status: String = "armado", @Volatile var lastTry: Long = 0,
+    )
+    private val armed = java.util.concurrent.CopyOnWriteArrayList<Armed>()
+    @Volatile private var armJob: kotlinx.coroutines.Job? = null
+    // quadrantes (minuto da vela) em que já houve uma entrada — a primeira invalida as demais
+    private val firedOpens = java.util.concurrent.ConcurrentHashMap<Long, String>()
+
+    /** Próxima abertura de vela de 1 min, mirando pelo menos ~[leadSec] s à frente (para armar 2 min antes). */
+    private fun nextCandleOpen(aheadSec: Int): Long {
+        val now = serverNowMs() / 1000
+        var open = now / 60 * 60 + 60
+        while (open - now < aheadSec) open += 60
+        return open
+    }
+
+    private suspend fun armSignal(args: Map<String, String>, settings: ConnectorSettings): String {
+        ensureConnected()
+        val dir = args["direction"].orEmpty().trim().lowercase()
+        if (dir != "call" && dir != "put") return "direction deve ser call ou put."
+        val minutes = args["minutes"]?.toDoubleOrNull()?.toInt() ?: 1
+        val amount = args["amount"]?.replace(',', '.')?.toDoubleOrNull() ?: settings.num("max_amount", 1.0)
+        val a = IqProtocol.resolveAsset(loadAssets(), args["asset"].orEmpty())
+            ?: return "Ativo '${args["asset"]}' não encontrado. Use open_assets."
+        if (!a.open) return "O ativo ${a.ticker} está fechado/suspenso agora."
+        // A entrada armada é automática (sem o modelo no loop), então não há como rodar o TypeSafe Jev no disparo.
+        // Com 'Exigir TypeSafe Jev' ligado, o armado não é permitido: valide e opere com buy. Desligado, arma normalmente.
+        if (settings.bool("require_jev"))
+            return "RECUSADO: 'Exigir validação TypeSafe Jev' está LIGADO — a entrada armada é automática e não passa pelo Jev. " +
+                "Desligue essa opção nas configurações do conector para usar sinais armados, ou valide com typesafe_jev_check e entre com buy."
+        // alvo: a próxima vela a pelo menos 15 s de distância (dá tempo de o preço reagir à abertura)
+        val target = nextCandleOpen(15)
+        armed.removeAll { it.asset == a.ticker && it.targetOpen == target } // re-armar o mesmo substitui
+        armed.add(Armed(a.ticker, a.id, dir, minutes.coerceIn(1, 60), amount, target, settings))
+        subscribeQuotes(a.id)
+        startArmLoop()
+        val cnt = armed.count { it.targetOpen == target && it.status == "armado" }
+        return "Armado: ${a.ticker} ${dir.uppercase()} para a vela das ${hms(target)} (em ${target - serverNowMs() / 1000}s). " +
+            "Gatilho = preço (${if (dir == "call") "abaixo" else "acima"} da abertura). $cnt sinal(is) armado(s) para essa vela; a 1ª entrada que disparar invalida as outras."
+    }
+
+    private fun armedListText(): String {
+        if (armed.isEmpty()) return "Nenhum sinal armado."
+        val now = serverNowMs() / 1000
+        return "Sinais armados:\n" + armed.sortedBy { it.targetOpen }.joinToString("\n") {
+            "${it.asset} ${it.dir.uppercase()} · vela ${hms(it.targetOpen)} (${if (it.targetOpen > now) "em ${it.targetOpen - now}s" else "ativa"}) · ${it.status}"
+        }
+    }
+
+    private fun disarm(asset: String): String {
+        val before = armed.size
+        if (asset.equals("all", true) || asset.isBlank()) armed.clear()
+        else armed.removeAll { it.asset.equals(asset.trim(), true) || it.asset.removeSuffix("-OTC").equals(asset.trim(), true) }
+        return "Cancelado(s) ${before - armed.size} sinal(is) armado(s). Restam ${armed.size}."
+    }
+
+    private fun startArmLoop() {
+        if (armJob?.isActive == true) return
+        armJob = bg.launch {
+            while (armed.isNotEmpty()) {
+                val now = serverNowMs() / 1000
+                val window = (armed.firstOrNull()?.settings?.num("max_entry_delay_sec", 10.0) ?: 10.0).toInt().coerceAtLeast(3)
+                // expira sinais cuja janela passou sem disparar
+                armed.filter { it.status == "armado" && now > it.targetOpen + window }.forEach {
+                    it.status = "expirado (preço não foi contra o candle na janela)"
+                }
+                armed.removeAll { it.status.startsWith("expirado") && now > it.targetOpen + window + 90 }
+                // dispara: por vela, na ordem que foram armados; a 1ª entrada vence
+                val due = armed.filter { it.status == "armado" && now in it.targetOpen..(it.targetOpen + window) }.sortedBy { it.armedAt }
+                for (t in due) {
+                    if (firedOpens.containsKey(t.targetOpen)) { t.status = "invalidado (outra entrada veio primeiro)"; continue }
+                    if (System.currentTimeMillis() - t.lastTry < 1200) continue
+                    t.lastTry = System.currentTimeMillis()
+                    val out = runCatching { buy(t.asset, t.dir, t.amount, t.minutes, t.settings, byAgent = true) }.getOrElse { "ERRO: ${it.message}" }
+                    when {
+                        out.startsWith("Ordem ABERTA") -> {
+                            firedOpens[t.targetOpen] = t.asset
+                            t.status = "EXECUTADO"
+                            armed.filter { o -> o.targetOpen == t.targetOpen && o.status == "armado" }.forEach { o -> o.status = "invalidado (outra entrada veio primeiro)" }
+                            runCatching { ErrorLog.log("iqoption", "gatilho armado executou: ${t.asset} ${t.dir}", null, "arm") }
+                            break
+                        }
+                        // "entrada contra o candle" = preço ainda não foi para o lado certo → segue aguardando nesta janela
+                        out.contains("entrada contra o candle") || out.contains("janela de entrada") -> {}
+                        else -> t.status = "falhou: ${out.take(80)}"
+                    }
+                }
+                kotlinx.coroutines.delay(400)
+            }
+        }
+    }
+
     // ------------------------------------------------------------------ estratégias MHI
     private data class StratCache(val at: Long, val ticker: String, val stats: List<Mhi.Stats>, val candles: List<Mhi.M1>)
     private val stratCache = ConcurrentHashMap<String, StratCache>()
@@ -1002,6 +1106,12 @@ class IqOptionConnector(private val kv: KvStore? = null) : UiConnector {
                         up[st.variant.name]?.let { "${it.direction.uppercase()} ${hms(it.entryAt)}" } ?: "—") })
             } else blocks += UiBlock.Note("Calculando estratégias MHI de $sAsset…", Tone.NEUTRAL)
         }
+        if (armed.isNotEmpty()) {
+            val now2 = serverNowMs() / 1000
+            blocks += UiBlock.Table("Sinais armados (entrada automática)", listOf("Ativo", "Dir.", "Vela", "Situação"),
+                armed.sortedBy { it.targetOpen }.map { listOf(it.asset, it.dir.uppercase(), hms(it.targetOpen) + (if (it.targetOpen > now2) " (em ${it.targetOpen - now2}s)" else ""), it.status) },
+                empty = "—")
+        }
         // gerenciamento e regras do agente
         run {
             val rk = risk()
@@ -1101,6 +1211,9 @@ class IqOptionConnector(private val kv: KvStore? = null) : UiConnector {
         "mm_status" -> mmText(settings)
         "strategies" -> strategiesText(args["asset"].orEmpty())
         "backtest" -> backtestText(args["asset"].orEmpty(), args["timeframe"], args["count"]?.toDoubleOrNull()?.toInt(), args["strong"] == "true", settings)
+        "arm_signal" -> armSignal(args, settings)
+        "armed_list" -> armedListText()
+        "disarm" -> disarm(args["asset"].orEmpty())
         "candle_clock" -> clockText(IqProtocol.timeframeSeconds(args["timeframe"] ?: "60") ?: 60, settings)
         "indicators" -> indicatorsText(args["asset"].orEmpty(), args["timeframe"], args["count"]?.toDoubleOrNull()?.toInt())
         "get_candles" -> candlesText(args["asset"].orEmpty(), args["timeframe"], args["count"]?.toDoubleOrNull()?.toInt())
