@@ -72,7 +72,11 @@ Campo de login: `{"id": "...", "label": "...", "type": "text|email|password|numb
 - Valores de `query` são codificados automaticamente.
 - **Formatos de resposta** (detectados sozinhos): JSON como veio; **XML/RSS/Atom** viram árvore —
   `<rss><channel><item><title>` → `${D}.rss.channel.item[*].title`; atributos em `@nome` (Atom: `{{${D}.link['@href']}}`);
-  texto misto em `#text`; elementos repetidos viram lista. HTML/texto → `{"body": "..."}` (use `{{${D}.body|strip|trunc:500}}`).
+  texto misto em `#text`; elementos repetidos viram lista. Vale para QUALQUER XML (RSS, Atom, SOAP, sitemap, APIs XML);
+  nomes com prefixo usam colchetes: `${D}['soap:Envelope']['soap:Body']`.
+  **JSONP** (`cb({...})`) e **NDJSON** (um JSON por linha → lista) viram JSON. **CSV/TSV** (content-type csv) →
+  `{"rows": [{"coluna": "valor"}]}`. **HTML** → `{"body": "<html bruto>", "title": "...", "text": "texto sem tags"}`.
+  Texto puro → `{"body": "..."}` (use `{{${D}.body|strip|trunc:500}}`).
 - `[*]` num elemento único (feed com 1 item) devolve o próprio elemento — funciona igual.
 
 ### `settings[]`

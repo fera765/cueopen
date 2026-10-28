@@ -298,4 +298,22 @@ class CustomEngineTest {
         val (ok0, msg0) = sp.selfTest(ConnectorSettings { null }, emptyMap())
         assertFalse(ok0); assertTrue(msg0.contains("login"))
     }
+
+    @Test fun `formatos variados viram arvore`() {
+        val soap = ResponseTree.parse("""<?xml version="1.0"?><soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/"><soap:Body><m:Price xmlns:m="x"><m:Value currency="BRL">10.5</m:Value></m:Price></soap:Body></soap:Envelope>""")
+        assertEquals("10.5", JsonPath.text(JsonPath.first(soap, "$['soap:Envelope']['soap:Body']['m:Price']['m:Value']['#text']")))
+        assertEquals("BRL", JsonPath.text(JsonPath.first(soap, "$['soap:Envelope']['soap:Body']['m:Price']['m:Value']['@currency']")))
+        val atom = ResponseTree.parse("""<feed xmlns="http://www.w3.org/2005/Atom"><entry><title type="text">A</title><link href="https://x/a"/></entry><entry><title>B</title><link href="https://x/b"/></entry></feed>""")
+        assertEquals(listOf("https://x/a", "https://x/b"), JsonPath.select(atom, "$.feed.entry[*].link['@href']").map { JsonPath.text(it) })
+        assertEquals("A", JsonPath.text(JsonPath.first(atom, "$.feed.entry[0].title['#text']")))
+        val sitemap = ResponseTree.parse("<urlset><url><loc>https://s/1</loc></url><url><loc>https://s/2</loc></url></urlset>")
+        assertEquals(2, JsonPath.select(sitemap, "$.urlset.url[*].loc").size)
+        assertEquals("1", JsonPath.text(JsonPath.first(ResponseTree.parse("cb({\"a\":1});"), "$.a")))
+        assertEquals(2, JsonPath.select(ResponseTree.parse("{\"a\":1}\n{\"a\":2}\n"), "$[*].a").size)
+        val csv = ResponseTree.parse("nome,preco\n\"Café, forte\",10\nChá,5\n", "text/csv")
+        assertEquals(listOf("Café, forte", "Chá"), JsonPath.select(csv, "$.rows[*].nome").map { JsonPath.text(it) })
+        val html = ResponseTree.parse("<!doctype html><html><head><title>Oi &amp; tchau</title><script>x()</script></head><body><p>Texto</p></body></html>")
+        assertEquals("Oi & tchau", JsonPath.text(JsonPath.first(html, "$.title")))
+        assertFalse(JsonPath.text(JsonPath.first(html, "$.text")).contains("x()"))
+    }
 }

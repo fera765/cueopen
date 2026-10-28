@@ -24,12 +24,69 @@ object ResponseTree {
         if (t.startsWith("{") || t.startsWith("[")) {
             runCatching { return json.parseToJsonElement(t) }
         }
+        val ct = contentType?.lowercase().orEmpty()
+        // JSONP: callback({...});
+        JSONP.matchEntire(t.trim())?.let { m -> runCatching { return json.parseToJsonElement(m.groupValues[1]) } }
+        // NDJSON / JSON Lines: um objeto por linha
+        if (t.startsWith("{") || ct.contains("ndjson") || ct.contains("jsonl")) {
+            val lines = t.lines().map { it.trim() }.filter { it.isNotEmpty() }
+            if (lines.size > 1) runCatching { return JsonArray(lines.map { json.parseToJsonElement(it) }) }
+        }
+        // CSV / TSV → {"rows":[{coluna: valor}]}
+        if (ct.contains("csv") || ct.contains("tab-separated")) {
+            val first = t.lineSequence().firstOrNull().orEmpty()
+            val sep = when {
+                ct.contains("tab-separated") -> '\t'
+                first.count { it == ';' } > first.count { it == ',' } -> ';'
+                else -> ','
+            }
+            csv(t, sep)?.let { return it }
+        }
         val head = t.take(300).lowercase()
         val looksHtml = head.startsWith("<!doctype html") || head.startsWith("<html") || (contentType?.lowercase()?.contains("text/html") == true && !head.contains("<rss") && !head.contains("<feed"))
         if (t.startsWith("<") && !looksHtml) {
             xml(t)?.let { return it }
         }
+        if (looksHtml) {
+            val title = TITLE.find(t)?.groupValues?.get(1)?.let { Template.stripHtml(it) }.orEmpty()
+            val clean = SCRIPT.replace(t, " ")
+            return JsonObject(mapOf(
+                "body" to JsonPrimitive(body), "title" to JsonPrimitive(title),
+                "text" to JsonPrimitive(Template.stripHtml(clean).take(20_000)),
+            ))
+        }
         return JsonObject(mapOf("body" to JsonPrimitive(body)))
+    }
+
+    private val JSONP = Regex("^[A-Za-z_${'$'}][\\w.${'$'}]*\\s*\\((.*)\\)\\s*;?${'$'}", RegexOption.DOT_MATCHES_ALL)
+    private val TITLE = Regex("<title[^>]*>(.*?)</title>", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL))
+    private val SCRIPT = Regex("<(script|style)[^>]*>.*?</\\1>", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL))
+
+    /** CSV/TSV com aspas ("a, b" e "" escapado). Primeira linha = cabeçalho. */
+    fun csv(text: String, sep: Char): JsonElement? {
+        val records = ArrayList<List<String>>()
+        var field = StringBuilder(); var row = ArrayList<String>(); var q = false; var k = 0
+        while (k < text.length) {
+            val ch = text[k]
+            if (q) {
+                if (ch == '"') { if (k + 1 < text.length && text[k + 1] == '"') { field.append('"'); k++ } else q = false }
+                else field.append(ch)
+            } else when (ch) {
+                '"' -> q = true
+                sep -> { row.add(field.toString()); field = StringBuilder() }
+                '\n' -> { row.add(field.toString()); field = StringBuilder(); records.add(row); row = ArrayList() }
+                '\r' -> {}
+                else -> field.append(ch)
+            }
+            k++
+        }
+        if (field.isNotEmpty() || row.isNotEmpty()) { row.add(field.toString()); records.add(row) }
+        val rows = records.filter { r -> r.any { it.isNotBlank() } }
+        if (rows.size < 2) return null
+        val header = rows[0].map { it.trim() }
+        return JsonObject(mapOf("rows" to JsonArray(rows.drop(1).map { r ->
+            JsonObject(header.mapIndexed { idx, h -> (h.ifBlank { "col$idx" }) to JsonPrimitive(r.getOrElse(idx) { "" }) }.toMap())
+        })))
     }
 
     fun xml(text: String): JsonElement? = runCatching { MiniXml(text).document() }.getOrNull()
