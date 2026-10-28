@@ -143,7 +143,8 @@ fun ChatScreen(nav: NavController, sessionId: String) {
           Box(Modifier.weight(1f).fillMaxWidth()) {
             LazyColumn(Modifier.fillMaxSize(), state = list, contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 items(session.items.filter { it !is ChatItem.Plan }, key = { it.id }) { item ->
-                    TimelineItem(item, onOpenComputer = { tab -> nav.navigate("computer/$sessionId?tab=$tab") }, onOpenMedia = { mediaOpen = it }, sessionId = sessionId, nav = nav)
+                    TimelineItem(item, onOpenComputer = { tab -> nav.navigate("computer/$sessionId?tab=$tab") }, onOpenMedia = { mediaOpen = it }, sessionId = sessionId, nav = nav,
+                        onSend = { msg -> app.agent.send(sessionId, msg, emptyList()) })
                 }
                 if (running) item { ThinkingRow(act) }
                 if (session.status == SessionStatus.SLEEPING) item {
@@ -276,10 +277,10 @@ fun ChatScreen(nav: NavController, sessionId: String) {
 }
 
 @Composable
-fun TimelineItem(item: ChatItem, onOpenComputer: (String) -> Unit, onOpenMedia: (String) -> Unit = {}, sessionId: String? = null, nav: androidx.navigation.NavController? = null) {
+fun TimelineItem(item: ChatItem, onOpenComputer: (String) -> Unit, onOpenMedia: (String) -> Unit = {}, sessionId: String? = null, nav: androidx.navigation.NavController? = null, onSend: ((String) -> Unit)? = null) {
     when (item) {
         is ChatItem.User -> UserBubble(item)
-        is ChatItem.Assistant -> AssistantText(item)
+        is ChatItem.Assistant -> AssistantText(item, onSend)
         is ChatItem.Step -> StepRow(item, onOpenComputer)
         is ChatItem.Plan -> {}  // o plano fica no card do computador, acima do composer
         is ChatItem.Media -> MediaCard(item, onOpenMedia)
@@ -309,14 +310,14 @@ private fun UserBubble(i: ChatItem.User) {
 }
 
 @Composable
-private fun AssistantText(i: ChatItem.Assistant) {
+private fun AssistantText(i: ChatItem.Assistant, onSend: ((String) -> Unit)? = null) {
     val c = Cue.c
     Column(Modifier.fillMaxWidth()) {
         if (i.final) Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(bottom = 6.dp)) {
             AgentFace(c.accent, "smile", 20.dp); Spacer(Modifier.width(6.dp))
             Text("CueOpen", fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
         }
-        Markdown(i.text)
+        CueMarkdown(i.text, onSend = onSend)
     }
 }
 

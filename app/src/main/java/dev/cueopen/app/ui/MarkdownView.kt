@@ -44,8 +44,11 @@ private val fencedBlock = Regex("```([a-zA-Z0-9_+.-]*)[ \\t]*\\n([\\s\\S]*?)```"
  * código com syntax highlighting (renderizador nativo, leve para listas longas). Blocos ```mermaid
  * (mapas mentais, fluxogramas, diagramas) são desenhados por um mini WebView com mermaid.js.
  */
+// bloco cueui (SDK de elementos), fechado OU ainda aberto no fim (stream): grupo 1 = conteúdo, 2 = fechado?
+private val openFence = Regex("```[a-zA-Z0-9_+.-]*[ \\t]*\\n?[\\s\\S]*$")
+
 @Composable
-fun CueMarkdown(text: String, modifier: Modifier = Modifier) {
+fun CueMarkdown(text: String, modifier: Modifier = Modifier, onSend: ((String) -> Unit)? = null) {
     val parts = remember(text) {
         val out = mutableListOf<Triple<String, String, String>>() // tipo, linguagem, conteúdo
         var last = 0
@@ -53,16 +56,28 @@ fun CueMarkdown(text: String, modifier: Modifier = Modifier) {
             if (m.range.first > last) out += Triple("text", "", text.substring(last, m.range.first))
             val language = m.groupValues[1].trim()
             val code = m.groupValues[2].removeSuffix("\n")
-            out += Triple(if (language.equals("mermaid", true)) "mermaid" else "code", language, code)
+            val kind = when { language.equals("mermaid", true) -> "mermaid"; language.equals("cueui", true) -> "cueui"; else -> "code" }
+            out += Triple(kind, language, code)
             last = m.range.last + 1
         }
-        if (last < text.length) out += Triple("text", "", text.substring(last))
-        out.filter { it.third.isNotBlank() }
+        if (last < text.length) {
+            val tail = text.substring(last)
+            // bloco cueui ainda chegando (abertura sem fechamento) → render progressivo, nunca mostra o JSON cru
+            val openCue = Regex("```cueui[ \\t]*\\n?([\\s\\S]*)$", RegexOption.IGNORE_CASE).find(tail)
+            if (openCue != null) {
+                val before = tail.substring(0, openCue.range.first)
+                if (before.isNotBlank()) out += Triple("text", "", before)
+                out += Triple("cueui-open", "cueui", openCue.groupValues[1])
+            } else out += Triple("text", "", tail)
+        }
+        out.filter { it.first.startsWith("cueui") || it.third.isNotBlank() }
     }
     Column(modifier, verticalArrangement = Arrangement.spacedBy(8.dp)) {
         parts.forEach { (kind, language, content) ->
             when (kind) {
                 "mermaid" -> MermaidCard(content)
+                "cueui" -> CueWidgetView(CueUi.parse(content, complete = true), onSend)
+                "cueui-open" -> CueWidgetView(CueUi.parse(content, complete = false), onSend)
                 "code" -> CodeFenceCard(language, content)
                 else -> if (hasTable(content)) renderWithTables(content) else MdBlock(content)
             }

@@ -375,6 +375,11 @@ object Compute {
     }
 
     /** Texto para modelos {{c.nome}}: número sem zeros sobrando (até 8 casas), listas/objetos como JSON. */
+    /** Número formatado para a UI: inteiro sem casas, senão até 4 casas sem zeros sobrando. */
+    fun strNum(v: Double): String = if (v.isNaN() || v.isInfinite()) "—"
+        else if (v == Math.rint(v) && kotlin.math.abs(v) < 1e15) v.toLong().toString()
+        else java.math.BigDecimal(v).setScale(4, java.math.RoundingMode.HALF_UP).stripTrailingZeros().toPlainString()
+
     fun str(v: Any?): String = when (v) {
         null -> ""
         is Double -> if (v.isNaN() || v.isInfinite()) "" else BigDecimal(v).setScale(8, RoundingMode.HALF_UP).stripTrailingZeros().toPlainString()

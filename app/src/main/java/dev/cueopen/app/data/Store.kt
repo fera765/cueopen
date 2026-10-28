@@ -76,6 +76,17 @@ class Store(context: Context) {
 
     fun addItem(sessionId: String, item: ChatItem) = editSession(sessionId) { it.copy(items = it.items + item) }
 
+    /** Adiciona só se não for repetição imediata do mesmo tipo e texto (evita mensagens de erro/aviso duplicadas). */
+    fun addItemUnique(sessionId: String, item: ChatItem) = editSession(sessionId) { s ->
+        val last = s.items.lastOrNull()
+        val dup = when {
+            last is ChatItem.Error && item is ChatItem.Error -> last.text.trim() == item.text.trim()
+            last is ChatItem.Assistant && item is ChatItem.Assistant -> last.text.trim() == item.text.trim()
+            else -> false
+        }
+        if (dup) s else s.copy(items = s.items + item)
+    }
+
     fun replaceItem(sessionId: String, item: ChatItem) = editSession(sessionId) { s ->
         s.copy(items = s.items.map { if (it.id == item.id) item else it })
     }

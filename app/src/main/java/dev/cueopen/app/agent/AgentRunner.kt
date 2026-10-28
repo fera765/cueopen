@@ -219,7 +219,7 @@ class AgentRunner(
                         attempt++
                         if (attempt >= 3) {
                             runCatching { dev.cueopen.app.diag.ErrorLog.log("agent", "LLM falhou 3x: ${t.javaClass.simpleName}: ${t.message.orEmpty()}", sessionId, "llm") }
-                            store.addItem(sessionId, ChatItem.Error(text = "O modelo falhou (${t.message?.take(120)}). Tentei 3 vezes. Toque em enviar para continuar, ou troque de modelo em Configurações."))
+                            store.addItemUnique(sessionId, ChatItem.Error(text = "O modelo falhou (${t.message?.take(120)}). Tentei 3 vezes. Toque em enviar para continuar, ou troque de modelo em Configurações."))
                             store.editSession(sessionId) { it.copy(status = SessionStatus.WAITING_USER) }
                             return
                         }
@@ -250,14 +250,21 @@ class AgentRunner(
             if (cNow.length > 40 && sameActions && similar(cNow, lastContent)) {
                 if (++repeats >= 2) {
                     runCatching { dev.cueopen.app.diag.ErrorLog.log("agent", "Modelo entrou em repetição (interrompido).", sessionId, "llm") }
-                    store.addItem(sessionId, ChatItem.Error(text = "O modelo entrou em repetição. Interrompi para não gastar tokens à toa. Reformule o pedido ou troque de modelo."))
+                    store.addItemUnique(sessionId, ChatItem.Error(text = "O modelo entrou em repetição. Interrompi para não gastar tokens à toa. Reformule o pedido ou troque de modelo."))
                     store.editSession(sessionId) { it.copy(status = SessionStatus.WAITING_USER) }
                     return
                 }
             } else repeats = 0
             lastContent = cNow
             if (!reply.content.isNullOrBlank()) {
-                store.addItem(sessionId, ChatItem.Assistant(text = reply.content.trim(), final = reply.toolCalls.isEmpty()))
+                val txt = reply.content.trim()
+                val isFinal = reply.toolCalls.isEmpty()
+                // Evita bolhas repetidas: se a última mensagem do assistente foi uma narração (não-final) quase
+                // igual a esta, substitui em vez de empilhar outra igual ("Vou aguardar e verificar…" repetido).
+                val lastA = store.session(sessionId)?.items?.lastOrNull { it is ChatItem.Assistant } as? ChatItem.Assistant
+                val collapse = lastA != null && !lastA.final && !isFinal && txt.length > 20 && similar(txt, lastA.text.trim())
+                if (collapse) store.replaceItem(sessionId, lastA!!.copy(text = txt))
+                else store.addItem(sessionId, ChatItem.Assistant(text = txt, final = isFinal))
             }
             if (reply.toolCalls.isEmpty()) {
                 if (store.session(sessionId)?.continuous == true) {
@@ -325,7 +332,7 @@ class AgentRunner(
                     val limit = if (trippedRepeatable) 4 else 2
                     if (++toolLoopNudges >= limit) {
                         runCatching { dev.cueopen.app.diag.ErrorLog.log("agent", "Loop de ferramenta sem progresso: $tripped (interrompido).", sessionId, tripped) }
-                        store.addItem(sessionId, ChatItem.Error(text = "O agente repetiu exatamente a mesma ação ($tripped), com os mesmos argumentos e o mesmo resultado, várias vezes seguidas. Interrompi para evitar um loop. Ajuste o pedido/abordagem ou troque de modelo."))
+                        store.addItemUnique(sessionId, ChatItem.Error(text = "O agente repetiu exatamente a mesma ação ($tripped), com os mesmos argumentos e o mesmo resultado, várias vezes seguidas. Interrompi para evitar um loop. Ajuste o pedido/abordagem ou troque de modelo."))
                         store.editSession(sessionId) { it.copy(status = SessionStatus.WAITING_USER) }
                         return
                     }
@@ -352,7 +359,7 @@ class AgentRunner(
             }
             if (steps >= maxSteps) {
                 if (store.session(sessionId)?.continuous == true) { sleepAndWake(sessionId, 60, "pausa automática após $maxSteps passos"); steps = 0; continue }
-                store.addItem(sessionId, ChatItem.Error(text = "Limite de $maxSteps passos atingido. Envie \"continue\" para seguir."))
+                store.addItemUnique(sessionId, ChatItem.Error(text = "Limite de $maxSteps passos atingido. Envie \"continue\" para seguir."))
                 store.editSession(sessionId) { it.copy(status = SessionStatus.WAITING_USER) }
                 return
             }
@@ -812,6 +819,13 @@ class AgentRunner(
             appendLine("6c. TEMPO DE VELA (trading de opções/velas): nunca durma um tempo fixo (ex.: 1 min) esperando a próxima vela — isso acorda no MEIO dela. Descubra quanto falta para a próxima vela (candle_clock do conector, se existir, usa o relógio do servidor; senão calcule pelo horário da vela) e use sleep com seconds = (segundos até a próxima vela − ~6) ou sleep align_candle_seconds=<tempo gráfico>. Ao acordar: confira o relógio, analise rápido e entre nos PRIMEIROS segundos da vela, para que a operação cubra exatamente a vela analisada (na IQ Option, entrar com menos de 30 s para o fim do minuto empurra a expiração para o minuto seguinte). Se a ordem for recusada por janela de entrada, obedeça o tempo de espera indicado.")
             appendLine("7. MODO CONTÍNUO: se o usuário pedir para monitorar, acompanhar, repetir ou rodar por horas/dias, NÃO finalize. Faça a verificação, registre em notes_write e chame `sleep` (minutos até a próxima verificação). Repita até o usuário pausar.")
             appendLine("8. Fora do modo contínuo, termine com `finish` (resumo curto + arquivos). `ask_user` só se for ambíguo ou irreversível. Responda no idioma do usuário.")
+            appendLine("8b. ELEMENTOS CueUI: quando um elemento interativo ajudar na resposta (opções para o usuário tocar, gráfico, calculadora, tabela, estatísticas, passos, barra de progresso, aviso, chave→valor), inclua um bloco ```cueui com UM objeto JSON `{\"type\": ...}`. O chat renderiza nativo; NÃO escreva o JSON como texto nem explique o bloco. Tipos e campos: " +
+                "buttons {items:[{label, send?|copy?|url?, tone?}]} (send = texto enviado a você ao tocar); " +
+                "chart {title?, style:\"bar\"|\"line\", labels?:[...], series:[{name?, values:[n...], color?}]}; " +
+                "calculator {title?, expr:\"a*b+c\", unit?, vars:[{id, label?, default, min?, max?, step?}]} (expr usa os ids das vars; cálculo nativo seguro); " +
+                "table {title?, columns:[...], rows:[[...],...]}; stats {title?, items:[{label, value, tone?}]}; steps {title?, items:[\"...\"]}; " +
+                "progress {title?, items:[{label, value:0-100, tone?}]}; callout {tone:\"info\"|\"good\"|\"warn\"|\"bad\", title?, text}; keyvalue {title?, items:[{key, value}]}. " +
+                "tone ∈ neutral|good|warn|bad|accent. Use com moderação, só quando agrega; texto normal continua em Markdown.")
             val walletPolicyForPrompt = WalletAgentPolicyStore(ctx.applicationContext)
             val walletHasGrants = agent != null && (
                 walletPolicyForPrompt.canAgentReadAddress(agent.id) ||
