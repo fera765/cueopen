@@ -532,6 +532,8 @@ class AgentRunner(
         return "$shown — linhas $start–$last de $total (${f.length() / 1024} KB)\n" + sb.toString() + tail
     }
 
+    private object CustomDefParserFence { fun strip(t: String) = dev.cueopen.app.uiconnector.custom.CustomDefParser.stripFences(t) }
+
     /** Normaliza argumentos JSON (chaves ordenadas, espaços ignorados) para comparar chamadas. */
     private fun normArgs(raw: String): String {
         fun canon(e: kotlinx.serialization.json.JsonElement): String = when (e) {
@@ -1280,7 +1282,33 @@ class AgentRunner(
                 store.addItem(sessionId, ChatItem.Step(tool = "sleep", title = "Aguardando $m min", args = s("reason"), result = "", status = StepStatus.OK))
                 return ToolResult(s("reason").ifBlank { "verificação" }, sleepMinutes = m)
             }
-            "connector_spec", "connector_validate", "connector_test", "connector_propose" -> return ToolResult(connectorTool(sessionId, call.name, s("json"), s("args_json")))
+            "connector_spec", "connector_validate", "connector_test", "connector_propose" -> {
+                // passo visível no chat: o que está sendo feito, com o quê, e o resultado
+                val cname = runCatching { (json.parseToJsonElement(CustomDefParserFence.strip(s("json"))) as JsonObject)["name"]?.jsonPrimitive?.contentOrNull }.getOrNull().orEmpty()
+                val testArgs = runCatching {
+                    (json.parseToJsonElement(s("args_json").ifBlank { "{}" }) as JsonObject).entries.joinToString("; ") { (tool, v) ->
+                        tool + "(" + ((v as? JsonObject)?.entries?.joinToString(", ") { (k, x) -> k + "=" + ((x as? kotlinx.serialization.json.JsonPrimitive)?.contentOrNull ?: x.toString()) } ?: "") + ")"
+                    }
+                }.getOrDefault("")
+                val (title, args) = when (call.name) {
+                    "connector_spec" -> "Lendo a especificação do SDK" to "formato JSON, regras e exemplos"
+                    "connector_validate" -> "Validando a definição do conector" to cname.ifBlank { "JSON" }
+                    "connector_test" -> (if (testArgs.isBlank()) "Testando o conector com dados reais" else "Testando o conector com exemplos") to
+                        listOf(cname, testArgs).filter { it.isNotBlank() }.joinToString(" · ")
+                    else -> "Preparando o card de instalação" to cname
+                }
+                val step = ChatItem.Step(tool = call.name, title = title, args = args)
+                store.addItem(sessionId, step)
+                setActivity(sessionId, Activity(Activity.Kind.THINKING, title))
+                val out = connectorTool(sessionId, call.name, s("json"), s("args_json"))
+                val failed = out.startsWith("INVÁLIDO") || out.startsWith("FALHOU") || out.startsWith("BLOQUEADO") || out.startsWith("ERRO")
+                val summary = when {
+                    call.name == "connector_spec" -> "Especificação carregada (${out.length / 1024} KB)."
+                    else -> out
+                }
+                store.replaceItem(sessionId, step.copy(title = title + (if (failed) " — falhou" else " — ok"), result = summary.take(4000), status = if (failed) StepStatus.ERROR else StepStatus.OK))
+                return ToolResult(out)
+            }
             "skill_load" -> {
                 val sk = store.state.value.skills.firstOrNull { it.name.equals(s("name"), true) }
                     ?: store.state.value.skills.firstOrNull { it.name.contains(s("name"), true) }
