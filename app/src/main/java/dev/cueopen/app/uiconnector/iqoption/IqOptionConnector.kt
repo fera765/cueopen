@@ -81,6 +81,11 @@ class IqOptionConnector : UiConnector {
                 SettingType.NUMBER, "5",
             ),
             SettingSpec(
+                "entry_against_candle", "Entrada contra o candle (recomendado)",
+                "Ligado: antes de cada compra o app confere o candle de 1 min. CALL (compra) só entra com o preço ABAIXO da abertura; PUT (venda) só ACIMA da abertura. Evita comprar no topo e vender no fundo.",
+                SettingType.SWITCH, "true",
+            ),
+            SettingSpec(
                 "allow_margin_agent", "Agente pode operar Forex/CFD/Cripto (margem)",
                 "Desligado: o agente só opera opções. Ligado: ele pode abrir posições alavancadas em Forex, CFD e cripto, sempre com stop loss e take profit.",
                 SettingType.SWITCH, "false", risky = true,
@@ -109,7 +114,8 @@ class IqOptionConnector : UiConnector {
             )),
             ToolSpec("buy", "Abre uma operação (call = compra/sobe, put = venda/desce) na conta ativa, respeitando os limites do usuário. " +
                 "EXIGE validação prévia com typesafe_jev_check (venue=iqoption, id=ticker, direction=call|put). " +
-                "Curta (até o limite do usuário): call e put. Longa: somente call.", listOf(
+                "Curta (até o limite do usuário): call e put. Longa: somente call. " +
+                "Entrada contra o candle de 1 min: call só abaixo da abertura, put só acima (senão RECUSADO; espere e tente de novo).", listOf(
                 ParamSpec("asset", "Ticker do ativo, ex.: EURUSD"),
                 ParamSpec("direction", "call (compra/sobe) ou put (venda/desce)", allowed = listOf("call", "put")),
                 ParamSpec("amount", "Valor da operação na moeda da conta", "number"),
@@ -158,7 +164,7 @@ class IqOptionConnector : UiConnector {
 
     /** Atualiza a lista completa de ativos em segundo plano (sem travar a tela). */
     private fun refreshAssetsInBackground() {
-        if (loadingAll || (allAssets.isNotEmpty() && System.currentTimeMillis() - allAssetsAt < 60_000)) return
+        if (loadingAll || (allAssets.isNotEmpty() && System.currentTimeMillis() - allAssetsAt < 5 * 60_000)) return
         loadingAll = true
         bg.launch { try { runCatching { loadAllAssets(force = true) } } finally { loadingAll = false } }
     }
@@ -197,6 +203,9 @@ class IqOptionConnector : UiConnector {
         require(e.isNotEmpty() && p.isNotEmpty()) { "Informe e-mail e senha." }
         mutex.withLock { connectLocked(e, p) }
         creds = mapOf("email" to e, "password" to p)
+        // carrega TODOS os ativos uma vez, já no login, e deixa em cache (o agente não espera por isso depois)
+        allAssetsAt = 0L
+        refreshAssetsInBackground()
         Result.success(Unit)
     } catch (t: Throwable) {
         if (t is kotlinx.coroutines.CancellationException) throw t
@@ -382,7 +391,11 @@ class IqOptionConnector : UiConnector {
     }
 
     private suspend fun loadAssets(force: Boolean = false): List<IqProtocol.Asset> {
-        if (!force && assets.isNotEmpty() && System.currentTimeMillis() - assetsAt < 60_000) return assets
+        if (!force && assets.isNotEmpty()) {
+            // cache: responde na hora; se estiver velho (> 5 min), atualiza em segundo plano
+            if (System.currentTimeMillis() - assetsAt > 5 * 60_000) refreshAssetsInBackground()
+            return assets
+        }
         val id = reqId()
         val root = request(id, IqProtocol.initializationDataMessage(id), "initialization-data", timeoutMs = 20_000)
         val list = IqProtocol.parseAssets(root["msg"] as? JsonObject ?: JsonObject(emptyMap()))
@@ -397,7 +410,10 @@ class IqOptionConnector : UiConnector {
 
     /** Todos os mercados: opções (turbo/binária, inclui OTC) + digital + forex + CFD + cripto. Cada fonte é opcional. */
     private suspend fun loadAllAssets(force: Boolean = false): List<IqProtocol.Asset> {
-        if (!force && allAssets.isNotEmpty() && System.currentTimeMillis() - allAssetsAt < 60_000) return allAssets
+        if (!force && allAssets.isNotEmpty()) {
+            if (System.currentTimeMillis() - allAssetsAt > 5 * 60_000) refreshAssetsInBackground()
+            return allAssets
+        }
         val out = ArrayList(loadAssets(force))
         val now = serverNowSec()
         // as 4 fontes extras em PARALELO e com tempo curto: uma fonte lenta/indisponível não atrasa as outras
@@ -531,6 +547,27 @@ class IqOptionConnector : UiConnector {
         }.trim()
     }
 
+    /**
+     * Filtro de entrada contra o candle de 1 min (depois da validação TypeSafe Jev, antes da ordem):
+     * CALL só com preço atual ABAIXO da abertura do candle; PUT só ACIMA. null = pode entrar; senão o motivo (RECUSADO…).
+     */
+    private suspend fun entryCheck(a: IqProtocol.Asset, dir: String): String? {
+        val id = reqId()
+        val root = runCatching { request(id, IqProtocol.getCandlesMessage(id, a.id, 60, 1, serverNowSec()), "candles", timeoutMs = 5_000) }.getOrNull()
+            ?: return "RECUSADO: não consegui ler o candle atual de ${a.ticker} para conferir a entrada. Tente de novo."
+        val cdl = IqProtocol.parseCandles(root["msg"] as? JsonObject ?: JsonObject(emptyMap())).maxByOrNull { it.from }
+            ?: return "RECUSADO: candle atual de ${a.ticker} indisponível. Tente de novo."
+        val now = cdl.close // fechamento do candle em formação = preço atual no servidor
+        val open = cdl.open
+        fun px(v: Double) = fmtPx(v)
+        return when {
+            dir == "call" && now < open -> null
+            dir == "put" && now > open -> null
+            dir == "call" -> "RECUSADO (entrada contra o candle): CALL exige preço ABAIXO da abertura do candle de 1 min, mas está ${if (now == open) "igual à" else "acima da"} abertura (${px(now)} vs ${px(open)}). Aguarde o preço recuar abaixo de ${px(open)} e valide de novo."
+            else -> "RECUSADO (entrada contra o candle): PUT exige preço ACIMA da abertura do candle de 1 min, mas está ${if (now == open) "igual à" else "abaixo da"} abertura (${px(now)} vs ${px(open)}). Aguarde o preço subir acima de ${px(open)} e valide de novo."
+        }
+    }
+
     /** Busca as velas reais e passa para a suíte de indicadores (que não busca nada sozinha). */
     private suspend fun indicatorsText(asset: String, tf: String?, count: Int?): String {
         val a = IqProtocol.resolveAsset(loadAssets(), asset) ?: return "Ativo '$asset' não encontrado. Use open_assets para ver os tickers."
@@ -571,6 +608,9 @@ class IqOptionConnector : UiConnector {
             return if (m != null) "${m.ticker} é ${kindLabel(m.kind)} (margem): use open_position em vez de buy." else "Ativo '$asset' não encontrado. Use open_assets."
         }
         if (!a.open) return "O ativo ${a.ticker} está fechado/suspenso agora."
+        if (byAgent && (settings?.text("entry_against_candle")?.ifEmpty { "true" } ?: "true") == "true") {
+            entryCheck(a, dir)?.let { return it }
+        }
         val exp = IqProtocol.expirationFor(serverNowSec(), minutes)
         subscribeQuotes(a.id) // cotação ao vivo para acompanhar ganhando/perdendo
         val id = reqId()
