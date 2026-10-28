@@ -22,7 +22,14 @@ import kotlinx.serialization.json.JsonPrimitive
  * apenas requisições para UM host HTTPS declarado em baseUrl. Referência completa em docs/ui-connector-sdk.md.
  */
 
-data class ReqDef(val method: String, val path: String, val query: Map<String, String>, val headers: Map<String, String>, val body: JsonElement?)
+data class ReqDef(
+    val method: String, val path: String, val query: Map<String, String>, val headers: Map<String, String>, val body: JsonElement?,
+    /** URL absoluta (https) num dos hosts declarados; quando presente substitui baseUrl + path. */
+    val url: String = "",
+    /** Corpo application/x-www-form-urlencoded (ex.: OAuth client_credentials). */
+    val form: Map<String, String> = emptyMap(),
+)
+data class ListDef(val rows: String, val item: String, val max: Int)
 data class ColDef(val title: String, val value: String)
 data class StatDef(val label: String, val value: String, val tone: Tone)
 data class PanelDef(
@@ -35,6 +42,7 @@ data class IntentDef(val asset: String, val direction: String)
 data class ToolDef(
     val name: String, val description: String, val params: List<ParamSpec>, val risky: Boolean, val requiresSignal: Boolean,
     val intent: IntentDef?, val limits: List<LimitDef>, val request: ReqDef, val response: String,
+    val list: ListDef? = null,
 )
 data class LoginDef(val fields: List<LoginField>, val request: ReqDef?, val extract: Map<String, String>, val verify: ReqDef?)
 
@@ -42,7 +50,11 @@ data class CustomDef(
     val id: String, val name: String, val description: String, val version: String, val accent: Long,
     val baseUrl: String, val host: String, val headers: Map<String, String>, val login: LoginDef,
     val settings: List<SettingSpec>, val panels: List<PanelDef>, val actions: List<ActionDef>, val tools: List<ToolDef>,
+    val allowedHosts: List<String> = emptyList(),
 ) {
+    /** Todos os hosts que o conector pode chamar. */
+    val hosts: Set<String> get() = (listOf(host) + allowedHosts).map { it.lowercase() }.toSet()
+
     fun toSpec() = UiConnectorSpec(
         id = id, name = name, description = description, version = version,
         loginFields = login.fields, settings = settings,
@@ -89,6 +101,7 @@ object CustomDefParser {
     private class Ctx {
         val errors = ArrayList<String>()
         val warnings = ArrayList<String>()
+        var hosts: Set<String> = emptySet()
 
         fun known(o: JsonObject, path: String, keys: Set<String>) {
             o.keys.filter { it !in keys }.forEach { warnings.add("$path.$it: chave desconhecida (ignorada).") }
@@ -178,19 +191,34 @@ object CustomDefParser {
             tpl(r.path, "$path.path", vars, false)
             r.query.forEach { (k, v) -> tpl(v, "$path.query.$k", vars, false) }
             r.headers.forEach { (k, v) -> tpl(v, "$path.headers.$k", vars, false) }
+            r.form.forEach { (k, v) -> tpl(v, "$path.form.$k", vars, false) }
+            tpl(r.url, "$path.url", vars, false)
             Template.strings(r.body).forEach { tpl(it, "$path.body", vars, false) }
         }
 
         fun req(o: JsonObject?, path: String): ReqDef? {
             if (o == null) return null
-            known(o, path, setOf("method", "path", "query", "headers", "body"))
+            known(o, path, setOf("method", "path", "url", "query", "headers", "body", "form"))
             val m = str(o, "method", path, def = "GET").uppercase()
             if (m !in METHODS) errors.add("$path.method '$m' inválido (GET, POST, PUT, PATCH, DELETE).")
-            val p = str(o, "path", path, required = true)
-            if (p.isNotEmpty() && !p.startsWith("/")) errors.add("$path.path deve começar com \"/\".")
-            if (p.contains("://") ) errors.add("$path.path não pode conter URL completa; o host vem de baseUrl.")
-            if (m == "GET" && o["body"] != null) warnings.add("$path.body é ignorado em GET.")
-            return ReqDef(m, p, strMap(obj(o, "query", path), "$path.query"), strMap(obj(o, "headers", path), "$path.headers"), o["body"])
+            val url = str(o, "url", path).trim()
+            val p = str(o, "path", path, required = url.isEmpty())
+            if (url.isNotEmpty()) {
+                if (p.isNotEmpty()) errors.add("$path: use \"path\" OU \"url\", não os dois.")
+                if (!url.startsWith("https://")) errors.add("$path.url deve começar com https://")
+                else {
+                    val h = url.removePrefix("https://").substringBefore('/').substringBefore('?').lowercase()
+                    if (h.contains("{{")) errors.add("$path.url: o host não pode ter variável.")
+                    else if (h !in hosts) errors.add("$path.url: host '$h' não está em baseUrl/allowedHosts.")
+                }
+            } else {
+                if (p.isNotEmpty() && !p.startsWith("/")) errors.add("$path.path deve começar com \"/\".")
+                if (p.contains("://")) errors.add("$path.path não pode conter URL completa; use \"url\" com um host de allowedHosts.")
+            }
+            if (m == "GET" && (o["body"] != null || o["form"] != null)) warnings.add("$path: body/form são ignorados em GET.")
+            if (o["body"] != null && o["form"] != null) errors.add("$path: use \"body\" OU \"form\", não os dois.")
+            return ReqDef(m, p, strMap(obj(o, "query", path), "$path.query"), strMap(obj(o, "headers", path), "$path.headers"), o["body"],
+                url, strMap(obj(o, "form", path), "$path.form"))
         }
 
         fun parseAccent(s: String): Long {
@@ -202,7 +230,7 @@ object CustomDefParser {
         }
 
         fun build(o: JsonObject): CustomDef? {
-            known(o, "$", setOf("id", "name", "description", "version", "accent", "baseUrl", "headers", "login", "settings", "panels", "actions", "tools"))
+            known(o, "$", setOf("id", "name", "description", "version", "accent", "baseUrl", "allowedHosts", "headers", "login", "settings", "panels", "actions", "tools"))
             val id = str(o, "id", "$", required = true)
             if (id.isNotEmpty() && !ID.matches(id)) errors.add("$.id '$id' inválido: use [a-z0-9], começando com letra (2–20).")
             val name = str(o, "name", "$", required = true)
@@ -215,6 +243,21 @@ object CustomDefParser {
                 val (h, err) = UrlGuard.baseHost(baseUrl)
                 if (err != null) errors.add("$.baseUrl: $err") else host = h.orEmpty()
             }
+            val allowed = ArrayList<String>()
+            val ah = o["allowedHosts"]
+            if (ah != null && ah !is JsonNull) {
+                val arrH = ah as? JsonArray
+                if (arrH == null) errors.add("$.allowedHosts deve ser uma lista de domínios.")
+                else {
+                    if (arrH.size > 8) errors.add("$.allowedHosts: máximo 8 domínios.")
+                    arrH.take(8).forEachIndexed { i, el ->
+                        val hv = (el as? JsonPrimitive)?.content?.trim()?.lowercase().orEmpty()
+                        val prob = UrlGuard.hostProblem(hv)
+                        if (prob != null) errors.add("$.allowedHosts[$i]: $prob") else allowed.add(hv)
+                    }
+                }
+            }
+            hosts = (listOf(host) + allowed).filter { it.isNotEmpty() }.toSet()
 
             // configurações
             val settings = ArrayList<SettingSpec>()
@@ -234,7 +277,7 @@ object CustomDefParser {
             val settingVars = settings.map { "s.${it.id}" }.toSet()
 
             // login
-            val lo = obj(o, "login", "$", required = true)
+            val lo = obj(o, "login", "$")
             var login = LoginDef(emptyList(), null, emptyMap(), null)
             if (lo != null) {
                 known(lo, "$.login", setOf("fields", "request", "extract", "verify"))
@@ -354,7 +397,7 @@ object CustomDefParser {
             val tools = ArrayList<ToolDef>()
             arr(o, "tools", "$", 30).forEachIndexed { i, to ->
                 val p = "$.tools[$i]"
-                known(to, p, setOf("name", "description", "params", "risky", "requiresSignal", "orderIntent", "limits", "request", "response"))
+                known(to, p, setOf("name", "description", "params", "risky", "requiresSignal", "orderIntent", "limits", "request", "response", "list"))
                 val params = ArrayList<ParamSpec>()
                 arr(to, "params", p, 12).forEachIndexed { j, pa ->
                     val pp = "$p.params[$j]"
@@ -399,11 +442,23 @@ object CustomDefParser {
                 if (requiresSignal && !risky) errors.add("$p: requiresSignal exige risky = true.")
                 val response = str(to, "response", p)
                 tpl(response, "$p.response", vars, true)
+                var list: ListDef? = null
+                val lso = obj(to, "list", p)
+                if (lso != null) {
+                    known(lso, "$p.list", setOf("rows", "item", "max"))
+                    val rows = str(lso, "rows", "$p.list", required = true)
+                    if (rows.isNotEmpty() && !JsonPath.isValid(rows)) errors.add("$p.list.rows: caminho inválido '$rows'.")
+                    val item = str(lso, "item", "$p.list", required = true)
+                    tpl(item, "$p.list.item", vars, true)
+                    val mx = str(lso, "max", "$p.list", def = "20").toIntOrNull()
+                    if (mx == null || mx !in 1..200) errors.add("$p.list.max deve ser de 1 a 200.")
+                    list = ListDef(rows, item, (mx ?: 20).coerceIn(1, 200))
+                }
                 val tname = str(to, "name", p, required = true)
                 val tdesc = str(to, "description", p, required = true)
-                if (treq != null) tools.add(ToolDef(tname, tdesc, params, risky, requiresSignal, intent, limits, treq, response))
+                if (treq != null) tools.add(ToolDef(tname, tdesc, params, risky, requiresSignal, intent, limits, treq, response, list))
             }
-            return CustomDef(id, name, description, version, accent, baseUrl, host, headers, login, settings, panels, actions, tools)
+            return CustomDef(id, name, description, version, accent, baseUrl, host, headers, login, settings, panels, actions, tools, allowed)
         }
     }
 

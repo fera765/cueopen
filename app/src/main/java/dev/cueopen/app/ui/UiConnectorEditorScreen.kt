@@ -69,6 +69,8 @@ fun UiConnectorEditorScreen(nav: NavController, id: String) {
     var saveError by remember { mutableStateOf<String?>(null) }
     var confirmSave by remember { mutableStateOf(false) }
     var confirmDelete by remember { mutableStateOf(false) }
+    var aiDialog by remember { mutableStateOf(false) }
+    var aiText by remember { mutableStateOf("") }
     var pendingTemplate by remember { mutableStateOf<CustomTemplates.Entry?>(null) }
 
     // validação ao vivo (debounce)
@@ -116,7 +118,7 @@ fun UiConnectorEditorScreen(nav: NavController, id: String) {
                     }, shape = RoundedCornerShape(12.dp)) { Text("Colar") }
                     OutlinedButton({ clipboard.setText(AnnotatedString(text)); message = "JSON copiado." }, shape = RoundedCornerShape(12.dp)) { Text("Copiar") }
                     OutlinedButton({
-                        nav.navigate("home?draft=" + Uri.encode("Crie, valide e instale um UI Connector para: "))
+                        aiDialog = true
                     }, shape = RoundedCornerShape(12.dp)) { Icon(Icons.Rounded.AutoAwesome, null, Modifier.size(18.dp)); Spacer(Modifier.width(6.dp)); Text("Criar com a IA") }
                 }
             }
@@ -133,6 +135,32 @@ fun UiConnectorEditorScreen(nav: NavController, id: String) {
         }
     }
 
+    if (aiDialog) {
+        AlertDialog(
+            onDismissRequest = { aiDialog = false },
+            title = { Text("Criar conector com a IA") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("Diga o serviço e o que o conector deve mostrar/fazer. A IA cria, valida, corrige e te mostra o botão Instalar.", fontSize = 13.sp)
+                    OutlinedTextField(
+                        value = aiText, onValueChange = { aiText = it }, minLines = 3, modifier = Modifier.fillMaxWidth(),
+                        placeholder = { Text("Ex.: notícias do g1 por RSS; ou meus top artistas do Spotify") },
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(enabled = aiText.isNotBlank(), onClick = {
+                    aiDialog = false
+                    val app = CueApp.instance
+                    val sess = dev.cueopen.app.data.Session(title = "Conector: " + aiText.trim().take(40), connectorBuilder = true)
+                    app.store.upsertSession(sess)
+                    app.agent.send(sess.id, "Crie, valide e instale um UI Connector para: " + aiText.trim())
+                    nav.navigate("chat/${sess.id}")
+                }) { Text("Criar") }
+            },
+            dismissButton = { TextButton({ aiDialog = false }) { Text("Cancelar") } },
+        )
+    }
     pendingTemplate?.let { t ->
         AlertDialog(
             onDismissRequest = { pendingTemplate = null },

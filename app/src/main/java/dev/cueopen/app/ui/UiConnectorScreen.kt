@@ -45,8 +45,47 @@ private fun toneColor(t: Tone): Color {
 fun UiConnectorsSection(nav: NavController) {
     val c = Cue.c
     val hub = CueApp.instance.uiConnectors
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val scope = rememberCoroutineScope()
+    var version by remember { mutableStateOf(0) }
+    var report by remember { mutableStateOf<String?>(null) }
+    val exportLauncher = androidx.activity.compose.rememberLauncherForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.CreateDocument("application/json")
+    ) { uri ->
+        if (uri != null) {
+            val ok = runCatching { context.contentResolver.openOutputStream(uri)?.use { it.write(hub.exportBackup().toByteArray()) } != null }.getOrDefault(false)
+            android.widget.Toast.makeText(context, if (ok) "Backup dos UI Conectores salvo." else "Não foi possível salvar o backup.", android.widget.Toast.LENGTH_SHORT).show()
+        }
+    }
+    val importLauncher = androidx.activity.compose.rememberLauncherForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        if (uri != null) scope.launch {
+            val text = runCatching { context.contentResolver.openInputStream(uri)?.use { it.readBytes().toString(Charsets.UTF_8) } }.getOrNull()
+            report = if (text == null) "Não foi possível ler o arquivo."
+            else hub.importBackup(text).fold(
+                { r ->
+                    "Importado: ${r.installed.size} conector(es)" + (if (r.installed.isNotEmpty()) " (" + r.installed.joinToString() + ")" else "") +
+                        ", ${r.prefs} configuração(ões). Faça login de novo nos conectores (credenciais não vão no backup)." +
+                        (if (r.errors.isNotEmpty()) "\nNão importados: " + r.errors.joinToString("; ") else "")
+                },
+                { it.message ?: "Falha ao importar." },
+            )
+            version++
+        }
+    }
+    key(version) {
     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-        SectionLabel("UI Conectores")
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Box(Modifier.weight(1f)) { SectionLabel("UI Conectores") }
+            TextButton({ exportLauncher.launch("cueopen-ui-conectores-backup.json") }) {
+                Icon(Icons.Rounded.Backup, null, Modifier.size(18.dp)); Spacer(Modifier.width(4.dp)); Text("Backup")
+            }
+            TextButton({ importLauncher.launch(arrayOf("application/json", "text/plain", "application/octet-stream", "*/*")) }) {
+                Icon(Icons.Rounded.FileOpen, null, Modifier.size(18.dp)); Spacer(Modifier.width(4.dp)); Text("Importar")
+            }
+        }
+        report?.let { Text(it, fontSize = 12.sp, color = c.ink2) }
         Text(
             "Conectores com interface própria: login, painéis ao vivo e ferramentas para o agente. Credenciais ficam cifradas no aparelho e nunca chegam à IA.",
             fontSize = 13.sp, color = c.ink2,
@@ -84,6 +123,7 @@ fun UiConnectorsSection(nav: NavController) {
             onClick = { nav.navigate("uiconnector/edit/new") },
             modifier = Modifier.fillMaxWidth().height(46.dp), shape = RoundedCornerShape(14.dp),
         ) { Icon(Icons.Rounded.Add, null); Spacer(Modifier.width(8.dp)); Text("Criar conector (SDK)") }
+    }
     }
 }
 

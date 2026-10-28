@@ -9,6 +9,7 @@ import dev.cueopen.app.trading.TradeCoordinator
 import dev.cueopen.app.uiconnector.custom.CustomConnector
 import dev.cueopen.app.uiconnector.custom.CustomConnectorStore
 import dev.cueopen.app.uiconnector.custom.CustomDef
+import dev.cueopen.app.uiconnector.custom.CustomDefParser
 import dev.cueopen.app.uiconnector.iqoption.IqOptionConnector
 import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.json.JsonArray
@@ -31,6 +32,8 @@ import kotlinx.serialization.json.put
  * (portão em [TradeCoordinator.gate]), uma ordem por vez por conector, sem colisão entre agentes.
  */
 class UiConnectorHub(context: Context) {
+    companion object { const val BACKUP_FORMAT = "cueopen-uiconnectors-backup" }
+
     private val ctx = context.applicationContext
     private val prefs = ctx.getSharedPreferences("uic_prefs", Context.MODE_PRIVATE)
     val vault = CredentialVault(ctx)
@@ -77,6 +80,59 @@ class UiConnectorHub(context: Context) {
         vault.clear(id)
         customStore.delete(id)
         custom = loadCustom(custom)
+    }
+
+    // ------------------------------------------------------------------ backup / importação
+    /**
+     * Backup de tudo dos UI Conectores: definições criadas pelo usuário + toggles + configurações.
+     * Credenciais NÃO entram (ficam só no cofre cifrado deste aparelho).
+     */
+    fun exportBackup(): String {
+        val defs = JsonArray(custom.mapNotNull { c ->
+            val raw = customStore.rawJson(c.spec.id) ?: return@mapNotNull null
+            val el = runCatching { kotlinx.serialization.json.Json.parseToJsonElement(CustomDefParser.stripFences(raw)) }.getOrNull() ?: return@mapNotNull null
+            buildJsonObject { put("id", c.spec.id); put("definition", el) }
+        })
+        val p = buildJsonObject {
+            prefs.all.forEach { (k, v) ->
+                when (v) {
+                    is Boolean -> put(k, v)
+                    is String -> put(k, v)
+                    else -> {}
+                }
+            }
+        }
+        return buildJsonObject {
+            put("format", BACKUP_FORMAT); put("version", 1); put("createdAt", System.currentTimeMillis())
+            put("connectors", defs); put("prefs", p)
+        }.toString()
+    }
+
+    data class ImportReport(val installed: List<String>, val errors: List<String>, val prefs: Int)
+
+    suspend fun importBackup(text: String): Result<ImportReport> = runCatching {
+        val root = kotlinx.serialization.json.Json.parseToJsonElement(text.trim()) as? JsonObject
+            ?: throw IllegalArgumentException("Arquivo inválido: não é um backup de UI Conectores.")
+        if ((root["format"] as? JsonPrimitive)?.contentOrNull != BACKUP_FORMAT) throw IllegalArgumentException("Arquivo inválido: não é um backup de UI Conectores do CueOpen.")
+        val installed = ArrayList<String>(); val errors = ArrayList<String>()
+        (root["connectors"] as? JsonArray)?.forEach { el ->
+            val o = el as? JsonObject
+            val def = o?.get("definition")
+            val label = (o?.get("id") as? JsonPrimitive)?.contentOrNull ?: "?"
+            if (def == null) { errors.add("$label: sem definição"); return@forEach }
+            saveCustom(def.toString()).onSuccess { installed.add(it.name) }.onFailure { errors.add("$label: ${it.message?.lineSequence()?.firstOrNull()}") }
+        }
+        var n = 0
+        val ed = prefs.edit()
+        (root["prefs"] as? JsonObject)?.forEach { (k, v) ->
+            val pv = v as? JsonPrimitive ?: return@forEach
+            if (!(k.startsWith("enabled_") || k.startsWith("agentreq_") || k.startsWith("set_"))) return@forEach
+            if (pv.isString) ed.putString(k, pv.content)
+            else { val b = pv.content.lowercase(); if (b == "true" || b == "false") ed.putBoolean(k, b == "true") else return@forEach }
+            n++
+        }
+        ed.apply()
+        ImportReport(installed, errors, n)
     }
 
     // ------------------------------------------------------------------ toggles e configurações

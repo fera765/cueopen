@@ -46,11 +46,14 @@ object UrlGuard {
     }
 
     /** Verificação da URL FINAL de cada requisição. [permissive] só nos testes (servidor local). */
-    fun check(url: String, host: String, permissive: Boolean = false): String? {
+    fun check(url: String, host: String, permissive: Boolean = false): String? = check(url, setOf(host), permissive)
+
+    /** Hosts permitidos: o de baseUrl + os de allowedHosts. */
+    fun check(url: String, hosts: Set<String>, permissive: Boolean = false): String? {
         val u = try { URI(url) } catch (t: Exception) { return "URL inválida" }
         if (u.userInfo != null) return "URL com credenciais não é permitida"
         val h = u.host?.lowercase() ?: return "URL sem host"
-        if (h != host.lowercase()) return "host '$h' não é o declarado ($host)"
+        if (hosts.none { it.equals(h, ignoreCase = true) }) return "host '$h' não está entre os declarados (${hosts.joinToString()})"
         if (permissive) return null
         if (u.scheme?.lowercase() != "https") return "somente HTTPS"
         if (u.port != -1 && u.port != 443) return "somente a porta 443"
@@ -82,7 +85,7 @@ class SafeDns : Dns {
     }
 }
 
-data class HttpReq(val method: String, val url: String, val headers: Map<String, String>, val body: String?)
+data class HttpReq(val method: String, val url: String, val headers: Map<String, String>, val body: String?, val contentType: String = "application/json; charset=utf-8")
 data class HttpRes(val code: Int, val headers: Map<String, List<String>>, val body: String)
 
 interface HttpExec {
@@ -103,7 +106,7 @@ class OkHttpExec(permissive: Boolean = false) : HttpExec {
     override suspend fun exec(r: HttpReq): HttpRes = withContext(Dispatchers.IO) {
         val m = r.method.uppercase()
         val hasBody = m == "POST" || m == "PUT" || m == "PATCH" || (m == "DELETE" && r.body != null)
-        val body = if (hasBody) (r.body ?: "").toRequestBody("application/json; charset=utf-8".toMediaType()) else null
+        val body = if (hasBody) (r.body ?: "").toRequestBody(r.contentType.toMediaType()) else null
         val req = Request.Builder().url(r.url).method(m, body).apply {
             r.headers.forEach { (k, v) -> header(k, v) }
         }.build()

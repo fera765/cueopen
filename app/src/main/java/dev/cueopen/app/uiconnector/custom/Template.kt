@@ -23,7 +23,7 @@ object Template {
 
     private val RE = Regex("\\{\\{(.*?)\\}\\}", RegexOption.DOT_MATCHES_ALL)
     private val VAR = Regex("^[A-Za-z][A-Za-z0-9_.]*$")
-    private val FILTERS = setOf("url", "json", "num", "int", "upper", "lower", "trim", "default", "date", "pct", "bool", "raw")
+    private val FILTERS = setOf("url", "json", "num", "int", "upper", "lower", "trim", "default", "date", "pct", "bool", "raw", "strip", "trunc", "base64")
     private val PARSER = Json { isLenient = true }
 
     fun parseRef(inner: String): Ref? {
@@ -58,6 +58,7 @@ object Template {
             for ((f, arg) in r.filters) {
                 if (f !in FILTERS) { out.add("filtro desconhecido '$f'"); continue }
                 if ((f == "num" || f == "pct") && arg != null && (arg.trim().toIntOrNull() ?: -1) !in 0..8) out.add("filtro $f: use um número de 0 a 8")
+                if (f == "trunc" && (arg?.trim()?.toIntOrNull() ?: -1) !in 1..5000) out.add("filtro trunc: use trunc:N (1 a 5000)")
                 if (f == "default" && arg == null) out.add("filtro default precisa de valor (default:X)")
             }
         }
@@ -91,6 +92,9 @@ object Template {
                 "upper" -> v.uppercase()
                 "lower" -> v.lowercase()
                 "trim" -> v.trim()
+                "strip" -> stripHtml(v)
+                "trunc" -> { val n = arg?.trim()?.toIntOrNull() ?: 200; if (v.length > n) v.take(n).trimEnd() + "…" else v }
+                "base64" -> java.util.Base64.getEncoder().encodeToString(v.toByteArray(Charsets.UTF_8))
                 "bool" -> if (v.trim().equals("true", true) || v.trim() == "1") "true" else "false"
                 "date" -> v.trim().toDoubleOrNull()?.let { d ->
                     val ms = if (d > 1e11) d.toLong() else (d * 1000).toLong()
@@ -101,6 +105,15 @@ object Template {
         }
         return v
     }
+
+    private val TAG = Regex("<[^>]*>")
+    private val WS = Regex("\\s+")
+
+    /** Remove tags HTML e decodifica as entidades mais comuns (para descrições de RSS/HTML). */
+    fun stripHtml(v: String): String = TAG.replace(v.replace("<![CDATA[", "").replace("]]>", ""), " ")
+        .replace("&nbsp;", " ").replace("&quot;", "\"").replace("&#39;", "'").replace("&apos;", "'")
+        .replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&")
+        .let { WS.replace(it, " ") }.trim()
 
     /** Percorre um JSON (corpo de requisição) renderizando as strings; tipa o valor se o modelo for um único {{x|num}}. */
     fun renderJson(e: JsonElement, ctx: Ctx): JsonElement = when (e) {

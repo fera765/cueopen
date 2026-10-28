@@ -15,6 +15,8 @@ object JsonPath {
         data class Key(val k: String) : Tok
         data class Idx(val i: Int) : Tok
         object All : Tok
+        /** `[*]`: itens de uma lista; num objeto único (ex.: RSS com 1 item) devolve o próprio objeto. */
+        object Items : Tok
     }
 
     fun parse(path: String): List<Tok>? {
@@ -42,7 +44,7 @@ object JsonPath {
                     val inner = p.substring(i + 1, end).trim()
                     i = end + 1
                     if (inner == "*") {
-                        out.add(Tok.All)
+                        out.add(Tok.Items)
                     } else if (inner.length >= 2 && (inner[0] == '\'' || inner[0] == '"') && inner.last() == inner[0]) {
                         out.add(Tok.Key(inner.substring(1, inner.length - 1)))
                     } else {
@@ -74,6 +76,9 @@ object JsonPath {
                             val ix = if (t.i < 0) e.size + t.i else t.i
                             if (ix >= 0 && ix < e.size) next.add(e[ix])
                         }
+                    }
+                    Tok.Items -> {
+                        if (e is JsonArray) next.addAll(e) else if (e is JsonObject) next.add(e)
                     }
                     Tok.All -> {
                         if (e is JsonArray) next.addAll(e)

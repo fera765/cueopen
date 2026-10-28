@@ -127,6 +127,8 @@ data class Session(
     val costUsd: Double = 0.0,
     val hasPricedUsage: Boolean = false,
     val autoCompact: Boolean = true,
+    /** Sessão aberta pelo criador de UI Connectors: só nela as ferramentas connector_* existem. */
+    val connectorBuilder: Boolean = false,
 )
 
 /** Memória de longo prazo (global ou de um Agent), recuperada por relevância — não toda de uma vez. */

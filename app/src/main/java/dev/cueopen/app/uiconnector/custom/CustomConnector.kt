@@ -31,7 +31,7 @@ class CustomConnector(
     @Volatile private var creds: Map<String, String>? = null
     @Volatile private var extracted: Map<String, String> = emptyMap()
 
-    override val isLoggedIn: Boolean get() = creds != null
+    override val isLoggedIn: Boolean get() = creds != null || def.login.fields.isEmpty()
 
     private class Reply(val code: Int, val body: String, val json: JsonElement?, val headers: Map<String, List<String>>)
 
@@ -41,24 +41,32 @@ class CustomConnector(
         def.settings.associate { "s.${it.id}" to st.text(it.id).ifEmpty { it.default } }
 
     private fun buildUrl(r: ReqDef, ctx: Template.Ctx): String {
-        val path = Template.render(r.path, ctx)
+        val path = if (r.url.isNotBlank()) "" else Template.render(r.path, ctx)
         val q = r.query.entries.joinToString("&") { (k, v) ->
             URLEncoder.encode(k, "UTF-8") + "=" + URLEncoder.encode(Template.render(v, ctx), "UTF-8")
         }
-        return def.baseUrl + (if (path.startsWith("/")) path else "/$path") + (if (q.isEmpty()) "" else (if (path.contains('?')) "&" else "?") + q)
+        val head = if (r.url.isNotBlank()) Template.render(r.url, ctx) else def.baseUrl + (if (path.startsWith("/")) path else "/$path")
+        return head + (if (q.isEmpty()) "" else (if (head.contains('?')) "&" else "?") + q)
     }
 
     private suspend fun send(r: ReqDef, vars: Map<String, String>, withGlobalHeaders: Boolean, jsonCtx: JsonElement? = null): Reply {
         val ctx = Template.Ctx(vars, jsonCtx)
         val url = buildUrl(r, ctx)
-        UrlGuard.check(url, def.host, permissive)?.let { throw IllegalStateException("Requisição bloqueada: $it") }
+        UrlGuard.check(url, def.hosts, permissive)?.let { throw IllegalStateException("Requisição bloqueada: $it") }
         val headers = LinkedHashMap<String, String>()
         if (withGlobalHeaders) def.headers.forEach { (k, v) -> headers[k] = Template.render(v, ctx) }
         r.headers.forEach { (k, v) -> headers[k] = Template.render(v, ctx) }
-        headers.putIfAbsent("Accept", "application/json")
-        val body = if (r.method == "GET" || r.body == null) null else Template.renderJson(r.body, ctx).toString()
-        val res = http.exec(HttpReq(r.method, url, headers, body))
-        val parsed = runCatching { parser.parseToJsonElement(res.body) }.getOrNull()
+        headers.putIfAbsent("Accept", "application/json, application/xml, application/rss+xml, text/xml, */*")
+        val isForm = r.form.isNotEmpty() && r.method != "GET"
+        val body = when {
+            r.method == "GET" -> null
+            isForm -> r.form.entries.joinToString("&") { (k, v) -> URLEncoder.encode(k, "UTF-8") + "=" + URLEncoder.encode(Template.render(v, ctx), "UTF-8") }
+            r.body == null -> null
+            else -> Template.renderJson(r.body, ctx).toString()
+        }
+        val ctype = if (isForm) "application/x-www-form-urlencoded" else "application/json; charset=utf-8"
+        val res = http.exec(HttpReq(r.method, url, headers, body, ctype))
+        val parsed = ResponseTree.parse(res.body, res.headers["content-type"]?.firstOrNull())
         return Reply(res.code, res.body, parsed, res.headers)
     }
 
@@ -199,6 +207,15 @@ class CustomConnector(
             val vars = settingVars(settings) + args.filterValues { it.isNotEmpty() }
             val reply = authed(t.request, vars)
             if (reply.code !in 200..299) return "ERRO HTTP ${reply.code}: ${reply.body.take(300)}"
+            val lst = t.list
+            if (lst != null) {
+                val ctxL = sessionVars() + vars
+                val rows = reply.json?.let { JsonPath.select(it, lst.rows) }.orEmpty()
+                if (rows.isEmpty()) return "Nenhum item encontrado (${lst.rows})."
+                val lines = rows.take(lst.max).mapIndexed { n, row -> "${n + 1}. " + Template.render(lst.item, Template.Ctx(ctxL, row)) }
+                val head = if (t.response.isNotBlank()) Template.render(t.response, Template.Ctx(ctxL, reply.json)) + "\n" else ""
+                return head + lines.joinToString("\n")
+            }
             if (t.response.isNotBlank()) Template.render(t.response, Template.Ctx(sessionVars() + vars, reply.json))
             else reply.body.take(4000)
         } catch (c: kotlinx.coroutines.CancellationException) {

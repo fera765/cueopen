@@ -201,4 +201,71 @@ class CustomEngineTest {
         val fenced = "```json\n" + CustomTemplates.MINIMAL.json + "\n```"
         assertEquals(emptyList<String>(), CustomDefParser.parse(fenced).errors)
     }
+
+    private val rss = """<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:media="http://search.yahoo.com/mrss/"><channel><title>g1</title>
+<item><title><![CDATA[Manchete <b>um</b>]]></title><link>https://g1.globo.com/a</link><pubDate>Tue, 27 Oct 2026</pubDate><media:content url="https://img/1.jpg"/></item>
+<item><title>Manchete dois</title><link>https://g1.globo.com/b</link></item>
+</channel></rss>"""
+
+    @Test fun `xml e rss viram arvore navegavel`() {
+        val t = ResponseTree.parse(rss)
+        assertEquals(listOf("https://g1.globo.com/a", "https://g1.globo.com/b"), JsonPath.select(t, "$.rss.channel.item[*].link").map { JsonPath.text(it) })
+        assertEquals("https://img/1.jpg", JsonPath.text(JsonPath.first(t, "$.rss.channel.item[0]['media:content']['@url']")))
+        assertEquals("Manchete um", Template.render("{{$.rss.channel.item[0].title|strip}}", Template.Ctx(emptyMap(), t)))
+        // item unico: [*] devolve o proprio elemento
+        val one = ResponseTree.parse("<feed><entry><title>So</title></entry></feed>")
+        assertEquals(listOf("So"), JsonPath.select(one, "$.feed.entry[*].title").map { JsonPath.text(it) })
+        assertEquals("oi", JsonPath.text(JsonPath.first(ResponseTree.parse("oi"), "$.body")))
+        assertNull(ResponseTree.xml("<!DOCTYPE x [<!ENTITY e SYSTEM \"file:///etc/passwd\">]><x>&e;</x>")?.let { if (JsonPath.text(JsonPath.first(it, "$.x")).contains("root")) it else null })
+    }
+
+    @Test fun `filtros strip trunc base64`() {
+        val c = Template.Ctx(mapOf("h" to "<p>Olá &amp; mundo</p>", "l" to "abcdefghij", "u" to "id:sec"))
+        assertEquals("Olá & mundo", Template.render("{{h|strip}}", c))
+        assertEquals("abc…", Template.render("{{l|trunc:3}}", c))
+        assertEquals("aWQ6c2Vj", Template.render("{{u|base64}}", c))
+    }
+
+    @Test fun `conector rss sem login lista noticias`() = runBlocking {
+        val def = CustomDefParser.parse(CustomTemplates.RSS.json).def!!
+        val f = Fake { HttpRes(200, mapOf("content-type" to listOf("application/rss+xml")), rss) }
+        val c = CustomConnector(def, f, permissive = true)
+        assertTrue(c.isLoggedIn)
+        val out = c.callTool("ultimas_noticias", emptyMap(), ConnectorSettings { null })
+        assertTrue(out, out.startsWith("1. Manchete um — https://g1.globo.com/a"))
+        assertTrue(out.contains("2. Manchete dois"))
+        val t = c.snapshot(ConnectorSettings { null })[0] as UiBlock.Table
+        assertEquals(listOf(listOf("Manchete um"), listOf("Manchete dois")), t.rows)
+    }
+
+    @Test fun `oauth com form e segundo host`() = runBlocking {
+        val def = CustomDefParser.parse(CustomTemplates.SPOTIFY.json).def!!
+        assertEquals(setOf("api.spotify.com", "accounts.spotify.com"), def.hosts)
+        val f = Fake { r ->
+            when {
+                r.url == "https://accounts.spotify.com/api/token" -> HttpRes(200, emptyMap(), """{"access_token":"TOKEN-XYZ","expires_in":3600}""")
+                r.url.startsWith("https://api.spotify.com/v1/search") -> HttpRes(200, emptyMap(), """{"artists":{"items":[{"name":"Anitta","external_urls":{"spotify":"https://open.spotify.com/artist/1"}}]}}""")
+                else -> HttpRes(404, emptyMap(), "{}")
+            }
+        }
+        val c = CustomConnector(def, f, permissive = true)
+        assertTrue(c.login(mapOf("clientId" to "abc", "clientSecret" to "s3cr3t")).isSuccess)
+        val tok = f.calls.first()
+        assertEquals("application/x-www-form-urlencoded", tok.contentType)
+        assertEquals("grant_type=client_credentials&client_id=abc&client_secret=s3cr3t", tok.body)
+        val out = c.callTool("buscar", mapOf("termo" to "anitta", "tipo" to "artist"), ConnectorSettings { null })
+        assertEquals("1. Anitta — https://open.spotify.com/artist/1", out)
+        assertTrue(f.calls.last().url.contains("q=anitta") && f.calls.last().headers["Authorization"] == "Bearer TOKEN-XYZ")
+        assertNotNull(UrlGuard.check("https://evil.com/x", def.hosts))
+    }
+
+    @Test fun `url absoluta precisa de host declarado`() {
+        val bad = CustomTemplates.SPOTIFY.json.replace("\"allowedHosts\": [ \"accounts.spotify.com\" ],", "")
+        assertTrue(CustomDefParser.parse(bad).errors.any { it.contains("allowedHosts") })
+        val both = CustomTemplates.MINIMAL.json.replace("\"path\": \"/data\"", "\"path\": \"/data\", \"url\": \"https://api.exemplo.com/x\"")
+        assertTrue(CustomDefParser.parse(both).errors.any { it.contains("OU") })
+        val ipHost = CustomTemplates.SPOTIFY.json.replace("accounts.spotify.com\" ]", "10.0.0.1\" ]")
+        assertTrue(CustomDefParser.parse(ipHost).errors.any { it.contains("allowedHosts") })
+    }
 }

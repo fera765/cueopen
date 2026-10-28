@@ -155,13 +155,12 @@ object SpecValidator {
         if (s.description.isBlank()) p += "description vazia."
         if (s.version.isBlank()) p += "version vazia."
 
-        if (s.loginFields.isEmpty()) p += "loginFields vazio."
         s.loginFields.groupBy { it.id }.filter { it.value.size > 1 }.keys.forEach { p += "campo de login duplicado: $it" }
         s.loginFields.forEach {
             if (!FIELD.matches(it.id)) p += "campo de login '${it.id}' com id inválido."
             if (it.label.isBlank()) p += "campo de login '${it.id}' sem label."
         }
-        if (s.loginFields.none { it.type == FieldType.PASSWORD }) p += "loginFields precisa de ao menos um campo PASSWORD (segredo)."
+        if (s.loginFields.isNotEmpty() && s.loginFields.none { it.type == FieldType.PASSWORD }) p += "loginFields precisa de ao menos um campo PASSWORD (segredo)."
 
         s.settings.groupBy { it.id }.filter { it.value.size > 1 }.keys.forEach { p += "setting duplicada: $it" }
         s.settings.forEach {

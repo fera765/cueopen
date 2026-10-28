@@ -81,7 +81,64 @@ object CustomTemplates {
 }
 """.trimIndent())
 
-    val ALL = listOf(TOKEN_LOGIN, API_KEY, MINIMAL)
+    val RSS = Entry("Notícias por RSS (sem login)", """
+{
+  "id": "noticiasg1",
+  "name": "Notícias g1",
+  "description": "Últimas notícias do g1 via RSS.",
+  "version": "1.0",
+  "baseUrl": "https://g1.globo.com",
+  "panels": [
+    { "type": "table", "title": "Últimas notícias", "request": { "path": "/rss/g1/" },
+      "rows": "${'$'}.rss.channel.item[*]",
+      "columns": [ { "title": "Manchete", "value": "{{${'$'}.title|strip}}" } ],
+      "empty": "Sem notícias agora." }
+  ],
+  "tools": [
+    { "name": "ultimas_noticias", "description": "Lista as últimas notícias do g1 com título, link e data.",
+      "request": { "path": "/rss/g1/" },
+      "list": { "rows": "${'$'}.rss.channel.item[*]", "item": "{{${'$'}.title|strip}} — {{${'$'}.link}} ({{${'$'}.pubDate}})", "max": 30 } }
+  ]
+}
+""".trimIndent())
+
+    val SPOTIFY = Entry("OAuth client credentials (Spotify)", """
+{
+  "id": "spotify",
+  "name": "Spotify",
+  "description": "Busca artistas, faixas e álbuns no catálogo do Spotify.",
+  "version": "1.0",
+  "accent": "#1DB954",
+  "baseUrl": "https://api.spotify.com/v1",
+  "allowedHosts": [ "accounts.spotify.com" ],
+  "headers": { "Authorization": "Bearer {{token}}" },
+  "login": {
+    "fields": [
+      { "id": "clientId", "label": "Client ID", "type": "text", "hint": "developer.spotify.com/dashboard" },
+      { "id": "clientSecret", "label": "Client Secret", "type": "password" }
+    ],
+    "request": { "method": "POST", "url": "https://accounts.spotify.com/api/token",
+      "form": { "grant_type": "client_credentials", "client_id": "{{clientId}}", "client_secret": "{{clientSecret}}" } },
+    "extract": { "token": "${'$'}.access_token" }
+  },
+  "panels": [
+    { "type": "table", "title": "Novos lançamentos", "request": { "path": "/browse/new-releases", "query": { "limit": "10" } },
+      "rows": "${'$'}.albums.items[*]",
+      "columns": [ { "title": "Álbum", "value": "{{${'$'}.name}}" }, { "title": "Artista", "value": "{{${'$'}.artists[0].name}}" } ] }
+  ],
+  "tools": [
+    { "name": "buscar", "description": "Busca no catálogo do Spotify e devolve nome e link.",
+      "params": [
+        { "name": "termo", "description": "Texto da busca" },
+        { "name": "tipo", "description": "O que buscar", "enum": [ "artist", "track", "album" ] }
+      ],
+      "request": { "path": "/search", "query": { "q": "{{termo}}", "type": "{{tipo}}", "limit": "10" } },
+      "list": { "rows": "${'$'}.*.items[*]", "item": "{{${'$'}.name}} — {{${'$'}.external_urls.spotify}}", "max": 10 } }
+  ]
+}
+""".trimIndent())
+
+    val ALL = listOf(TOKEN_LOGIN, API_KEY, RSS, SPOTIFY, MINIMAL)
 
     /** Rascunho enviado ao chat para a IA escrever a definição (o usuário só descreve o serviço). */
     val AI_PROMPT = """Crie um UI Connector em JSON para o serviço: <DESCREVA AQUI: nome, URL base da API e o que quer ver/fazer>.
