@@ -260,7 +260,7 @@ class AgentRunner(
                 if (store.session(sessionId)?.continuous == true) {
                     // modo contínuo: sem ferramenta = lembra de dormir até a próxima verificação
                     store.editSession(sessionId) { it.copy(llm = it.llm + LlmMessage("user", "[Sistema] Você está em modo contínuo. Use `sleep` para aguardar a próxima verificação ou `finish` se o usuário pediu para encerrar.")) }
-                    if (++steps >= maxSteps) { sleepAndWake(sessionId, 5, "verificação periódica"); steps = 0 }
+                    if (++steps >= maxSteps) { sleepAndWake(sessionId, 5 * 60, "verificação periódica"); steps = 0 }
                     continue
                 }
                 store.editSession(sessionId) { it.copy(status = SessionStatus.DONE) }
@@ -268,7 +268,7 @@ class AgentRunner(
                 return
             }
             var stopLoop: SessionStatus? = null
-            var sleepReq: Pair<Int, String>? = null
+            var sleepReq: Pair<Int, String>? = null // (segundos, motivo)
             val resultHashes = HashMap<String, Int>()
             val resultLong = HashSet<String>()
             for (call in reply.toolCalls) {
@@ -290,7 +290,7 @@ class AgentRunner(
                     it.copy(llm = it.llm + LlmMessage("tool", ctxOut, toolCallId = call.id, name = call.name))
                 }
                 if (result.stop != null) stopLoop = result.stop
-                if (result.sleepMinutes != null) sleepReq = result.sleepMinutes to result.output
+                if (result.sleepSeconds != null) sleepReq = result.sleepSeconds to result.output
             }
             // Loop de ferramentas: mesma ação repetida sem progresso → corrige e, se insistir, interrompe.
             run {
@@ -338,7 +338,7 @@ class AgentRunner(
                 store.editSession(sessionId) { it.copy(llm = it.llm + LlmMessage("user", "[Sistema] Você está perto do limite de passos. Priorize concluir o essencial e entregar agora com finish (resumo curto + arquivos). Deixe o não-essencial como próximo passo.")) }
             }
             if (steps >= maxSteps) {
-                if (store.session(sessionId)?.continuous == true) { sleepAndWake(sessionId, 1, "pausa automática após $maxSteps passos"); steps = 0; continue }
+                if (store.session(sessionId)?.continuous == true) { sleepAndWake(sessionId, 60, "pausa automática após $maxSteps passos"); steps = 0; continue }
                 store.addItem(sessionId, ChatItem.Error(text = "Limite de $maxSteps passos atingido. Envie \"continue\" para seguir."))
                 store.editSession(sessionId) { it.copy(status = SessionStatus.WAITING_USER) }
                 return
@@ -347,10 +347,10 @@ class AgentRunner(
     }
 
     /** Modo contínuo: dorme (o serviço em foreground + wakelock mantém o processo vivo) e retoma. */
-    private suspend fun sleepAndWake(sessionId: String, minutes: Int, reason: String) {
-        val wake = System.currentTimeMillis() + minutes * 60_000L
+    private suspend fun sleepAndWake(sessionId: String, seconds: Int, reason: String) {
+        val wake = System.currentTimeMillis() + seconds.coerceAtLeast(1) * 1000L
         store.editSession(sessionId) { it.copy(status = SessionStatus.SLEEPING, wakeAt = wake, wakeReason = reason, continuous = true) }
-        setActivity(sessionId, Activity(Activity.Kind.IDLE, "Aguardando até ${java.text.SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(wake))}"))
+        setActivity(sessionId, Activity(Activity.Kind.IDLE, "Aguardando até ${java.text.SimpleDateFormat(if (seconds < 120) "HH:mm:ss" else "HH:mm", Locale.getDefault()).format(Date(wake))}"))
         dev.cueopen.app.sandbox.SandboxService.start(ctx, "Agente em modo contínuo")
         store.flush()
         while (System.currentTimeMillis() < wake) kotlinx.coroutines.delay(minOf(30_000L, wake - System.currentTimeMillis()).coerceAtLeast(1000))
@@ -359,7 +359,7 @@ class AgentRunner(
 
     private fun wakeUp(sessionId: String) {
         val r = store.session(sessionId)?.wakeReason.orEmpty()
-        val now = SimpleDateFormat("dd/MM HH:mm", Locale.getDefault()).format(Date())
+        val now = SimpleDateFormat("dd/MM HH:mm:ss", Locale.getDefault()).format(Date())
         store.editSession(sessionId) {
             it.copy(status = SessionStatus.RUNNING, wakeAt = null,
                 llm = it.llm + LlmMessage("user", "[Sistema $now] Hora de continuar (motivo do sleep: $r). Faça a próxima verificação/etapa."))
@@ -533,6 +533,8 @@ class AgentRunner(
     }
 
     private object CustomDefParserFence { fun strip(t: String) = dev.cueopen.app.uiconnector.custom.CustomDefParser.stripFences(t) }
+
+    private fun tfLabel(tf: Int) = when { tf % 3600 == 0 -> "${tf / 3600}h"; tf % 60 == 0 -> "${tf / 60} min"; else -> "${tf}s" }
 
     /** Normaliza argumentos JSON (chaves ordenadas, espaços ignorados) para comparar chamadas. */
     private fun normArgs(raw: String): String {
@@ -787,6 +789,7 @@ class AgentRunner(
             appendLine("6b. AUTONOMIA: se o usuário pedir para monitorar/acompanhar/repetir algo ao longo do tempo (ex.: \"a cada 20 min verifique o mercado\"), chame set_schedule com o intervalo em minutos. Se ele não der intervalo mas a tarefa for contínua, escolha um intervalo razoável e econômico. Para parar, set_schedule minutes=0.")
             val caps = agent?.deviceCaps.orEmpty()
             if (caps.isNotEmpty()) appendLine("6c. Você tem acesso ao aparelho: " + caps.joinToString(", ") { dev.cueopen.app.device.DeviceCaps.all.firstOrNull { d -> d.id == it }?.title ?: it } + ". Use as ferramentas device_* quando fizer sentido.")
+            appendLine("6c. TEMPO DE VELA (trading de opções/velas): nunca durma um tempo fixo (ex.: 1 min) esperando a próxima vela — isso acorda no MEIO dela. Descubra quanto falta para a próxima vela (candle_clock do conector, se existir, usa o relógio do servidor; senão calcule pelo horário da vela) e use sleep com seconds = (segundos até a próxima vela − ~6) ou sleep align_candle_seconds=<tempo gráfico>. Ao acordar: confira o relógio, analise rápido e entre nos PRIMEIROS segundos da vela, para que a operação cubra exatamente a vela analisada (na IQ Option, entrar com menos de 30 s para o fim do minuto empurra a expiração para o minuto seguinte). Se a ordem for recusada por janela de entrada, obedeça o tempo de espera indicado.")
             appendLine("7. MODO CONTÍNUO: se o usuário pedir para monitorar, acompanhar, repetir ou rodar por horas/dias, NÃO finalize. Faça a verificação, registre em notes_write e chame `sleep` (minutos até a próxima verificação). Repita até o usuário pausar.")
             appendLine("8. Fora do modo contínuo, termine com `finish` (resumo curto + arquivos). `ask_user` só se for ambíguo ou irreversível. Responda no idioma do usuário.")
             val walletPolicyForPrompt = WalletAgentPolicyStore(ctx.applicationContext)
@@ -956,9 +959,13 @@ class AgentRunner(
         if (builder) add(tool("connector_propose", "Mostra ao usuário o card 'Instalar conector' no chat. Só aceita definição com zero erros e, se não tiver login, que tenha passado em connector_test com o MESMO JSON.", buildJsonObject {
             put("json", str("Definição JSON completa e válida do conector"))
         }, listOf("json")))
-        if (allowMultiAgent) add(tool("sleep", "Modo contínuo: pausa por N minutos e depois retoma automaticamente (monitoramento).", buildJsonObject {
-            put("minutes", int("Minutos até a próxima verificação (1-1440)")); put("reason", str("O que fazer ao acordar"))
-        }, listOf("minutes", "reason")))
+        if (allowMultiAgent) add(tool("sleep", "Modo contínuo: pausa e depois retoma automaticamente. Use UM modo: minutes, seconds, ou align_candle_seconds (acorda lead_seconds ANTES da abertura da próxima vela daquele tempo gráfico — use em trading para pegar o INÍCIO da vela, nunca um tempo fixo de 1 min que cai no meio dela).", buildJsonObject {
+            put("minutes", int("Minutos até a próxima verificação (1-1440)"))
+            put("seconds", int("Segundos até a próxima verificação (5-86400) — para esperas curtas e precisas"))
+            put("align_candle_seconds", int("Tempo gráfico da vela em segundos (60, 300, 900…): acorda pouco antes da próxima vela abrir"))
+            put("lead_seconds", int("Com align_candle_seconds: quantos segundos antes da abertura acordar (padrão 6, 2-30)"))
+            put("reason", str("O que fazer ao acordar"))
+        }, listOf("reason")))
         if (allowMultiAgent) add(tool("create_skill", "Cria uma nova skill na biblioteca do usuário.", buildJsonObject {
             put("name", str("Nome")); put("description", str("Descrição curta")); put("instructions", str("Instruções detalhadas"))
         }, listOf("name", "description", "instructions")))
@@ -1068,7 +1075,7 @@ class AgentRunner(
         }, listOf("summary")))
     }
 
-    data class ToolResult(val output: String, val stop: SessionStatus? = null, val sleepMinutes: Int? = null)
+    data class ToolResult(val output: String, val stop: SessionStatus? = null, val sleepSeconds: Int? = null)
 
     /**
      * Executes an already-AUTHORIZED autonomous transfer end to end: local signing, broadcast,
@@ -1279,9 +1286,24 @@ class AgentRunner(
                 return ToolResult("Pronto: o Android vai me acordar sozinho a cada ${mm} min (mesmo com o app fechado) e eu farei a verificação. Nada de você precisar mandar mensagem. Pare com /stop ou desligando a autonomia no Agent.")
             }
             "sleep" -> {
-                val m = (i("minutes") ?: 5).coerceIn(1, 1440)
-                store.addItem(sessionId, ChatItem.Step(tool = "sleep", title = "Aguardando $m min", args = s("reason"), result = "", status = StepStatus.OK))
-                return ToolResult(s("reason").ifBlank { "verificação" }, sleepMinutes = m)
+                val align = i("align_candle_seconds")
+                val (secs, title, note) = when {
+                    align != null && align >= 5 -> {
+                        val tf = align.coerceIn(5, 86_400)
+                        val lead = (i("lead_seconds") ?: 6).coerceIn(2, 30)
+                        val nowMs = System.currentTimeMillis()
+                        var nextOpen = (nowMs / 1000 / tf + 1) * tf // próxima abertura (epoch s, alinhada ao tempo gráfico)
+                        var wait = (nextOpen * 1000 - nowMs) / 1000.0 - lead
+                        if (wait < 3) { nextOpen += tf; wait += tf } // perto demais: mira a vela seguinte
+                        val hhmmss = SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date(nextOpen * 1000))
+                        Triple(wait.toInt().coerceAtLeast(1), "Aguardando a próxima vela de ${tfLabel(tf)} (abre $hhmmss)",
+                            "Acordo ${lead}s antes da vela de ${tfLabel(tf)} que abre às $hhmmss — analise e entre no INÍCIO dela.")
+                    }
+                    i("seconds") != null -> { val sc = i("seconds")!!.coerceIn(5, 86_400); Triple(sc, "Aguardando ${sc}s", "") }
+                    else -> { val m = (i("minutes") ?: 5).coerceIn(1, 1440); Triple(m * 60, "Aguardando $m min", "") }
+                }
+                store.addItem(sessionId, ChatItem.Step(tool = "sleep", title = title, args = s("reason"), result = note, status = StepStatus.OK))
+                return ToolResult(listOf(s("reason").ifBlank { "verificação" }, note).filter { it.isNotBlank() }.joinToString(" — "), sleepSeconds = secs)
             }
             "connector_spec", "connector_validate", "connector_test", "connector_propose" -> {
                 // passo visível no chat: o que está sendo feito, com o quê, e o resultado

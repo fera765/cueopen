@@ -81,6 +81,11 @@ class IqOptionConnector : UiConnector {
                 SettingType.NUMBER, "5",
             ),
             SettingSpec(
+                "max_entry_delay_sec", "Janela de entrada no início da vela (s)",
+                "O agente só abre operação nos primeiros N segundos da vela de 1 min (assim a operação cobre a vela analisada, do começo). Fora disso a ordem é recusada e ele espera a próxima vela. 0 = desliga.",
+                SettingType.NUMBER, "10",
+            ),
+            SettingSpec(
                 "entry_against_candle", "Entrada contra o candle (recomendado)",
                 "Ligado: antes de cada compra o app confere o candle de 1 min. CALL (compra) só entra com o preço ABAIXO da abertura; PUT (venda) só ACIMA da abertura. Evita comprar no topo e vender no fundo.",
                 SettingType.SWITCH, "true",
@@ -106,6 +111,9 @@ class IqOptionConnector : UiConnector {
                 ParamSpec("asset", "Ticker do ativo, ex.: EURUSD"),
                 ParamSpec("timeframe", "Tamanho da vela em segundos (60=1min, 300=5min…) ou 1m/5m/1h. Padrão 60.", required = false),
                 ParamSpec("count", "Quantidade de velas (1–200). Padrão 30.", "integer", required = false),
+            )),
+            ToolSpec("candle_clock", "Relógio da vela pelo horário do SERVIDOR da IQ Option: quando a vela atual abriu, quantos segundos faltam para a próxima, se dá para entrar agora e quantos segundos dormir (sleep seconds) para acordar logo antes da próxima vela. Use SEMPRE antes de esperar/entrar.", listOf(
+                ParamSpec("timeframe", "Tempo gráfico (60, 300, 900… s ou 1m/5m/15m). Padrão 60.", required = false),
             )),
             ToolSpec("indicators", "Análise técnica completa (padrão TradingView) sobre velas REAIS do ativo: mais de 30 indicadores (médias, RSI, MACD, Estocástico, ADX, Bollinger, Ichimoku, Supertrend, PSAR…) com sinal de compra/venda e o resumo. Calculado no aparelho, em milissegundos.", listOf(
                 ParamSpec("asset", "Ticker do ativo, ex.: EURUSD-OTC"),
@@ -543,8 +551,48 @@ class IqOptionConnector : UiConnector {
                 appendLine("${fmt.format(Date(c.from * 1000))} ${c.open} ${c.max} ${c.min} ${c.close} ${c.volume.toLong()}")
             }
             val first = list.first().close; val last = list.last().close
-            if (first != 0.0) append(String.format(Locale.US, "Variação no período: %.4f%% (fechamento %s → %s)", (last - first) / first * 100, first, last))
+            if (first != 0.0) appendLine(String.format(Locale.US, "Variação no período: %.4f%% (fechamento %s → %s)", (last - first) / first * 100, first, last))
+            val nowSec = serverNowMs() / 1000; val open = nowSec / size * size
+            append("Agora (servidor UTC): ${fmt.format(Date(nowSec * 1000))}:${String.format(Locale.US, "%02d", nowSec % 60)} · vela atual aberta há ${nowSec - open}s · próxima em ${open + size - nowSec}s (use candle_clock para o tempo exato de espera)")
         }.trim()
+    }
+
+    private fun serverNowMs(): Long = System.currentTimeMillis() + serverOffsetMs
+
+    private fun hms(epochSec: Long): String = SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date(epochSec * 1000))
+
+    /** Situação da vela atual no relógio do servidor + quanto dormir para acordar antes da próxima. */
+    private fun clockText(tf: Int, settings: ConnectorSettings?): String {
+        val nowMs = serverNowMs()
+        val nowSec = nowMs / 1000
+        val open = nowSec / tf * tf
+        val next = open + tf
+        val elapsed = nowSec - open
+        val toNext = (next * 1000 - nowMs) / 1000.0
+        val window = (settings?.num("max_entry_delay_sec", 10.0) ?: 10.0).toInt()
+        val lead = 6
+        val sleepSec = (toNext - lead).let { if (it < 3) it + tf else it }.toInt().coerceAtLeast(1)
+        val canEnter = tf == 60 && (window <= 0 || elapsed <= window)
+        return buildString {
+            appendLine("Servidor: ${hms(nowSec)} · vela de ${tf}s aberta às ${hms(open)} (há ${elapsed}s) · próxima abre às ${hms(next)} (em ${String.format(Locale.US, "%.1f", toNext)}s)")
+            if (tf == 60) appendLine(if (canEnter) "JANELA DE ENTRADA ABERTA: dá para entrar agora no início desta vela (até ${window}s após a abertura); uma operação de 1 min expira às ${hms(next)}."
+                else "Fora da janela de entrada (${window}s): NÃO entre no meio da vela.")
+            append("Para pegar o início da próxima vela: sleep seconds=$sleepSec (acorda ~${lead}s antes de ${hms(if (toNext - lead < 3) next + tf else next)}), então chame candle_clock/indicators e entre nos primeiros segundos.")
+        }
+    }
+
+    /** Guardrail: só entra no começo da vela de 1 min (a operação cobre a vela analisada). null = ok. */
+    private fun entryWindowCheck(settings: ConnectorSettings?): String? {
+        val window = (settings?.num("max_entry_delay_sec", 10.0) ?: 10.0).toInt()
+        if (window <= 0) return null
+        val nowMs = serverNowMs(); val nowSec = nowMs / 1000
+        val elapsed = nowSec % 60
+        if (elapsed <= window) return null
+        val next = nowSec / 60 * 60 + 60
+        val toNext = (next * 1000 - nowMs) / 1000.0
+        val sleepSec = (toNext - 6).let { if (it < 3) it + 60 else it }.toInt().coerceAtLeast(1)
+        return "RECUSADO (fora da janela de entrada): a vela atual abriu há ${elapsed}s (limite ${window}s); entrar agora pegaria o meio da vela. " +
+            "A próxima vela abre às ${hms(next)} (em ${String.format(Locale.US, "%.0f", toNext)}s): chame sleep seconds=$sleepSec e entre nos primeiros segundos dela."
     }
 
     /**
@@ -563,8 +611,8 @@ class IqOptionConnector : UiConnector {
         return when {
             dir == "call" && now < open -> null
             dir == "put" && now > open -> null
-            dir == "call" -> "RECUSADO (entrada contra o candle): CALL exige preço ABAIXO da abertura do candle de 1 min, mas está ${if (now == open) "igual à" else "acima da"} abertura (${px(now)} vs ${px(open)}). Aguarde o preço recuar abaixo de ${px(open)} e valide de novo."
-            else -> "RECUSADO (entrada contra o candle): PUT exige preço ACIMA da abertura do candle de 1 min, mas está ${if (now == open) "igual à" else "abaixo da"} abertura (${px(now)} vs ${px(open)}). Aguarde o preço subir acima de ${px(open)} e valide de novo."
+            dir == "call" -> "RECUSADO (entrada contra o candle): CALL exige preço ABAIXO da abertura do candle de 1 min, mas está ${if (now == open) "igual à" else "acima da"} abertura (${px(now)} vs ${px(open)}). Aguarde o preço recuar abaixo de ${px(open)} e tente de novo em 2–3 s enquanto a janela de entrada estiver aberta; se ela fechar, use candle_clock e espere a próxima vela."
+            else -> "RECUSADO (entrada contra o candle): PUT exige preço ACIMA da abertura do candle de 1 min, mas está ${if (now == open) "igual à" else "abaixo da"} abertura (${px(now)} vs ${px(open)}). Aguarde o preço subir acima de ${px(open)} e tente de novo em 2–3 s enquanto a janela de entrada estiver aberta; se ela fechar, use candle_clock e espere a próxima vela."
         }
     }
 
@@ -608,6 +656,7 @@ class IqOptionConnector : UiConnector {
             return if (m != null) "${m.ticker} é ${kindLabel(m.kind)} (margem): use open_position em vez de buy." else "Ativo '$asset' não encontrado. Use open_assets."
         }
         if (!a.open) return "O ativo ${a.ticker} está fechado/suspenso agora."
+        if (byAgent) entryWindowCheck(settings)?.let { return it }
         if (byAgent && (settings?.text("entry_against_candle")?.ifEmpty { "true" } ?: "true") == "true") {
             entryCheck(a, dir)?.let { return it }
         }
@@ -768,6 +817,7 @@ class IqOptionConnector : UiConnector {
                     l.take(120).joinToString(", ") { it.ticker }
             }
         }
+        "candle_clock" -> clockText(IqProtocol.timeframeSeconds(args["timeframe"] ?: "60") ?: 60, settings)
         "indicators" -> indicatorsText(args["asset"].orEmpty(), args["timeframe"], args["count"]?.toDoubleOrNull()?.toInt())
         "get_candles" -> candlesText(args["asset"].orEmpty(), args["timeframe"], args["count"]?.toDoubleOrNull()?.toInt())
         "buy" -> buy(
