@@ -299,7 +299,15 @@ class CustomConnector(
                         if (!wr.ok) return "ERRO ao criar o arquivo '$wp': " + Redactor.redact(wr.text.take(800), secrets())
                     }
                     val cmd = Template.renderShell(t.shell.run, Template.Ctx(sessionVars() + vars))
-                    val r = bridge.shell(cmd, t.shell.timeoutSec)
+                    var r = bridge.shell(cmd, t.shell.timeoutSec)
+                    // Auto-reparo: o comando sumiu do ambiente (pacote removido, setup antigo, ambiente
+                    // recriado) → refaz o setup uma vez e tenta de novo, em vez de falhar em produção.
+                    if (!r.ok && def.setup != null && (r.text.contains("not found") || r.text.contains("[exit 127]") || r.text.contains("ModuleNotFoundError"))) {
+                        bridge.resetSetup()
+                        val su = def.setup
+                        val again = bridge.ensureSetup(Template.renderShell(su.run, Template.Ctx(settingVars(settings))), su.timeoutSec)
+                        if (again == null || again.ok) r = bridge.shell(cmd, t.shell.timeoutSec)
+                    }
                     lastStepRaw = r.text
                     if (!r.ok) return "ERRO: " + Redactor.redact(r.text.take(2000), secrets())
                     Reply(200, r.text, ResponseTree.parse(r.text, null), emptyMap())
@@ -346,7 +354,15 @@ class CustomConnector(
             if (lst != null) {
                 val ctxL = sessionVars() + vars + cvars
                 val rows = rowsOf(lst.rows, reply.json, cvals)
-                if (rows.isEmpty()) return "ERRO: nenhum item em ${lst.rows} (HTTP ${reply.code}). Estrutura recebida:\n" + ResponseTree.outline(reply.json, 3).take(1500)
+                if (rows.isEmpty()) {
+                    // Lista que EXISTE mas veio vazia é um resultado válido ("nenhum par/registro"), não um erro
+                    // do conector — antes virava "ERRO: nenhum item em $[*]" e o agente achava que quebrou.
+                    val parentPath = lst.rows.removeSuffix("[*]")
+                    val parent = if (lst.rows.startsWith("c.")) null else reply.json?.let { j -> if (parentPath == "$") j else JsonPath.first(j, parentPath) }
+                    if (parent is kotlinx.serialization.json.JsonArray && parent.isEmpty())
+                        return NO_RESULTS + " (a resposta do servidor veio com a lista vazia, HTTP ${reply.code}). Tente outros parâmetros."
+                    return "ERRO: nenhum item em ${lst.rows} (HTTP ${reply.code}). Estrutura recebida:\n" + ResponseTree.outline(reply.json, 3).take(1500)
+                }
                 val lines = rows.take(lst.max).mapIndexed { n, row -> "${n + 1}. " + Template.render(lst.item, Template.Ctx(ctxL, row)) }
                 val head = if (t.response.isNotBlank()) Template.render(t.response, Template.Ctx(ctxL, reply.json)) + "\n" else ""
                 return head + lines.joinToString("\n")
@@ -362,6 +378,8 @@ class CustomConnector(
             "ERRO: " + Redactor.redact(e.message ?: e.javaClass.simpleName, secrets())
         }
     }
+
+    companion object { const val NO_RESULTS = "Nenhum resultado" }
 
     /** Saída CRUA do último passo de terminal/arquivo/browser (para o teste achar falhas escondidas). */
     @Volatile private var lastStepRaw: String? = null
@@ -463,6 +481,7 @@ class CustomConnector(
                 when {
                     out.startsWith("ERRO") || out.startsWith("RECUSAD") -> { passedAll = false; fail("ferramenta ${t.name}$tag: " + out.take(1500) + hint(out)) }
                     out.isBlank() -> { passedAll = false; fail("ferramenta ${t.name}$tag: resposta vazia") }
+                    out.startsWith(NO_RESULTS) -> { passedAll = false; fail("ferramenta ${t.name}$tag: os exemplos de args_json não trouxeram nenhum item — use exemplos REAIS que retornem dados, para provar que o modelo de cada item funciona") }
                     hidden != null -> { passedAll = false; fail("ferramenta ${t.name}$tag: terminou, mas a saída mostra falha: \"$hidden\"" + hint(hidden) + "\nSaída:\n" + raw.takeLast(1200)) }
                     else -> if (n == 1) sb.appendLine("✓ ferramenta ${t.name} (${secs}s): " + out.replace("\n", " ⏎ ").take(300))
                         else sb.appendLine("✓ ferramenta ${t.name}: 2ª execução também passou")

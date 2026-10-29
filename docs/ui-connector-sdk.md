@@ -209,6 +209,11 @@ isolado de validação (`__uic__<id>__v`, workspace limpo e setup rodado de novo
    Ferramentas de ordem/envio (`orderIntent`, `limits`, `requiresSignal`, ou terminal que envia/paga/publica)
    nunca rodam no teste.
 
+Credenciais: conector que exige login/API key só é proposto depois de `connector_test` logado. O agente pede os dados
+com `ask_secure` (formulário seguro: valores só no aparelho, nunca no modelo/histórico/log) e testa com
+`login_json`/`settings_json` usando `{{secret:nome}}`. Ao instalar, o card autoriza as capacidades validadas e entra
+com as mesmas credenciais.
+
 Em produção cada comando de conector roda isolado: `cd /root/workspace; bash -c '<run>' < /dev/null` — processo
 próprio (cd/export/exit não vazam para a próxima chamada nem matam a sessão do terminal) e sem stdin.
 

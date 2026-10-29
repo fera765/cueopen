@@ -374,6 +374,10 @@ class BrowserHost(private val appCtx: Context) {
         val deferred = pageDone ?: return "ERROR: não foi possível acompanhar o carregamento desta navegação."
         val result = withTimeoutOrNull(45_000) { deferred.await() } ?: run {
             _ui.value = _ui.value.copy(loading = false)
+            // Sites de documentação/SPA às vezes nunca disparam o fim do carregamento (scripts de
+            // analytics pendurados), mas o texto já está na tela: devolve o que existe em vez de falhar.
+            val chars = runCatching { eval("document.body ? document.body.innerText.length : 0").trim('"').toDoubleOrNull() ?: 0.0 }.getOrDefault(0.0)
+            if (chars >= 200) return "OK: conteúdo disponível (a página ainda carregava recursos após 45 s) ($target)"
             return "TIMEOUT: a página não concluiu o carregamento em 45 segundos: $target"
         }
         if (result.startsWith("ERROR:")) return result

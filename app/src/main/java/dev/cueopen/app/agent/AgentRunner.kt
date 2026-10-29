@@ -143,6 +143,50 @@ class AgentRunner(
         return job
     }
 
+    // ------------------------------------------------------------------ ask_question / ask_secure (respostas da UI)
+    /** O usuário respondeu o card de perguntas: marca respondido e retoma a tarefa com as respostas. */
+    fun answerQuestion(sessionId: String, item: ChatItem.Question, answers: List<List<String>>) {
+        val cur = store.session(sessionId)?.items?.firstOrNull { it.id == item.id } as? ChatItem.Question ?: return
+        if (cur.state != "pending") return
+        store.replaceItem(sessionId, cur.copy(answers = answers, state = "answered"))
+        send(sessionId, AskTools.answersMessage(cur.questions, answers))
+    }
+
+    fun dismissQuestion(sessionId: String, item: ChatItem.Question) {
+        val cur = store.session(sessionId)?.items?.firstOrNull { it.id == item.id } as? ChatItem.Question ?: return
+        if (cur.state != "pending") return
+        store.replaceItem(sessionId, cur.copy(state = "dismissed"))
+        send(sessionId, AskTools.DISMISSED_MESSAGE)
+    }
+
+    /**
+     * Formulário seguro enviado: os VALORES vão só para o [SecretVault] (memória do aparelho). O item do
+     * chat guarda apenas os nomes, e a mensagem que retoma a IA também só tem os nomes.
+     */
+    fun submitSecure(sessionId: String, item: ChatItem.SecureForm, values: Map<String, String>) {
+        val cur = store.session(sessionId)?.items?.firstOrNull { it.id == item.id } as? ChatItem.SecureForm ?: return
+        if (cur.state != "pending") return
+        val allowed = cur.fields.map { it.name }.toSet()
+        val clean = values.filterKeys { it in allowed }.filterValues { it.isNotBlank() }
+        SecretVault.put(sessionId, clean)
+        store.replaceItem(sessionId, cur.copy(state = "submitted", submitted = clean.keys.toList()))
+        send(sessionId, AskTools.secureSubmittedMessage(clean.keys.toList()))
+    }
+
+    fun cancelSecure(sessionId: String, item: ChatItem.SecureForm) {
+        val cur = store.session(sessionId)?.items?.firstOrNull { it.id == item.id } as? ChatItem.SecureForm ?: return
+        if (cur.state != "pending") return
+        store.replaceItem(sessionId, cur.copy(state = "cancelled"))
+        send(sessionId, AskTools.SECURE_CANCELLED)
+    }
+
+    /** Troca {{secret:nome}} pelos valores do cofre em todos os textos de um objeto de argumentos. */
+    private fun resolveArgs(sessionId: String, o: JsonObject): JsonObject = JsonObject(o.mapValues { (_, v) ->
+        val p = v as? kotlinx.serialization.json.JsonPrimitive
+        if (p != null && p.isString && p.content.contains("secret:")) kotlinx.serialization.json.JsonPrimitive(SecretVault.resolve(sessionId, p.content))
+        else if (v is JsonObject) resolveArgs(sessionId, v) else v
+    })
+
     private suspend fun maybeTitle(sessionId: String, text: String) {
         val s = store.session(sessionId) ?: return
         if (s.title != "Nova tarefa") return
@@ -173,7 +217,7 @@ class AgentRunner(
         val resultSigWindow = ArrayDeque<String>()
         var toolLoopNudges = 0
         var cleanRounds = 0
-        val controlTools = setOf("sleep", "set_schedule", "ask_user", "finish", "complete_step", "notes_write", "notes_read")
+        val controlTools = setOf("sleep", "set_schedule", "ask_user", "ask_question", "ask_secure", "finish", "complete_step", "notes_write", "notes_read")
         while (scope.isActive) {
             val workerUsed = if (tokenBudgetOverride != null) {
                 ((store.session(sessionId)?.let { it.tokensIn + it.tokensOut } ?: startingTokens) - startingTokens).coerceAtLeast(0)
@@ -323,7 +367,8 @@ class AgentRunner(
                 resultHashes[call.id] = result.output.hashCode()
                 if (result.output.length > 200) resultLong.add(call.id)
                 // a especificação do SDK (connector_spec) vai inteira: cortá-la fazia o agente ler a sobra por arquivo em loop
-                val ctxOut = ctxMgr.storeToolOutput(sessionId, call.id, result.output, limit = if (call.name == "connector_spec") 60_000 else 8_000)
+                // nenhum valor do formulário seguro volta para o modelo, mesmo que uma ferramenta o ecoe
+                val ctxOut = ctxMgr.storeToolOutput(sessionId, call.id, SecretVault.redact(sessionId, result.output), limit = if (call.name == "connector_spec") 60_000 else 8_000)
                 store.editSession(sessionId) {
                     it.copy(llm = it.llm + LlmMessage("tool", ctxOut, toolCallId = call.id, name = call.name))
                 }
@@ -861,7 +906,10 @@ class AgentRunner(
             if (caps.isNotEmpty()) appendLine("6c. Você tem acesso ao aparelho: " + caps.joinToString(", ") { dev.cueopen.app.device.DeviceCaps.all.firstOrNull { d -> d.id == it }?.title ?: it } + ". Use as ferramentas device_* quando fizer sentido.")
             appendLine("6c. TEMPO DE VELA (trading de opções/velas): nunca durma um tempo fixo (ex.: 1 min) esperando a próxima vela — isso acorda no MEIO dela. Descubra quanto falta para a próxima vela (candle_clock do conector, se existir, usa o relógio do servidor; senão calcule pelo horário da vela) e use sleep com seconds = (segundos até a próxima vela − ~6) ou sleep align_candle_seconds=<tempo gráfico>. Ao acordar: confira o relógio, analise rápido e entre nos PRIMEIROS segundos da vela, para que a operação cubra exatamente a vela analisada (na IQ Option, entrar com menos de 30 s para o fim do minuto empurra a expiração para o minuto seguinte). Se a ordem for recusada por janela de entrada, obedeça o tempo de espera indicado.")
             appendLine("7. MODO CONTÍNUO: se o usuário pedir para monitorar, acompanhar, repetir ou rodar por horas/dias, NÃO finalize. Faça a verificação, registre em notes_write e chame `sleep` (minutos até a próxima verificação). Repita até o usuário pausar.")
-            appendLine("8. Fora do modo contínuo, termine com `finish` (resumo curto + arquivos). `ask_user` só se for ambíguo ou irreversível. Responda no idioma do usuário.")
+            appendLine("8. Fora do modo contínuo, termine com `finish` (resumo curto + arquivos). Responda no idioma do usuário.")
+            appendLine("8a. DÚVIDA REAL → `ask_question`: só quando o usuário pediu uma tarefa E existe uma dúvida verdadeira que muda o resultado (ex.: qual de duas abordagens, público, formato, escopo) e errar custaria refazer muito trabalho ou algo irreversível. NÃO use para confirmar (\"posso começar?\"), para coisas que você descobre pesquisando/lendo arquivos, nem para preferências triviais — nesses casos assuma o mais razoável e diga o que assumiu. No máximo UMA vez por pedido, com 1–4 perguntas objetivas e 2–4 opções cada (\"Outra resposta\" já aparece). Depois das respostas, siga direto.")
+            appendLine("8b0. DADOS SENSÍVEIS → `ask_secure`: para API key, token, e-mail/senha, dados de login ou de formulário, NUNCA peça para o usuário digitar no chat — chame ask_secure com os campos. Você nunca verá os valores; depois use o marcador {{secret:<nome>}} nos argumentos (shell, browser_type, browser_navigate, file_write, ferramentas uic_*/mcp_*, connector_test login_json/settings_json/args_json) que o app troca pelo valor na execução. Nunca tente imprimir, ecoar ou adivinhar o valor. Se o usuário colar um segredo no chat, use-o só se necessário e recomende o formulário seguro.")
+            SecretVault.names(sessionId).takeIf { it.isNotEmpty() }?.let { appendLine("8b1. Dados seguros já disponíveis nesta tarefa (use o marcador, sem pedir de novo): " + it.joinToString { n -> "{{secret:$n}}" }) }
             appendLine("8b. ELEMENTOS CueUI: quando um elemento interativo ajudar na resposta (opções para o usuário tocar, gráfico, calculadora, tabela, estatísticas, passos, barra de progresso, aviso, chave→valor), inclua um bloco ```cueui com UM objeto JSON `{\"type\": ...}`. O chat renderiza nativo; NÃO escreva o JSON como texto nem explique o bloco. Tipos e campos: " +
                 "buttons {items:[{label, send?|copy?|url?, tone?}]} (send = texto enviado a você ao tocar); " +
                 "chart {title?, style:\"bar\"|\"line\", labels?:[...], series:[{name?, values:[n...], color?}]}; " +
@@ -907,7 +955,7 @@ class AgentRunner(
             }
             if (session.connectorBuilder) appendLine()
             if (session.connectorBuilder) appendLine("## Criar UI Connectors (esta conversa é o criador de conectores)")
-            if (session.connectorBuilder) appendLine("- Quando o usuário pedir um conector (UI Connector), NÃO escreva o JSON no chat: chame connector_spec, monte a definição, valide com connector_validate e corrija até zero erros (repita sozinho, sem perguntar), depois TESTE DE VERDADE com connector_test (requisições reais; corrija caminhos pela estrutura que ele mostra até PASSOU) e só então chame connector_propose. GUARDRAILS: connector_test executa de verdade, num sandbox isolado de validação, o setup, cada comando, cada script de \"files\" (verificação de sintaxe) e cada ferramenta de terminal/arquivos/browser (duas vezes, para provar que repete sem quebrar). Sempre passe args_json com exemplos reais. Se aparecer ✗ (comando inexistente, pip sem --break-system-packages, {{param}} entre aspas, heredoc, script ausente, Traceback…), corrija e teste de novo até PASSOU — connector_propose é bloqueado sem isso, inclusive em conectores com login. Não use o browser/web para testar — só connector_test vale. Só diga que deu certo depois de connector_propose; a instalação é feita pelo usuário no card. Se faltar a URL base ou os endpoints reais da API, pesquise na documentação oficial (web) ou pergunte.")
+            if (session.connectorBuilder) appendLine("- Quando o usuário pedir um conector (UI Connector), NÃO escreva o JSON no chat: chame connector_spec, monte a definição, valide com connector_validate e corrija até zero erros (repita sozinho, sem perguntar), depois TESTE DE VERDADE com connector_test (requisições reais; corrija caminhos pela estrutura que ele mostra até PASSOU) e só então chame connector_propose. GUARDRAILS: connector_test executa de verdade, num sandbox isolado de validação, o setup, cada comando, cada script de \"files\" (verificação de sintaxe) e cada ferramenta de terminal/arquivos/browser (duas vezes, para provar que repete sem quebrar). Sempre passe args_json com exemplos reais. Se o serviço exige API key/token/login, PEÇA com ask_secure (nunca no chat) e teste com login_json/settings_json usando {{secret:nome}} — o conector só é entregue depois de testado com dados reais. Se aparecer ✗ (comando inexistente, pip sem --break-system-packages, {{param}} entre aspas, heredoc, script ausente, Traceback…), corrija e teste de novo até PASSOU — connector_propose é bloqueado sem isso, inclusive em conectores com login. Não use o browser/web para testar — só connector_test vale. Só diga que deu certo depois de connector_propose; a instalação é feita pelo usuário no card. Se faltar a URL base ou os endpoints reais da API, pesquise na documentação oficial (web) ou pergunte.")
             if (session.connectorBuilder) appendLine("- Serviços em TEMPO REAL (corretoras de ações/Forex/cripto/opções, cotações e saldo ao vivo, streams) usam o bloco realtime (WebSocket wss://) do SDK: login HTTP extrai o token, onOpen autentica/assina, rules montam estado (rt.*) e coleções (source), e ordens usam tools com send + await por request_id, sempre com risky, limits, requiresSignal e orderIntent. Use as mensagens REAIS do protocolo do serviço (documentação oficial); nunca invente.")
             if (session.connectorBuilder) appendLine("- CAPACIDADES DO APARELHO (terminal, arquivos, browser): o SDK permite conectores que rodam comandos (bloco capabilities + passo shell), criam/leem arquivos (passo file) e abrem páginas (passo fetch). Dá para fazer QUALQUER tipo de conector — baixar vídeo, gerar slides/HTML, copy, converter arquivos, especialista em JS/UI-UX que roda ferramentas, etc. Regras de ouro: (1) instale dependências no bloco setup (apk add/pip install), não dentro de cada ferramenta; (2) para CRIAR arquivos/scripts use o passo file (op write) ou o campo files do shell — NUNCA heredoc/echo multilinha no run (quebra o shell); (3) passe dados variáveis como argumento entre aspas ou via variável de ambiente (ex.: VAR={{param}} python3 gerar.py), nunca interpolados crus no meio do comando; (4) os arquivos do conector ficam no workspace isolado dele, acessível ao agente em /root/connectors/<id>/workspace.")
             if (session.connectorBuilder) appendLine("- CÁLCULOS (indicadores técnicos, estatística, sinais, tabelas derivadas, conversões): use o bloco compute do SDK — expressões com a biblioteca de funções do app (sma, ema, rsi, macd, bollinger, stoch, adx, ichimoku, supertrend, psar, vwap… e map/filter/reduce/zip_rows). Busque os dados reais (ex.: velas) com request/source e calcule tudo no compute; nunca peça ao usuário para calcular nem invente valores. Pedidos como 'todos os indicadores do TradingView' = um conector com compute cobrindo médias, osciladores, volatilidade, tendência e volume, com sinal e resumo (veja o exemplo de indicadores na especificação).")
@@ -1038,6 +1086,8 @@ class AgentRunner(
         }, listOf("json")))
         if (builder) add(tool("connector_test", "TESTA DE VERDADE o conector (requisições reais; com realtime, conecta o WebSocket, espera mensagens e confere estado/coleções): busca cada painel, confere se tabelas têm linhas e colunas preenchidas e executa cada ferramenta não sensível. GUARDRAILS de terminal/arquivos/browser: num sandbox isolado de validação roda o setup, confere cada comando (command -v), verifica a sintaxe dos scripts de files e do run, executa cada ferramenta de terminal/arquivos/browser (2x, idempotência) e acusa falhas escondidas na saída (command not found, Traceback, No such file…). Mostra a estrutura real/saída quando algo falha, para você corrigir. Obrigatório passar antes de connector_propose (TODOS os conectores).", buildJsonObject {
             put("json", str("Definição JSON completa do conector"))
+            put("login_json", str("Para conector com login: credenciais de teste por campo de login, SEMPRE com marcadores do formulário seguro, ex.: {\"token\":\"{{secret:token}}\"} (peça antes com ask_secure)"))
+            put("settings_json", str("Opcional: valores das configurações (settings) para o teste, ex.: {\"apiKey\":\"{{secret:api_key}}\"}"))
             put("args_json", str("Exemplos REAIS de argumentos por ferramenta (obrigatório para ferramentas com parâmetros obrigatórios), ex.: {\"buscar\":{\"termo\":\"anitta\",\"tipo\":\"artist\"}}"))
         }, listOf("json")))
         if (builder) add(tool("connector_propose", "Mostra ao usuário o card 'Instalar conector' no chat. Só aceita definição que passou em connector_test com o MESMO JSON (guardrails: nada é proposto sem validação completa).", buildJsonObject {
@@ -1154,7 +1204,44 @@ class AgentRunner(
         if (allowMultiAgent) connectorTools().forEach { add(it) }
         // UI Connectors (ex.: IQ Option): só os que este agente pode usar (toggle por agente / "Agent required?").
         runCatching { dev.cueopen.app.CueApp.instance.uiConnectors.toolDefinitions(agent) }.getOrDefault(emptyList()).forEach { add(it) }
-        if (allowMultiAgent) add(tool("ask_user", "Faz uma pergunta ao usuário e pausa a tarefa até ele responder.", buildJsonObject { put("question", str("Pergunta")) }, listOf("question")))
+        if (allowMultiAgent) add(tool("ask_user", "Faz uma pergunta aberta ao usuário e pausa a tarefa até ele responder. Para escolhas, prefira ask_question.", buildJsonObject { put("question", str("Pergunta")) }, listOf("question")))
+        fun objArr(desc: String, props: JsonObject, required: List<String>) = buildJsonObject {
+            put("type", "array"); put("description", desc)
+            put("items", buildJsonObject {
+                put("type", "object"); put("properties", props)
+                put("required", buildJsonArray { required.forEach { add(kotlinx.serialization.json.JsonPrimitive(it)) } })
+            })
+        }
+        fun boolP(desc: String) = buildJsonObject { put("type", "boolean"); put("description", desc) }
+        if (allowMultiAgent) add(tool("ask_question",
+            "Mostra ao usuário um card de perguntas de MÚLTIPLA ESCOLHA (1–4 perguntas, uma por página, 2–4 opções cada, com 'Outra resposta' e 'Pular') e pausa até ele responder. " +
+                "Use SÓ quando o usuário pediu uma tarefa e há uma dúvida REAL que muda o resultado e não dá para resolver pesquisando ou com uma suposição razoável. Máximo uma vez por pedido.",
+            buildJsonObject {
+                put("questions", objArr("Perguntas (1 a 4)", buildJsonObject {
+                    put("question", str("Pergunta clara e completa, terminando com ?"))
+                    put("header", str("Rótulo curto (até 12 letras), ex.: Formato"))
+                    put("options", objArr("2 a 4 opções diferentes", buildJsonObject {
+                        put("label", str("Texto da opção (1–5 palavras)"))
+                        put("description", str("Opcional: o que essa escolha implica"))
+                    }, listOf("label")))
+                    put("multi_select", boolP("true se o usuário puder marcar várias opções"))
+                    put("allow_other", boolP("Mostra 'Outra resposta' com texto livre (padrão true)"))
+                }, listOf("question", "options")))
+            }, listOf("questions")))
+        if (allowMultiAgent) add(tool("ask_secure",
+            "Mostra um FORMULÁRIO SEGURO para o usuário digitar API key, token, e-mail/senha ou dados de formulário. Os valores ficam só no aparelho e NUNCA chegam a você: " +
+                "depois use {{secret:<name>}} nos argumentos das ferramentas (o app troca pelo valor real na execução e esconde o valor das saídas). Use sempre que precisar de credenciais — nunca peça segredos no chat.",
+            buildJsonObject {
+                put("title", str("Título do formulário, ex.: Chave da API da Eduzz"))
+                put("reason", str("Por que precisa (1 frase), ex.: para testar o conector com dados reais"))
+                put("fields", objArr("Campos (1 a 8)", buildJsonObject {
+                    put("name", str("Nome snake_case usado no marcador {{secret:name}}, ex.: api_key"))
+                    put("label", str("Rótulo mostrado ao usuário"))
+                    put("type", buildJsonObject { put("type", "string"); put("enum", buildJsonArray { AskTools.SECURE_TYPES.forEach { add(kotlinx.serialization.json.JsonPrimitive(it)) } }); put("description", "password/token/api_key ficam mascarados") })
+                    put("required", boolP("Obrigatório (padrão true)"))
+                    put("hint", str("Dica/placeholder opcional, ex.: começa com sk_"))
+                }, listOf("name", "label")))
+            }, listOf("fields")))
         add(tool("finish", "Conclui a tarefa com um resumo e a lista de entregáveis.", buildJsonObject {
             put("summary", str("Resumo do resultado")); put("files", strArray("Caminhos dos arquivos entregues"))
         }, listOf("summary")))
@@ -1284,7 +1371,14 @@ class AgentRunner(
     /** Hash do último JSON que passou em connector_test, por sessão do criador. */
     private val builderPassed = java.util.concurrent.ConcurrentHashMap<String, Int>()
 
-    private suspend fun connectorTool(sessionId: String, name: String, json: String, argsJson: String = ""): String {
+    /** Login (com marcadores {{secret:x}}, nunca valores) usado no último connector_test que PASSOU. */
+    private val builderLogin = java.util.concurrent.ConcurrentHashMap<String, Map<String, String>>()
+
+    private fun strMap(raw: String): Map<String, String> = runCatching {
+        (this.json.parseToJsonElement(raw.ifBlank { "{}" }) as JsonObject).mapValues { (_, x) -> (x as? kotlinx.serialization.json.JsonPrimitive)?.contentOrNull ?: x.toString() }
+    }.getOrDefault(emptyMap())
+
+    private suspend fun connectorTool(sessionId: String, name: String, json: String, argsJson: String = "", loginJson: String = "", settingsJson: String = ""): String {
         if (store.session(sessionId)?.connectorBuilder != true)
             return "Indisponível: crie conectores pela página Conectores → Novo conector → Criar com a IA."
         if (name == "connector_spec") return dev.cueopen.app.uiconnector.custom.SdkPrompt.MARKDOWN
@@ -1299,12 +1393,26 @@ class AgentRunner(
                         (if (parsed.warnings.isNotEmpty()) "\nAvisos:\n" + parsed.warnings.joinToString("\n") { "- $it" } else "")
                 else when {
                     clash -> "INVÁLIDO: o id '${d.id}' pertence a um conector do app. Troque o id."
+                    name == "connector_test" && SecretVault.missing(sessionId, argsJson + loginJson + settingsJson).isNotEmpty() -> {
+                        val miss = SecretVault.missing(sessionId, argsJson + loginJson + settingsJson)
+                        "FALHOU — faltam dados seguros: ${miss.joinToString { "{{secret:$it}}" }}. Peça ao usuário com ask_secure (campos: ${miss.joinToString()}) e rode connector_test de novo."
+                    }
+                    name == "connector_test" && d.login.fields.isNotEmpty() && loginJson.isBlank() &&
+                        store.session(sessionId)?.items?.none { it is ChatItem.SecureForm && it.state == "cancelled" } != false -> {
+                        // GUARDRAIL: conector com login só é entregue testado DE VERDADE (painéis e HTTP com sessão real).
+                        val fields = d.login.fields.joinToString { it.id }
+                        "FALHOU — este conector exige login (${fields}) e ainda não foi testado com credenciais reais. Chame ask_secure pedindo esses campos " +
+                            "(ex.: name=${d.login.fields.first().id}) e rode connector_test de novo com login_json {${d.login.fields.joinToString { "\"${it.id}\":\"{{secret:${it.id}}}\"" }}}. " +
+                            "Só se o usuário cancelar o formulário seguro o teste aceita seguir sem login."
+                    }
                     name == "connector_test" -> {
                         val toolArgs = runCatching {
                             (this.json.parseToJsonElement(argsJson.ifBlank { "{}" }) as JsonObject).mapValues { (_, v) ->
-                                (v as? JsonObject)?.mapValues { (_, x) -> (x as? kotlinx.serialization.json.JsonPrimitive)?.contentOrNull ?: x.toString() }.orEmpty()
+                                (v as? JsonObject)?.mapValues { (_, x) -> SecretVault.resolve(sessionId, (x as? kotlinx.serialization.json.JsonPrimitive)?.contentOrNull ?: x.toString()) }.orEmpty()
                             }
                         }.getOrDefault(emptyMap())
+                        val loginRaw = strMap(loginJson)
+                        val settingOverrides = strMap(settingsJson).mapValues { SecretVault.resolve(sessionId, it.value) }
                         // GUARDRAILS: terminal/arquivos/browser rodam DE VERDADE num ambiente isolado de
                         // validação (setup, comandos, sintaxe dos scripts e execução real das ferramentas),
                         // para o conector já chegar 100% funcional quando o usuário instalar.
@@ -1313,13 +1421,18 @@ class AgentRunner(
                             if (usesDevice) dev.cueopen.app.uiconnector.custom.AndroidHostBridge.forValidation(d)
                             else dev.cueopen.app.uiconnector.custom.NoHostBridge
                         val conn = dev.cueopen.app.uiconnector.custom.CustomConnector(d, bridge = bridge)
-                        val settings = dev.cueopen.app.uiconnector.ConnectorSettings { k -> d.settings.firstOrNull { it.id == k }?.default }
-                        val (passed, report) = try { runCatching { conn.selfTest(settings, toolArgs) }.getOrElse { false to "Falha no teste: ${it.message}" } }
+                        val settings = dev.cueopen.app.uiconnector.ConnectorSettings { k -> settingOverrides[k] ?: d.settings.firstOrNull { it.id == k }?.default }
+                        val (passed, report) = try {
+                            val loginErr = if (loginRaw.isNotEmpty()) conn.login(loginRaw.mapValues { SecretVault.resolve(sessionId, it.value) }).exceptionOrNull() else null
+                            if (loginErr != null) false to "✗ login com os dados seguros falhou: ${loginErr.message}. Confira o pedido de login (login.request/extract/verify) ou peça os dados de novo com ask_secure."
+                            else runCatching { conn.selfTest(settings, toolArgs) }.getOrElse { false to "Falha no teste: ${it.message}" }
+                        }
                             finally { conn.dispose(); if (usesDevice) dev.cueopen.app.uiconnector.custom.AndroidHostBridge.releaseValidation(d.id) }
-                        if (passed) builderPassed[sessionId] = raw.hashCode() else builderPassed.remove(sessionId)
+                        if (passed) { builderPassed[sessionId] = raw.hashCode(); if (loginRaw.isNotEmpty()) builderLogin[sessionId] = loginRaw else builderLogin.remove(sessionId) }
+                        else builderPassed.remove(sessionId)
                         (if (passed) "PASSOU — o conector foi validado de ponta a ponta" + (if (usesDevice) " (setup, comandos, scripts e execução real no sandbox)" else " com dados reais") + ".\n"
                          else "FALHOU — o conector NÃO pode ser proposto assim. Corrija cada ✗ abaixo e rode connector_test de novo (sem perguntar ao usuário):\n") +
-                            report.take(7000) +
+                            SecretVault.redact(sessionId, report).take(7000) +
                             (if (passed) "\nAgora chame connector_propose com o MESMO JSON." else "")
                     }
                     name == "connector_propose" && builderPassed[sessionId] != raw.hashCode() ->
@@ -1332,6 +1445,9 @@ class AgentRunner(
                         store.addItem(sessionId, ChatItem.ConnectorProposal(
                             connectorId = d.id, name = d.name, description = d.description, host = d.host,
                             tools = d.tools.map { it.name }, json = raw,
+                            capabilities = d.capabilities.toList().sorted(),
+                            // só os marcadores; o card resolve no cofre na hora de instalar
+                            loginSecrets = builderLogin[sessionId]?.filterValues { SecretVault.references(it).isNotEmpty() }.orEmpty(),
                         ))
                         "Card de instalação exibido ao usuário (conector '${d.name}', id ${d.id}). Diga em 1–2 frases que o conector foi validado e que ele deve tocar em 'Instalar conector'. Não afirme que já foi instalado."
                     }
@@ -1432,7 +1548,7 @@ class AgentRunner(
                 val step = ChatItem.Step(tool = call.name, title = title, args = args)
                 store.addItem(sessionId, step)
                 setActivity(sessionId, Activity(Activity.Kind.THINKING, title))
-                val out = connectorTool(sessionId, call.name, s("json"), s("args_json"))
+                val out = SecretVault.redact(sessionId, connectorTool(sessionId, call.name, s("json"), s("args_json"), s("login_json"), s("settings_json")))
                 val failed = out.startsWith("INVÁLIDO") || out.startsWith("FALHOU") || out.startsWith("BLOQUEADO") || out.startsWith("ERRO")
                 val summary = when {
                     call.name == "connector_spec" -> "Especificação carregada (${out.length / 1024} KB)."
@@ -1449,6 +1565,31 @@ class AgentRunner(
             "ask_user" -> {
                 store.addItem(sessionId, ChatItem.Assistant(text = s("question"), final = true))
                 return ToolResult("Pergunta enviada; aguardando resposta.", SessionStatus.WAITING_USER)
+            }
+            "ask_question" -> {
+                // GUARDRAIL: só existe para uma dúvida real dentro de um pedido do usuário presente —
+                // nunca em ciclos autônomos/agendados e no máximo uma vez por mensagem do usuário.
+                val sess = store.session(sessionId)
+                val items = sess?.items.orEmpty()
+                val lastUser = items.indexOfLast { it is ChatItem.User }
+                val autonomous = sess?.continuous == true || sess?.llm?.lastOrNull { it.role == "user" }?.content?.startsWith("[Heartbeat") == true
+                if (lastUser < 0 || autonomous) return ToolResult("RECUSADO: ask_question só pode ser usado quando o usuário pediu uma tarefa e está na conversa. Siga com a suposição mais razoável e diga qual assumiu.")
+                if (items.drop(lastUser + 1).any { it is ChatItem.Question }) return ToolResult("RECUSADO: você já fez perguntas para este pedido. Use as respostas recebidas (ou uma suposição razoável) e continue a tarefa.")
+                val (qs, err) = AskTools.parseQuestions(a)
+                if (err != null) return ToolResult("ERRO em ask_question: $err")
+                store.addItem(sessionId, ChatItem.Question(questions = qs))
+                return ToolResult("Perguntas exibidas ao usuário; aguardando as respostas.", SessionStatus.WAITING_USER)
+            }
+            "ask_secure" -> {
+                val (title, fields, err) = AskTools.parseSecure(a)
+                if (err != null) return ToolResult("ERRO em ask_secure: $err")
+                if (fields.all { SecretVault.has(sessionId, it.name) })
+                    return ToolResult("Você JÁ tem esses dados seguros: ${fields.joinToString { "{{secret:${it.name}}}" }}. Use os marcadores direto; não peça de novo.")
+                val pending = store.session(sessionId)?.items?.any { it is ChatItem.SecureForm && it.state == "pending" } == true
+                if (pending) return ToolResult("Já há um formulário seguro aguardando o usuário. Espere a resposta.", SessionStatus.WAITING_USER)
+                store.addItem(sessionId, ChatItem.SecureForm(title = title, reason = s("reason").take(300), fields = fields))
+                return ToolResult("Formulário seguro exibido ao usuário; aguardando. Você NÃO verá os valores — depois use " +
+                    fields.joinToString { "{{secret:${it.name}}}" } + " nos argumentos das ferramentas.", SessionStatus.WAITING_USER)
             }
             "complete_step" -> {
                 val plan = store.session(sessionId)?.items?.lastOrNull { it is ChatItem.Plan } as? ChatItem.Plan
@@ -1520,7 +1661,13 @@ class AgentRunner(
         setActivity(sessionId, Activity(kind, argPreview.take(80)))
         if (kind == Activity.Kind.BROWSER) browserFor(sessionId).setAgentControl(true)
 
-        val out: String = try {
+        // marcador {{secret:x}} sem valor no cofre (ex.: app foi reiniciado) → pede de novo pelo formulário seguro
+        SecretVault.missing(sessionId, call.argsJson.replace("\\\"", "\"")).takeIf { it.isNotEmpty() }?.let { miss ->
+            store.replaceItem(sessionId, step.copy(result = "Dados seguros ausentes: " + miss.joinToString(), status = StepStatus.ERROR))
+            executions.fail(executionId, "secret ausente")
+            return ToolResult("ERRO: não há valor seguro para ${miss.joinToString { "{{secret:$it}}" }} nesta tarefa (o formulário não foi enviado ou o app reiniciou). Peça com ask_secure e tente de novo.")
+        }
+        val out0: String = try {
             when (call.name) {
                 "multi_agents" -> runMultiAgents(sessionId, s("tasks_json"), s("repo_path"), i("max_workers") ?: 3, i("budget_tokens") ?: 6000)
                 "wallet_get_address" -> {
@@ -1915,7 +2062,7 @@ class AgentRunner(
                 "shell" -> {
                     // Guardrail determinístico: recusa invocações diretas de scripts inexistentes,
                     // em vez de mandar bash executar um caminho alucinado e produzir ENOENT.
-                    val command = s("command").trim()
+                    val command = SecretVault.resolve(sessionId, s("command")).trim()
                     val directScript = Regex("""(?:^|[;&|]\\s*)(?:bash|sh|python3?|node)\\s+(['"]?)(/[^\\s'";&|]+)""")
                         .find(command)?.groupValues?.get(2)
                     val missingScript = directScript?.let { path ->
@@ -1936,7 +2083,7 @@ class AgentRunner(
                     val r = terminals.get(sessionId, cwd).runAgentCommand(command, (i("timeout") ?: 180).toLong(), b("background"))
                     run {
                         buildString {
-                            val body = r.output.takeLast(10_000)
+                            val body = ShellOutput.compact(r.output).takeLast(10_000)
                             // Deixa explícito quando o comando terminou sem imprimir nada, para a LLM
                             // não interpretar "sem saída" como falha de execução e repetir o comando.
                             append(if (body.isBlank()) "(sem saída)" else body)
@@ -1959,7 +2106,8 @@ class AgentRunner(
                             else {
                                 f.parentFile?.mkdirs()
                                 val append = a["append"]?.jsonPrimitive?.booleanOrNull == true
-                                if (append && f.exists()) f.appendText(s("content")) else f.writeText(s("content"))
+                                val content = SecretVault.resolve(sessionId, s("content"))
+                                if (append && f.exists()) f.appendText(content) else f.writeText(content)
                                 val lines = f.useLines { it.count() }
                                 val preview = runCatching { f.useLines { seq -> seq.take(10).joinToString("\n") } }.getOrDefault("")
                                 "OK: ${if (append) "conteúdo acrescentado" else "arquivo salvo"} (${f.name}) — ${f.length()} bytes, $lines linhas.\n[Prévia das primeiras 10 linhas]\n$preview"
@@ -1975,17 +2123,32 @@ class AgentRunner(
                         .ifBlank { "(vazio)" }
                 }
                 "browser_navigate" -> {
-                    val url = s("url").let { u -> if (u.startsWith("/root")) "file://" + sandbox.hostFile(u, sessionId).absolutePath else u }
-                    val navigation = browserFor(sessionId).navigate(url)
-                    if (navigation.startsWith("ERROR:") || navigation.startsWith("TIMEOUT:")) navigation
-                    else navigation + "\n\n" + browserFor(sessionId).read(4000)
+                    // Caminhos do sandbox (/root, /public, /home ou file:///root/…) viram o arquivo real do aparelho:
+                    // o WebView não enxerga o filesystem do proot (era a causa de net::ERR_FILE_NOT_FOUND).
+                    val raw = SecretVault.resolve(sessionId, s("url")).trim()
+                    val guest = raw.removePrefix("file://").let { if (raw.startsWith("file://")) it.substringBefore('?').substringBefore('#') else it }
+                    val isSandboxPath = guest.startsWith("/root") || guest.startsWith("/public") || guest.startsWith("/home") || (raw.startsWith("file://") && !guest.startsWith("/data/") && !guest.startsWith("/storage/") && !guest.startsWith("/sdcard"))
+                    val hostF = if (isSandboxPath) sandbox.hostFile(guest, sessionId) else null
+                    if (hostF != null && !hostF.exists()) {
+                        "ERROR: arquivo não existe no workspace: $guest. Use file_list para achar o caminho certo (arquivos de conectores ficam em /root/connectors/<id>/workspace)."
+                    } else {
+                        val url = hostF?.let { "file://" + it.absolutePath } ?: raw
+                        val navigation = browserFor(sessionId).navigate(url)
+                        if (navigation.startsWith("ERROR:") || navigation.startsWith("TIMEOUT:")) navigation +
+                            (if (navigation.contains("ERR_NAME_NOT_RESOLVED")) "\nO domínio não existe/não resolveu: confira a URL (não invente endereços) ou pesquise o site oficial." else "")
+                        else {
+                            val page = browserFor(sessionId).read(4000)
+                            val notFound = Regex("(?i)(t[ií]tulo:[^\\n]*(404|not found|n[aã]o encontrad)|this page doesn.t exist|page not found|p[aá]gina n[aã]o encontrada)").containsMatchIn(page.take(600))
+                            (if (notFound) "⚠ A página carregou, mas é um ERRO 404 (não existe). Não use este conteúdo; procure o endereço correto.\n" else "") + navigation + "\n\n" + page
+                        }
+                    }
                 }
                 "browser_read", "browser_snapshot" -> browserFor(sessionId).read((i("max_chars") ?: 9000).coerceIn(1000, 20000))
                 "browser_click" -> browserFor(sessionId).click(i("index") ?: -1)
-                "browser_type" -> browserFor(sessionId).type(i("index") ?: -1, s("text"), b("submit"))
+                "browser_type" -> browserFor(sessionId).type(i("index") ?: -1, SecretVault.resolve(sessionId, s("text")), b("submit"))
                 "browser_scroll" -> browserFor(sessionId).scroll(s("direction") != "up")
                 "browser_back" -> { browserFor(sessionId).back(); "ok" }
-                "browser_js" -> browserFor(sessionId).runJs(s("code"))
+                "browser_js" -> browserFor(sessionId).runJs(SecretVault.resolve(sessionId, s("code")))
                 "device_notifications" -> dev.cueopen.app.device.NotifStore.recent(s("filter"), (i("limit") ?: 30).coerceIn(1, 100))
                     .joinToString("\n") { "[${java.text.SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(it.time))}] ${it.app}: ${it.title} — ${it.text}".take(300) }
                     .ifBlank { "Nenhuma notificação capturada ainda." }
@@ -2021,10 +2184,10 @@ class AgentRunner(
                     store.upsertSkill(Skill(name = s("name"), description = s("description"), instructions = s("instructions")))
                     "Skill \"${s("name")}\" criada e ativada."
                 }
-                else -> if (call.name.startsWith("mcp_")) dev.cueopen.app.connectors.Connectors.callTool(store, call.name, a)
+                else -> if (call.name.startsWith("mcp_")) dev.cueopen.app.connectors.Connectors.callTool(store, call.name, resolveArgs(sessionId, a))
                         else if (call.name.startsWith("uic_")) {
                             val ag = store.agent(store.session(sessionId)?.agentId)
-                            dev.cueopen.app.CueApp.instance.uiConnectors.callTool(ag, ag?.id ?: sessionId, call.name, a).also { out ->
+                            dev.cueopen.app.CueApp.instance.uiConnectors.callTool(ag, ag?.id ?: sessionId, call.name, resolveArgs(sessionId, a)).let { SecretVault.redact(sessionId, it) }.also { out ->
                                 // Falhas reais do conector entram no log de erros (sem expor segredos: já redigido).
                                 if (out.startsWith("ERRO") || out.startsWith("RECUSAD"))
                                     runCatching { dev.cueopen.app.diag.ErrorLog.log("uiconnector", out.take(600), sessionId, call.name) }
@@ -2042,6 +2205,7 @@ class AgentRunner(
             store.replaceItem(sessionId, step.copy(result = t.message.orEmpty(), status = StepStatus.ERROR))
             return ToolResult("Erro: ${t.message}")
         }
+        val out = SecretVault.redact(sessionId, out0)
         val commandFailed = Regex("""\[exit ([1-9]\d*)\]""").containsMatchIn(out)
         val isError = out.startsWith("ERROR:") || out.startsWith("TIMEOUT:") || out.startsWith("ERRO:") || commandFailed
         // Marcadores de falha específicos de ferramentas (não começam com ERRO:) também viram log.

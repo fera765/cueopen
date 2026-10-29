@@ -109,6 +109,8 @@ class Sandbox(private val ctx: Context) {
         return when {
             p.startsWith("/root/") || p == "/root" -> File(publicFor(sessionId), p.removePrefix("/root").trimStart('/'))
             p.startsWith("/home/") -> File(publicFor(sessionId), p.removePrefix("/home").trimStart('/'))
+            // /public, /home e /root são o MESMO bind no proot; tracebacks do Python mostram /public/workspace/...
+            p.startsWith("/public/") || p == "/public" -> File(publicFor(sessionId), p.removePrefix("/public").trimStart('/'))
             p.startsWith("/") -> File(rootfsFor(sessionId), p.trimStart('/'))
             else -> File(workspaceFor(sessionId), p)
         }

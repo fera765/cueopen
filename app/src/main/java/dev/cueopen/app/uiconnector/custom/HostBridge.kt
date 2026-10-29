@@ -26,6 +26,9 @@ interface HostBridge {
      */
     suspend fun ensureSetup(command: String, timeoutSec: Int): BridgeResult? = null
 
+    /** Esquece que o setup já rodou (auto-reparo: um comando sumiu do ambiente → refaz o setup). */
+    fun resetSetup() {}
+
     /** Roda um comando no sandbox do conector (cwd = workspace do conector). */
     suspend fun shell(command: String, timeoutSec: Int): BridgeResult
 

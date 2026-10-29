@@ -503,7 +503,8 @@ class IqOptionConnector(private val kv: KvStore? = null) : UiConnector {
                         } catch (t: Throwable) {
                             val f = (marketFails[type] ?: 0) + 1
                             marketFails[type] = f
-                            if (f >= 2) { marketBackoff[type] = System.currentTimeMillis() + 10 * 60_000; if (f == 2) err("$type indisponível nesta conta/região; pausado por 10 min.") }
+                            // backoff crescente: 10 min, 20, 40… até 6 h — conta/região sem esse mercado não volta a gerar timeouts
+                            if (f >= 2) { val mins = (10L shl (f - 2).coerceAtMost(6)).coerceAtMost(360L); marketBackoff[type] = System.currentTimeMillis() + mins * 60_000; if (f == 2) err("$type indisponível nesta conta/região; pausado (tentativas cada vez mais espaçadas).") }
                             emptyList()
                         }
                     }
@@ -514,6 +515,12 @@ class IqOptionConnector(private val kv: KvStore? = null) : UiConnector {
         allAssets = out
         allAssetsAt = System.currentTimeMillis()
         return out
+    }
+
+    /** Sugestões de tickers abertos parecidos, para o agente acertar na próxima chamada. */
+    private fun similar(asset: String): String {
+        val list = runCatching { IqProtocol.suggestAssets(allAssets.ifEmpty { assets }, asset) }.getOrDefault(emptyList())
+        return if (list.isEmpty()) " Use open_assets para ver os tickers abertos." else " Parecidos abertos agora: ${list.joinToString()}. (Ou use open_assets.)"
     }
 
     private fun kindLabel(k: String) = when (k) { "turbo" -> "Turbo"; "binary" -> "Binária"; "digital" -> "Digital"; "forex" -> "Forex"; "cfd" -> "CFD"; "crypto" -> "Cripto"; else -> k }
@@ -604,7 +611,7 @@ class IqOptionConnector(private val kv: KvStore? = null) : UiConnector {
     }
 
     private suspend fun candlesText(asset: String, tf: String?, count: Int?): String {
-        val a = IqProtocol.resolveAsset(loadAssets(), asset) ?: return "Ativo '$asset' não encontrado. Use open_assets para ver os tickers."
+        val a = IqProtocol.resolveAsset(loadAssets(), asset) ?: return "Ativo '$asset' não encontrado." + similar(asset)
         val size = IqProtocol.timeframeSeconds(tf ?: "60")
             ?: return "timeframe inválido. Use 60, 300, 900, 3600… (segundos) ou 1m/5m/15m/1h."
         val n = (count ?: 30).coerceIn(1, 200)
@@ -861,7 +868,7 @@ class IqOptionConnector(private val kv: KvStore? = null) : UiConnector {
     }
 
     private suspend fun catalogText(asset: String, time: String?, daysArg: Int?, tf: Int): String {
-        val a = IqProtocol.resolveAsset(loadAssets(), asset) ?: return "Ativo '$asset' não encontrado. Use open_assets."
+        val a = IqProtocol.resolveAsset(loadAssets(), asset) ?: return "Ativo '$asset' não encontrado." + similar(asset)
         val days = (daysArg ?: 5).coerceIn(1, 20)
         val label = time?.takeIf { it.isNotBlank() } ?: SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(((serverNowMs() / 1000 / tf + 1) * tf) * 1000))
         data class Day(val date: String, val color: Int, val open: Double, val close: Double)
@@ -906,7 +913,7 @@ class IqOptionConnector(private val kv: KvStore? = null) : UiConnector {
     private fun pct(v: Double) = String.format(Locale.US, "%.0f%%", v * 100)
 
     private suspend fun strategiesText(asset: String): String {
-        val sc = strategies(asset) ?: return "Ativo '$asset' não encontrado. Use open_assets."
+        val sc = strategies(asset) ?: return "Ativo '$asset' não encontrado." + similar(asset)
         val now = serverNowSec()
         val up = Mhi.upcoming(sc.candles, now, (10)).associateBy { it.variant.name }
         val best = sc.stats.filter { it.signals >= 20 }.maxByOrNull { it.rateG0 }
@@ -1019,7 +1026,7 @@ class IqOptionConnector(private val kv: KvStore? = null) : UiConnector {
 
     /** Busca as velas reais e passa para a suíte de indicadores (que não busca nada sozinha). */
     private suspend fun indicatorsText(asset: String, tf: String?, count: Int?): String {
-        val a = IqProtocol.resolveAsset(loadAssets(), asset) ?: return "Ativo '$asset' não encontrado. Use open_assets para ver os tickers."
+        val a = IqProtocol.resolveAsset(loadAssets(), asset) ?: return "Ativo '$asset' não encontrado." + similar(asset)
         val size = IqProtocol.timeframeSeconds(tf ?: "60") ?: return "timeframe inválido. Use 60, 300, 900, 3600… ou 1m/5m/15m/1h."
         val n = (count ?: 300).coerceIn(50, 1000)
         val id = reqId()

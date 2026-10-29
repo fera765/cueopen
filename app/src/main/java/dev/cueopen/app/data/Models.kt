@@ -74,6 +74,38 @@ sealed class ChatItem {
         val tools: List<String> = emptyList(),
         val json: String,
         val installed: Boolean = false,
+        /** Capacidades do aparelho (terminal/files/browser) já validadas — autorizadas ao instalar. */
+        val capabilities: List<String> = emptyList(),
+        /** Login testado com dados do formulário seguro: campo → marcador {{secret:nome}} (nunca o valor). */
+        val loginSecrets: Map<String, String> = emptyMap(),
+    ) : ChatItem()
+
+    /** Perguntas de múltipla escolha do agente (ask_question): aparece só quando há uma dúvida real. */
+    @Serializable
+    data class Question(
+        override val id: String = newId(),
+        override val time: Long = now(),
+        val questions: List<QuestionSpec>,
+        /** Respostas por pergunta (vazio = pulou). */
+        val answers: List<List<String>> = emptyList(),
+        /** pending | answered | dismissed */
+        val state: String = "pending",
+    ) : ChatItem()
+
+    /**
+     * Formulário SEGURO (ask_secure): API key, token, e-mail/senha, campos de formulário. Só os NOMES dos
+     * campos ficam aqui (e no histórico); os valores vão direto para o cofre do aparelho, nunca para a IA.
+     */
+    @Serializable
+    data class SecureForm(
+        override val id: String = newId(),
+        override val time: Long = now(),
+        val title: String,
+        val reason: String = "",
+        val fields: List<SecureField>,
+        /** pending | submitted | cancelled */
+        val state: String = "pending",
+        val submitted: List<String> = emptyList(),
     ) : ChatItem()
 
     @Serializable
@@ -83,6 +115,23 @@ sealed class ChatItem {
         val text: String,
     ) : ChatItem()
 }
+
+@Serializable
+data class QuestionOption(val label: String, val description: String = "")
+
+@Serializable
+data class QuestionSpec(
+    val question: String,
+    val header: String = "",
+    val options: List<QuestionOption>,
+    val multiSelect: Boolean = false,
+    /** Mostra "Outra resposta" com campo de texto. */
+    val allowOther: Boolean = true,
+)
+
+/** Campo do formulário seguro. type: password | token | api_key | email | text | number | url */
+@Serializable
+data class SecureField(val name: String, val label: String, val type: String = "password", val required: Boolean = true, val hint: String = "")
 
 @Serializable
 data class PlanPhase(val title: String, val done: Boolean = false)

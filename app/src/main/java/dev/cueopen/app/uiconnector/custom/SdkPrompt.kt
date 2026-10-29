@@ -339,7 +339,11 @@ estado do tempo real com `{{rt.nome}}` (painéis sem request podem mostrar só `
   `rm -rf /`, `~` ou `*`.
 Como cada comando roda: `cd /root/workspace; bash -c '<run>' < /dev/null` — processo próprio (`cd`/`export`/`exit`
 não afetam a próxima chamada), sempre a partir do workspace, sem entrada pelo teclado. Use caminhos relativos ao workspace.
-Passe SEMPRE `args_json` com exemplos reais para cada ferramenta com parâmetros obrigatórios. Ferramentas de ordem/envio
+Passe SEMPRE `args_json` com exemplos reais para cada ferramenta com parâmetros obrigatórios.
+**API key, token, login**: peça ao usuário com a ferramenta `ask_secure` (formulário seguro — você nunca vê os valores)
+e teste de verdade passando `login_json` (ex.: `{"token":"{{secret:token}}"}`) e/ou `settings_json` no `connector_test`.
+Conector com login só é proposto depois de testado logado (a menos que o usuário cancele o formulário seguro); ao instalar,
+o card já entra com essas credenciais e autoriza as capacidades validadas. Ferramentas de ordem/envio
 (com `orderIntent`, `limits`, `requiresSignal`, ou de terminal cujo nome/descrição indica enviar/pagar/publicar) não são
 executadas no teste, mas seus comandos e scripts passam pelas mesmas verificações.
 

@@ -362,11 +362,27 @@ object IqProtocol {
 
     /** Resolve "EURUSD", "eur/usd", "EURUSD-OTC" no ticker do ativo. */
     fun resolveAsset(assets: List<Asset>, query: String): Asset? {
-        fun norm(s: String) = s.uppercase().replace("/", "").replace(" ", "").replace("_", "")
-        val q = norm(query)
+        val q = normTicker(query)
         if (q.isEmpty()) return null
-        return assets.firstOrNull { norm(it.ticker) == q }
-            ?: assets.firstOrNull { norm(it.ticker).replace("-OTC", "") == q && it.open }
+        val base = q.removeSuffix("-OTC").removeSuffix("OTC")
+        return assets.firstOrNull { normTicker(it.ticker) == q }
+            ?: assets.firstOrNull { normTicker(it.ticker).replace("-OTC", "") == q && it.open }
+            // o modelo costuma inventar o sufixo: "BTCUSD-OTC" quando só existe "BTCUSD" (ou o contrário)
+            ?: assets.firstOrNull { normTicker(it.ticker).replace("-OTC", "") == base && it.open }
+            ?: assets.firstOrNull { normTicker(it.ticker).replace("-OTC", "") == base }
+    }
+
+    private fun normTicker(s: String) = s.uppercase().replace("/", "").replace(" ", "").replace("_", "").replace("OTC", "-OTC").replace("--OTC", "-OTC")
+
+    /** Tickers parecidos com a busca (para o agente corrigir sem chamar open_assets de novo). */
+    fun suggestAssets(assets: List<Asset>, query: String, n: Int = 6): List<String> {
+        val base = normTicker(query).removeSuffix("-OTC")
+        if (base.length < 2) return emptyList()
+        val head = base.take(3)
+        return assets.asSequence().filter { it.open }.map { it.ticker }.distinct()
+            .sortedBy { t -> val tt = normTicker(t).removeSuffix("-OTC"); when { tt.startsWith(base) -> 0; tt.contains(base) -> 1; tt.startsWith(head) -> 2; tt.contains(head) -> 3; else -> 9 } }
+            .filter { t -> val tt = normTicker(t); tt.contains(head) || base.contains(tt.removeSuffix("-OTC").take(3)) }
+            .take(n).toList()
     }
 
     /** Aceita "60", "60s", "1m", "5m", "1h" → segundos. Só tamanhos suportados pela plataforma. */

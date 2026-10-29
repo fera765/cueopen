@@ -288,6 +288,8 @@ fun TimelineItem(item: ChatItem, onOpenComputer: (String) -> Unit, onOpenMedia: 
         is ChatItem.Media -> MediaCard(item, onOpenMedia)
         is ChatItem.Error -> InfoRow(Icons.Rounded.ErrorOutline, item.text, Cue.c.err)
         is ChatItem.ConnectorProposal -> ConnectorProposalCard(item, sessionId, nav)
+        is ChatItem.Question -> QuestionCard(item, sessionId)
+        is ChatItem.SecureForm -> SecureFormCard(item, sessionId)
     }
 }
 
@@ -641,6 +643,8 @@ fun sessionMarkdown(s: Session): String = buildString {
             is ChatItem.Plan -> { appendLine("**Plano:** ${i.goal}"); i.phases.forEach { appendLine("- [${if (it.done) "x" else " "}] ${it.title}") }; appendLine() }
             is ChatItem.Error -> appendLine("⚠️ ${i.text}\n")
             is ChatItem.ConnectorProposal -> appendLine("🧩 Conector ${i.name} (${i.host})${if (i.installed) " — instalado" else ""}\n")
+            is ChatItem.Question -> { i.questions.forEachIndexed { n, q -> appendLine("❓ ${q.question} → ${i.answers.getOrNull(n)?.joinToString().orEmpty().ifBlank { "—" }}") }; appendLine() }
+            is ChatItem.SecureForm -> appendLine("🔒 ${i.title}: ${if (i.state == "submitted") "enviado com segurança (" + i.submitted.joinToString() + ")" else i.state}\n")
             is ChatItem.Media -> appendLine("🖼 ${i.caption} (${java.io.File(i.path).name})\n")
         }
     }
@@ -670,6 +674,10 @@ private fun ConnectorProposalCard(p: ChatItem.ConnectorProposal, sessionId: Stri
     var busy by remember(p.id) { mutableStateOf(false) }
     var error by remember(p.id) { mutableStateOf<String?>(null) }
     val exists = remember(p.id, p.installed) { app.uiConnectors.isCustom(p.connectorId) }
+    // Capacidades já validadas no sandbox: autorizadas junto com a instalação (o usuário pode desmarcar).
+    var grantCaps by remember(p.id) { mutableStateOf(true) }
+    val secretsReady = sessionId != null && p.loginSecrets.isNotEmpty() &&
+        p.loginSecrets.values.all { v -> dev.cueopen.app.agent.SecretVault.missing(sessionId, v).isEmpty() }
     Column(
         Modifier.fillMaxWidth().clip(RoundedCornerShape(18.dp)).background(c.surface)
             .border(1.dp, if (p.installed) c.ok else c.accent, RoundedCornerShape(18.dp)).padding(16.dp),
@@ -686,6 +694,11 @@ private fun ConnectorProposalCard(p: ChatItem.ConnectorProposal, sessionId: Stri
         Text(p.description, fontSize = 13.sp, color = c.ink2)
         Text("Host: ${p.host}", fontSize = 12.sp, color = c.ink3)
         if (p.tools.isNotEmpty()) Text("Ferramentas do agente: " + p.tools.joinToString(), fontSize = 12.sp, color = c.ink3)
+        if (!p.installed && p.capabilities.isNotEmpty()) Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).clickable { grantCaps = !grantCaps }.padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+            Checkbox(grantCaps, { grantCaps = it })
+            Text("Autorizar " + p.capabilities.joinToString { dev.cueopen.app.uiconnector.custom.Capabilities.label(it) } + " (já testado no sandbox isolado)", fontSize = 12.sp, color = c.ink2)
+        }
+        if (!p.installed && secretsReady) Text("🔒 Entra com as credenciais que você enviou no formulário seguro (testadas).", fontSize = 12.sp, color = c.ink2)
         error?.let { Text(it, fontSize = 12.sp, color = c.err) }
         if (p.installed) {
             Text("Pronto: ative-o no agente em Agents → editar → UI Conectores.", fontSize = 12.sp, color = c.ink2)
@@ -696,6 +709,12 @@ private fun ConnectorProposalCard(p: ChatItem.ConnectorProposal, sessionId: Stri
                         busy = true; error = null
                         app.uiConnectors.saveCustom(p.json)
                             .onSuccess {
+                                if (grantCaps) p.capabilities.forEach { cap -> app.uiConnectors.setCapabilityGranted(p.connectorId, cap, true) }
+                                if (secretsReady && sessionId != null) {
+                                    val creds = p.loginSecrets.mapValues { dev.cueopen.app.agent.SecretVault.resolve(sessionId, it.value) }
+                                    app.uiConnectors.login(p.connectorId, creds, remember = true)
+                                        .onFailure { e -> error = "Instalado, mas o login automático falhou: ${e.message}. Entre manualmente em Conectores." }
+                                }
                                 if (sessionId != null) app.store.replaceItem(sessionId, p.copy(installed = true))
                             }
                             .onFailure { error = it.message ?: "Falha ao instalar." }

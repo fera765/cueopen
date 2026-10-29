@@ -78,6 +78,21 @@ class AndroidHostBridge(
         }
     }
 
+    override fun resetSetup() {
+        runCatching { java.io.File(app.sandbox.publicFor(sessionId), ".setup-ok").delete() }
+    }
+
+    /**
+     * Dentro do sandbox do conector, /root, /public e /home são o mesmo bind (tracebacks mostram
+     * /public/workspace/...). Para o AGENTE (que roda em outro ambiente) esses arquivos ficam em
+     * /root/connectors/<pasta>/workspace — reescreve os caminhos para ele conseguir abrir/copiar.
+     */
+    private fun agentPaths(text: String): String {
+        val dir = app.sandbox.environmentRoot(sessionId).name
+        val target = "/root/connectors/$dir/workspace"
+        return text.replace(Regex("(?<![A-Za-z0-9_/])/(public|home|root)/workspace(?=[/\\s'\":]|$)"), target)
+    }
+
     // ------------------------------------------------------------------ terminal
     override suspend fun shell(command: String, timeoutSec: Int): BridgeResult {
         val cmd = command.take(BridgeSecurity.MAX_CMD_CHARS)
@@ -90,7 +105,7 @@ class AndroidHostBridge(
             val r = app.terminals.get(sessionId).runAgentCommand(ConnectorGuardrails.isolate(cmd), BridgeSecurity.clampTimeout(timeoutSec).toLong(), background = false)
             val failedQuiet = !r.timedOut && r.exitCode != 0 && r.output.isBlank()
             val body = buildString {
-                append(r.output.ifBlank { "(sem saída)" })
+                append(agentPaths(dev.cueopen.app.agent.ShellOutput.compact(r.output)).ifBlank { "(sem saída)" })
                 if (r.timedOut) append("\n[timeout após ${BridgeSecurity.clampTimeout(timeoutSec)}s]")
                 append("\n[exit ${r.exitCode}]")
                 if (failedQuiet) append("\nDica: o comando falhou sem imprimir nada. Confirme se as dependências foram instaladas (use o bloco setup) e rode o comando com '2>&1' para ver o erro; evite '>/dev/null' ao diagnosticar.")
