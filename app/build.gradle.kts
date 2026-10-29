@@ -17,8 +17,8 @@ android {
         // do sandbox a partir de filesDir. Os .so do proot também vêm em jniLibs.
         targetSdk = 28
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
-        versionCode = 47
-        versionName = "4.13.0"
+        versionCode = 48
+        versionName = "4.14.0"
         ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64") }
     }
     signingConfigs {
@@ -72,6 +72,8 @@ dependencies {
     implementation("com.mikepenz:multiplatform-markdown-renderer-m3:0.27.0")
     implementation("com.mikepenz:multiplatform-markdown-renderer-code:0.27.0")
     implementation("androidx.browser:browser:1.8.0")
+    // Controle de tema escuro do WebView (algorithmic darkening / prefers-color-scheme)
+    implementation("androidx.webkit:webkit:1.12.1")
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.7")
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.8.7")
     implementation("androidx.navigation:navigation-compose:2.8.5")

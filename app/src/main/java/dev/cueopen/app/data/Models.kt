@@ -301,6 +301,10 @@ data class Settings(
     val sandboxPackages: String = "bash curl wget git python3 py3-pip nodejs npm",
     val userName: String = "",
     val notifyOnDone: Boolean = true,
+    /** TypeSafe Jev: envia só as ferramentas/conectores relevantes a cada passo e ajusta orçamentos de contexto. */
+    val jevOrchestration: Boolean = true,
+    /** TypeSafe Jev Router: o modelo é escolhido por requisição (qualidade × custo) — só OpenRouter. */
+    val jevRouting: Boolean = false,
     /** Orçamento de contexto (tokens estimados) antes de compactar. */
     val contextBudget: Int = 24_000,
     val keepRecentMessages: Int = 10,

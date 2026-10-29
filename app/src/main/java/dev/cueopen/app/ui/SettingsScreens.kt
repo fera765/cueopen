@@ -49,13 +49,6 @@ fun SettingsScreen(nav: NavController) {
                     Text("Agente local · sem login · v3", color = c.bg.copy(alpha = .7f), fontSize = 12.sp)
                 }
             }
-            SectionLabel("Autonomia e energia")
-            SettingsLink(Icons.Rounded.Alarm, "Alarmes e lembretes", "Permita para os ciclos autônomos dispararem no horário certo") {
-                runCatching { if (android.os.Build.VERSION.SDK_INT >= 31) nav.context.startActivity(android.content.Intent(android.provider.Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM, android.net.Uri.parse("package:" + nav.context.packageName))) }
-            }
-            SettingsLink(Icons.Rounded.BatteryChargingFull, "Ignorar otimização de bateria", "Evita que o Android pause o app em segundo plano") {
-                runCatching { nav.context.startActivity(android.content.Intent(android.provider.Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)) }
-            }
             SectionLabel("Você")
             CueField(s.userName, { v -> app.store.updateSettings { it.copy(userName = v) } }, "Seu nome")
             SectionLabel("Provedor de modelos")
@@ -72,6 +65,9 @@ fun SettingsScreen(nav: NavController) {
             CueField(s.accuracyModel, { v -> app.store.updateSettings { it.copy(accuracyModel = v.trim()) } }, "Modelo avaliador de acurácia (day trade)")
             Text("Usado pela ferramenta typesafe_jev_check para medir a acurácia dos sinais antes de operar. Padrão: typesafe/jev-router (TypeSafe Jev, roteia para o melhor/mais barato).", fontSize = 12.sp, color = Cue.c.ink2)
             CueField(s.baseUrl, { v -> app.store.updateSettings { it.copy(baseUrl = v.trim()) } }, "Base URL (compatível OpenAI)")
+            SectionLabel("TypeSafe Jev")
+            ToggleRow("Orquestração Jev", "Cada passo leva só as ferramentas, conectores, skills, memórias e knowledge relevantes — menos tokens de entrada", s.jevOrchestration) { v -> app.store.updateSettings { it.copy(jevOrchestration = v) } }
+            ToggleRow("Roteamento Jev Router", "O Jev Router escolhe o modelo e o esforço de raciocínio de cada passo (qualidade × custo). Só OpenRouter; o modelo definido no Agent tem prioridade", s.jevRouting) { v -> app.store.updateSettings { it.copy(jevRouting = v) } }
             ToggleRow("Desativar thinking", "Zero raciocínio estendido — respostas mais rápidas", s.disableThinking) { v -> app.store.updateSettings { it.copy(disableThinking = v) } }
             Text("Passos máximos por execução: ${s.maxSteps}", fontSize = 14.sp)
             Slider(s.maxSteps.toFloat(), { v -> app.store.updateSettings { it.copy(maxSteps = v.toInt()) } }, valueRange = 10f..1000f,

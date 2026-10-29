@@ -260,6 +260,7 @@ fun BrowserPane(sessionId: String) {
                     DropdownMenuItem({ Text("Página inicial") }, { menu = false; browser.home() }, leadingIcon = { Icon(Icons.Rounded.Home, null) })
                     DropdownMenuItem({ Text(if (devtools) "Ocultar Rede/Console" else "Rede e Console") }, { menu = false; devtools = !devtools }, leadingIcon = { Icon(Icons.Rounded.NetworkCheck, null) })
                     DropdownMenuItem({ Text(if (ui.desktop) "Versão mobile" else "Versão desktop") }, { menu = false; browser.setDesktop(!ui.desktop) }, leadingIcon = { Icon(Icons.Rounded.DesktopWindows, null) })
+                    DropdownMenuItem({ Text(if (ui.darkPages) "Páginas no tema claro" else "Páginas no tema escuro") }, { menu = false; browser.setDarkPages(!ui.darkPages) }, leadingIcon = { Icon(if (ui.darkPages) Icons.Rounded.LightMode else Icons.Rounded.DarkMode, null) })
                     DropdownMenuItem({ Text("Abrir no navegador do sistema") }, {
                         menu = false
                         runCatching { ctx.startActivity(android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse(ui.url))) }

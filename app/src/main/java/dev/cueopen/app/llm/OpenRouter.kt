@@ -152,7 +152,9 @@ class OpenRouter(private val settings: () -> Settings) {
 
     /** Pedido simples sem ferramentas (títulos, resumos), no modelo rápido. */
     suspend fun quick(prompt: String, maxTokens: Int = 200): String =
-        chat(listOf(LlmMessage("user", prompt)), model = settings().fastModel, maxTokens = maxTokens).content.orEmpty().trim()
+        chat(listOf(LlmMessage("user", prompt)), maxTokens = maxTokens,
+            model = settings().let { dev.cueopen.app.agent.JevOrchestrator.auxModel(it.fastModel, it.jevRouting, it.baseUrl.contains("openrouter", true)) }
+        ).content.orEmpty().trim()
 
     private fun LlmMessage.toJson(): JsonElement = buildJsonObject {
         put("role", role)

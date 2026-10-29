@@ -28,7 +28,7 @@ class BrowserHost(private val appCtx: Context) {
 
     data class Ui(val url: String = "", val title: String = "", val loading: Boolean = false, val progress: Int = 0,
                   val canBack: Boolean = false, val canForward: Boolean = false, val agentControl: Boolean = false,
-                  val desktop: Boolean = false, val online: Boolean = true, val netType: String = "")
+                  val desktop: Boolean = false, val online: Boolean = true, val netType: String = "", val darkPages: Boolean = false)
 
     /** Uma requisição vista pelo WebView (painel Rede + ferramenta browser_network). */
     data class NetEntry(val id: Long, val url: String, val method: String, val type: String, val mainFrame: Boolean,
@@ -108,7 +108,29 @@ class BrowserHost(private val appCtx: Context) {
         // à sessão do agente e à UI; destruí-la durante uma navegação cancelava o carregamento
         // e fazia o site parecer travado até o usuário abrir o Browser.
         _view?.let { return it }
-        return createView(ctx, false).also { view -> _view = view; view.loadUrl(HOME) }
+        return createView(ctx, false).also { view -> _view = view; ensureSized(view); view.loadUrl(HOME) }
+    }
+
+    /**
+     * O agente navega com a aba Browser FECHADA: o WebView fica sem janela e com 0×0. Páginas que
+     * calculam o layout pelo tamanho da janela (slides com scale = innerWidth/1920, 100vh, canvas)
+     * carregavam com escala 0 e ficavam em BRANCO — só elementos fixos (barra, timer) apareciam.
+     * Fora da tela, damos ao WebView o tamanho real da tela antes de carregar.
+     */
+    private fun ensureSized(v: WebView) {
+        if (v.isAttachedToWindow && v.width > 0 && v.height > 0) return
+        if (v.width > 0 && v.height > 0) return
+        val dm = appCtx.resources.displayMetrics
+        val w = dm.widthPixels.coerceAtLeast(360)
+        val h = (dm.heightPixels - (dm.density * 180).toInt()).coerceAtLeast(480) // menos barras/abas do Computador
+        v.measure(android.view.View.MeasureSpec.makeMeasureSpec(w, android.view.View.MeasureSpec.EXACTLY),
+            android.view.View.MeasureSpec.makeMeasureSpec(h, android.view.View.MeasureSpec.EXACTLY))
+        v.layout(0, 0, w, h)
+    }
+
+    /** Avisa a página que a janela mudou (aba aberta/rotação): layouts calculados em JS se refazem. */
+    private fun notifyResize(v: WebView) {
+        v.evaluateJavascript("(function(){try{window.dispatchEvent(new Event('resize'));}catch(e){}})()", null)
     }
 
     /**
@@ -188,6 +210,15 @@ class BrowserHost(private val appCtx: Context) {
             mediaPlaybackRequiresUserGesture = false
             setSupportMultipleWindows(false)
             if (android.os.Build.VERSION.SDK_INT >= 26) safeBrowsingEnabled = false
+        }
+        // TEMA: páginas renderizam como foram escritas (claro), igual a um navegador comum. Com o
+        // aparelho em modo escuro o WebView podia escurecer a página ou anunciar prefers-color-scheme
+        // dark e esconder o conteúdo (texto escuro sobre fundo escurecido / CSS escuro incompleto).
+        applyColorScheme(v, darkPages)
+        v.setBackgroundColor(android.graphics.Color.WHITE)
+        // Ao abrir a aba (WebView ganha tamanho) a página recalcula o layout.
+        v.addOnLayoutChangeListener { view, l, t, r, b, ol, ot, or, ob ->
+            if ((r - l) != (or - ol) || (b - t) != (ob - ot)) notifyResize(view as WebView)
         }
         defaultUa = v.settings.userAgentString
         v.setLayerType(android.view.View.LAYER_TYPE_HARDWARE, null)
@@ -300,6 +331,34 @@ class BrowserHost(private val appCtx: Context) {
     suspend fun uiBack() = onMain { if (_view?.canGoBack() == true) { pageDone = CompletableDeferred(); _view?.goBack() } }
     suspend fun uiReload() = onMain { pageDone = CompletableDeferred(); _view?.reload() }
 
+    /** Páginas em tema escuro? Padrão: não (renderiza como o site foi feito). Alternável no menu ⋮. */
+    @Volatile var darkPages: Boolean = false
+        private set
+
+    fun setDarkPages(on: Boolean) {
+        darkPages = on
+        _view?.let { applyColorScheme(it, on); it.reload() }
+        _ui.value = _ui.value.copy(darkPages = on)
+    }
+
+    private fun applyColorScheme(v: WebView, dark: Boolean) {
+        runCatching {
+            if (androidx.webkit.WebViewFeature.isFeatureSupported(androidx.webkit.WebViewFeature.ALGORITHMIC_DARKENING))
+                androidx.webkit.WebSettingsCompat.setAlgorithmicDarkeningAllowed(v.settings, false)
+        }
+        @Suppress("DEPRECATION")
+        runCatching {
+            if (androidx.webkit.WebViewFeature.isFeatureSupported(androidx.webkit.WebViewFeature.FORCE_DARK)) {
+                // ON só faz o site usar o próprio tema escuro (prefers-color-scheme); nunca inverte cores.
+                androidx.webkit.WebSettingsCompat.setForceDark(v.settings,
+                    if (dark) androidx.webkit.WebSettingsCompat.FORCE_DARK_ON else androidx.webkit.WebSettingsCompat.FORCE_DARK_OFF)
+                if (androidx.webkit.WebViewFeature.isFeatureSupported(androidx.webkit.WebViewFeature.FORCE_DARK_STRATEGY))
+                    androidx.webkit.WebSettingsCompat.setForceDarkStrategy(v.settings, androidx.webkit.WebSettingsCompat.DARK_STRATEGY_WEB_THEME_DARKENING_ONLY)
+            }
+        }
+        if (android.os.Build.VERSION.SDK_INT >= 29) runCatching { v.isForceDarkAllowed = false }
+    }
+
     /** Alterna entre versão mobile e desktop dos sites. */
     fun setDesktop(on: Boolean) {
         val v = _view ?: return
@@ -363,7 +422,7 @@ class BrowserHost(private val appCtx: Context) {
             }
             pageDone = CompletableDeferred()
             _ui.value = _ui.value.copy(loading = true, progress = 0)
-            agentView().loadUrl(normalized)
+            agentView().also { ensureSized(it) }.loadUrl(normalized)
             normalized
         }
         return awaitLoad(target)

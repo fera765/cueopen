@@ -218,7 +218,7 @@ class AgentRunner(
         val resultSigWindow = ArrayDeque<String>()
         var toolLoopNudges = 0
         var cleanRounds = 0
-        val controlTools = setOf("sleep", "set_schedule", "ask_user", "ask_question", "ask_secure", "finish", "complete_step", "notes_write", "notes_read")
+        val controlTools = setOf("tools_load", "sleep", "set_schedule", "ask_user", "ask_question", "ask_secure", "finish", "complete_step", "notes_write", "notes_read")
         while (scope.isActive) {
             val workerUsed = if (tokenBudgetOverride != null) {
                 ((store.session(sessionId)?.let { it.tokensIn + it.tokensOut } ?: startingTokens) - startingTokens).coerceAtLeast(0)
@@ -240,7 +240,10 @@ class AgentRunner(
                 setActivity(sessionId, Activity(Activity.Kind.THINKING, "Compactando contexto"))
                 s = ctxMgr.compactIfNeeded(s)
             }
-            val sys = LlmMessage("system", systemPrompt(sessionId, agent, s))
+            // TypeSafe Jev: decide quais ferramentas/conectores e quanto knowledge/memória entram neste passo
+            val allTools = tools(agent, allowMultiAgent = tokenBudgetOverride == null, builder = s.connectorBuilder)
+            val (jplan, stepTools) = jevPlan(sessionId, s, allTools)
+            val sys = LlmMessage("system", systemPrompt(sessionId, agent, s, jplan))
             var history = ctxMgr.microCompact(s.llm, sessionId)
             if (history.firstOrNull()?.role != "user") history = listOf(LlmMessage("user", "[Contexto anterior compactado no resumo da sessão. Continue de onde parou.]")) + history
             // Resiliência: tenta a chamada; em erro, reenvia (backoff) e só desiste após 3 falhas.
@@ -261,7 +264,7 @@ class AgentRunner(
                 var attempt = 0
                 while (true) {
                     try {
-                        return@run llm.chat(listOf(sys) + history, tools = tools(agent, allowMultiAgent = tokenBudgetOverride == null, builder = s.connectorBuilder), model = agent?.model, maxTokens = replyTokenLimit)
+                        return@run llm.chat(listOf(sys) + history, tools = stepTools, model = stepModel(agent), maxTokens = replyTokenLimit)
                     } catch (c: kotlinx.coroutines.CancellationException) {
                         throw c
                     } catch (t: Throwable) {
@@ -278,7 +281,7 @@ class AgentRunner(
                 }
                 @Suppress("UNREACHABLE_CODE") return
             }
-            val modelId = agent?.model?.takeIf { it.isNotBlank() } ?: store.settings.model
+            val modelId = stepModel(agent)
             val callCostUsd = runCatching { llm.estimateCostUsd(modelId, reply.usage) }.getOrNull()
             store.editSession(sessionId) {
                 it.copy(llm = it.llm + LlmMessage("assistant", reply.content, toolCallsJson = reply.rawToolCallsJson),
@@ -864,15 +867,54 @@ class AgentRunner(
         }
     }
 
-    private fun systemPrompt(sessionId: String, agent: AgentProfile?, session: Session): String {
+    // ------------------------------------------------------------------ TypeSafe Jev (orquestração)
+    private fun openRouterBase() = store.settings.baseUrl.contains("openrouter", true)
+
+    /** Modelo do passo: o do Agent; senão Jev Router (se ligado); senão o padrão. */
+    private fun stepModel(agent: AgentProfile?): String =
+        JevOrchestrator.routeModel(agent?.model, store.settings.model, store.settings.jevRouting, openRouterBase())
+
+    private fun toolName(o: kotlinx.serialization.json.JsonElement): String =
+        runCatching { o.jsonObject["function"]!!.jsonObject["name"]!!.jsonPrimitive.content }.getOrDefault("")
+
+    private fun jevQuery(session: Session): String {
+        val users = session.llm.filter { it.role == "user" && it.content?.startsWith("[Sistema]") != true }.takeLast(3)
+        return users.joinToString(" ") { it.content.orEmpty().take(1500) } + " " + session.summary.take(800) + " " + session.title
+    }
+
+    /** Plano do passo + esquema de ferramentas já filtrado. */
+    private fun jevPlan(sessionId: String, s: Session, all: kotlinx.serialization.json.JsonArray): Pair<JevOrchestrator.Plan, kotlinx.serialization.json.JsonArray> {
+        val names = all.map { toolName(it) }
+        val hub = runCatching { dev.cueopen.app.CueApp.instance.uiConnectors }.getOrNull()
+        val conns = hub?.connectors.orEmpty().filter { c -> names.any { it.startsWith("uic_${c.spec.id}_") } }
+            .associate { it.spec.id to (it.spec.name to it.spec.description) }
+        val mcp = names.filter { it.startsWith("mcp_") && it.contains("__") }.map { it.substringBefore("__") }.distinct()
+            .associateWith { it.removePrefix("mcp_") }
+        val used = s.items.filterIsInstance<ChatItem.Step>().map { it.tool }.toSet()
+        val plan = JevOrchestrator.plan(JevOrchestrator.Input(
+            sessionId = sessionId, query = jevQuery(s), usedTools = used, builder = s.connectorBuilder,
+            connectors = conns, mcpServers = mcp,
+            historyTokens = ctxMgr.estimateTokens(s.llm) + ctxMgr.estimateTokens(s.summary),
+            contextBudget = store.settings.contextBudget, enabled = store.settings.jevOrchestration,
+        ))
+        val connIdOf = { n: String -> conns.keys.firstOrNull { n.startsWith("uic_${it}_") } }
+        val mcpOf = { n: String -> n.substringBefore("__").takeIf { n.contains("__") } }
+        val kept = buildJsonArray { all.forEach { t -> if (plan.keepTool(toolName(t), connIdOf, mcpOf)) add(t) } }
+        return plan to kept
+    }
+
+    private fun systemPrompt(sessionId: String, agent: AgentProfile?, session: Session, jplan: JevOrchestrator.Plan? = null): String {
         val st = store.state.value
-        val skills: List<Skill> = st.skills.filter { sk ->
-            sk.enabled && (agent == null || agent.skillIds.isEmpty() || sk.id in agent.skillIds)
-        }
         val lastUser = session.llm.lastOrNull { it.role == "user" }?.content.orEmpty()
         val query = lastUser + " " + session.summary.take(1500)
-        val memories = ctxMgr.relevantMemories(query, agent?.id).also { ctxMgr.touch(it) }
-        val knowledge = ctxMgr.relevantKnowledge(query)
+        // Skills: as mais relevantes ao pedido primeiro, com teto (o índice inteiro não precisa ir em todo passo)
+        val qWords = JevOrchestrator.norm(query).split(Regex("[^a-z0-9]+")).filter { it.length >= 4 }.toSet()
+        val skills: List<Skill> = st.skills.filter { sk ->
+            sk.enabled && (agent == null || agent.skillIds.isEmpty() || sk.id in agent.skillIds)
+        }.sortedByDescending { sk -> JevOrchestrator.norm(sk.name + " " + sk.description).split(Regex("[^a-z0-9]+")).count { it in qWords } }
+            .take(jplan?.skillsShown ?: Int.MAX_VALUE)
+        val memories = ctxMgr.relevantMemories(query, agent?.id, maxChars = jplan?.memoryChars ?: 2400).also { ctxMgr.touch(it) }
+        val knowledge = ctxMgr.relevantKnowledge(query, maxChars = jplan?.knowledgeChars ?: 4500)
         val notes = ctxMgr.readNotes(sessionId)
         val date = SimpleDateFormat("EEEE, d 'de' MMMM 'de' yyyy", Locale("pt", "BR")).format(Date())
         return buildString {
@@ -999,6 +1041,10 @@ class AgentRunner(
             if (knowledge.isNotEmpty()) {
                 appendLine(); appendLine("## Knowledge do usuário (relevante)")
                 knowledge.forEach { appendLine("### ${it.title}\n${it.content.take(1500)}\n") }
+            }
+            jplan?.let { p ->
+                val names = runCatching { dev.cueopen.app.CueApp.instance.uiConnectors.connectors.associate { it.spec.id to it.spec.name } }.getOrDefault(emptyMap())
+                p.index(names, emptyMap()).takeIf { it.isNotBlank() }?.let { appendLine(); appendLine(it) }
             }
             if (session.summary.isNotBlank()) {
                 appendLine(); appendLine("## Resumo da sessão até aqui (histórico antigo compactado)"); appendLine(session.summary.take(6000))
@@ -1205,6 +1251,8 @@ class AgentRunner(
         if (allowMultiAgent) connectorTools().forEach { add(it) }
         // UI Connectors (ex.: IQ Option): só os que este agente pode usar (toggle por agente / "Agent required?").
         runCatching { dev.cueopen.app.CueApp.instance.uiConnectors.toolDefinitions(agent) }.getOrDefault(emptyList()).forEach { add(it) }
+        add(tool("tools_load", "Carrega ferramentas que estão FORA do contexto (listadas em 'Ferramentas sob demanda'): grupos (ex.: wallet, device, web_dev, agents, schedule), connector:<id> ou mcp:<servidor>. Ficam disponíveis a partir da próxima resposta, até o fim da tarefa.",
+            buildJsonObject { put("names", strArray("Nomes a carregar, ex.: [\"wallet\", \"connector:iqoption\"]")) }, listOf("names")))
         if (allowMultiAgent) add(tool("ask_user", "Faz uma pergunta aberta ao usuário e pausa a tarefa até ele responder. Para escolhas, prefira ask_question.", buildJsonObject { put("question", str("Pergunta")) }, listOf("question")))
         fun objArr(desc: String, props: JsonObject, required: List<String>) = buildJsonObject {
             put("type", "array"); put("description", desc)
@@ -1566,6 +1614,15 @@ class AgentRunner(
             "ask_user" -> {
                 store.addItem(sessionId, ChatItem.Assistant(text = s("question"), final = true))
                 return ToolResult("Pergunta enviada; aguardando resposta.", SessionStatus.WAITING_USER)
+            }
+            "tools_load" -> {
+                val hub = runCatching { dev.cueopen.app.CueApp.instance.uiConnectors }.getOrNull()
+                val connIds = hub?.connectors.orEmpty().map { it.spec.id }.toSet()
+                val mcpNames = dev.cueopen.app.connectors.Connectors.toolDefinitions(store).mapNotNull { d -> toolName(d).takeIf { it.contains("__") }?.substringBefore("__")?.removePrefix("mcp_") }.toSet()
+                val (ok, bad) = JevOrchestrator.resolveLoad(sl("names"), connIds, mcpNames)
+                JevOrchestrator.load(sessionId, ok)
+                return ToolResult((if (ok.isNotEmpty()) "Carregado: ${ok.joinToString()}. As ferramentas aparecem na sua próxima resposta." else "Nada carregado.") +
+                    (if (bad.isNotEmpty()) " Desconhecidos: ${bad.joinToString()} — use os nomes do índice 'Ferramentas sob demanda'." else ""))
             }
             "ask_question" -> {
                 // GUARDRAIL: só existe para uma dúvida real dentro de um pedido do usuário presente —
