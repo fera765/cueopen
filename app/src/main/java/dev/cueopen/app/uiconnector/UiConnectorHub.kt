@@ -64,7 +64,7 @@ class UiConnectorHub(context: Context) {
             // definição idêntica → mantém a instância (e a sessão logada)
             previous.firstOrNull { it is CustomConnector && it.def == def }
                 ?: runCatching {
-                    CustomConnector(def, bridge = dev.cueopen.app.uiconnector.custom.AndroidHostBridge(def) { cap -> capabilityGranted(def.id, cap) })
+                    CustomConnector(def, bridge = dev.cueopen.app.uiconnector.custom.AndroidHostBridge(def, isGranted = { cap -> capabilityGranted(def.id, cap) }))
                 }.getOrNull()
         }
         // instâncias descartadas fecham a conexão em tempo real (WebSocket)
