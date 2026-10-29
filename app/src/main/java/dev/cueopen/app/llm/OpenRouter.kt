@@ -136,7 +136,7 @@ class OpenRouter(private val settings: () -> Settings) {
                 }
                 .post(buildBody(disableReasoning, structuredOutput).toString().toRequestBody("application/json".toMediaType()))
                 .build()
-            http.newCall(req).execute().use { response -> response.code to response.body?.string().orEmpty() }
+            return http.newCall(req).execute().use { response -> response.code to response.body?.string().orEmpty() }
         }
         var disable = openRouter && s.disableThinking && mdl !in forceReasoning
         var structuredOutput = jsonResponse
