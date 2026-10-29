@@ -24,6 +24,7 @@ import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
 import java.io.IOException
+import java.net.URI
 import java.util.concurrent.TimeUnit
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
@@ -32,7 +33,7 @@ data class ToolCall(val id: String, val name: String, val argsJson: String)
 data class Usage(val prompt: Long = 0, val completion: Long = 0, val cached: Long = 0)
 data class LlmReply(val content: String?, val toolCalls: List<ToolCall>, val rawToolCallsJson: String?, val usage: Usage = Usage(), val truncated: Boolean = false)
 
-/** Cliente OpenAI-compatível (OpenRouter por padrão). Raciocínio/thinking desligado por padrão. */
+/** Transporte OpenAI-compatible (OpenRouter por padrão), com suporte opcional ao System One do Jev. */
 class OpenRouter(private val settings: () -> Settings) {
     private val json = Json { ignoreUnknownKeys = true }
     private val http = OkHttpClient.Builder()
@@ -47,17 +48,31 @@ class OpenRouter(private val settings: () -> Settings) {
     @Volatile private var priceCacheAt = 0L
     @Volatile private var priceCache: Map<String, ModelPrice> = emptyMap()
 
-    /** Estima o custo em USD com os preços publicados pelo endpoint /models da OpenRouter.
-     * Retorna null se o modelo/preço não estiver disponível; não inventa nem presume preço.
-     */
+    private fun endpoint(baseUrl: String, path: String): String {
+        val uri = runCatching { URI(baseUrl.trim()) }.getOrElse { throw IOException("Base URL inválida.") }
+        val scheme = uri.scheme?.lowercase()
+        val host = uri.host ?: throw IOException("Base URL inválida.")
+        val localHttp = host.equals("localhost", true) || host == "127.0.0.1" || host == "::1" || host == "[::1]"
+        if (scheme != "https" && !(scheme == "http" && localHttp)) throw IOException("Use HTTPS para proteger sua chave; HTTP só é aceito em localhost.")
+        if (uri.userInfo != null || uri.rawQuery != null || uri.rawFragment != null) throw IOException("A Base URL não pode conter credenciais, query ou fragmento.")
+        val basePath = (uri.path ?: "").trimEnd('/')
+        val fullPath = if (basePath.endsWith("/$path", ignoreCase = true)) basePath else "$basePath/$path"
+        return runCatching { URI(scheme, null, host, uri.port, fullPath, null, null).toASCIIString() }
+            .getOrElse { throw IOException("Base URL inválida.") }
+    }
+
+    private fun isOpenRouter(baseUrl: String): Boolean =
+        runCatching { URI(baseUrl.trim()).host?.lowercase() == "openrouter.ai" }.getOrDefault(false)
+
+    /** Estima o custo em USD com preços publicados em /models; null significa que não há preço confiável. */
     suspend fun estimateCostUsd(modelId: String, usage: Usage): Double? = withContext(Dispatchers.IO) {
         val s = settings()
-        if (!s.baseUrl.contains("openrouter.ai", ignoreCase = true)) return@withContext null
-        if (System.currentTimeMillis() - priceCacheAt > 6 * 60 * 60 * 1000L || !priceCache.containsKey(modelId)) {
+        if (!isOpenRouter(s.baseUrl)) return@withContext null
+        if (priceCache.isEmpty() || System.currentTimeMillis() - priceCacheAt > 6 * 60 * 60 * 1000L) {
             runCatching {
-                val request = Request.Builder()
-                    .url(s.baseUrl.trimEnd('/') + "/models")
-                    .get().build()
+                val request = Request.Builder().url(endpoint(s.baseUrl, "models")).apply {
+                    if (s.apiKey.isNotBlank()) header("Authorization", "Bearer ${s.apiKey}")
+                }.get().build()
                 http.newCall(request).execute().use { response ->
                     if (!response.isSuccessful) return@use
                     val root = json.parseToJsonElement(response.body?.string().orEmpty()).jsonObject
@@ -93,11 +108,13 @@ class OpenRouter(private val settings: () -> Settings) {
         tools: JsonArray? = null,
         model: String? = null,
         maxTokens: Int = 16000,
+        jsonResponse: Boolean = false,
     ): LlmReply = withContext(Dispatchers.IO) {
         val s = settings()
-        require(s.apiKey.isNotBlank()) { "Configure sua chave da OpenRouter em Configurações." }
         val mdl = model ?: s.model
-        fun buildBody(disableReasoning: Boolean) = buildJsonObject {
+        require(mdl.isNotBlank()) { "Escolha um modelo nas Configurações." }
+        val openRouter = isOpenRouter(s.baseUrl)
+        fun buildBody(disableReasoning: Boolean, structuredOutput: Boolean) = buildJsonObject {
             put("model", mdl)
             put("max_tokens", maxTokens)
             put("temperature", 0.2)
@@ -106,30 +123,48 @@ class OpenRouter(private val settings: () -> Settings) {
                 put("tools", tools)
                 put("tool_choice", "auto")
             }
-            if (disableReasoning) put("reasoning", buildJsonObject { put("enabled", false); put("exclude", true) })
+            if (structuredOutput) put("response_format", buildJsonObject { put("type", "json_object") })
+            // `reasoning` e headers abaixo são extensões da OpenRouter, não do protocolo OpenAI geral.
+            if (openRouter && disableReasoning) put("reasoning", buildJsonObject { put("enabled", false); put("exclude", true) })
         }
-        fun once(disableReasoning: Boolean): Pair<Int, String> {
+        fun once(disableReasoning: Boolean, structuredOutput: Boolean): Pair<Int, String> {
             val req = Request.Builder()
-                .url(s.baseUrl.trimEnd('/') + "/chat/completions")
-                .header("Authorization", "Bearer ${s.apiKey}")
-                .header("HTTP-Referer", "https://github.com/cueopen").header("X-Title", "CueOpen")
-                .post(buildBody(disableReasoning).toString().toRequestBody("application/json".toMediaType()))
+                .url(endpoint(s.baseUrl, "chat/completions"))
+                .apply {
+                    if (s.apiKey.isNotBlank()) header("Authorization", "Bearer ${s.apiKey}")
+                    if (openRouter) header("HTTP-Referer", "https://github.com/cueopen").header("X-Title", "CueOpen")
+                }
+                .post(buildBody(disableReasoning, structuredOutput).toString().toRequestBody("application/json".toMediaType()))
                 .build()
-            http.newCall(req).execute().use { r -> return r.code to r.body?.string().orEmpty() }
+            http.newCall(req).execute().use { response -> response.code to response.body?.string().orEmpty() }
         }
-        // 1ª tentativa respeita a config; se 400 por "reasoning mandatory", refaz sem desligar.
-        var disable = s.disableThinking && mdl !in forceReasoning
-        var (code, text) = once(disable)
-        if (code == 400 && text.contains("reasoning", true) && disable) {
-            forceReasoning.add(mdl); disable = false
-            val retry = once(false); code = retry.first; text = retry.second
+        var disable = openRouter && s.disableThinking && mdl !in forceReasoning
+        var structuredOutput = jsonResponse
+        var code = 0
+        var text = ""
+        var attempts = 0
+        while (attempts < 3) {
+            attempts++
+            val result = once(disable, structuredOutput)
+            code = result.first
+            text = result.second
+            if (code == 400 && structuredOutput && (text.contains("response_format", true) || text.contains("json_object", true))) {
+                structuredOutput = false
+                continue
+            }
+            if (code == 400 && disable && text.contains("reasoning", true)) {
+                forceReasoning.add(mdl)
+                disable = false
+                continue
+            }
+            break
         }
         if (code !in 200..299) {
             val msg = runCatching { json.parseToJsonElement(text).jsonObject["error"]?.jsonObject?.get("message")?.jsonPrimitive?.content }.getOrNull()
             throw IOException("HTTP $code — ${msg ?: text.take(160)}")
         }
         val root = json.parseToJsonElement(text).jsonObject
-        root["error"]?.let { throw IOException("LLM: ${it}") }
+        root["error"]?.let { throw IOException("LLM: $it") }
         val choice0 = root["choices"]!!.jsonArray[0].jsonObject
         val finish = choice0["finish_reason"]?.let { runCatching { it.jsonPrimitive.contentOrNull }.getOrNull() }
         val msg = choice0["message"]!!.jsonObject
@@ -145,9 +180,28 @@ class OpenRouter(private val settings: () -> Settings) {
             )
         }.orEmpty()
         val u = root["usage"]?.let { runCatching { it.jsonObject }.getOrNull() }
-        fun num(o: kotlinx.serialization.json.JsonObject?, k: String) = o?.get(k)?.let { runCatching { it.jsonPrimitive.content.toDouble().toLong() }.getOrNull() } ?: 0L
+        fun num(o: JsonObject?, key: String) = o?.get(key)?.let { runCatching { it.jsonPrimitive.content.toDouble().toLong() }.getOrNull() } ?: 0L
         val cachedTok = u?.get("prompt_tokens_details")?.let { runCatching { it.jsonObject }.getOrNull() }?.let { num(it, "cached_tokens") } ?: 0L
         LlmReply(content, calls, tcs?.toString(), Usage(num(u, "prompt_tokens"), num(u, "completion_tokens"), cachedTok), truncated = finish == "length")
+    }
+
+    /** Chamada nativa System One para Jev: não passa pelo endpoint de geração de texto. */
+    suspend fun systemOne(model: String, body: JsonObject): String = withContext(Dispatchers.IO) {
+        val s = settings()
+        require(body["model"]?.jsonPrimitive?.content == model) { "O modelo do pedido System One não corresponde ao selecionado." }
+        val request = Request.Builder()
+            .url(endpoint(s.baseUrl, "systemone"))
+            .apply { if (s.apiKey.isNotBlank()) header("Authorization", "Bearer ${s.apiKey}") }
+            .post(body.toString().toRequestBody("application/json".toMediaType()))
+            .build()
+        http.newCall(request).execute().use { response ->
+            val text = response.body?.string().orEmpty()
+            if (!response.isSuccessful) {
+                val message = runCatching { json.parseToJsonElement(text).jsonObject["error"]?.jsonObject?.get("message")?.jsonPrimitive?.content }.getOrNull()
+                throw IOException("System One respondeu HTTP ${response.code} — ${message ?: text.take(160)}")
+            }
+            text
+        }
     }
 
     /** Pedido simples sem ferramentas (títulos, resumos), no modelo rápido. */

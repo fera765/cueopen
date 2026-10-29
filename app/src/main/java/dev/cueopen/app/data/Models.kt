@@ -24,6 +24,8 @@ sealed class ChatItem {
         override val time: Long = now(),
         val text: String,
         val attachments: List<String> = emptyList(),
+        /** Texto da resposta do agente citada ao responder; null em mensagens antigas/sem citação. */
+        val replyTo: String? = null,
     ) : ChatItem()
 
     @Serializable

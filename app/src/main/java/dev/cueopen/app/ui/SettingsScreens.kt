@@ -53,18 +53,18 @@ fun SettingsScreen(nav: NavController) {
             CueField(s.userName, { v -> app.store.updateSettings { it.copy(userName = v) } }, "Seu nome")
             SectionLabel("Provedor de modelos")
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                val isOR = s.baseUrl.contains("openrouter")
+                val isOR = s.baseUrl.contains("openrouter", ignoreCase = true)
                 Chip("OpenRouter", isOR) { app.store.updateSettings { it.copy(baseUrl = "https://openrouter.ai/api/v1") } }
-                Chip("Personalizado", !isOR) { app.store.updateSettings { it.copy(baseUrl = if (it.baseUrl.contains("openrouter")) "https://" else it.baseUrl) } }
+                Chip("Personalizado", !isOR) { app.store.updateSettings { it.copy(baseUrl = if (it.baseUrl.contains("openrouter", true)) "https://" else it.baseUrl) } }
             }
-            Text("OpenRouter: cole sua chave abaixo. Personalizado: qualquer endpoint compatível com a API da OpenAI (base URL + chave), inclusive provedores gratuitos.", fontSize = 12.sp, color = Cue.c.ink2)
+            Text("OpenRouter é o exemplo recomendado. Personalizado aceita endpoints OpenAI-compatible; por exemplo, OpenCode Go usa https://opencode.ai/inference/go/openai/v1. O catálogo é carregado do provedor; famílias OpenCode que exigem outra API são ocultadas, e function calling depende do modelo escolhido.", fontSize = 12.sp, color = Cue.c.ink2)
             SectionLabel("Credenciais")
             CueField(s.apiKey, { v -> app.store.updateSettings { it.copy(apiKey = v.trim()) } }, "Chave da API", password = true)
-            ModelPicker(s.model, { v -> app.store.updateSettings { it.copy(model = v) } }, "Modelo do agente")
-            ModelPicker(s.fastModel, { v -> app.store.updateSettings { it.copy(fastModel = v) } }, "Modelo rápido (títulos e resumos de contexto)")
-            CueField(s.accuracyModel, { v -> app.store.updateSettings { it.copy(accuracyModel = v.trim()) } }, "Modelo avaliador de acurácia (day trade)")
-            Text("Usado pela ferramenta typesafe_jev_check para medir a acurácia dos sinais antes de operar. Padrão: typesafe/jev-router (TypeSafe Jev, roteia para o melhor/mais barato).", fontSize = 12.sp, color = Cue.c.ink2)
             CueField(s.baseUrl, { v -> app.store.updateSettings { it.copy(baseUrl = v.trim()) } }, "Base URL (compatível OpenAI)")
+            ModelPicker(s.model, { v -> app.store.updateSettings { it.copy(model = v) } }, "Modelo do agente", baseUrl = s.baseUrl, apiKey = s.apiKey)
+            ModelPicker(s.fastModel, { v -> app.store.updateSettings { it.copy(fastModel = v) } }, "Modelo rápido (títulos e resumos de contexto)", baseUrl = s.baseUrl, apiKey = s.apiKey)
+            ModelPicker(s.accuracyModel, { v -> app.store.updateSettings { it.copy(accuracyModel = v) } }, "Modelo avaliador de acurácia (day trade)", baseUrl = s.baseUrl, apiKey = s.apiKey)
+            Text("Jev no OpenRouter/TypeSafe usa a API System One de decisões tipadas. Outros modelos recebem um pedido JSON estruturado; essa estimativa não é calibrada nem equivalente ao Jev. Dados ausentes, resposta inválida ou confiança abaixo de 70% não liberam uma ordem.", fontSize = 12.sp, color = Cue.c.ink2)
             SectionLabel("TypeSafe Jev")
             ToggleRow("Orquestração Jev", "Cada passo leva só as ferramentas, conectores, skills, memórias e knowledge relevantes — menos tokens de entrada", s.jevOrchestration) { v -> app.store.updateSettings { it.copy(jevOrchestration = v) } }
             ToggleRow("Roteamento Jev Router", "O Jev Router escolhe o modelo e o esforço de raciocínio de cada passo (qualidade × custo). Só OpenRouter; o modelo definido no Agent tem prioridade", s.jevRouting) { v -> app.store.updateSettings { it.copy(jevRouting = v) } }
@@ -253,7 +253,7 @@ fun OnboardingScreen(onDone: () -> Unit) {
                     Spacer(Modifier.height(20.dp))
                     CueField(st.settings.apiKey, { v -> app.store.updateSettings { it.copy(apiKey = v.trim()) } }, "sk-or-…", password = true)
                     Spacer(Modifier.height(8.dp))
-                    ModelPicker(st.settings.model, { v -> app.store.updateSettings { it.copy(model = v) } }, "Modelo")
+                    ModelPicker(st.settings.model, { v -> app.store.updateSettings { it.copy(model = v) } }, "Modelo", baseUrl = st.settings.baseUrl, apiKey = st.settings.apiKey)
                 }
                 else -> {
                     val state by app.sandbox.state.collectAsStateWithLifecycle()

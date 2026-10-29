@@ -6,6 +6,7 @@ import androidx.compose.animation.core.*
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -27,8 +28,11 @@ import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
@@ -70,6 +74,7 @@ fun ChatScreen(nav: NavController, sessionId: String) {
     val running = session.status == SessionStatus.RUNNING
     val list = rememberLazyListState()
     var draft by remember { mutableStateOf("") }
+    var replyingTo by remember(sessionId) { mutableStateOf<ChatItem.Assistant?>(null) }
     var menu by remember { mutableStateOf(false) }
     var rename by remember { mutableStateOf(false) }
     var usage by remember { mutableStateOf(false) }
@@ -91,7 +96,17 @@ fun ChatScreen(nav: NavController, sessionId: String) {
         if (list.isScrollInProgress) follow = atBottom   // gesto do usuário decide
         else if (atBottom) follow = true
     }
-    val streamKey = session.items.size to (session.items.lastOrNull()?.let { it.hashCode() } ?: 0)
+    val visibleItems = remember(session.items) { session.items.filter { it !is ChatItem.Plan } }
+    val lastItem = session.items.lastOrNull()
+    // Evita hashCode() no objeto inteiro (que pode conter milhares de caracteres) em cada atualização.
+    val lastItemKey = when (lastItem) {
+        is ChatItem.Assistant -> 31 * lastItem.id.hashCode() + lastItem.text.length + lastItem.text.take(128).hashCode()
+        is ChatItem.User -> 31 * lastItem.id.hashCode() + lastItem.text.length + lastItem.text.take(128).hashCode()
+        is ChatItem.Step -> 31 * lastItem.id.hashCode() + lastItem.result.length + lastItem.title.hashCode()
+        null -> 0
+        else -> lastItem.id.hashCode()
+    }
+    val streamKey = session.items.size to lastItemKey
     LaunchedEffect(streamKey, running, follow) {
         if (follow) {
             val total = list.layoutInfo.totalItemsCount
@@ -143,9 +158,10 @@ fun ChatScreen(nav: NavController, sessionId: String) {
           Box(Modifier.weight(1f).fillMaxWidth()) {
             androidx.compose.runtime.CompositionLocalProvider(LocalChatPersona provides ChatPersona.of(agent)) {
             LazyColumn(Modifier.fillMaxSize(), state = list, contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                items(session.items.filter { it !is ChatItem.Plan }, key = { it.id }) { item ->
+                items(visibleItems, key = { it.id }) { item ->
                     TimelineItem(item, onOpenComputer = { tab -> nav.navigate("computer/$sessionId?tab=$tab") }, onOpenMedia = { mediaOpen = it }, sessionId = sessionId, nav = nav,
-                        onSend = { msg -> app.agent.send(sessionId, msg, emptyList()) })
+                        onSend = { msg -> app.agent.send(sessionId, msg, emptyList()) },
+                        onReply = { replyingTo = it })
                 }
                 if (running) item { ThinkingRow(act) }
                 if (session.status == SessionStatus.SLEEPING) item {
@@ -176,6 +192,9 @@ fun ChatScreen(nav: NavController, sessionId: String) {
                 nextCycleAt = if (running) null else
                     (session.wakeAt ?: autoAgent?.let { (it.lastBeatAt ?: System.currentTimeMillis()) + it.heartbeatMinutes * 60_000L })
                         ?.takeIf { it > System.currentTimeMillis() },
+                replyText = replyingTo?.text?.take(800),
+                replyAuthor = agent?.name ?: "Fluwy Bot",
+                onClearReply = { replyingTo = null },
                 onSend = { text, files ->
                     if (text.trim().startsWith("@create-agent", true)) {
                         val desc = text.trim().removePrefix("@create-agent").removePrefix("@Create-Agent").trim()
@@ -232,7 +251,7 @@ fun ChatScreen(nav: NavController, sessionId: String) {
                     val names = files.mapNotNull { u -> runCatching {
                         val n = queryName(ctx, u); ctx.contentResolver.openInputStream(u)!!.use { i -> File(ws, n).outputStream().use { i.copyTo(it) } }; n
                     }.getOrNull() }
-                    app.agent.send(sessionId, text, names); draft = ""
+                    app.agent.send(sessionId, text, names, quotedReply = replyingTo?.text); draft = ""; replyingTo = null
                 },
             )
         }
@@ -279,10 +298,10 @@ fun ChatScreen(nav: NavController, sessionId: String) {
 }
 
 @Composable
-fun TimelineItem(item: ChatItem, onOpenComputer: (String) -> Unit, onOpenMedia: (String) -> Unit = {}, sessionId: String? = null, nav: androidx.navigation.NavController? = null, onSend: ((String) -> Unit)? = null) {
+fun TimelineItem(item: ChatItem, onOpenComputer: (String) -> Unit, onOpenMedia: (String) -> Unit = {}, sessionId: String? = null, nav: androidx.navigation.NavController? = null, onSend: ((String) -> Unit)? = null, onReply: ((ChatItem.Assistant) -> Unit)? = null) {
     when (item) {
         is ChatItem.User -> UserBubble(item)
-        is ChatItem.Assistant -> AssistantText(item, onSend)
+        is ChatItem.Assistant -> AssistantText(item, onSend, onReply)
         is ChatItem.Step -> StepRow(item, onOpenComputer)
         is ChatItem.Plan -> {}  // o plano fica no card do computador, acima do composer
         is ChatItem.Media -> MediaCard(item, onOpenMedia)
@@ -297,6 +316,16 @@ fun TimelineItem(item: ChatItem, onOpenComputer: (String) -> Unit, onOpenMedia: 
 private fun UserBubble(i: ChatItem.User) {
     val c = Cue.c
     Column(Modifier.fillMaxWidth().padding(top = 12.dp, bottom = 10.dp), horizontalAlignment = Alignment.End) {
+        i.replyTo?.takeIf { it.isNotBlank() }?.let { quoted ->
+            Row(Modifier.widthIn(max = 320.dp).padding(bottom = 6.dp).clip(RoundedCornerShape(12.dp)).background(c.surface2).padding(start = 8.dp, end = 10.dp, top = 7.dp, bottom = 7.dp), verticalAlignment = Alignment.CenterVertically) {
+                Box(Modifier.width(3.dp).height(36.dp).clip(RoundedCornerShape(2.dp)).background(c.accent))
+                Spacer(Modifier.width(8.dp))
+                Column {
+                    Text("Respondendo ao agente", fontSize = 11.sp, fontWeight = FontWeight.SemiBold, color = c.ink2)
+                    Text(quoted, fontSize = 12.sp, color = c.ink, maxLines = 3, overflow = TextOverflow.Ellipsis)
+                }
+            }
+        }
         if (i.attachments.isNotEmpty()) {
             Row(Modifier.padding(bottom = 6.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 i.attachments.forEach { a ->
@@ -314,15 +343,32 @@ private fun UserBubble(i: ChatItem.User) {
 }
 
 @Composable
-private fun AssistantText(i: ChatItem.Assistant, onSend: ((String) -> Unit)? = null) {
+private fun AssistantText(i: ChatItem.Assistant, onSend: ((String) -> Unit)? = null, onReply: ((ChatItem.Assistant) -> Unit)? = null) {
     val c = Cue.c
-    Column(Modifier.fillMaxWidth()) {
-        if (i.final) Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(bottom = 6.dp)) {
-            val persona = LocalChatPersona.current
-            AgentFace(persona.color, persona.face, 20.dp); Spacer(Modifier.width(6.dp))
-            Text(persona.name, fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
+    var dragX by remember(i.id) { mutableStateOf(0f) }
+    val density = LocalDensity.current
+    val thresholdPx = with(density) { 72.dp.toPx() }
+    val maxOffsetPx = with(density) { 112.dp.toPx() }
+    val dragModifier = if (onReply != null) Modifier.pointerInput(i.id, onReply) {
+        detectHorizontalDragGestures(
+            onHorizontalDrag = { change, amount ->
+                if (amount > 0f || dragX > 0f) dragX = (dragX + amount).coerceIn(0f, maxOffsetPx)
+                change.consume()
+            },
+            onDragEnd = { if (dragX >= thresholdPx) onReply(i); dragX = 0f },
+            onDragCancel = { dragX = 0f },
+        )
+    } else Modifier
+    Box(Modifier.fillMaxWidth()) {
+        if (dragX > 4f) Icon(Icons.Rounded.Reply, "Responder", Modifier.align(Alignment.CenterStart).padding(start = 8.dp).size(20.dp), tint = c.accent)
+        Column(Modifier.fillMaxWidth().then(dragModifier).graphicsLayer { translationX = dragX }) {
+            if (i.final) Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(bottom = 6.dp)) {
+                val persona = LocalChatPersona.current
+                AgentFace(persona.color, persona.face, 20.dp); Spacer(Modifier.width(6.dp))
+                Text(persona.name, fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
+            }
+            CueMarkdown(i.text, onSend = onSend)
         }
-        CueMarkdown(i.text, onSend = onSend)
     }
 }
 
@@ -637,7 +683,10 @@ fun sessionMarkdown(s: Session): String = buildString {
     appendLine("# ${s.title}\n")
     s.items.forEach { i ->
         when (i) {
-            is ChatItem.User -> appendLine("**Você:** ${i.text}\n")
+            is ChatItem.User -> {
+                i.replyTo?.let { appendLine("> Mensagem do agente citada:\n> ${it.lines().joinToString("\n> ")}\n") }
+                appendLine("**Você:** ${i.text}\n")
+            }
             is ChatItem.Assistant -> appendLine("**Fluwy Bot:** ${i.text}\n")
             is ChatItem.Step -> appendLine("> ${i.title}: `${i.args}`")
             is ChatItem.Plan -> { appendLine("**Plano:** ${i.goal}"); i.phases.forEach { appendLine("- [${if (it.done) "x" else " "}] ${it.title}") }; appendLine() }

@@ -25,6 +25,13 @@ class TradeGuardTest {
         assertFalse(g.approve("a", "solana", "BONK", Side.BUY, 75.0, 80)) // minimo do agente maior que o piso
     }
 
+    @Test fun `gate rejeita confianca baixa e numeros fora do intervalo`() {
+        val g = gate()
+        assertFalse(g.approve("a", "solana", "SOL", Side.BUY, 90.0, 70, confidence = 69.9))
+        assertFalse(g.approve("a", "solana", "SOL", Side.BUY, 101.0, 70, confidence = 90.0))
+        assertTrue(g.approve("a", "solana", "SOL", Side.BUY, 90.0, 70, confidence = 70.0))
+    }
+
     @Test fun `aprovacao e de uso unico`() {
         val g = gate()
         g.approve("a", "iqoption", "EURUSD", Side.BUY, 80.0, 70)
@@ -78,6 +85,20 @@ class TradeGuardTest {
         val res = SignalIO.parseResults("texto ```json [{\"id\":\"EURUSD\",\"accuracy\":\"85%\",\"confidence\":60,\"reason\":\"ok\"}] ```")
         assertEquals(85.0, res!![0].accuracy, 0.0)
         assertNull(SignalIO.parseResults("sem json"))
+    }
+
+    @Test fun `entrada e resultado estritos falham fechados`() {
+        assertNull(SignalIO.parseInputsStrict("[{\"id\":\"EURUSD\",\"direction\":\"call\"},{\"id\":\"eur/usd\",\"direction\":\"put\"}]"))
+        assertEquals(1, SignalIO.parseInputsStrict("[{\"id\":\"EURUSD\",\"venue\":\"iqoption\",\"direction\":\"call\",\"data\":{\"price\":1}}]")!!.size)
+        assertEquals(false, SignalIO.parseInputsStrict("[{\"id\":\"EURUSD\",\"direction\":\"call\",\"data\":\"x\"}]")!!.single().hasEvidence)
+        val valid = """[{"id":"EURUSD","accuracy":82.5,"confidence":75,"reason":"velas e direção alinhadas"}]"""
+        assertEquals(82.5, SignalIO.parseResultsStrict(valid, listOf("EURUSD"))!!.single().accuracy, 0.0)
+        val objectEnvelope = """{"results":[{"id":"EURUSD","accuracy":82.5,"confidence":75,"reason":"velas e direção alinhadas"}]}"""
+        assertEquals(82.5, SignalIO.parseResultsStrict(objectEnvelope, listOf("EURUSD"))!!.single().accuracy, 0.0)
+        assertNull(SignalIO.parseResultsStrict("texto $valid", listOf("EURUSD")))
+        assertNull(SignalIO.parseResultsStrict("""[{"id":"EURUSD","accuracy":"82","confidence":75,"reason":"ok"}]""", listOf("EURUSD")))
+        assertNull(SignalIO.parseResultsStrict("""[{"id":"EURUSD","accuracy":82,"confidence":75}]""", listOf("EURUSD")))
+        assertNull(SignalIO.parseResultsStrict("""[{"id":"EURUSD","accuracy":82,"confidence":75,"reason":"ok"}]""", listOf("EURUSD", "BTCUSD")))
     }
 
     @Test fun `reservas de ativo entre agentes`() {

@@ -126,7 +126,8 @@ fun AgentEditScreen(nav: NavController, id: String) {
             CueField(a.name, { a = a.copy(name = it) }, "Nome do Agent")
             // Caixa de tamanho fixo: prompts grandes rolam por dentro em vez de esticar a tela.
             CueField(a.instructions, { a = a.copy(instructions = it) }, "Instruções (como deve agir, tom, objetivos)", modifier = Modifier.height(200.dp), minLines = 5)
-            ModelPicker(a.model ?: "", { a = a.copy(model = it.ifBlank { null }) }, "Modelo (vazio = padrão do app)", allowEmpty = true)
+            ModelPicker(a.model ?: "", { a = a.copy(model = it.ifBlank { null }) }, "Modelo (vazio = padrão do app)", allowEmpty = true,
+                baseUrl = app.store.settings.baseUrl, apiKey = app.store.settings.apiKey)
             SectionLabel("Autonomia")
             ToggleRow("Pode trabalhar de forma autônoma", "Quando ligado, o próprio agente decide, pela conversa, se e de quanto em quanto tempo deve acordar para seguir uma tarefa contínua. Sem um pedido assim, ele fica dormindo.", a.autonomous) { a = a.copy(autonomous = it) }
             if (a.autonomous) {

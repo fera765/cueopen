@@ -7,6 +7,8 @@ import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.doubleOrNull
+import kotlinx.serialization.json.intOrNull
 import java.util.concurrent.ConcurrentHashMap
 
 /*
@@ -41,6 +43,7 @@ class SignalGate(
     private val clock: () -> Long = { System.currentTimeMillis() },
     private val ttlMs: Long = 5 * 60_000L,
     val floor: Int = 70,
+    val confidenceFloor: Int = SignalEvaluationAdapter.MIN_CONFIDENCE.toInt(),
 ) {
     data class Approval(val agentKey: String, val venue: String, val asset: String, val side: Side, val accuracy: Int, val at: Long)
 
@@ -55,9 +58,9 @@ class SignalGate(
 
     /** Grava a aprovação se a acurácia atinge o maior entre [minAccuracy] e o piso. Devolve se gravou. */
     @Synchronized
-    fun approve(agentKey: String, venue: String?, asset: String, side: Side, accuracy: Double, minAccuracy: Int): Boolean {
+    fun approve(agentKey: String, venue: String?, asset: String, side: Side, accuracy: Double, minAccuracy: Int, confidence: Double = 100.0): Boolean {
         purge()
-        if (accuracy < maxOf(minAccuracy, floor)) return false
+        if (!accuracy.isFinite() || accuracy !in 0.0..100.0 || !confidence.isFinite() || confidence < confidenceFloor || accuracy < maxOf(minAccuracy, floor)) return false
         val v = venue?.trim()?.lowercase().orEmpty().ifBlank { "*" }
         val a = AssetKeys.norm(asset)
         if (a.isEmpty()) return false
@@ -118,7 +121,13 @@ object SwapLegs {
     }
 }
 
-data class SignalInput(val id: String, val direction: String?, val venue: String?)
+data class SignalInput(
+    val id: String,
+    val direction: String?,
+    val venue: String?,
+    val horizonMinutes: Int? = null,
+    val hasEvidence: Boolean = false,
+)
 data class JevResult(val id: String, val accuracy: Double, val confidence: Double, val reason: String)
 
 /** Leitura tolerante dos sinais enviados pelo agente e da resposta do avaliador. */
@@ -141,8 +150,37 @@ object SignalIO {
         extractArray(text)?.mapNotNull { el ->
             val o = el as? JsonObject ?: return@mapNotNull null
             val id = str(o["id"]) ?: return@mapNotNull null
-            SignalInput(id, str(o["direction"]), str(o["venue"]))
+            SignalInput(id, str(o["direction"]), str(o["venue"]), num(o["horizon_minutes"]).takeIf { it > 0.0 }?.toInt(), hasEvidence(o))
         }.orEmpty()
+
+    /** Null se qualquer sinal está malformado, repetido ou sem identificador. */
+    fun parseInputsStrict(text: String): List<SignalInput>? {
+        val root = runCatching { json.parseToJsonElement(text.trim()) as? JsonArray }.getOrNull() ?: return null
+        if (root.isEmpty()) return null
+        val out = root.map { element ->
+            val o = element as? JsonObject ?: return null
+            val id = str(o["id"] )?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+            val direction = str(o["direction"])?.trim()?.takeIf { it.isNotEmpty() }
+            val venue = str(o["venue"])?.trim()?.takeIf { it.isNotEmpty() }
+            val horizon = (o["horizon_minutes"] as? JsonPrimitive)?.let { it.intOrNull ?: it.contentOrNull?.toIntOrNull() }
+            SignalInput(id, direction, venue, horizon, hasEvidence(o))
+        }
+        if (out.map { AssetKeys.norm(it.id) }.distinct().size != out.size) return null
+        return out
+    }
+
+    private fun hasEvidence(o: JsonObject): Boolean {
+        fun meaningful(value: JsonElement?): Boolean = when (value) {
+            is JsonPrimitive -> if (value.isString) {
+                val text = value.contentOrNull?.trim().orEmpty()
+                text.length >= 3 && text.lowercase() !in setOf("null", "n/a", "none", "sem dados", "indisponível", "desconhecido")
+            } else value.doubleOrNull != null
+            is JsonObject -> value.values.any { meaningful(it) }
+            is JsonArray -> value.any { meaningful(it) }
+            else -> false
+        }
+        return listOf("data", "market_data", "evidence").any { meaningful(o[it]) }
+    }
 
     /** null = a resposta não contém um array JSON. */
     fun parseResults(text: String): List<JevResult>? =
@@ -150,6 +188,44 @@ object SignalIO {
             val o = el as? JsonObject ?: return@mapNotNull null
             JevResult(str(o["id"]) ?: "?", num(o["accuracy"]), num(o["confidence"]), str(o["reason"]).orEmpty())
         }
+
+    /** Parser de produção: aceita somente array JSON (ou bloco JSON fechado) com um resultado válido por id. */
+    fun parseResultsStrict(text: String, expectedIds: List<String>): List<JevResult>? {
+        if (expectedIds.isEmpty()) return null
+        val trimmed = text.trim()
+        val body = if (trimmed.startsWith("```")) {
+            val firstLine = trimmed.indexOf('\n')
+            val lastFence = trimmed.lastIndexOf("```")
+            if (firstLine < 0 || lastFence <= firstLine || trimmed.substring(lastFence + 3).isNotBlank()) return null
+            trimmed.substring(firstLine + 1, lastFence).trim()
+        } else trimmed
+        val parsed = runCatching { Json.parseToJsonElement(body) }.getOrNull() ?: return null
+        val array = when (parsed) {
+            is JsonArray -> parsed
+            is JsonObject -> parsed["results"] as? JsonArray ?: return null
+            else -> return null
+        }
+        val expected = expectedIds.map { AssetKeys.norm(it) }
+        if (expected.any { it.isBlank() } || expected.distinct().size != expected.size || array.size != expected.size) return null
+        val found = HashSet<String>()
+        val result = array.map { element ->
+            val o = element as? JsonObject ?: return null
+            val id = str(o["id"])?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+            val key = AssetKeys.norm(id)
+            if (key !in expected || !found.add(key)) return null
+            fun strictNumber(name: String): Double? {
+                val p = o[name] as? JsonPrimitive ?: return null
+                if (p.isString) return null
+                val n = p.doubleOrNull ?: return null
+                return n.takeIf { it.isFinite() && it in 0.0..100.0 }
+            }
+            val accuracy = strictNumber("accuracy") ?: return null
+            val confidence = strictNumber("confidence") ?: return null
+            val reason = str(o["reason"])?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+            JevResult(id, accuracy, confidence, reason.take(300))
+        }
+        return result.takeIf { found.size == expected.size }
+    }
 }
 
 /** Coordenação entre agentes e venues: um lugar só para travas e "reservas" de ativo. */

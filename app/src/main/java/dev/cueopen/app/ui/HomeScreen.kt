@@ -206,6 +206,9 @@ fun Composer(
     running: Boolean = false, onStop: () -> Unit = {},
     nextCycleAt: Long? = null,
     onSend: (String, List<Uri>) -> Unit,
+    replyText: String? = null,
+    replyAuthor: String = "mensagem do agente",
+    onClearReply: () -> Unit = {},
 ) {
     val c = Cue.c
     // Mantém cursor/seleção dentro do Composer; String isolada perde a posição do cursor
@@ -365,6 +368,18 @@ fun Composer(
     val imeVisible = WindowInsets.ime.getBottom(LocalDensity.current) > 0
     Column(Modifier.fillMaxWidth().padding(start = 12.dp, end = 12.dp, top = 12.dp, bottom = if (imeVisible) 0.dp else 12.dp)
         .clip(RoundedCornerShape(26.dp)).background(c.surface).border(1.dp, c.line, RoundedCornerShape(26.dp)).padding(12.dp)) {
+        if (!replyText.isNullOrBlank()) {
+            Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(c.surface2).padding(start = 8.dp, end = 2.dp, top = 6.dp, bottom = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+                Box(Modifier.width(3.dp).height(34.dp).clip(RoundedCornerShape(2.dp)).background(c.accent))
+                Spacer(Modifier.width(8.dp))
+                Column(Modifier.weight(1f)) {
+                    Text("Respondendo a $replyAuthor", fontSize = 11.sp, fontWeight = FontWeight.SemiBold, color = c.ink2, maxLines = 1)
+                    Text(replyText, fontSize = 12.sp, color = c.ink, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                }
+                IconButton(onClick = onClearReply, modifier = Modifier.size(34.dp)) { Icon(Icons.Rounded.Close, "Cancelar resposta", Modifier.size(18.dp), tint = c.ink2) }
+            }
+            Spacer(Modifier.height(8.dp))
+        }
         if (files.isNotEmpty()) {
             Row(Modifier.horizontalScroll(rememberScrollState()).padding(bottom = 8.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 files.forEach { u ->

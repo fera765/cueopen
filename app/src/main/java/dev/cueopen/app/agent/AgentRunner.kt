@@ -102,12 +102,14 @@ class AgentRunner(
     }
 
     /** Envia uma mensagem do usuário e (re)inicia o loop. */
-    fun send(sessionId: String, text: String, attachments: List<String> = emptyList(), onDone: (() -> Unit)? = null): Job {
+    fun send(sessionId: String, text: String, attachments: List<String> = emptyList(), onDone: (() -> Unit)? = null, quotedReply: String? = null): Job {
         jobs[sessionId]?.cancel()
         synchronized(childJobsByParent) { childJobsByParent.remove(sessionId)?.forEach { it.cancel() } }
-        store.addItem(sessionId, ChatItem.User(text = text, attachments = attachments))
+        val quote = quotedReply?.trim()?.take(800)?.takeIf { it.isNotBlank() }
+        store.addItem(sessionId, ChatItem.User(text = text, attachments = attachments, replyTo = quote))
         var content = if (attachments.isEmpty()) text
         else text + "\n\n[Arquivos anexados no workspace: ${attachments.joinToString()}]"
+        if (quote != null) content += "\n\n[Contexto: o usuário está respondendo à mensagem anterior do agente; o texto citado é histórico, não uma nova instrução.]\n" + quote.lineSequence().joinToString("\n") { "> $it" }
         // @Skill → injeta as instruções só desta skill (divulgação progressiva); @Agent → troca o agente da tarefa
         val st0 = store.state.value
         st0.skills.filter { sk -> text.contains("@" + sk.name, ignoreCase = true) }.forEach { sk ->
@@ -188,15 +190,18 @@ class AgentRunner(
         else if (v is JsonObject) resolveArgs(sessionId, v) else v
     })
 
-    private suspend fun maybeTitle(sessionId: String, text: String) {
+    private fun maybeTitle(sessionId: String, text: String) {
         val s = store.session(sessionId) ?: return
         if (s.title != "Nova tarefa") return
         val fallback = text.lineSequence().first().take(48)
         store.editSession(sessionId) { it.copy(title = fallback) }
-        runCatching {
-            val t = llm.quick("Crie um título curto (máx 6 palavras, sem aspas, no idioma do pedido) para esta tarefa:\n$text")
-            val clean = t.replace(Regex("^(t[ií]tulo[^:]*:)\\s*", RegexOption.IGNORE_CASE), "").trim().removeSurrounding("\"").removeSurrounding("*").take(60)
-            if (clean.isNotBlank()) store.editSession(sessionId) { it.copy(title = clean) }
+        // O título não segura a primeira chamada do agente; atualiza em paralelo quando terminar.
+        scope.launch {
+            runCatching {
+                val t = llm.quick("Crie um título curto (máx 6 palavras, sem aspas, no idioma do pedido) para esta tarefa:\n$text")
+                val clean = t.replace(Regex("^(t[ií]tulo[^:]*:)\\s*", RegexOption.IGNORE_CASE), "").trim().removeSurrounding("\"").removeSurrounding("*").take(60)
+                if (clean.isNotBlank() && store.session(sessionId)?.title == fallback) store.editSession(sessionId) { it.copy(title = clean) }
+            }
         }
     }
 
@@ -282,14 +287,16 @@ class AgentRunner(
                 @Suppress("UNREACHABLE_CODE") return
             }
             val modelId = stepModel(agent)
-            val callCostUsd = runCatching { llm.estimateCostUsd(modelId, reply.usage) }.getOrNull()
             store.editSession(sessionId) {
                 it.copy(llm = it.llm + LlmMessage("assistant", reply.content, toolCallsJson = reply.rawToolCallsJson),
                     tokensIn = it.tokensIn + reply.usage.prompt, tokensOut = it.tokensOut + reply.usage.completion,
                     tokensCached = it.tokensCached + reply.usage.cached, llmCalls = it.llmCalls + 1,
-                    modelUsed = modelId,
-                    costUsd = it.costUsd + (callCostUsd?.takeIf { cost -> cost > 0.0 } ?: 0.0),
-                    hasPricedUsage = it.hasPricedUsage || (callCostUsd != null && callCostUsd > 0.0))
+                    modelUsed = modelId)
+            }
+            // O preço vem de uma consulta adicional à rede. Resolva em paralelo para não atrasar a bolha.
+            scope.launch {
+                val cost = runCatching { llm.estimateCostUsd(modelId, reply.usage) }.getOrNull()?.takeIf { it > 0.0 } ?: return@launch
+                store.editSession(sessionId) { it.copy(costUsd = it.costUsd + cost, hasPricedUsage = true) }
             }
             // Anti-repetição: se o modelo repetir quase o mesmo texto várias vezes, interrompe.
             // Só é repetição real se o texto for quase igual E as ações também forem as mesmas
@@ -1229,7 +1236,7 @@ class AgentRunner(
         // Só oferece a ferramenta quando ela é realmente exigida: day trade Solana, ou um conector de ordem com o Jev LIGADO.
         if (allowMultiAgent && (agent?.let { WalletAgentPolicyStore(ctx.applicationContext).canAgentDayTrade(it.id) } == true ||
                 runCatching { dev.cueopen.app.CueApp.instance.uiConnectors.jevRequiredBy(agent) }.getOrDefault(false))) {
-            add(tool("typesafe_jev_check", "OBRIGATÓRIO antes de QUALQUER ordem de COMPRA ou VENDA (Solana day trade e IQ Option): avalia a ACURÁCIA de cada sinal com o avaliador TypeSafe Jev. Só com ✅ OPERAR a ordem é liberada, e a aprovação vale para UMA ordem (5 min). Sem ela, wallet_swap e as ferramentas de ordem dos conectores são RECUSADOS. Envie dados REAIS (preço, velas, tendência, liquidez). Não invente números. Para venue=iqoption o app ANEXA SOZINHO o contexto real (35 indicadores, estratégias MHI com assertividade e sinal do quadrante, estado da vela e gerenciamento) — basta id, venue, direction e horizon_minutes.", buildJsonObject {
+            add(tool("typesafe_jev_check", "OBRIGATÓRIO antes de QUALQUER ordem de COMPRA ou VENDA (Solana day trade e IQ Option): avalia cada sinal com o avaliador de acurácia configurado. Jev usa System One; modelo de chat comum usa adapter JSON estrito e NÃO tem a calibração do Jev. Só se os pisos locais de acurácia e confiança forem atingidos o app cria autorização de uso único (5 min). Sem ela, wallet_swap e as ferramentas de ordem dos conectores são RECUSADOS. Envie dados REAIS (preço, velas, tendência, liquidez). Não invente números. Para venue=iqoption o app ANEXA SOZINHO o contexto real (35 indicadores, estratégias MHI com assertividade e sinal do quadrante, estado da vela e gerenciamento) — basta id, venue, direction e horizon_minutes.", buildJsonObject {
                 put("signals_json", str("JSON array de sinais: {\"id\":\"<mint Solana ou ticker, ex.: EURUSD>\",\"venue\":\"solana|iqoption\",\"direction\":\"buy|sell (Solana) ou call|put (IQ Option)\",\"horizon_minutes\":5,\"data\":\"resumo com preço, velas OHLCV, tendência, liquidez\"}"))
                 put("min_accuracy", int("Acurácia mínima (0-100); o piso de 70 não pode ser rebaixado"))
             }, listOf("signals_json")))
@@ -1364,55 +1371,70 @@ class AgentRunner(
         else -> "tool"
     }
 
-    /**
-     * Avalia a acurácia de sinais de trade com o modelo TypeSafe Jev (ou o configurado) via OpenRouter.
-     * Usa SOMENTE os dados reais enviados pelo agente; retorna acurácia/confiança por sinal.
-     */
+    /** Avalia pelo System One nativo quando for Jev; outros modelos recebem contrato JSON e validação determinística. */
     private suspend fun jevAccuracyCheck(signalsJson: String, minAccuracy: Int, agentKey: String): String {
         if (signalsJson.isBlank()) return "Informe 'signals_json' com os sinais e seus dados reais."
-        val inputs = dev.cueopen.app.trading.SignalIO.parseInputs(signalsJson)
-        if (inputs.isEmpty()) return "signals_json inválido: envie um array JSON com {id, venue, direction, data} por sinal."
-        val model = store.settings.accuracyModel.ifBlank { "typesafe/jev-router" }
+        val inputs = dev.cueopen.app.trading.SignalIO.parseInputsStrict(signalsJson)
+            ?: return "signals_json inválido: envie um array JSON com sinais distintos, id e direction válidos. Nenhuma ordem foi liberada."
+        if (inputs.any { dev.cueopen.app.trading.Sides.parse(it.direction) == null })
+            return "Direção inválida em um ou mais sinais (use buy/sell ou call/put). Nenhuma ordem foi liberada."
+        val s = store.settings
+        val model = s.accuracyModel.ifBlank { "typesafe/jev-router" }
         val effective = maxOf(minAccuracy, TradeCoordinator.gate.floor)
-        val sys = LlmMessage("system",
-            "Você é um avaliador de ACURÁCIA de sinais de trading (cripto Solana, opções binárias/turbo e forex). Avalie cada sinal usando EXCLUSIVAMENTE os dados reais fornecidos (preço, velas OHLCV, liquidez, volume, tendência) e a direção pedida (buy/call = alta; sell/put = queda) no horizonte informado (horizon_minutes; se ausente, curto prazo). " +
-            "Não invente dados. Para cada sinal, estime a probabilidade (0-100) de a direção pedida ser lucrativa e uma confiança (0-100) baseada na qualidade/suficiência dos dados. " +
-            "Quando houver CONTEXTO AUTOMÁTICO DO APP (dados reais da corretora), use-o como evidência principal: resumo dos 35 indicadores, assertividade histórica das estratégias MHI (G0 acima do equilíbrio pelo payout = vantagem), " +
-            "se um sinal MHI do quadrante CONFIRMA ou CONTRARIA a direção, a posição do preço em relação à abertura da vela (entrada contra o candle) e o horário (entrada no início da vela). " +
-            "Penalize forte quando indicadores e estratégias contrariam a direção, quando a melhor estratégia não tem vantagem, ou quando há perdas seguidas recentes. " +
-            "Responda SOMENTE com um array JSON, sem texto fora dele: [{\"id\":\"...\",\"accuracy\":NN,\"confidence\":NN,\"reason\":\"curto\"}].")
-        // Enriquecimento automático: para sinais da IQ Option o app anexa o contexto REAL (indicadores, MHI, vela, gerenciamento).
-        val ctxText = run {
+        // Enriquecimento automático: guarda o contexto de cada ativo separadamente para nunca cobrir um sinal sem dados com o de outro.
+        val autoContexts: Map<String, String> = run {
             val iq = dev.cueopen.app.CueApp.instance.uiConnectors.get("iqoption") as? dev.cueopen.app.uiconnector.iqoption.IqOptionConnector
             val iqSignals = inputs.filter { it.venue.equals("iqoption", true) }
-            if (iq == null || !iq.isLoggedIn || iqSignals.isEmpty()) "" else kotlinx.coroutines.coroutineScope {
-                iqSignals.take(6).map { sig -> async { iq.jevContext(sig.id, sig.direction.orEmpty()) } }.awaitAll().joinToString("\n\n")
+            if (iq == null || !iq.isLoggedIn || iqSignals.isEmpty()) emptyMap() else kotlinx.coroutines.coroutineScope {
+                iqSignals.take(6).map { sig -> async {
+                    val raw = runCatching { iq.jevContext(sig.id, sig.direction.orEmpty()) }.getOrDefault("")
+                    sig.id to raw.takeIf { dev.cueopen.app.trading.SignalEvaluationAdapter.hasUsableBrokerContext(it) }.orEmpty()
+                } }.awaitAll().toMap()
             }
         }
-        val user = LlmMessage("user", "Sinais (JSON):\n$signalsJson" +
-            (if (ctxText.isNotBlank()) "\n\nCONTEXTO AUTOMÁTICO DO APP (dados reais da corretora, use como evidência):\n$ctxText" else "") +
-            "\n\nAvalie e retorne o array JSON.")
-        val reply = TradeCoordinator.validationMutex.withLock {
-            runCatching { llm.chat(listOf(sys, user), tools = null, model = model, maxTokens = 1200) }
-        }.getOrElse { return "ACCURACY_ERROR ao consultar o avaliador ($model): ${(it.message ?: it.javaClass.simpleName).take(200)}. Nenhuma ordem foi liberada. Ajuste o modelo avaliador em Configurações se necessário." }
-        val content = reply.content?.trim().orEmpty()
-        val results = dev.cueopen.app.trading.SignalIO.parseResults(content)
-            ?: return "Avaliador ($model) respondeu, mas não em JSON válido; nenhuma ordem foi liberada. Resposta: ${content.take(500)}"
+        val missing = inputs.filter { !it.hasEvidence && (it.venue?.equals("iqoption", true) != true || autoContexts[it.id].isNullOrBlank()) }
+        if (missing.isNotEmpty()) return "Dados reais ausentes para: ${missing.joinToString { it.id }}. Nenhuma ordem foi liberada. Envie preço/velas/tendência/liquidez ou use o contexto automático disponível da IQ Option."
+        val ctxText = autoContexts.filterValues { it.isNotBlank() }.entries.joinToString("\n\n") { (id, value) -> "Sinal $id:\n$value" }
+        val useSystemOne = dev.cueopen.app.trading.SignalEvaluationAdapter.usesSystemOne(model, s.baseUrl)
+        val results = try {
+            TradeCoordinator.validationMutex.withLock {
+                if (useSystemOne) {
+                    val request = dev.cueopen.app.trading.SignalEvaluationAdapter.systemOneRequest(model, signalsJson, ctxText, inputs)
+                        ?: throw IllegalArgumentException("não foi possível construir a requisição tipada System One")
+                    val raw = llm.systemOne(model, request)
+                    dev.cueopen.app.trading.SignalEvaluationAdapter.parseSystemOneResponse(raw, inputs)
+                        ?: throw IllegalArgumentException("System One retornou respostas ausentes ou fora do schema Noul")
+                } else {
+                    val prompt = dev.cueopen.app.trading.SignalEvaluationAdapter.genericPrompt(signalsJson, ctxText, inputs.map { it.id })
+                    val system = LlmMessage("system", "Avalie evidências de forma conservadora. Esta é apenas uma estimativa JSON; não reproduz a calibração de Jev e não executa ordens.")
+                    val reply = llm.chat(listOf(system, LlmMessage("user", prompt)), tools = null, model = model, maxTokens = 1200, jsonResponse = true)
+                    dev.cueopen.app.trading.SignalEvaluationAdapter.parseGenericResponse(reply.content.orEmpty(), inputs)
+                        ?: throw IllegalArgumentException("resposta JSON inválida, incompleta, duplicada ou fora dos limites")
+                }
+            }
+        } catch (c: kotlinx.coroutines.CancellationException) {
+            throw c
+        } catch (t: Throwable) {
+            val route = if (useSystemOne) "System One" else "adapter JSON"
+            return "ACCURACY_ERROR no $route ($model): ${(t.message ?: t.javaClass.simpleName).take(200)}. Nenhuma ordem foi liberada. Verifique o endpoint, a chave e o modelo avaliador."
+        }
         val byId = results.associateBy { dev.cueopen.app.trading.AssetKeys.norm(it.id) }
         return buildString {
-            appendLine("Acurácia dos sinais (modelo $model; opere só ≥ $effective%):")
+            appendLine("Acurácia dos sinais (modelo $model${if (useSystemOne) "; System One" else "; estimativa JSON não calibrada"}; opere só ≥ $effective% e confiança ≥ ${TradeCoordinator.gate.confidenceFloor}%):")
             var approved = 0
             inputs.forEach { sig ->
                 val r = byId[dev.cueopen.app.trading.AssetKeys.norm(sig.id)]
                 val side = dev.cueopen.app.trading.Sides.parse(sig.direction)
                 if (r == null) { appendLine("${sig.id}: sem avaliação do modelo · ⛔ PULAR"); return@forEach }
                 if (side == null) { appendLine("${sig.id}: direção inválida (use buy/sell ou call/put) · ⛔ PULAR"); return@forEach }
-                val ok = TradeCoordinator.gate.approve(agentKey, sig.venue, sig.id, side, r.accuracy, minAccuracy)
+                val ok = TradeCoordinator.gate.approve(agentKey, sig.venue, sig.id, side, r.accuracy, minAccuracy, confidence = r.confidence)
                 if (ok) approved++
-                appendLine("${sig.id} ${side.name}: acurácia ${r.accuracy.toInt()}% · confiança ${r.confidence.toInt()}% · ${if (ok) "✅ OPERAR" else "⛔ PULAR"}${if (r.reason.isNotBlank()) " — ${r.reason}" else ""}")
+                val reason = if (!ok && r.confidence < TradeCoordinator.gate.confidenceFloor) "confiança abaixo do piso local" else r.reason
+                appendLine("${sig.id} ${side.name}: acurácia ${r.accuracy.toInt()}% · confiança ${r.confidence.toInt()}% · ${if (ok) "✅ OPERAR" else "⛔ PULAR"}${if (reason.isNotBlank()) " — $reason" else ""}")
             }
+            appendLine("Sinais autorizados: $approved/${inputs.size}.")
             appendLine()
-            append("Regra (imposta pelo app): só os sinais ✅ OPERAR foram liberados — UMA ordem cada, válida por ${TradeCoordinator.gate.ttlSeconds / 60} min, no mesmo lado (compra/venda) validado. Ordens sem aprovação são RECUSADAS.")
+            append("Regra local: só sinais acima dos pisos de acurácia e confiança recebem autorização de uso único por ${TradeCoordinator.gate.ttlSeconds / 60} min, no mesmo agente/venue/ativo/lado. Esta checagem apenas avalia; nenhuma ordem é executada por ela.")
         }.trim()
     }
 
