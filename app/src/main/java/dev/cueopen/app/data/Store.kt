@@ -11,22 +11,28 @@ import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.onEach
-import kotlinx.coroutines.flow.update
 import kotlinx.serialization.json.Json
 import java.io.File
+import java.io.IOException
 
 val AppJson = Json { ignoreUnknownKeys = true; encodeDefaults = true; prettyPrint = false }
 
 /** Armazenamento local (sem login, sem nuvem): um JSON em filesDir com escrita debounce. */
 @OptIn(FlowPreview::class)
 class Store(context: Context) {
+    private data class VersionedState(val revision: Long, val state: AppState)
     private val file = File(context.filesDir, "cueopen_state.json")
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    private val _state = MutableStateFlow(load())
+    private val stateLock = Any()
+    private var revision = 1L
+    private var persistedRevision = 0L
+    private val initialState = load()
+    private val _state = MutableStateFlow(initialState)
+    private val snapshots = MutableStateFlow(VersionedState(1L, initialState))
     val state: StateFlow<AppState> = _state
 
     init {
-        _state.drop(1).debounce(400).onEach { save(it) }.launchIn(scope)
+        snapshots.drop(1).debounce(400).onEach { save(it) }.launchIn(scope)
     }
 
     private fun load(): AppState = runCatching {
@@ -50,15 +56,29 @@ class Store(context: Context) {
     }.getOrElse { AppState() }
 
     @Synchronized
-    private fun save(s: AppState) {
+    private fun save(snapshot: VersionedState) {
+        if (snapshot.revision <= persistedRevision) return
         val tmp = File(file.parentFile, file.name + ".tmp")
-        tmp.writeText(AppJson.encodeToString(AppState.serializer(), s))
-        tmp.renameTo(file)
+        tmp.writeText(AppJson.encodeToString(AppState.serializer(), snapshot.state))
+        if (!tmp.renameTo(file)) throw IOException("Não foi possível concluir a gravação do estado local.")
+        persistedRevision = snapshot.revision
     }
 
-    fun flush() = save(_state.value)
+    fun flush() {
+        synchronized(stateLock) { save(snapshots.value) }
+    }
 
-    fun update(fn: (AppState) -> AppState) = _state.update(fn)
+    fun update(fn: (AppState) -> AppState) {
+        synchronized(stateLock) {
+            val current = _state.value
+            val next = fn(current)
+            if (next !== current) {
+                revision += 1
+                _state.value = next
+                snapshots.value = VersionedState(revision, next)
+            }
+        }
+    }
 
     val settings get() = _state.value.settings
 

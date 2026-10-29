@@ -123,7 +123,7 @@ class ContextManager(private val store: Store, private val sandbox: Sandbox, pri
             Histórico a compactar:
             $transcript
         """.trimIndent()
-        val summary = runCatching { llm.quick(prompt, maxTokens = 1500) }.getOrNull()
+        val summary = runCatching { llm.quick(prompt, maxTokens = 1500, conversationId = s.id) }.getOrNull()
         val updated = if (!summary.isNullOrBlank()) {
             s.copy(llm = tail, summary = summary, compactions = s.compactions + 1)
         } else {
@@ -239,7 +239,7 @@ class ContextManager(private val store: Store, private val sandbox: Sandbox, pri
 
                 Conversa:
                 $convo
-            """.trimIndent(), maxTokens = 400)
+            """.trimIndent(), maxTokens = 400, conversationId = s.id)
         }.getOrNull() ?: return
         out.lines().map { it.trim() }.filter { it.startsWith("- ") }.map { it.removePrefix("- ").trim() }
             .filter { it.length in 8..400 }.take(5).forEach { saveMemory(it, null) }

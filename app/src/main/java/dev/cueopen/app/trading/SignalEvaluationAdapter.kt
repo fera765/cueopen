@@ -16,11 +16,19 @@ object SignalEvaluationAdapter {
     /** O mesmo piso é imposto no portão local, não apenas pedido ao modelo. */
     const val MIN_CONFIDENCE = 70.0
 
+    /** O alias TypeSafe/OpenRouter antigo vira o ID Console equivalente ao usar OpenCode. */
+    fun resolveModel(model: String, baseUrl: String): String {
+        val host = runCatching { URI(baseUrl.trim()).host?.lowercase() }.getOrNull().orEmpty()
+        val id = model.trim()
+        return if (host == "opencode.ai" && (id.isBlank() || id.equals("typesafe/jev-router", true) || id.equals("jev-latest", true))) "jev-1.13" else id
+    }
+
     fun usesSystemOne(model: String, baseUrl: String): Boolean {
         val host = runCatching { URI(baseUrl.trim()).host?.lowercase() }.getOrNull().orEmpty()
         val id = model.trim().lowercase()
         return (host == "openrouter.ai" && id.startsWith("typesafe/jev")) ||
-            (host == "api.typesafe.ai" && (id.startsWith("jev-") || id.startsWith("typesafe/jev")))
+            (host == "api.typesafe.ai" && (id.startsWith("jev-") || id.startsWith("typesafe/jev"))) ||
+            (host == "opencode.ai" && id.startsWith("jev-"))
     }
 
     /** Body documentado no System One oficial (OpenRouter ou API TypeSafe). */

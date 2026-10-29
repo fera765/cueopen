@@ -1,5 +1,4 @@
 package dev.cueopen.app.llm
-
 import dev.cueopen.app.data.LlmMessage
 import dev.cueopen.app.data.Settings
 import kotlinx.coroutines.Dispatchers
@@ -109,11 +108,14 @@ class OpenRouter(private val settings: () -> Settings) {
         model: String? = null,
         maxTokens: Int = 16000,
         jsonResponse: Boolean = false,
+        conversationId: String? = null,
     ): LlmReply = withContext(Dispatchers.IO) {
         val s = settings()
         val mdl = model ?: s.model
         require(mdl.isNotBlank()) { "Escolha um modelo nas Configurações." }
         val openRouter = isOpenRouter(s.baseUrl)
+        val openCodeSession = OpenCodeProtocol.sessionHeader(s.baseUrl, conversationId)
+        val openCodeUserAgent = OpenCodeProtocol.userAgent(s.baseUrl)
         fun buildBody(disableReasoning: Boolean, structuredOutput: Boolean) = buildJsonObject {
             put("model", mdl)
             put("max_tokens", maxTokens)
@@ -133,6 +135,8 @@ class OpenRouter(private val settings: () -> Settings) {
                 .apply {
                     if (s.apiKey.isNotBlank()) header("Authorization", "Bearer ${s.apiKey}")
                     if (openRouter) header("HTTP-Referer", "https://github.com/cueopen").header("X-Title", "CueOpen")
+                    openCodeSession?.let { header("x-opencode-session", it) }
+                    openCodeUserAgent?.let { header("User-Agent", it) }
                 }
                 .post(buildBody(disableReasoning, structuredOutput).toString().toRequestBody("application/json".toMediaType()))
                 .build()
@@ -186,12 +190,19 @@ class OpenRouter(private val settings: () -> Settings) {
     }
 
     /** Chamada nativa System One para Jev: não passa pelo endpoint de geração de texto. */
-    suspend fun systemOne(model: String, body: JsonObject): String = withContext(Dispatchers.IO) {
+    suspend fun systemOne(model: String, body: JsonObject, conversationId: String? = null): String = withContext(Dispatchers.IO) {
         val s = settings()
         require(body["model"]?.jsonPrimitive?.content == model) { "O modelo do pedido System One não corresponde ao selecionado." }
+        val systemOneUrl = OpenCodeProtocol.systemOneEndpoint(s.baseUrl) ?: endpoint(s.baseUrl, "systemone")
+        val openCodeSession = OpenCodeProtocol.sessionHeader(s.baseUrl, conversationId)
+        val openCodeUserAgent = OpenCodeProtocol.userAgent(s.baseUrl)
         val request = Request.Builder()
-            .url(endpoint(s.baseUrl, "systemone"))
-            .apply { if (s.apiKey.isNotBlank()) header("Authorization", "Bearer ${s.apiKey}") }
+            .url(systemOneUrl)
+            .apply {
+                if (s.apiKey.isNotBlank()) header("Authorization", "Bearer ${s.apiKey}")
+                openCodeSession?.let { header("x-opencode-session", it) }
+                openCodeUserAgent?.let { header("User-Agent", it) }
+            }
             .post(body.toString().toRequestBody("application/json".toMediaType()))
             .build()
         http.newCall(request).execute().use { response ->
@@ -205,9 +216,10 @@ class OpenRouter(private val settings: () -> Settings) {
     }
 
     /** Pedido simples sem ferramentas (títulos, resumos), no modelo rápido. */
-    suspend fun quick(prompt: String, maxTokens: Int = 200): String =
+    suspend fun quick(prompt: String, maxTokens: Int = 200, conversationId: String? = null): String =
         chat(listOf(LlmMessage("user", prompt)), maxTokens = maxTokens,
-            model = settings().let { dev.cueopen.app.agent.JevOrchestrator.auxModel(it.fastModel, it.jevRouting, it.baseUrl.contains("openrouter", true)) }
+            model = settings().let { dev.cueopen.app.agent.JevOrchestrator.auxModel(it.fastModel, it.jevRouting, it.baseUrl.contains("openrouter", true)) },
+            conversationId = conversationId,
         ).content.orEmpty().trim()
 
     private fun LlmMessage.toJson(): JsonElement = buildJsonObject {

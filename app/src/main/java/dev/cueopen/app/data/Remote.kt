@@ -1,5 +1,6 @@
 package dev.cueopen.app.data
 
+import dev.cueopen.app.BuildConfig
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
@@ -50,9 +51,16 @@ object ProviderModels {
     )
 
     fun supportsChatCompletions(baseUrl: String, modelId: String): Boolean {
+        if (isSystemOneId(modelId)) return false
         val host = runCatching { validatedBase(baseUrl).host.lowercase() }.getOrNull() ?: return true
         return host != "opencode.ai" || modelId.lowercase() !in openCodeNonChatCompletions
     }
+
+    private fun isSystemOneId(modelId: String): Boolean =
+        modelId.startsWith("jev-", ignoreCase = true) || modelId.startsWith("typesafe/jev", ignoreCase = true)
+
+    private fun isSystemOneModel(model: Model): Boolean =
+        isSystemOneId(model.id) || model.apiFamily?.contains("systemone", ignoreCase = true) == true
 
     /**
      * OpenAI-compatible providers normally expose GET {baseUrl}/models. OpenCode Console lists
@@ -81,25 +89,38 @@ object ProviderModels {
     private fun fingerprint(key: String): String = MessageDigest.getInstance("SHA-256")
         .digest(key.toByteArray(Charsets.UTF_8)).take(8).joinToString("") { "%02x".format(it) }
 
-    suspend fun all(baseUrl: String, apiKey: String, forceRefresh: Boolean = false): List<Model> {
+    suspend fun all(baseUrl: String, apiKey: String, forceRefresh: Boolean = false, includeSystemOne: Boolean = false): List<Model> {
         val endpoint = modelsEndpoint(baseUrl)
-        val cacheKey = "$endpoint|${fingerprint(apiKey)}"
+        val cacheKey = "$endpoint|${fingerprint(apiKey)}|systemone=$includeSystemOne"
         val now = System.currentTimeMillis()
         if (!forceRefresh) cache[cacheKey]?.takeIf { now - it.loadedAt < CACHE_MS }?.let { return it.models }
         return withContext(Dispatchers.IO) {
             val beforeFetch = System.currentTimeMillis()
             if (!forceRefresh) cache[cacheKey]?.takeIf { beforeFetch - it.loadedAt < CACHE_MS }?.let { return@withContext it.models }
-            val request = Request.Builder().url(endpoint).header("Accept", "application/json").apply {
-                if (apiKey.isNotBlank()) header("Authorization", "Bearer ${apiKey.trim()}")
-            }.get().build()
-            val body = http.newCall(request).execute().use { response ->
-                if (!response.isSuccessful) throw IOException("Catálogo do provedor respondeu HTTP ${response.code}.")
-                response.body?.string().orEmpty()
+            fun fetch(url: String): List<Model> {
+                val parsedUrl = url.toHttpUrl()
+                val request = Request.Builder().url(parsedUrl).header("Accept", "application/json").apply {
+                    if (parsedUrl.host.equals("opencode.ai", ignoreCase = true)) header("User-Agent", "CueOpen/${BuildConfig.VERSION_NAME}")
+                    if (apiKey.isNotBlank()) header("Authorization", "Bearer ${apiKey.trim()}")
+                }.get().build()
+                val body = http.newCall(request).execute().use { response ->
+                    if (!response.isSuccessful) throw IOException("Catálogo do provedor respondeu HTTP ${response.code}.")
+                    response.body?.string().orEmpty()
+                }
+                return parseCatalog(body)
             }
-            val models = parseCatalog(body).filter { supportsChatCompletions(baseUrl, it.id) }
-            if (models.isEmpty()) throw IOException("O endpoint respondeu, mas não retornou modelos em formato OpenAI-compatible.")
-            cache[cacheKey] = Entry(System.currentTimeMillis(), models)
-            models
+            val primary = fetch(endpoint)
+            val models = primary.filter { supportsChatCompletions(baseUrl, it.id) || (includeSystemOne && isSystemOneModel(it)) }.toMutableList()
+            val base = validatedBase(baseUrl)
+            if (includeSystemOne && base.host.equals("opencode.ai", ignoreCase = true)) {
+                val consoleEndpoint = base.newBuilder().encodedPath("/inference/v1/models").build().toString()
+                runCatching { fetch(consoleEndpoint).filter(::isSystemOneModel).map { it.copy(apiFamily = "systemone") } }
+                    .getOrNull()?.let(models::addAll)
+            }
+            val distinctModels = models.distinctBy { it.id }
+            if (distinctModels.isEmpty()) throw IOException("O endpoint respondeu, mas não retornou modelos compatíveis.")
+            cache[cacheKey] = Entry(System.currentTimeMillis(), distinctModels)
+            distinctModels
         }
     }
 

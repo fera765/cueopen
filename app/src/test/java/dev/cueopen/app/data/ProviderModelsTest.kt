@@ -2,6 +2,7 @@ package dev.cueopen.app.data
 
 import java.io.IOException
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
@@ -46,6 +47,9 @@ class ProviderModelsTest {
     @Test fun `OpenCode Go omite familias que nao atendem Chat Completions`() {
         assertTrue(ProviderModels.supportsChatCompletions("https://opencode.ai/inference/go/openai/v1", "glm-5.3"))
         assertTrue(ProviderModels.supportsChatCompletions("https://openrouter.ai/api/v1", "gpt-6-luna"))
+        assertFalse(ProviderModels.supportsChatCompletions("https://opencode.ai/inference/go/openai/v1", "jev-1.13"))
+        assertFalse(ProviderModels.supportsChatCompletions("https://opencode.ai/inference/go/openai/v1", "jev-1.13-free"))
+        assertFalse(ProviderModels.supportsChatCompletions("https://openrouter.ai/api/v1", "typesafe/jev-router"))
         assertEquals(false, ProviderModels.supportsChatCompletions("https://opencode.ai/inference/go/openai/v1", "gpt-6-luna"))
         assertEquals(false, ProviderModels.supportsChatCompletions("https://opencode.ai/inference/go/openai/v1", "claude-haiku-5-5"))
     }

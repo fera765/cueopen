@@ -63,8 +63,8 @@ fun SettingsScreen(nav: NavController) {
             CueField(s.baseUrl, { v -> app.store.updateSettings { it.copy(baseUrl = v.trim()) } }, "Base URL (compatível OpenAI)")
             ModelPicker(s.model, { v -> app.store.updateSettings { it.copy(model = v) } }, "Modelo do agente", baseUrl = s.baseUrl, apiKey = s.apiKey)
             ModelPicker(s.fastModel, { v -> app.store.updateSettings { it.copy(fastModel = v) } }, "Modelo rápido (títulos e resumos de contexto)", baseUrl = s.baseUrl, apiKey = s.apiKey)
-            ModelPicker(s.accuracyModel, { v -> app.store.updateSettings { it.copy(accuracyModel = v) } }, "Modelo avaliador de acurácia (day trade)", baseUrl = s.baseUrl, apiKey = s.apiKey)
-            Text("Jev no OpenRouter/TypeSafe usa a API System One de decisões tipadas. Outros modelos recebem um pedido JSON estruturado; essa estimativa não é calibrada nem equivalente ao Jev. Dados ausentes, resposta inválida ou confiança abaixo de 70% não liberam uma ordem.", fontSize = 12.sp, color = Cue.c.ink2)
+            ModelPicker(dev.cueopen.app.trading.SignalEvaluationAdapter.resolveModel(s.accuracyModel.ifBlank { "typesafe/jev-router" }, s.baseUrl), { v -> app.store.updateSettings { it.copy(accuracyModel = v) } }, "Modelo avaliador de acurácia (day trade)", baseUrl = s.baseUrl, apiKey = s.apiKey, includeSystemOne = true)
+            Text("Jev usa a API System One de decisões tipadas. No OpenCode, Jev 1.13 pertence ao catálogo Console, não ao Go, e pode exigir créditos; Jev Free depende da política de privacidade da conta. Outros modelos recebem um pedido JSON estruturado, sem equivalência de calibração. Dados ausentes, resposta inválida ou confiança abaixo de 70% não liberam uma ordem.", fontSize = 12.sp, color = Cue.c.ink2)
             SectionLabel("TypeSafe Jev")
             ToggleRow("Orquestração Jev", "Cada passo leva só as ferramentas, conectores, skills, memórias e knowledge relevantes — menos tokens de entrada", s.jevOrchestration) { v -> app.store.updateSettings { it.copy(jevOrchestration = v) } }
             ToggleRow("Roteamento Jev Router", "O Jev Router escolhe o modelo e o esforço de raciocínio de cada passo (qualidade × custo). Só OpenRouter; o modelo definido no Agent tem prioridade", s.jevRouting) { v -> app.store.updateSettings { it.copy(jevRouting = v) } }
@@ -221,7 +221,7 @@ fun SandboxScreen(nav: NavController) {
         dismissButton = { TextButton({ confirm = false }) { Text("Cancelar") } })
 }
 
-/** Onboarding sem login: nome, chave OpenRouter e instalação opcional do sandbox. */
+/** Onboarding sem login: nome e instalação opcional do sandbox; provedor/modelo ficam em Configurações. */
 @Composable
 fun OnboardingScreen(onDone: () -> Unit) {
     val app = CueApp.instance
@@ -231,7 +231,7 @@ fun OnboardingScreen(onDone: () -> Unit) {
     val scope = rememberCoroutineScope()
     Column(Modifier.fillMaxSize().background(c.bg).statusBarsPadding().navigationBarsPadding().imePadding().padding(24.dp)) {
         Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-            repeat(3) { i -> Box(Modifier.height(4.dp).weight(1f).clip(CircleShape).background(if (i <= page) c.ink else c.line)) }
+            repeat(2) { i -> Box(Modifier.height(4.dp).weight(1f).clip(CircleShape).background(if (i <= page) c.ink else c.line)) }
         }
         Column(Modifier.weight(1f).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.Center) {
             when (page) {
@@ -242,18 +242,10 @@ fun OnboardingScreen(onDone: () -> Unit) {
                     Spacer(Modifier.height(12.dp))
                     Text("O Fluwy Bot planeja, pesquisa no browser, escreve e roda código num Linux dentro do seu celular — e entrega arquivos prontos. Sem conta, sem login.",
                         style = MaterialTheme.typography.bodyLarge, color = c.ink2)
+                    Spacer(Modifier.height(8.dp))
+                    Text("Você pode escolher provedor e modelo depois, em Configurações.", style = MaterialTheme.typography.bodyMedium, color = c.ink3)
                     Spacer(Modifier.height(20.dp))
                     CueField(st.settings.userName, { v -> app.store.updateSettings { it.copy(userName = v) } }, "Como devo te chamar?")
-                }
-                1 -> {
-                    Text("Conecte um modelo", style = MaterialTheme.typography.headlineLarge)
-                    Spacer(Modifier.height(12.dp))
-                    Text("Cole sua chave da OpenRouter (openrouter.ai/keys). Ela fica só neste aparelho. Thinking vem desligado por padrão para respostas rápidas.",
-                        style = MaterialTheme.typography.bodyLarge, color = c.ink2)
-                    Spacer(Modifier.height(20.dp))
-                    CueField(st.settings.apiKey, { v -> app.store.updateSettings { it.copy(apiKey = v.trim()) } }, "sk-or-…", password = true)
-                    Spacer(Modifier.height(8.dp))
-                    ModelPicker(st.settings.model, { v -> app.store.updateSettings { it.copy(model = v) } }, "Modelo", baseUrl = st.settings.baseUrl, apiKey = st.settings.apiKey)
                 }
                 else -> {
                     val state by app.sandbox.state.collectAsStateWithLifecycle()
@@ -273,9 +265,9 @@ fun OnboardingScreen(onDone: () -> Unit) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             if (page > 0) TextButton({ page-- }) { Text("Voltar", color = c.ink2) }
             Spacer(Modifier.weight(1f))
-            if (page == 2) TextButton({ app.store.update { it.copy(onboarded = true) }; onDone() }) { Text("Pular", color = c.ink2) }
-            PillButton(if (page < 2) "Continuar" else "Começar") {
-                if (page < 2) page++ else { app.store.update { it.copy(onboarded = true) }; onDone() }
+            if (page == 1) TextButton({ app.store.update { it.copy(onboarded = true) }; onDone() }) { Text("Pular", color = c.ink2) }
+            PillButton(if (page < 1) "Continuar" else "Começar") {
+                if (page < 1) page++ else { app.store.update { it.copy(onboarded = true) }; onDone() }
             }
         }
     }

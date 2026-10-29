@@ -198,7 +198,7 @@ class AgentRunner(
         // O título não segura a primeira chamada do agente; atualiza em paralelo quando terminar.
         scope.launch {
             runCatching {
-                val t = llm.quick("Crie um título curto (máx 6 palavras, sem aspas, no idioma do pedido) para esta tarefa:\n$text")
+                val t = llm.quick("Crie um título curto (máx 6 palavras, sem aspas, no idioma do pedido) para esta tarefa:\n$text", conversationId = sessionId)
                 val clean = t.replace(Regex("^(t[ií]tulo[^:]*:)\\s*", RegexOption.IGNORE_CASE), "").trim().removeSurrounding("\"").removeSurrounding("*").take(60)
                 if (clean.isNotBlank() && store.session(sessionId)?.title == fallback) store.editSession(sessionId) { it.copy(title = clean) }
             }
@@ -269,7 +269,7 @@ class AgentRunner(
                 var attempt = 0
                 while (true) {
                     try {
-                        return@run llm.chat(listOf(sys) + history, tools = stepTools, model = stepModel(agent), maxTokens = replyTokenLimit)
+                        return@run llm.chat(listOf(sys) + history, tools = stepTools, model = stepModel(agent), maxTokens = replyTokenLimit, conversationId = sessionId)
                     } catch (c: kotlinx.coroutines.CancellationException) {
                         throw c
                     } catch (t: Throwable) {
@@ -817,7 +817,7 @@ class AgentRunner(
      * Cria e configura um Agent completo a partir de uma descrição em linguagem natural (@create-agent).
      * Usa o modelo rápido para gerar nome, personalidade, instruções, missão, autonomia e skills sugeridas.
      */
-    suspend fun createAgentFromPrompt(desc: String): AgentProfile {
+    suspend fun createAgentFromPrompt(desc: String, conversationId: String? = null): AgentProfile {
         val skillNames = store.state.value.skills.filter { it.enabled }.joinToString(", ") { it.name }
         val raw = runCatching {
             llm.quick("""
@@ -830,7 +830,7 @@ class AgentRunner(
                  "skills":["nomes exatos entre: $skillNames"]}
                 Se o usuário pedir monitoramento/execução recorrente, defina autonomous=true e heartbeatMinutes com o intervalo pedido (em minutos).
                 Pedido: $desc
-            """.trimIndent(), maxTokens = 600)
+            """.trimIndent(), maxTokens = 600, conversationId = conversationId)
         }.getOrDefault("")
         val js = raw.substringAfter('{', "").let { if (it.isNotEmpty()) "{$it".substringBeforeLast('}') + "}" else "" }
         val o = runCatching { json.parseToJsonElement(js).jsonObject }.getOrNull()
@@ -1372,14 +1372,16 @@ class AgentRunner(
     }
 
     /** Avalia pelo System One nativo quando for Jev; outros modelos recebem contrato JSON e validação determinística. */
-    private suspend fun jevAccuracyCheck(signalsJson: String, minAccuracy: Int, agentKey: String): String {
+    private suspend fun jevAccuracyCheck(sessionId: String, signalsJson: String, minAccuracy: Int, agentKey: String): String {
         if (signalsJson.isBlank()) return "Informe 'signals_json' com os sinais e seus dados reais."
         val inputs = dev.cueopen.app.trading.SignalIO.parseInputsStrict(signalsJson)
             ?: return "signals_json inválido: envie um array JSON com sinais distintos, id e direction válidos. Nenhuma ordem foi liberada."
         if (inputs.any { dev.cueopen.app.trading.Sides.parse(it.direction) == null })
             return "Direção inválida em um ou mais sinais (use buy/sell ou call/put). Nenhuma ordem foi liberada."
         val s = store.settings
-        val model = s.accuracyModel.ifBlank { "typesafe/jev-router" }
+        val model = dev.cueopen.app.trading.SignalEvaluationAdapter.resolveModel(
+            s.accuracyModel.ifBlank { "typesafe/jev-router" }, s.baseUrl,
+        )
         val effective = maxOf(minAccuracy, TradeCoordinator.gate.floor)
         // Enriquecimento automático: guarda o contexto de cada ativo separadamente para nunca cobrir um sinal sem dados com o de outro.
         val autoContexts: Map<String, String> = run {
@@ -1401,13 +1403,13 @@ class AgentRunner(
                 if (useSystemOne) {
                     val request = dev.cueopen.app.trading.SignalEvaluationAdapter.systemOneRequest(model, signalsJson, ctxText, inputs)
                         ?: throw IllegalArgumentException("não foi possível construir a requisição tipada System One")
-                    val raw = llm.systemOne(model, request)
+                    val raw = llm.systemOne(model, request, conversationId = sessionId)
                     dev.cueopen.app.trading.SignalEvaluationAdapter.parseSystemOneResponse(raw, inputs)
                         ?: throw IllegalArgumentException("System One retornou respostas ausentes ou fora do schema Noul")
                 } else {
                     val prompt = dev.cueopen.app.trading.SignalEvaluationAdapter.genericPrompt(signalsJson, ctxText, inputs.map { it.id })
                     val system = LlmMessage("system", "Avalie evidências de forma conservadora. Esta é apenas uma estimativa JSON; não reproduz a calibração de Jev e não executa ordens.")
-                    val reply = llm.chat(listOf(system, LlmMessage("user", prompt)), tools = null, model = model, maxTokens = 1200, jsonResponse = true)
+                    val reply = llm.chat(listOf(system, LlmMessage("user", prompt)), tools = null, model = model, maxTokens = 1200, jsonResponse = true, conversationId = sessionId)
                     dev.cueopen.app.trading.SignalEvaluationAdapter.parseGenericResponse(reply.content.orEmpty(), inputs)
                         ?: throw IllegalArgumentException("resposta JSON inválida, incompleta, duplicada ou fora dos limites")
                 }
@@ -1893,7 +1895,7 @@ class AgentRunner(
                     val allowed = ag != null && (WalletAgentPolicyStore(ctx.applicationContext).canAgentDayTrade(ag.id) ||
                         dev.cueopen.app.CueApp.instance.uiConnectors.jevRequiredBy(ag))
                     if (!allowed) "Indisponível: a validação TypeSafe Jev não é exigida por nenhum recurso deste agente (day trade Solana desligado e conectores com 'Exigir TypeSafe Jev' off). Opere direto pelas ferramentas do conector."
-                    else jevAccuracyCheck(s("signals_json"), i("min_accuracy") ?: 70, ag!!.id)
+                    else jevAccuracyCheck(sessionId, s("signals_json"), i("min_accuracy") ?: 70, ag!!.id)
                 }
                 "market_price", "market_candles", "market_liquidity", "market_discover", "market_token_info",
                 "wallet_list_tokens", "wallet_swap", "trade_set_rule", "trade_list", "trade_cancel", "trade_update_rule" -> {

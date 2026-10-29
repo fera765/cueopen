@@ -203,7 +203,7 @@ fun ChatScreen(nav: NavController, sessionId: String) {
                         else {
                             app.store.addItem(sessionId, ChatItem.Assistant(text = "Criando agente…", final = false))
                             cmdScope.launch {
-                                val a = runCatching { app.agent.createAgentFromPrompt(desc) }.getOrNull()
+                                val a = runCatching { app.agent.createAgentFromPrompt(desc, conversationId = sessionId) }.getOrNull()
                                 val okMsg = "✅ Agente **" + a?.name + "** criado e salvo em Agents" + (if (a?.autonomous == true) " · autônomo a cada ${a.heartbeatMinutes} min" else "") + ".\n\n" + (a?.instructions ?: "")
                                 app.store.addItem(sessionId, if (a != null)
                                     ChatItem.Assistant(text = okMsg, final = true)

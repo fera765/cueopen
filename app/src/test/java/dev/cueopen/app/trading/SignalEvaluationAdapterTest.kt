@@ -15,6 +15,11 @@ class SignalEvaluationAdapterTest {
     @Test fun `detecta System One nativo somente nos provedores com rota dedicada`() {
         assertTrue(SignalEvaluationAdapter.usesSystemOne("typesafe/jev-router", "https://openrouter.ai/api/v1"))
         assertTrue(SignalEvaluationAdapter.usesSystemOne("jev-latest", "https://api.typesafe.ai/v1"))
+        assertTrue(SignalEvaluationAdapter.usesSystemOne("jev-1.13", "https://opencode.ai/inference/go/openai/v1"))
+        assertEquals("jev-1.13", SignalEvaluationAdapter.resolveModel("typesafe/jev-router", "https://opencode.ai/inference/go/openai/v1"))
+        assertEquals("jev-1.13", SignalEvaluationAdapter.resolveModel("jev-latest", "https://opencode.ai/inference/go/openai/v1"))
+        assertEquals("typesafe/jev-router", SignalEvaluationAdapter.resolveModel("typesafe/jev-router", "https://openrouter.ai/api/v1"))
+        assertEquals("jev-1.13-free", SignalEvaluationAdapter.resolveModel("jev-1.13-free", "https://opencode.ai/inference/go/openai/v1"))
         assertFalse(SignalEvaluationAdapter.usesSystemOne("glm-5.3", "https://opencode.ai/inference/go/openai/v1"))
         assertFalse(SignalEvaluationAdapter.usesSystemOne("typesafe/jev-router", "https://example.com/v1"))
     }
@@ -31,6 +36,15 @@ class SignalEvaluationAdapterTest {
         val state = Json.parseToJsonElement(body["state"]!!.jsonPrimitive.content).jsonObject
         assertTrue(state.containsKey("signals"))
         assertTrue(state.containsKey("broker_context"))
+        val openCode = SignalEvaluationAdapter.systemOneRequest(
+            "jev-1.13",
+            """[{"id":"EURUSD","direction":"call","venue":"iqoption","horizon_minutes":5,"data":{"price":1.2}}]""",
+            "",
+            listOf(input),
+        )!!
+        assertEquals("jev-1.13", openCode["model"]!!.jsonPrimitive.content)
+        assertTrue(openCode.containsKey("state"))
+        assertTrue(openCode.containsKey("questions"))
     }
 
     @Test fun `Noul probability vira accuracy e confidence com minimo conservador`() {
