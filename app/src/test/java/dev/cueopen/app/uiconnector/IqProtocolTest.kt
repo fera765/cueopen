@@ -83,6 +83,18 @@ class IqProtocolTest {
         assertTrue(flat.isPractice)
     }
 
+    @Test fun `so profile ou balance-changed explicito confirma a carteira ativa`() {
+        val profile = obj("""{"name":"profile","msg":{"balance_id":222,"balances":[{"id":222,"type":4,"amount":10}]}}""")
+        assertEquals(222L, IqProtocol.confirmedActiveBalanceId(profile))
+        val changed = obj("""{"name":"balance-changed","msg":{"current_balance":{"id":333,"type":1,"amount":2}}}""")
+        assertEquals(333L, IqProtocol.confirmedActiveBalanceId(changed))
+        val flat = obj("""{"name":"balance-changed","msg":{"id":333,"type":1,"amount":2}}""")
+        assertNull(IqProtocol.confirmedActiveBalanceId(flat))
+        val scalar = obj("""{"name":"balance-changed","msg":{"id":333,"type":1,"amount":2,"current_balance":2}}""")
+        assertNull(IqProtocol.confirmedActiveBalanceId(scalar))
+        assertNull(IqProtocol.confirmedActiveBalanceId(obj("""{"name":"result","msg":{"id":333}}""")))
+    }
+
     @Test fun `initialization-data lista ativos abertos e fechados`() {
         val msg = obj("""{"turbo":{"actives":{
             "1":{"name":"front.EURUSD","enabled":true,"is_suspended":false},

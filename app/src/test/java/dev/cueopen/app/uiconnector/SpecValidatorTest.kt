@@ -22,6 +22,13 @@ class SpecValidatorTest {
     @Test fun `o spec real da IQ Option e valido`() =
         assertEquals(emptyList<String>(), SpecValidator.validate(IqOptionConnector().spec))
 
+    @Test fun `settings legados mantem IDs e novos critérios ficam separados`() {
+        val settings = IqOptionConnector().spec.settings.associateBy { it.id }
+        assertEquals("true", settings.getValue("require_confluence").default)
+        assertEquals("false", settings.getValue("confluence_strong").default)
+        assertEquals("false", settings.getValue("price_action_strict").default)
+    }
+
     @Test fun `id invalido e recusado`() {
         listOf("Demo", "1demo", "de_mo", "d", "demo-x").forEach {
             assertTrue("id '$it' deveria ser recusado", SpecValidator.validate(valid().copy(id = it)).any { p -> p.contains("id ") })

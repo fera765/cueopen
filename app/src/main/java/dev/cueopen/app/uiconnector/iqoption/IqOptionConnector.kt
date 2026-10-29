@@ -16,6 +16,11 @@ import dev.cueopen.app.uiconnector.UiConnectorSpec
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import dev.cueopen.app.uiconnector.custom.TechnicalSuite
+import dev.cueopen.app.uiconnector.iqoption.PriceActionExecutionGate
+import dev.cueopen.app.uiconnector.iqoption.PriceActionPipeline
+import dev.cueopen.app.uiconnector.iqoption.PriceBar
+import dev.cueopen.app.uiconnector.iqoption.PriceMarketDataSource
+import dev.cueopen.app.uiconnector.iqoption.PriceSeries
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
@@ -83,7 +88,7 @@ class IqOptionConnector(private val kv: KvStore? = null) : UiConnector {
                 SettingType.NUMBER, "5",
             ),
             SettingSpec("require_jev", "Exigir validação TypeSafe Jev",
-                "Desligado (padrão): o agente opera usando só os dados e filtros do próprio conector (confluência, entrada contra o candle, janela da vela), SEM consultar o avaliador TypeSafe Jev. Ligado: toda ordem passa obrigatoriamente pelo Jev.",
+                "Desligado (padrão): não consulta o Jev. Ligado: toda ordem exige aprovação Jev. A análise Price Action e as salvaguardas internas de risco continuam obrigatórias nos dois modos.",
                 SettingType.SWITCH, "false", risky = true),
             SettingSpec("mm_enabled", "Ativar Masaniello (sobrescreve o valor de entrada)",
                 "Ligado: o Masaniello assume o VALOR de todas as entradas do agente (ignora o valor pedido e o 'Valor máximo por operação') e o MODO de operar (uma operação por vez, ignora 'Máx. de operações abertas'). " +
@@ -97,9 +102,12 @@ class IqOptionConnector(private val kv: KvStore? = null) : UiConnector {
             SettingSpec("daily_take_profit", "Meta diária (stop gain)", "Lucro no dia que encerra as operações do agente até amanhã. 0 = sem meta.", SettingType.NUMBER, "10"),
             SettingSpec("max_consec_losses", "Perdas seguidas para pausar", "Após N perdas seguidas o agente pausa pelo tempo abaixo.", SettingType.NUMBER, "3"),
             SettingSpec("cooldown_min", "Pausa após perdas seguidas (min)", "Tempo de pausa depois de atingir as perdas seguidas.", SettingType.NUMBER, "30"),
-            SettingSpec("require_confluence", "Exigir confluência dos indicadores",
-                "Ligado: CALL só se o resumo técnico (35 indicadores, velas de 1 min) for de compra; PUT só se for de venda.", SettingType.SWITCH, "true"),
-            SettingSpec("confluence_strong", "Confluência só com sinal FORTE", "Ligado: exige 'Forte compra'/'Forte venda' (menos operações, mais seletivas).", SettingType.SWITCH, "false"),
+            SettingSpec("require_confluence", "Filtro legado: confluência técnica",
+                "Compatibilidade: quando ligado, acrescenta a antiga confirmação TechnicalSuite depois do gate Price Action. Mantém o padrão anterior ligado; desligue para usar somente o novo gate Price Action.", SettingType.SWITCH, "true"),
+            SettingSpec("confluence_strong", "Filtro legado: exigir sinal técnico forte",
+                "Só se aplica quando 'Filtro legado: confluência técnica' está ligado. Preserva o significado antigo desta preferência; não é o strict Price Action.", SettingType.SWITCH, "false"),
+            SettingSpec("price_action_strict", "Exigir setup Price Action forte",
+                "Ligado: exige rompimento ou continuação estrutural forte no novo gate. Heurística não validada; pode reduzir ou eliminar sinais.", SettingType.SWITCH, "false"),
             SettingSpec(
                 "max_entry_delay_sec", "Janela de entrada no início da vela (s)",
                 "O agente só abre operação nos primeiros N segundos da vela de 1 min (assim a operação cobre a vela analisada, do começo). Fora disso a ordem é recusada e ele espera a próxima vela. 0 = desliga.",
@@ -142,13 +150,19 @@ class IqOptionConnector(private val kv: KvStore? = null) : UiConnector {
                 ParamSpec("asset", "Ticker do ativo, ex.: EURUSD-OTC"),
             )),
             ToolSpec("mm_status", "Gerenciamento e regras: ciclo Masaniello (acertos/operações restantes, banca, próxima entrada, lucro-alvo), resultado do dia, perdas seguidas e se o agente está pausado."),
-            ToolSpec("backtest", "Backtest com velas REAIS do ativo: aplica a suíte técnica vela a vela e simula operações de 1 vela, com taxa de acerto, ponto de equilíbrio pelo payout, resultado com valor fixo e com Masaniello. Use para escolher ativo/tempo gráfico ANTES de operar.", listOf(
+            ToolSpec("price_analysis", "Análise determinística de Price Action em velas fechadas: estrutura de topos/fundos, suporte/resistência aproximados, rompimento/rejeição, força do candle e decisão CALL, PUT ou NÃO OPERAR. Critérios heurísticos não validados; não representam probabilidade de acerto.", listOf(
+                ParamSpec("asset", "Ticker do ativo"),
+                ParamSpec("timeframe", "Timeframe em segundos ou 1m/5m/1h. Padrão 60.", required = false),
+                ParamSpec("count", "Velas fechadas (30–200). Padrão 120.", "integer", required = false),
+                ParamSpec("strict", "true = só rompimento ou continuação forte", "boolean", required = false),
+            )),
+            ToolSpec("backtest", "Replay determinístico da engine Price Action: decide em candles fechados e simula a vela seguinte. Mostra estatísticas históricas, sem prometer acurácia; não modela execução, latência, payout real nem o filtro legado TechnicalSuite (se ligado em require_confluence).", listOf(
                 ParamSpec("asset", "Ticker do ativo"),
                 ParamSpec("timeframe", "Tempo gráfico (60, 300… ou 1m/5m). Padrão 60.", required = false),
                 ParamSpec("count", "Velas (300–1000). Padrão 600.", "integer", required = false),
                 ParamSpec("strong", "true = só sinais fortes", "boolean", required = false),
             )),
-            ToolSpec("arm_signal", "ARMA um sinal JÁ VALIDADO para entrar AUTOMÁTICO no início da próxima vela (faça isto ~2 min antes). O único gatilho restante é o PREÇO: call entra quando o preço cai abaixo da abertura da vela; put quando sobe acima. Pode armar vários ativos; assim que o PRIMEIRO disparar, os outros são invalidados (uma entrada por vez). Informe os ativos validados por você.", listOf(
+            ToolSpec("arm_signal", "Agenda uma tentativa automática no início da próxima vela. No disparo, a engine Price Action reanalisa candles fechados e bloqueia se a decisão não coincidir com CALL/PUT; permanecem os limites de risco, janela e gatilho contra-candle. O primeiro sinal disparado invalida os demais da mesma vela.", listOf(
                 ParamSpec("asset", "Ticker do ativo validado, ex.: EURUSD-OTC"),
                 ParamSpec("direction", "call (compra) ou put (venda)", allowed = listOf("call", "put")),
                 ParamSpec("minutes", "Expiração em minutos (1–60). Padrão 1.", "integer", required = false),
@@ -164,12 +178,12 @@ class IqOptionConnector(private val kv: KvStore? = null) : UiConnector {
                 ParamSpec("timeframe", "Tamanho da vela (60, 300, 900… segundos ou 1m/5m/15m/1h). Padrão 60.", required = false),
                 ParamSpec("count", "Quantidade de velas (50–1000). Padrão 300.", "integer", required = false),
             )),
-            ToolSpec("buy", "Abre uma operação (call = compra/sobe, put = venda/desce) na conta ativa, respeitando os limites do usuário. " +
-                "EXIGE validação prévia com typesafe_jev_check (venue=iqoption, id=ticker, direction=call|put). " +
+            ToolSpec("buy", "Tenta abrir uma operação (call = compra/sobe, put = venda/desce) na conta ativa. A direção pedida precisa coincidir com a decisão determinística da engine Price Action sobre velas fechadas; caso contrário, a operação é recusada. " +
+                "A validação TypeSafe Jev só é exigida quando 'require_jev' estiver ligado. " +
                 "Curta (até o limite do usuário): call e put. Longa: somente call. " +
                 "Entrada contra o candle de 1 min: call só abaixo da abertura, put só acima (senão RECUSADO; espere e tente de novo). " +
                 "REGRAS DURAS: com o Masaniello ligado o VALOR é definido pelo gerenciamento (o amount informado é ignorado) e é uma operação por vez; " +
-                "stop loss/meta diária, pausa após perdas seguidas e confluência dos indicadores são impostos pelo app. Consulte mm_status antes de operar.", listOf(
+                "stop loss/meta diária, pausa após perdas seguidas e filtros de preço são impostos pelo app. O filtro legado require_confluence mantém o veto TechnicalSuite antigo; confluence_strong conserva sua semântica antiga; price_action_strict controla apenas a força do novo gate. Regras são heurísticas não validadas; consulte mm_status e price_analysis.", listOf(
                 ParamSpec("asset", "Ticker do ativo, ex.: EURUSD"),
                 ParamSpec("direction", "call (compra/sobe) ou put (venda/desce)", allowed = listOf("call", "put")),
                 ParamSpec("amount", "Valor da operação na moeda da conta", "number"),
@@ -203,10 +217,13 @@ class IqOptionConnector(private val kv: KvStore? = null) : UiConnector {
     private val client = OkHttpClient.Builder()
         .connectTimeout(15, TimeUnit.SECONDS).readTimeout(30, TimeUnit.SECONDS).pingInterval(20, TimeUnit.SECONDS).build()
     private val mutex = Mutex()
+    /** Reserva comum mantida até ACK para buy normal, arm, margem e troca de conta. */
+    private val accountOrderCoordinator = IqOptionOrderCoordinator()
     private val counter = AtomicLong(1)
     private val generation = AtomicLong(0)
     private val waiters = CopyOnWriteArrayList<Waiter>()
     private val balances = ConcurrentHashMap<Long, IqProtocol.Balance>()
+    private val activeBalanceSelection = IqActiveBalanceSelection()
     private val tracked = ConcurrentHashMap<Long, Tracked>()
     private val quotes = ConcurrentHashMap<Int, Double>()
     private val subscribed = java.util.Collections.newSetFromMap(ConcurrentHashMap<Int, Boolean>())
@@ -218,6 +235,19 @@ class IqOptionConnector(private val kv: KvStore? = null) : UiConnector {
     /** Tarefas de fundo (carregar ativos) — a tela nunca espera por elas. */
     private val bg = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     @Volatile private var loadingAll = false
+    /** A análise recebe uma interface de mercado; somente este adaptador conhece IQ Option e WebSocket. */
+    private val priceActionPipeline = PriceActionPipeline(PriceMarketDataSource { asset, timeframe, limit ->
+        loadClosedCandles(asset, timeframe, limit)
+    })
+    /** Adaptador de execução específico da IQ Option; a decisão/risk policy recebem apenas o resultado do portão. */
+    private val optionExecutionPort = IqOptionExecutionPort { order ->
+        val requestId = reqId()
+        val root = request(requestId,
+            IqProtocol.openOptionMessage(requestId, order.balanceId, order.activeId, order.direction,
+                order.expirationSeconds, order.amount, order.turbo),
+            "option", "option-rejected", timeoutMs = 15_000)
+        IqProtocol.parseOptionAck(root)
+    }
 
     /** Atualiza a lista completa de ativos em segundo plano (sem travar a tela). */
     private fun refreshAssetsInBackground() {
@@ -231,7 +261,6 @@ class IqOptionConnector(private val kv: KvStore? = null) : UiConnector {
     @Volatile private var ws: WebSocket? = null
     @Volatile private var authenticated = false
     @Volatile private var creds: Map<String, String>? = null
-    @Volatile private var activeBalanceId: Long? = null
     @Volatile private var serverOffsetMs = 0L
     @Volatile private var assets: List<IqProtocol.Asset> = emptyList()
     @Volatile private var assetsAt = 0L
@@ -251,10 +280,13 @@ class IqOptionConnector(private val kv: KvStore? = null) : UiConnector {
 
     private fun recentNames(): String = synchronized(seen) { seen.toList().distinct().joinToString(",") }
 
-    private fun activeBalance(): IqProtocol.Balance? = activeBalanceId?.let { balances[it] }
+    private fun activeBalance(): IqProtocol.Balance? = activeBalanceSelection.activeId()?.let { balances[it] }
 
     // ------------------------------------------------------------------ login / sessão
-    override suspend fun login(credentials: Map<String, String>): Result<Unit> = try {
+    override suspend fun login(credentials: Map<String, String>): Result<Unit> =
+        accountOrderCoordinator.runReserved { loginReserved(credentials) }
+
+    private suspend fun loginReserved(credentials: Map<String, String>): Result<Unit> = try {
         val e = credentials["email"].orEmpty().trim()
         val p = credentials["password"].orEmpty()
         require(e.isNotEmpty() && p.isNotEmpty()) { "Informe e-mail e senha." }
@@ -321,6 +353,7 @@ class IqOptionConnector(private val kv: KvStore? = null) : UiConnector {
         subscribed.clear()
         authenticated = false
         ws = null
+        activeBalanceSelection.invalidate()
         val failure = IOException("Conexão com a IQ Option perdida: $reason")
         waiters.forEach { it.deferred.completeExceptionally(failure) }
         waiters.clear()
@@ -332,9 +365,12 @@ class IqOptionConnector(private val kv: KvStore? = null) : UiConnector {
         ws = null
         authenticated = false
         subscribed.clear()
+        activeBalanceSelection.invalidate()
     }
 
-    override suspend fun logout() {
+    override suspend fun logout() = accountOrderCoordinator.runReserved { logoutReserved() }
+
+    private suspend fun logoutReserved() {
         closeSocket()
         ssid = null
         creds = null
@@ -345,7 +381,7 @@ class IqOptionConnector(private val kv: KvStore? = null) : UiConnector {
         marginIds.clear()
         assets = emptyList()
         allAssets = emptyList()
-        activeBalanceId = null
+        activeBalanceSelection.invalidate()
     }
 
     private suspend fun ensureConnected() {
@@ -384,9 +420,7 @@ class IqOptionConnector(private val kv: KvStore? = null) : UiConnector {
                 val p = if (msg != null) IqProtocol.parseProfile(msg) else null
                 if (p != null) {
                     p.balances.forEach { balances[it.id] = it }
-                    val wanted = p.activeBalanceId
-                    if (wanted != null && balances.containsKey(wanted)) activeBalanceId = wanted
-                    if (activeBalanceId == null) activeBalanceId = (p.balances.firstOrNull { it.isPractice } ?: p.balances.first()).id
+                    activeBalanceSelection.observeServerConfirmation(IqProtocol.confirmedActiveBalanceId(root))
                     authenticated = true
                 }
             }
@@ -394,7 +428,7 @@ class IqOptionConnector(private val kv: KvStore? = null) : UiConnector {
                 val b = if (msg != null) IqProtocol.parseBalanceChanged(msg) else null
                 if (b != null) {
                     balances[b.id] = b
-                    if (msg?.containsKey("current_balance") == true) activeBalanceId = b.id
+                    activeBalanceSelection.observeServerConfirmation(IqProtocol.confirmedActiveBalanceId(root))
                 }
             }
             "option-closed", "socket-option-closed" -> {
@@ -546,10 +580,13 @@ class IqOptionConnector(private val kv: KvStore? = null) : UiConnector {
         return IqProtocol.parsePositions(root["msg"] as? JsonObject ?: JsonObject(emptyMap()))
     }
 
-    private suspend fun openMargin(args: Map<String, String>, settings: ConnectorSettings): String {
+    private suspend fun openMargin(args: Map<String, String>, settings: ConnectorSettings): String =
+        accountOrderCoordinator.runReserved { openMarginReserved(args, settings) }
+
+    private suspend fun openMarginReserved(args: Map<String, String>, settings: ConnectorSettings): String {
         ensureConnected()
         if (!settings.bool("allow_margin_agent")) return "RECUSADO: o usuário não liberou o agente para operar Forex/CFD/cripto (configurações do conector IQ Option)."
-        val acc = activeBalance() ?: return "Nenhuma conta ativa."
+        val acc = activeBalance() ?: return "RECUSADO: nenhuma carteira ativa foi confirmada pelo servidor; confirme a conta antes de operar."
         if (acc.isReal && !settings.bool("allow_real_agent")) return "RECUSADO: a conta ativa é REAL e o agente não foi liberado para ela."
         val side = args["side"].orEmpty().lowercase()
         if (side != "buy" && side != "sell") return "side deve ser buy ou sell."
@@ -593,21 +630,36 @@ class IqOptionConnector(private val kv: KvStore? = null) : UiConnector {
     // ------------------------------------------------------------------ ações de negócio
     private fun money(b: IqProtocol.Balance) = String.format(Locale.US, "%.2f %s", b.amount, b.currency).trim()
 
-    private suspend fun switchAccount(target: String): String {
+    private suspend fun switchAccount(target: String): String = accountOrderCoordinator.runReserved {
+        switchAccountReserved(target)
+    }
+
+    private suspend fun switchAccountReserved(target: String): String {
         ensureConnected()
         val wantReal = target.equals("real", true)
         val b = balances.values.firstOrNull { if (wantReal) it.isReal else it.isPractice }
             ?: error("Esta conta não tem uma carteira ${if (wantReal) "REAL" else "DEMO"} disponível.")
-        if (activeBalanceId == b.id) return "A conta ${b.label} já está ativa (${money(b)})."
+        if (activeBalanceSelection.activeId() == b.id) return "A conta ${b.label} já está ativa (${money(b)})."
         val waiter = Waiter(null, setOf("balance-changed", "profile"), CompletableDeferred())
         waiters += waiter
-        val confirmed = try {
-            ws?.send(IqProtocol.changeBalanceMessage(b.id))
-            runCatching { withTimeout(8_000) { waiter.deferred.await() } }.isSuccess
-        } finally { waiters.remove(waiter) }
-        activeBalanceId = b.id // as ordens carregam user_balance_id explícito → a conta local é a fonte da verdade
-        val saldo = money(balances[b.id] ?: b)
-        return "Conta ${b.label} ativa ($saldo" + if (confirmed) ")." else "; sem confirmação do servidor, mas as ordens usarão esta conta)."
+        activeBalanceSelection.beginSwitch(b.id)
+        var confirmed = false
+        try {
+            if (ws?.send(IqProtocol.changeBalanceMessage(b.id)) != true)
+                return "RECUSADO: não foi possível enviar o pedido de troca; a carteira ativa ficou desconhecida e novas ordens estão bloqueadas."
+            val response = withTimeout(8_000) { waiter.deferred.await() }
+            val confirmedId = IqProtocol.confirmedActiveBalanceId(response)
+            if (confirmedId != b.id || !activeBalanceSelection.observeServerConfirmation(confirmedId))
+                return "RECUSADO: a IQ Option não confirmou a carteira solicitada (ID ${b.id}); conta ativa desconhecida e novas ordens bloqueadas."
+            confirmed = true
+            return "Conta ${b.label} confirmada pelo servidor (${money(balances[b.id] ?: b)})."
+        } catch (t: Throwable) {
+            if (t is kotlinx.coroutines.CancellationException) throw t
+            return "RECUSADO: troca de conta sem confirmação válida (${t.message ?: t.javaClass.simpleName}); conta ativa desconhecida e novas ordens bloqueadas."
+        } finally {
+            waiters.remove(waiter)
+            activeBalanceSelection.finishSwitch(b.id, confirmed)
+        }
     }
 
     private suspend fun candlesText(asset: String, tf: String?, count: Int?): String {
@@ -686,18 +738,20 @@ class IqOptionConnector(private val kv: KvStore? = null) : UiConnector {
     private fun riskCheck(settings: ConnectorSettings?): String? {
         val r = risk()
         val now = System.currentTimeMillis()
-        if (r.pausedUntil > now) return "RECUSADO (regra de proteção): agente em pausa até ${SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(r.pausedUntil))} após perdas seguidas. Não opere; aguarde."
         val sl = settings?.num("daily_stop_loss", 10.0) ?: 10.0
         val tp = settings?.num("daily_take_profit", 10.0) ?: 10.0
-        if (sl > 0 && r.dayPnl <= -sl) return "RECUSADO (stop loss diário): resultado do dia ${String.format(Locale.US, "%.2f", r.dayPnl)} atingiu o limite de −$sl. Operações do agente encerradas até amanhã."
-        if (tp > 0 && r.dayPnl >= tp) return "RECUSADO (meta diária atingida): +${String.format(Locale.US, "%.2f", r.dayPnl)} ≥ $tp. Operações do agente encerradas até amanhã — preserve o lucro."
         val maxL = (settings?.num("max_consec_losses", 3.0) ?: 3.0).toInt()
-        if (maxL > 0 && r.consecLosses >= maxL) {
-            val until = now + ((settings?.num("cooldown_min", 30.0) ?: 30.0) * 60_000).toLong()
-            saveRisk(r.copy(pausedUntil = until, consecLosses = 0))
-            return "RECUSADO (regra de proteção): ${r.consecLosses} perdas seguidas. Agente pausado até ${SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(until))}."
+        val cooldown = ((settings?.num("cooldown_min", 30.0) ?: 30.0) * 60_000).toLong()
+        val decision = IqRiskPolicy.evaluate(r, now, IqRiskLimits(sl, tp, maxL, cooldown))
+        if (decision.updatedState != r) saveRisk(decision.updatedState)
+        val until = decision.pauseUntilMillis?.let { SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(it)) }
+        return when (decision.block) {
+            IqRiskBlock.PAUSED -> "RECUSADO (regra de proteção): agente em pausa até $until após perdas seguidas. Não opere; aguarde."
+            IqRiskBlock.DAILY_STOP_LOSS -> "RECUSADO (stop loss diário): resultado do dia ${String.format(Locale.US, "%.2f", r.dayPnl)} atingiu o limite de −$sl. Operações do agente encerradas até amanhã."
+            IqRiskBlock.DAILY_TAKE_PROFIT -> "RECUSADO (meta diária atingida): +${String.format(Locale.US, "%.2f", r.dayPnl)} ≥ $tp. Operações do agente encerradas até amanhã — preserve o lucro."
+            IqRiskBlock.CONSECUTIVE_LOSSES -> "RECUSADO (regra de proteção): ${decision.consecutiveLossesAtBlock} perdas seguidas. Agente pausado até $until."
+            null -> null
         }
-        return null
     }
 
     private fun mmText(settings: ConnectorSettings?): String {
@@ -716,18 +770,71 @@ class IqOptionConnector(private val kv: KvStore? = null) : UiConnector {
         }
     }
 
-    /** Confluência: o resumo dos 35 indicadores (velas de 1 min) precisa concordar com a direção. null = ok. */
-    private suspend fun confluenceCheck(a: IqProtocol.Asset, dir: String, settings: ConnectorSettings?): String? {
+    /** Adaptador de transporte: normaliza e descarta explicitamente qualquer candle ainda em formação. */
+    private suspend fun loadClosedCandles(asset: String, timeframe: Int, limit: Int): PriceSeries {
+        val a = IqProtocol.resolveAsset(loadAssets(), asset)
+            ?: throw IllegalArgumentException("Ativo '$asset' não encontrado na IQ Option.")
+        val id = reqId()
+        val root = request(id, IqProtocol.getCandlesMessage(id, a.id, timeframe, limit.coerceIn(30, 200), serverNowSec()), "candles", timeoutMs = 8_000)
+        val closed = IqProtocol.parseCandles(root["msg"] as? JsonObject ?: JsonObject(emptyMap()))
+            .filter { it.from + timeframe <= serverNowSec() }
+            .sortedBy { it.from }
+            .takeLast(limit.coerceIn(30, 200))
+            .map { PriceBar(it.from, it.open, it.max, it.min, it.close, it.volume) }
+        return PriceSeries(a.ticker, timeframe, closed)
+    }
+
+    /** O agente só pode executar CALL/PUT quando a mesma análise pura confirma o lado solicitado. */
+    private suspend fun priceActionCheck(asset: String, dir: String, settings: ConnectorSettings?): String? {
+        val analysis = runCatching { priceActionPipeline.analyze(asset, 60, 150) }.getOrElse {
+            if (it is kotlinx.coroutines.CancellationException) throw it
+            return "RECUSADO (Price Action indisponível): ${it.message ?: "falha ao carregar candles fechados"}. Nenhuma ordem foi enviada."
+        }
+        val gate = PriceActionExecutionGate.authorize(analysis, dir, settings?.bool("price_action_strict") == true)
+        return if (gate.allowed) null else
+            "RECUSADO (Price Action): ${gate.reason} ${analysis.reasons.joinToString(" ")}"
+    }
+
+    /** Compatibilidade: a confluência técnica antiga só acrescenta um veto quando a chave salva está ligada. */
+    private suspend fun legacyConfluenceCheck(a: IqProtocol.Asset, dir: String, settings: ConnectorSettings?): String? {
         if (settings?.text("require_confluence")?.ifEmpty { "true" } == "false") return null
         val id = reqId()
-        val root = runCatching { request(id, IqProtocol.getCandlesMessage(id, a.id, 60, 150, serverNowSec()), "candles", timeoutMs = 6_000) }.getOrNull()
-            ?: return "RECUSADO: não consegui ler as velas para conferir a confluência. Tente de novo."
-        val list = IqProtocol.parseCandles(root["msg"] as? JsonObject ?: JsonObject(emptyMap())).sortedBy { it.from }
-        if (list.size < 60) return "RECUSADO: poucas velas para conferir a confluência (${list.size})."
-        val r = TechnicalSuite.analyze(TechnicalSuite.Candles(list.map { it.from.toDouble() }, list.map { it.open }, list.map { it.max }, list.map { it.min }, list.map { it.close }, list.map { it.volume }))
-        val want = IqRules.direction(r.summary, settings?.bool("confluence_strong") == true)
-        return if (want == dir) null else
-            "RECUSADO (sem confluência): o resumo técnico de ${a.ticker} está '${r.summary}' (${r.buys} compra × ${r.sells} venda) — não confirma ${dir.uppercase()}. Não force a entrada; procure outro ativo ou espere."
+        val root = try {
+            request(id, IqProtocol.getCandlesMessage(id, a.id, 60, 150, serverNowSec()), "candles", timeoutMs = 8_000)
+        } catch (t: Throwable) {
+            if (t is kotlinx.coroutines.CancellationException) throw t
+            return "RECUSADO (filtro legado): não foi possível confirmar a confluência; nenhuma ordem foi enviada."
+        }
+        val list = IqProtocol.parseCandles(root["msg"] as? JsonObject ?: JsonObject(emptyMap()))
+            .filter { it.from + 60 <= serverNowSec() }.sortedBy { it.from }
+        if (list.size < 60) return "RECUSADO (filtro legado): poucas velas fechadas para confluência (${list.size})."
+        val result = TechnicalSuite.analyze(TechnicalSuite.Candles(
+            list.map { it.from.toDouble() }, list.map { it.open }, list.map { it.max },
+            list.map { it.min }, list.map { it.close }, list.map { it.volume },
+        ))
+        val expected = IqRules.direction(result.summary, settings?.bool("confluence_strong") == true)
+        return if (expected == dir) null else
+            "RECUSADO (filtro legado de confluência): '${result.summary}' (${result.buys} compra × ${result.sells} venda) não confirma ${dir.uppercase()}."
+    }
+
+    private suspend fun priceAnalysisText(asset: String, timeframe: String?, count: Int?, strict: Boolean): String {
+        val size = IqProtocol.timeframeSeconds(timeframe ?: "60") ?: return "timeframe inválido. Use 60, 300, 900… ou 1m/5m/15m/1h."
+        val limit = (count ?: 120).coerceIn(30, 200)
+        val analysis = try {
+            priceActionPipeline.analyze(asset, size, limit)
+        } catch (t: Throwable) {
+            if (t is kotlinx.coroutines.CancellationException) throw t
+            return "Análise Price Action indisponível: ${t.message ?: t.javaClass.simpleName}. Nenhum sinal foi gerado."
+        }
+        val gate = PriceActionExecutionGate.authorize(analysis, analysis.decision.name, strict)
+        return buildString {
+            appendLine("Price Action · ${analysis.asset} · ${size}s · ${analysis.barsAnalyzed} candles fechados")
+            appendLine("DECISÃO: ${analysis.decision.name} · ${if (gate.allowed) "candidato pelos critérios de preço (risco e janela ainda não avaliados)" else "NÃO OPERAR neste filtro: ${gate.reason}"}")
+            appendLine("Estrutura: ${analysis.marketStructure.name.lowercase().replace('_', ' ')} · suporte ${analysis.support?.let(::fmtPx) ?: "—"} · resistência ${analysis.resistance?.let(::fmtPx) ?: "—"}")
+            appendLine("Corpo/range: ${analysis.bodyToRange?.let { String.format(Locale.US, "%.0f%%", it * 100) } ?: "—"} · localização do fechamento: ${analysis.closeLocation?.let { String.format(Locale.US, "%.0f%%", it * 100) } ?: "—"} · choque de volatilidade: ${if (analysis.volatilityShock) "sim" else "não"}")
+            analysis.reasons.forEach { appendLine("• $it") }
+            append("Hipóteses heurísticas ainda não validadas; não estimam probabilidade de acerto nem garantem resultado. Backtest é apenas replay histórico.")
+        }
     }
 
     private suspend fun backtestText(asset: String, tf: String?, count: Int?, strong: Boolean, settings: ConnectorSettings): String {
@@ -736,22 +843,24 @@ class IqOptionConnector(private val kv: KvStore? = null) : UiConnector {
         val n = (count ?: 600).coerceIn(300, 1000)
         val id = reqId()
         val root = request(id, IqProtocol.getCandlesMessage(id, a.id, size, n, serverNowSec()), "candles", timeoutMs = 20_000)
-        val list = IqProtocol.parseCandles(root["msg"] as? JsonObject ?: JsonObject(emptyMap())).sortedBy { it.from }
+        val list = IqProtocol.parseCandles(root["msg"] as? JsonObject ?: JsonObject(emptyMap()))
+            .filter { it.from + size <= serverNowSec() }.sortedBy { it.from }
         if (list.size < 200) return "Poucas velas para backtest (${list.size})."
         val payout = odds(settings) - 1
         val m = mmFresh(settings)
         val b = withContext(Dispatchers.Default) {
-            IqRules.backtest(list.map { IqRules.Bar(it.open, it.max, it.min, it.close, it.volume) }, payout, strong, 120, m.n, m.k, m.bank)
+            IqRules.backtest(list.map { IqRules.Bar(it.open, it.max, it.min, it.close, it.volume) }, payout, strong, 120, m.n, m.k, m.bank, size)
         }
         val edge = b.winRate - b.breakEven
         return buildString {
-            appendLine("Backtest ${a.ticker} · ${size}s · ${list.size} velas reais · sinais ${if (strong) "FORTES" else "compra/venda"} · payout ${String.format(Locale.US, "%.0f", payout * 100)}%")
-            appendLine("Operações ${b.trades} (call ${b.calls} / put ${b.puts}) · acertos ${b.wins} · erros ${b.losses} · empates ${b.ties}")
-            appendLine("Taxa de acerto ${String.format(Locale.US, "%.1f", b.winRate * 100)}% · equilíbrio ${String.format(Locale.US, "%.1f", b.breakEven * 100)}% · vantagem ${String.format(Locale.US, "%+.1f", edge * 100)} p.p. · maior sequência de erros ${b.maxLossStreak}")
+            appendLine("Replay Price Action ${a.ticker} · ${size}s · ${list.size} velas fechadas · setups ${if (strong) "FORTES" else "padrão"} · payout hipotético ${String.format(Locale.US, "%.0f", payout * 100)}%")
+            appendLine("Método: decide até o candle fechado i; simula entrada na abertura e saída no fechamento de i+1. Sem latência, spread, rejeições ou liquidação real.")
+            appendLine("Operações ${b.trades} (call ${b.calls} / put ${b.puts}) · acertos ${b.wins} · erros ${b.losses} · empates ${b.ties} · resultados ignorados por candle seguinte inválido ${b.invalidResultCandles}")
+            appendLine("Taxa de acerto ${String.format(Locale.US, "%.1f", b.winRate * 100)}% · equilíbrio matemático pelo payout assumido ${String.format(Locale.US, "%.1f", b.breakEven * 100)}% · diferença descritiva ${String.format(Locale.US, "%+.1f", edge * 100)} p.p. · maior sequência de erros ${b.maxLossStreak}")
             appendLine("Valor fixo 1: ${String.format(Locale.US, "%+.2f", b.flatPnl)} · Masaniello ${m.k}/${m.n} banca ${m.bank}: ${String.format(Locale.US, "%+.2f", b.mmFinal - m.bank)} (ciclos ganhos ${b.mmCyclesWon}, encerrados ${b.mmCyclesLost})")
-            append(if (b.trades < 30) "Amostra pequena: não conclua nada com menos de 30 operações."
-                else if (edge > 0.03) "Sinal com vantagem neste período: candidato a operar (resultado passado não garante o futuro)."
-                else "SEM vantagem estatística neste período: NÃO opere este ativo/tempo gráfico com esta estratégia.")
+            append(if (b.trades < 30) "Amostra pequena: não conclua nada com menos de 30 operações. "
+                else "Resultado descritivo deste recorte, não evidência de vantagem nem previsão. ")
+            append("Heurísticas não validadas; o replay não autoriza uma ordem.")
         }
     }
 
@@ -1041,13 +1150,16 @@ class IqOptionConnector(private val kv: KvStore? = null) : UiConnector {
 
     private fun openCount(): Int = tracked.values.count { it.result == null && it.expSec + 120 > serverNowSec() }
 
-    private suspend fun buy(asset: String, direction: String, amount: Double, minutes: Int, settings: ConnectorSettings?, byAgent: Boolean): String {
+    private suspend fun buy(asset: String, direction: String, amount: Double, minutes: Int, settings: ConnectorSettings?, byAgent: Boolean): String =
+        accountOrderCoordinator.runReserved { buyReserved(asset, direction, amount, minutes, settings, byAgent) }
+
+    private suspend fun buyReserved(asset: String, direction: String, amount: Double, minutes: Int, settings: ConnectorSettings?, byAgent: Boolean): String {
         ensureConnected()
         val dir = direction.trim().lowercase()
         if (dir != "call" && dir != "put") return "direction deve ser call ou put."
         if (amount <= 0.0) return "amount deve ser maior que zero."
         if (minutes !in 1..60) return "minutes deve estar entre 1 e 60."
-        val acc = activeBalance() ?: return "Nenhuma conta ativa."
+        val acc = activeBalance() ?: return "RECUSADO: nenhuma carteira ativa foi confirmada pelo servidor; confirme a conta antes de operar."
         if (byAgent && settings != null) {
             if (acc.isReal && !settings.bool("allow_real_agent"))
                 return "RECUSADO: a conta ativa é REAL e o usuário não liberou o agente para operar nela. Troque para demo (set_account) ou peça ao usuário para liberar nas configurações do conector."
@@ -1079,16 +1191,15 @@ class IqOptionConnector(private val kv: KvStore? = null) : UiConnector {
                 if (finalAmount > m.bank + 1e-9) return "RECUSADO (Masaniello): a banca restante do ciclo (${String.format(Locale.US, "%.2f", m.bank)}) é menor que a entrada mínima de 1. Reinicie o ciclo."
                 useMm = true
             }
-            confluenceCheck(a, dir, settings)?.let { return it }
+            priceActionCheck(a.ticker, dir, settings)?.let { return it }
+            legacyConfluenceCheck(a, dir, settings)?.let { return it }
         }
         if (byAgent && (settings?.text("entry_against_candle")?.ifEmpty { "true" } ?: "true") == "true") {
             entryCheck(a, dir)?.let { return it }
         }
         val exp = IqProtocol.expirationFor(serverNowSec(), minutes)
         subscribeQuotes(a.id) // cotação ao vivo para acompanhar ganhando/perdendo
-        val id = reqId()
-        val root = request(id, IqProtocol.openOptionMessage(id, acc.id, a.id, dir, exp, finalAmount, IqProtocol.isTurbo(minutes)), "option", "option-rejected", timeoutMs = 15_000)
-        val ack = IqProtocol.parseOptionAck(root)
+        val ack = optionExecutionPort.open(IqOptionOrder(acc.id, a.id, dir, exp, finalAmount, IqProtocol.isTurbo(minutes)))
         val optId = ack.optionId
         if (optId == null) {
             err("ordem recusada: ${ack.error}")
@@ -1254,7 +1365,7 @@ class IqOptionConnector(private val kv: KvStore? = null) : UiConnector {
     override suspend fun callTool(name: String, args: Map<String, String>, settings: ConnectorSettings): String = when (name) {
         "balance" -> {
             ensureConnected()
-            val act = activeBalanceId
+            val act = activeBalanceSelection.activeId()
             if (balances.isEmpty()) "Sem dados de saldo ainda."
             else balances.values.sortedBy { it.type }.joinToString("\n") { "${it.label}: ${money(it)}" + if (it.id == act) " (ativa)" else "" }
         }
@@ -1283,6 +1394,7 @@ class IqOptionConnector(private val kv: KvStore? = null) : UiConnector {
         "mm_status" -> mmText(settings)
         "strategies" -> strategiesText(args["asset"].orEmpty())
         "catalog" -> catalogText(args["asset"].orEmpty(), args["time"], args["days"]?.toIntOrNull(), IqProtocol.timeframeSeconds(args["timeframe"] ?: "60") ?: 60)
+        "price_analysis" -> priceAnalysisText(args["asset"].orEmpty(), args["timeframe"], args["count"]?.toIntOrNull(), args["strict"] == "true")
         "backtest" -> backtestText(args["asset"].orEmpty(), args["timeframe"], args["count"]?.toDoubleOrNull()?.toInt(), args["strong"] == "true", settings)
         "arm_signal" -> armSignal(args, settings)
         "armed_list" -> armedListText()

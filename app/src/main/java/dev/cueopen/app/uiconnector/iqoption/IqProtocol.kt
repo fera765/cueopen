@@ -295,6 +295,16 @@ object IqProtocol {
         return parseBalance(o, msg["currency"].str() ?: "")
     }
 
+    /** Retorna um ID de carteira somente quando a mensagem declara explicitamente qual está ativa. */
+    fun confirmedActiveBalanceId(root: JsonObject): Long? {
+        val msg = root["msg"].obj() ?: return null
+        return when (root["name"].str()) {
+            "profile" -> parseProfile(msg)?.activeBalanceId
+            "balance-changed" -> if (msg["current_balance"].obj() != null) parseBalanceChanged(msg)?.id else null
+            else -> null
+        }
+    }
+
     /** `initialization-data`: ativos de opções turbo/binárias com flag de aberto. */
     fun parseAssets(msg: JsonObject): List<Asset> {
         val out = linkedMapOf<Int, Asset>()
