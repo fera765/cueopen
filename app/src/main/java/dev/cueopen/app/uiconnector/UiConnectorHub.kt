@@ -82,6 +82,8 @@ class UiConnectorHub(context: Context) {
             val old = previous.firstOrNull { it.spec.id == def.id } as? CustomConnector
             if (old != null && old.def != def) { old.logout(); vault.clear(def.id) }
             custom = loadCustom(previous)
+            // o ambiente descartável de validação do criador com IA não é mais necessário
+            runCatching { dev.cueopen.app.uiconnector.custom.AndroidHostBridge.deleteValidation(def.id) }
         }
         return r
     }

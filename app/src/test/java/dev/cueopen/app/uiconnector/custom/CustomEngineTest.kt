@@ -296,7 +296,8 @@ class CustomEngineTest {
         assertNull(def)
         val sp = CustomConnector(CustomDefParser.parse(CustomTemplates.SPOTIFY.json).def!!, f, permissive = true)
         val (ok0, msg0) = sp.selfTest(ConnectorSettings { null }, emptyMap())
-        assertFalse(ok0); assertTrue(msg0.contains("login"))
+        // guardrails: sem login, painéis/HTTP ficam para depois do login (o resto é validado agora)
+        assertTrue(msg0, ok0); assertTrue(msg0, msg0.contains("login"))
     }
 
     @Test fun `formatos variados viram arvore`() {

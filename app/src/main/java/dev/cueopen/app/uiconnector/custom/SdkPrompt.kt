@@ -323,6 +323,26 @@ estado do tempo real com `{{rt.nome}}` (painéis sem request podem mostrar só `
   shell já com aspas (sem injeção); o browser só abre hosts declarados. Não tente ler/gravar fora do workspace nem embutir
   segredos no comando.
 
+## GUARDRAILS de terminal, arquivos e scripts (validados ANTES da instalação)
+`connector_test` não confere só o formato: ele EXECUTA o conector num sandbox isolado de validação, do zero
+(workspace limpo e `setup` rodado de novo), exatamente como o agente vai rodar depois. Ele bloqueia a proposta se:
+- o `setup` falhar, ou algum comando usado nas ferramentas não existir depois dele (`command -v`). Instale tudo no
+  `setup` e termine o setup conferindo: `…; command -v yt-dlp >/dev/null 2>&1 && echo OK`;
+- um script de `files` tiver erro de sintaxe (`bash -n`, `python3 ast`, `node --check`) ou o `run` não passar em `bash -n`;
+- a ferramenta falhar ao rodar (exit ≠ 0, tempo-limite) OU a saída mostrar falha escondida mesmo com exit 0
+  (`command not found`, `No such file or directory`, `Traceback`, `ModuleNotFoundError`, `SyntaxError`, `Permission denied`…);
+- a ferramenta funcionar na 1ª vez e quebrar na 2ª (ex.: `mkdir pasta` sem `-p`, arquivo que já existe) — toda
+  ferramenta de terminal/arquivo rápida roda DUAS vezes;
+- houver: heredoc no `run`; `{{param}}` entre aspas (`'{{x}}'` ou `"{{x}}"` — o app já põe aspas); `apt`/`yum`/`brew`
+  (o sandbox é Alpine: `apk add --no-cache`); `sudo`; `pip install` sem `--break-system-packages`; `read`/editores/REPL
+  interativos (o terminal não tem teclado: stdin vazio); `|| true` no fim; comando em segundo plano (`&`, `nohup`);
+  `rm -rf /`, `~` ou `*`.
+Como cada comando roda: `cd /root/workspace; bash -c '<run>' < /dev/null` — processo próprio (`cd`/`export`/`exit`
+não afetam a próxima chamada), sempre a partir do workspace, sem entrada pelo teclado. Use caminhos relativos ao workspace.
+Passe SEMPRE `args_json` com exemplos reais para cada ferramenta com parâmetros obrigatórios. Ferramentas de ordem/envio
+(com `orderIntent`, `limits`, `requiresSignal`, ou de terminal cujo nome/descrição indica enviar/pagar/publicar) não são
+executadas no teste, mas seus comandos e scripts passam pelas mesmas verificações.
+
 ## Checklist antes de responder
 - [ ] raiz tem `id`, `name`, `description`, `baseUrl`
 - [ ] `id` só `[a-z0-9]`, começa com letra
@@ -337,6 +357,8 @@ estado do tempo real com `{{rt.nome}}` (painéis sem request podem mostrar só `
 - [ ] cada ferramenta tem no máximo um entre `request`, `send`, `source`, `shell`, `file`, `fetch`; `send` de ordem ⇒ `risky` + `requiresSignal` + `orderIntent` + `limits`
 - [ ] `shell` ⇒ `"terminal"` em `capabilities` + `risky`; `file` write/delete ⇒ `"files"` + `risky`; `fetch` ⇒ `"browser"` + host declarado
 - [ ] cada `compute` usa só funções listadas; `c.x` só depois de `x` ser calculado; `rows: "c.nome"` aponta para uma lista do compute
+- [ ] terminal: dependências no `setup` (Alpine `apk add --no-cache`, `pip install --break-system-packages`), scripts em `files`, `{{param}}` sem aspas, nada interativo, nada em segundo plano
+- [ ] `connector_test` PASSOU com `args_json` de exemplo — sem isso `connector_propose` é bloqueado
 - [ ] nenhuma chave fora deste documento; JSON sem comentários
 
 ## Exemplo válido completo

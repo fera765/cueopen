@@ -189,6 +189,29 @@ velas reais da Binance.
 - O criador com IA só libera a instalação de conectores sem login depois do `connector_test`, que conecta de verdade,
   espera mensagens e confere se cada `set` e cada coleção recebeu dados.
 
+## Guardrails do criador com IA (validação antes da instalação)
+
+Um conector criado pelo chat **Criar com a IA** só chega ao card "Instalar conector" depois de passar em
+`connector_test` com o mesmo JSON — para **todos** os conectores, inclusive os com login (`connector_propose`
+é bloqueado em código). Para conectores com terminal/arquivos/browser o teste roda de verdade num ambiente
+isolado de validação (`__uic__<id>__v`, workspace limpo e setup rodado de novo a cada teste):
+
+1. **Estático** (`ConnectorGuardrails.staticCheck`): heredoc no `run`, `{{param}}` entre aspas, `apt`/`yum`/`brew`
+   (o sandbox é Alpine), `sudo`, `pip install` sem `--break-system-packages`, `read`/editores interativos,
+   `|| true` no fim, comandos em segundo plano, `rm -rf /`, scripts chamados sem `files` que os criem, aspas abertas.
+2. **Ambiente**: sandbox responde; `setup` roda e precisa terminar com exit 0; cada comando externo usado pelas
+   ferramentas é conferido com `command -v` depois do setup.
+3. **Sintaxe**: cada arquivo de `files` passa em `bash -n` / `python3 ast.parse` / `node --check` / JSON, e o `run`
+   renderizado com os exemplos passa em `bash -n`.
+4. **Execução real**: cada ferramenta de terminal/arquivos/browser roda com os exemplos de `args_json` — duas
+   vezes quando rápida (idempotência) — e a saída crua é varrida por falhas escondidas mesmo com exit 0
+   (`command not found`, `No such file or directory`, `Traceback`, `ModuleNotFoundError`, `SyntaxError`…).
+   Ferramentas de ordem/envio (`orderIntent`, `limits`, `requiresSignal`, ou terminal que envia/paga/publica)
+   nunca rodam no teste.
+
+Em produção cada comando de conector roda isolado: `cd /root/workspace; bash -c '<run>' < /dev/null` — processo
+próprio (cd/export/exit não vazam para a próxima chamada nem matam a sessão do terminal) e sem stdin.
+
 ## Validação TypeSafe Jev e coordenação (imposto em código)
 
 `typesafe_jev_check` grava aprovações (piso 70, uso único, 5 min, por agente/venue/ativo/lado). `wallet_swap` (compra e venda)

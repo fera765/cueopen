@@ -319,7 +319,10 @@ fun ReplayScreen(nav: NavController, sessionId: String) {
         }
     }) { pad ->
         LazyColumn(state = replayList, modifier = Modifier.padding(pad), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            itemsIndexed(session.items.take(shown), key = { _, it -> it.id }) { _, item -> TimelineItem(item, onOpenComputer = {}) }
+            val persona = ChatPersona.of(app.store.state.value.agents.firstOrNull { it.id == session.agentId })
+            itemsIndexed(session.items.take(shown), key = { _, it -> it.id }) { _, item ->
+                androidx.compose.runtime.CompositionLocalProvider(LocalChatPersona provides persona) { TimelineItem(item, onOpenComputer = {}) }
+            }
         }
     }
 }

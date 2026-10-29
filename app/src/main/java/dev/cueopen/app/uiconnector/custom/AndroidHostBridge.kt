@@ -16,9 +16,40 @@ import java.io.File
 class AndroidHostBridge(
     private val def: CustomDef,
     private val isGranted: (String) -> Boolean,
+    /** Ambiente do sandbox. Produção: `__uic__<id>`; validação do criador: [validationSession]. */
+    private val sessionId: String = "__uic__${def.id}",
 ) : HostBridge {
 
-    private val sessionId = "__uic__${def.id}"
+    companion object {
+        /** Ambiente ISOLADO usado só para validar um conector antes da instalação (nunca o de produção). */
+        fun validationSession(id: String) = "__uic__${id}__v"
+
+        /**
+         * Ponte do teste de validação: concede todas as capacidades DECLARADAS, mas só dentro do
+         * ambiente descartável de validação. Limpa o workspace e a marca do setup antes, para provar que o conector
+         * funciona a partir do zero (nada sobrando de execuções anteriores).
+         */
+        fun forValidation(def: CustomDef): AndroidHostBridge {
+            val sid = validationSession(def.id)
+            runCatching { CueApp.instance.sandbox.workspaceFor(sid).deleteRecursively() }
+            // o setup roda de novo a cada teste: prova que ele prepara o ambiente sozinho
+            runCatching { java.io.File(CueApp.instance.sandbox.publicFor(sid), ".setup-ok").delete() }
+            return AndroidHostBridge(def, { true }, sid)
+        }
+
+        /** Libera terminal e browser do ambiente de validação (os arquivos ficam para inspeção). */
+        fun releaseValidation(id: String) {
+            val sid = validationSession(id)
+            runCatching { CueApp.instance.terminals.close(sid) }
+            runCatching { CueApp.instance.closeBrowser(sid) }
+        }
+
+        /** Apaga o ambiente de validação inteiro (ex.: depois que o conector foi instalado). */
+        fun deleteValidation(id: String) {
+            releaseValidation(id)
+            runCatching { CueApp.instance.sandbox.deleteEnvironment(validationSession(id)) }
+        }
+    }
 
     override fun granted(capability: String): Boolean = capability in def.capabilities && isGranted(capability)
 
@@ -33,7 +64,7 @@ class AndroidHostBridge(
         val tag = Integer.toHexString(command.hashCode())
         if (runCatching { marker.readText().trim() == tag }.getOrDefault(false)) return null // já preparado
         return try {
-            val r = app.terminals.get(sessionId).runAgentCommand(command, BridgeSecurity.clampSetupTimeout(timeoutSec).toLong(), background = false)
+            val r = app.terminals.get(sessionId).runAgentCommand(ConnectorGuardrails.isolate(command), BridgeSecurity.clampSetupTimeout(timeoutSec).toLong(), background = false)
             if (!r.timedOut && r.exitCode == 0) {
                 runCatching { marker.writeText(tag) }
                 BridgeResult(true, r.output.takeLast(4_000))
@@ -54,7 +85,9 @@ class AndroidHostBridge(
         if (!sandbox.isInstalled()) return BridgeResult(false, "O sandbox Linux não está instalado. Abra Configurações → Sandbox para instalar o terminal.")
         sandbox.ensureEnvironment(sessionId)
         return try {
-            val r = app.terminals.get(sessionId).runAgentCommand(cmd, BridgeSecurity.clampTimeout(timeoutSec).toLong(), background = false)
+            // isolado: cwd sempre o workspace, processo bash próprio (cd/export/exit não vazam nem
+            // matam a sessão) e stdin vazio (nada fica esperando digitação e travando até o timeout).
+            val r = app.terminals.get(sessionId).runAgentCommand(ConnectorGuardrails.isolate(cmd), BridgeSecurity.clampTimeout(timeoutSec).toLong(), background = false)
             val failedQuiet = !r.timedOut && r.exitCode != 0 && r.output.isBlank()
             val body = buildString {
                 append(r.output.ifBlank { "(sem saída)" })

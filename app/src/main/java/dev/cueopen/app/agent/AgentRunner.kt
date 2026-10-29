@@ -907,7 +907,7 @@ class AgentRunner(
             }
             if (session.connectorBuilder) appendLine()
             if (session.connectorBuilder) appendLine("## Criar UI Connectors (esta conversa é o criador de conectores)")
-            if (session.connectorBuilder) appendLine("- Quando o usuário pedir um conector (UI Connector), NÃO escreva o JSON no chat: chame connector_spec, monte a definição, valide com connector_validate e corrija até zero erros (repita sozinho, sem perguntar), depois TESTE DE VERDADE com connector_test (requisições reais; corrija caminhos pela estrutura que ele mostra até PASSOU) e só então chame connector_propose. Não use o browser/web para testar — só connector_test vale. Só diga que deu certo depois de connector_propose; a instalação é feita pelo usuário no card. Se faltar a URL base ou os endpoints reais da API, pesquise na documentação oficial (web) ou pergunte.")
+            if (session.connectorBuilder) appendLine("- Quando o usuário pedir um conector (UI Connector), NÃO escreva o JSON no chat: chame connector_spec, monte a definição, valide com connector_validate e corrija até zero erros (repita sozinho, sem perguntar), depois TESTE DE VERDADE com connector_test (requisições reais; corrija caminhos pela estrutura que ele mostra até PASSOU) e só então chame connector_propose. GUARDRAILS: connector_test executa de verdade, num sandbox isolado de validação, o setup, cada comando, cada script de \"files\" (verificação de sintaxe) e cada ferramenta de terminal/arquivos/browser (duas vezes, para provar que repete sem quebrar). Sempre passe args_json com exemplos reais. Se aparecer ✗ (comando inexistente, pip sem --break-system-packages, {{param}} entre aspas, heredoc, script ausente, Traceback…), corrija e teste de novo até PASSOU — connector_propose é bloqueado sem isso, inclusive em conectores com login. Não use o browser/web para testar — só connector_test vale. Só diga que deu certo depois de connector_propose; a instalação é feita pelo usuário no card. Se faltar a URL base ou os endpoints reais da API, pesquise na documentação oficial (web) ou pergunte.")
             if (session.connectorBuilder) appendLine("- Serviços em TEMPO REAL (corretoras de ações/Forex/cripto/opções, cotações e saldo ao vivo, streams) usam o bloco realtime (WebSocket wss://) do SDK: login HTTP extrai o token, onOpen autentica/assina, rules montam estado (rt.*) e coleções (source), e ordens usam tools com send + await por request_id, sempre com risky, limits, requiresSignal e orderIntent. Use as mensagens REAIS do protocolo do serviço (documentação oficial); nunca invente.")
             if (session.connectorBuilder) appendLine("- CAPACIDADES DO APARELHO (terminal, arquivos, browser): o SDK permite conectores que rodam comandos (bloco capabilities + passo shell), criam/leem arquivos (passo file) e abrem páginas (passo fetch). Dá para fazer QUALQUER tipo de conector — baixar vídeo, gerar slides/HTML, copy, converter arquivos, especialista em JS/UI-UX que roda ferramentas, etc. Regras de ouro: (1) instale dependências no bloco setup (apk add/pip install), não dentro de cada ferramenta; (2) para CRIAR arquivos/scripts use o passo file (op write) ou o campo files do shell — NUNCA heredoc/echo multilinha no run (quebra o shell); (3) passe dados variáveis como argumento entre aspas ou via variável de ambiente (ex.: VAR={{param}} python3 gerar.py), nunca interpolados crus no meio do comando; (4) os arquivos do conector ficam no workspace isolado dele, acessível ao agente em /root/connectors/<id>/workspace.")
             if (session.connectorBuilder) appendLine("- CÁLCULOS (indicadores técnicos, estatística, sinais, tabelas derivadas, conversões): use o bloco compute do SDK — expressões com a biblioteca de funções do app (sma, ema, rsi, macd, bollinger, stoch, adx, ichimoku, supertrend, psar, vwap… e map/filter/reduce/zip_rows). Busque os dados reais (ex.: velas) com request/source e calcule tudo no compute; nunca peça ao usuário para calcular nem invente valores. Pedidos como 'todos os indicadores do TradingView' = um conector com compute cobrindo médias, osciladores, volatilidade, tendência e volume, com sinal e resumo (veja o exemplo de indicadores na especificação).")
@@ -1036,11 +1036,11 @@ class AgentRunner(
         if (builder) add(tool("connector_validate", "Valida uma definição JSON de UI Connector com o parser real do app. Retorna OK ou a lista exata de erros (caminho + motivo). Corrija e valide de novo até zero erros.", buildJsonObject {
             put("json", str("Definição JSON completa do conector"))
         }, listOf("json")))
-        if (builder) add(tool("connector_test", "TESTA DE VERDADE o conector (requisições reais; com realtime, conecta o WebSocket, espera mensagens e confere estado/coleções): busca cada painel, confere se tabelas têm linhas e colunas preenchidas e executa cada ferramenta não sensível. Mostra a estrutura real da resposta quando um caminho falha, para você corrigir. Obrigatório passar antes de connector_propose (conectores sem login).", buildJsonObject {
+        if (builder) add(tool("connector_test", "TESTA DE VERDADE o conector (requisições reais; com realtime, conecta o WebSocket, espera mensagens e confere estado/coleções): busca cada painel, confere se tabelas têm linhas e colunas preenchidas e executa cada ferramenta não sensível. GUARDRAILS de terminal/arquivos/browser: num sandbox isolado de validação roda o setup, confere cada comando (command -v), verifica a sintaxe dos scripts de files e do run, executa cada ferramenta de terminal/arquivos/browser (2x, idempotência) e acusa falhas escondidas na saída (command not found, Traceback, No such file…). Mostra a estrutura real/saída quando algo falha, para você corrigir. Obrigatório passar antes de connector_propose (TODOS os conectores).", buildJsonObject {
             put("json", str("Definição JSON completa do conector"))
-            put("args_json", str("Opcional: exemplos de argumentos por ferramenta, ex.: {\"buscar\":{\"termo\":\"anitta\",\"tipo\":\"artist\"}}"))
+            put("args_json", str("Exemplos REAIS de argumentos por ferramenta (obrigatório para ferramentas com parâmetros obrigatórios), ex.: {\"buscar\":{\"termo\":\"anitta\",\"tipo\":\"artist\"}}"))
         }, listOf("json")))
-        if (builder) add(tool("connector_propose", "Mostra ao usuário o card 'Instalar conector' no chat. Só aceita definição com zero erros e, se não tiver login, que tenha passado em connector_test com o MESMO JSON.", buildJsonObject {
+        if (builder) add(tool("connector_propose", "Mostra ao usuário o card 'Instalar conector' no chat. Só aceita definição que passou em connector_test com o MESMO JSON (guardrails: nada é proposto sem validação completa).", buildJsonObject {
             put("json", str("Definição JSON completa e válida do conector"))
         }, listOf("json")))
         if (allowMultiAgent) add(tool("sleep", "Modo contínuo: pausa e depois retoma automaticamente. Use UM modo: minutes, seconds, ou align_candle_seconds (acorda lead_seconds ANTES da abertura da próxima vela daquele tempo gráfico — use em trading para pegar o INÍCIO da vela, nunca um tempo fixo de 1 min que cai no meio dela).", buildJsonObject {
@@ -1305,18 +1305,29 @@ class AgentRunner(
                                 (v as? JsonObject)?.mapValues { (_, x) -> (x as? kotlinx.serialization.json.JsonPrimitive)?.contentOrNull ?: x.toString() }.orEmpty()
                             }
                         }.getOrDefault(emptyMap())
-                        val conn = dev.cueopen.app.uiconnector.custom.CustomConnector(d)
+                        // GUARDRAILS: terminal/arquivos/browser rodam DE VERDADE num ambiente isolado de
+                        // validação (setup, comandos, sintaxe dos scripts e execução real das ferramentas),
+                        // para o conector já chegar 100% funcional quando o usuário instalar.
+                        val usesDevice = d.capabilities.isNotEmpty() || d.setup != null
+                        val bridge: dev.cueopen.app.uiconnector.custom.HostBridge =
+                            if (usesDevice) dev.cueopen.app.uiconnector.custom.AndroidHostBridge.forValidation(d)
+                            else dev.cueopen.app.uiconnector.custom.NoHostBridge
+                        val conn = dev.cueopen.app.uiconnector.custom.CustomConnector(d, bridge = bridge)
                         val settings = dev.cueopen.app.uiconnector.ConnectorSettings { k -> d.settings.firstOrNull { it.id == k }?.default }
-                        val (passed, report) = try { runCatching { conn.selfTest(settings, toolArgs) }.getOrElse { false to "Falha no teste: ${it.message}" } } finally { conn.dispose() }
-                        if (passed) builderPassed[sessionId] = raw.hashCode()
-                        (if (passed) "PASSOU — o conector funciona com dados reais.\n" else "FALHOU — corrija a definição (caminhos/endpoints) e rode connector_test de novo:\n") + report.take(6000) +
+                        val (passed, report) = try { runCatching { conn.selfTest(settings, toolArgs) }.getOrElse { false to "Falha no teste: ${it.message}" } }
+                            finally { conn.dispose(); if (usesDevice) dev.cueopen.app.uiconnector.custom.AndroidHostBridge.releaseValidation(d.id) }
+                        if (passed) builderPassed[sessionId] = raw.hashCode() else builderPassed.remove(sessionId)
+                        (if (passed) "PASSOU — o conector foi validado de ponta a ponta" + (if (usesDevice) " (setup, comandos, scripts e execução real no sandbox)" else " com dados reais") + ".\n"
+                         else "FALHOU — o conector NÃO pode ser proposto assim. Corrija cada ✗ abaixo e rode connector_test de novo (sem perguntar ao usuário):\n") +
+                            report.take(7000) +
                             (if (passed) "\nAgora chame connector_propose com o MESMO JSON." else "")
                     }
-                    name == "connector_propose" && d.login.fields.isEmpty() && builderPassed[sessionId] != raw.hashCode() ->
-                        "BLOQUEADO: rode connector_test com este MESMO JSON e só proponha quando PASSOU."
+                    name == "connector_propose" && builderPassed[sessionId] != raw.hashCode() ->
+                        "BLOQUEADO pelos guardrails: este JSON ainda não passou em connector_test. Rode connector_test com este MESMO JSON (com args_json de exemplo para as ferramentas) e só proponha quando PASSOU."
                     name == "connector_validate" -> "OK — definição válida (host ${d.host}, ${d.tools.size} ferramenta(s), ${d.panels.size} painel(is))." +
                         (if (parsed.warnings.isNotEmpty()) "\nAvisos (não bloqueiam; corrija se fizer sentido):\n" + parsed.warnings.joinToString("\n") { "- $it" } else "") +
-                        "\nAgora chame connector_test com o MESMO JSON" + (if (d.login.fields.isNotEmpty()) " (conector com login: o teste real só ocorre após o usuário entrar; pode propor)." else ".")
+                        "\nAgora chame connector_test com o MESMO JSON e args_json com exemplos REAIS para cada ferramenta" +
+                        (if (d.login.fields.isNotEmpty()) " (com login: painéis/HTTP ficam para depois do login, mas terminal, arquivos, setup e scripts são validados agora)." else ".")
                     else -> {
                         store.addItem(sessionId, ChatItem.ConnectorProposal(
                             connectorId = d.id, name = d.name, description = d.description, host = d.host,
@@ -1414,7 +1425,7 @@ class AgentRunner(
                 val (title, args) = when (call.name) {
                     "connector_spec" -> "Lendo a especificação do SDK" to "formato JSON, regras e exemplos"
                     "connector_validate" -> "Validando a definição do conector" to cname.ifBlank { "JSON" }
-                    "connector_test" -> (if (testArgs.isBlank()) "Testando o conector com dados reais" else "Testando o conector com exemplos") to
+                    "connector_test" -> (if (testArgs.isBlank()) "Validando o conector (guardrails + execução real)" else "Validando o conector com exemplos (guardrails + execução real)") to
                         listOf(cname, testArgs).filter { it.isNotBlank() }.joinToString(" · ")
                     else -> "Preparando o card de instalação" to cname
                 }

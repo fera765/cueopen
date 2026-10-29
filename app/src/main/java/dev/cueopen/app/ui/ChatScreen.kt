@@ -141,6 +141,7 @@ fun ChatScreen(nav: NavController, sessionId: String) {
     }) { pad ->
         Column(Modifier.fillMaxSize().padding(pad).imePadding()) {
           Box(Modifier.weight(1f).fillMaxWidth()) {
+            androidx.compose.runtime.CompositionLocalProvider(LocalChatPersona provides ChatPersona.of(agent)) {
             LazyColumn(Modifier.fillMaxSize(), state = list, contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 items(session.items.filter { it !is ChatItem.Plan }, key = { it.id }) { item ->
                     TimelineItem(item, onOpenComputer = { tab -> nav.navigate("computer/$sessionId?tab=$tab") }, onOpenMedia = { mediaOpen = it }, sessionId = sessionId, nav = nav,
@@ -153,6 +154,7 @@ fun ChatScreen(nav: NavController, sessionId: String) {
                 }
                 if (session.status == SessionStatus.STOPPED) item { InfoRow(Icons.Rounded.StopCircle, "Tarefa interrompida. Envie uma mensagem para continuar.") }
                 if (session.status == SessionStatus.DONE) item { DoneRow(onCopy = { copyText(ctx, lastAnswer(session)) }, onShare = { shareText(ctx, lastAnswer(session)) }) }
+            }
             }
             if (!follow) {
                 SmallFloatingActionButton({ follow = true }, Modifier.align(Alignment.BottomEnd).padding(16.dp), containerColor = c.ink, contentColor = c.bg) {
@@ -314,8 +316,9 @@ private fun AssistantText(i: ChatItem.Assistant, onSend: ((String) -> Unit)? = n
     val c = Cue.c
     Column(Modifier.fillMaxWidth()) {
         if (i.final) Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(bottom = 6.dp)) {
-            AgentFace(c.accent, "smile", 20.dp); Spacer(Modifier.width(6.dp))
-            Text("Fluwy Bot", fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
+            val persona = LocalChatPersona.current
+            AgentFace(persona.color, persona.face, 20.dp); Spacer(Modifier.width(6.dp))
+            Text(persona.name, fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
         }
         CueMarkdown(i.text, onSend = onSend)
     }
@@ -463,13 +466,27 @@ private fun PlanCard(p: ChatItem.Plan) {
     }
 }
 
+/** Quem está respondendo neste chat: o Agent escolhido (cor + forma do mascote) ou o Fluwy Bot padrão. */
+data class ChatPersona(val color: Color, val face: String, val name: String) {
+    companion object {
+        val DEFAULT = ChatPersona(Color(0xFFFF6B3D), "wink", "Fluwy Bot")
+        fun of(agent: dev.cueopen.app.data.AgentProfile?): ChatPersona =
+            if (agent == null) DEFAULT else ChatPersona(Color(agent.color), agent.face, agent.name.ifBlank { DEFAULT.name })
+    }
+}
+
+val LocalChatPersona = androidx.compose.runtime.staticCompositionLocalOf { ChatPersona.DEFAULT }
+
+/** "Pensando…": o mascote é o MESMO do Agent escolhido (igual ao do topo do chat), respirando e balançando. */
 @Composable
 private fun ThinkingRow(a: Activity) {
     val c = Cue.c
+    val persona = LocalChatPersona.current
     val t = rememberInfiniteTransition(label = "t")
-    val alpha by t.animateFloat(0.3f, 1f, infiniteRepeatable(tween(700), RepeatMode.Reverse), label = "a")
+    val alpha by t.animateFloat(0.45f, 1f, infiniteRepeatable(tween(700), RepeatMode.Reverse), label = "a")
+    val bob by t.animateFloat(0f, -3f, infiniteRepeatable(tween(520, easing = FastOutSlowInEasing), RepeatMode.Reverse), label = "b")
     Row(verticalAlignment = Alignment.CenterVertically) {
-        AgentFace(c.accent, "side", 22.dp, Modifier.alpha(alpha)); Spacer(Modifier.width(8.dp))
+        AgentFace(persona.color, persona.face, 22.dp, Modifier.offset(y = bob.dp).alpha(alpha)); Spacer(Modifier.width(8.dp))
         Text(when (a.kind) { Activity.Kind.THINKING, Activity.Kind.IDLE -> "Pensando…"; else -> "Trabalhando…" }, color = c.ink2, fontSize = 14.sp)
     }
 }

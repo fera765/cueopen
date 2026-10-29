@@ -300,6 +300,7 @@ class CustomConnector(
                     }
                     val cmd = Template.renderShell(t.shell.run, Template.Ctx(sessionVars() + vars))
                     val r = bridge.shell(cmd, t.shell.timeoutSec)
+                    lastStepRaw = r.text
                     if (!r.ok) return "ERRO: " + Redactor.redact(r.text.take(2000), secrets())
                     Reply(200, r.text, ResponseTree.parse(r.text, null), emptyMap())
                 }
@@ -309,6 +310,7 @@ class CustomConnector(
                     val fpath = Template.render(t.file.path, ctxF)
                     val content = t.file.content?.let { Template.render(it, ctxF) }
                     val r = bridge.fileOp(t.file.op, fpath, content)
+                    lastStepRaw = r.text
                     if (!r.ok) return "ERRO: " + Redactor.redact(r.text.take(2000), secrets())
                     Reply(200, r.text, ResponseTree.parse(r.text, null), emptyMap())
                 }
@@ -316,6 +318,7 @@ class CustomConnector(
                     if (!bridge.granted(Capabilities.BROWSER)) return capDenied(Capabilities.BROWSER)
                     val url = Template.render(t.fetch.url, Template.Ctx(sessionVars() + vars))
                     val r = bridge.fetch(url, t.fetch.waitSec)
+                    lastStepRaw = r.text
                     if (!r.ok) return "ERRO: " + Redactor.redact(r.text.take(2000), secrets())
                     Reply(200, r.text, ResponseTree.parse(r.text, null), emptyMap())
                 }
@@ -360,34 +363,193 @@ class CustomConnector(
         }
     }
 
+    /** Saída CRUA do último passo de terminal/arquivo/browser (para o teste achar falhas escondidas). */
+    @Volatile private var lastStepRaw: String? = null
+
     /**
-     * Teste real do conector (usado pelo criador com IA antes de liberar a instalação): busca cada painel,
-     * confere se tabelas têm linhas e colunas preenchidas e executa cada ferramenta NÃO sensível.
-     * Devolve (passou, relatório). Ferramentas sensíveis (risky) nunca são executadas no teste.
+     * Teste real do conector (usado pelo criador com IA antes de liberar a instalação). Com os GUARDRAILS
+     * ([ConnectorGuardrails]) ele valida TUDO que o conector vai executar, e não só o formato:
+     *  1. análise estática de setup, comandos, scripts e arquivos (erros bloqueiam);
+     *  2. sandbox disponível, `setup` rodado de verdade, cada comando externo conferido com `command -v`;
+     *  3. cada script gravado por `files` passa no verificador de sintaxe (bash -n / python ast / node --check)
+     *     e o próprio `run` passa em `bash -n`;
+     *  4. cada ferramenta de terminal/arquivos/browser RODA no ambiente isolado de validação — duas vezes
+     *     quando rápida (a 2ª pega o que só funciona na 1ª: mkdir sem -p, arquivo que já existe…) — e a saída
+     *     crua é varrida por falhas escondidas (command not found, Traceback…) mesmo com exit 0;
+     *  5. painéis, tempo real e ferramentas HTTP com dados reais (quando não exige login).
+     * Ordens, envios e ferramentas com efeito externo nunca são executadas. Devolve (passou, relatório).
      */
     suspend fun selfTest(settings: ConnectorSettings, toolArgs: Map<String, Map<String, String>>): Pair<Boolean, String> {
-        if (!isLoggedIn) return false to "Conector exige login: o teste real só é possível após instalar e entrar."
         val sb = StringBuilder()
         var ok = true
         val base = settingVars(settings)
-        val r0 = rt
-        if (r0 != null) {
-            val err = ensureRt(base)
-            if (err != null) return false to Redactor.redact("✗ tempo real: não conectou — $err", secrets())
-            r0.settle(8_000)
-            val n = r0.received.get()
-            if (n == 0L) { ok = false; sb.appendLine("✗ tempo real: conectou, mas nenhuma mensagem chegou em 8 s (confira onOpen/assinaturas).") }
-            else sb.appendLine("✓ tempo real: conectado, $n mensagem(ns) recebida(s)")
-            val st = r0.stateSnapshot()
-            for (k in def.realtime!!.stateKeys) {
-                val v = st[k]
-                if (v == null) { ok = false; sb.appendLine("✗ estado rt.$k: nenhuma mensagem casou com a regra (confira match/set)") }
-                else sb.appendLine("✓ estado rt.$k = " + v.take(80))
-            }
-            for ((c, size) in r0.collectionSizes()) {
-                if (size == 0) { ok = false; sb.appendLine("✗ coleção $c: vazia (confira match/push)") } else sb.appendLine("✓ coleção $c: $size item(ns)")
+        fun fail(line: String) { ok = false; sb.appendLine("✗ $line") }
+
+        // ---------------------------------------------------------- 1. guardrails estáticos
+        val findings = ConnectorGuardrails.staticCheck(def)
+        val errs = findings.filter { it.level == ConnectorGuardrails.Level.ERROR }
+        val warns = findings.filter { it.level == ConnectorGuardrails.Level.WARN }
+        if (errs.isNotEmpty()) {
+            ok = false
+            sb.appendLine("GUARDRAILS — ${errs.size} erro(s) que fariam o conector falhar no agente:")
+            errs.forEach { sb.appendLine(it.toString()) }
+        } else sb.appendLine("✓ guardrails estáticos: comandos, scripts e arquivos sem defeitos conhecidos")
+
+        // ---------------------------------------------------------- 2–3. ambiente, setup, comandos e sintaxe
+        val shellTools = def.tools.filter { it.shell != null }
+        val needsTerminal = shellTools.isNotEmpty() || def.setup != null
+        var terminalReady = !needsTerminal
+        if (needsTerminal) terminalReady = validateTerminal(settings, toolArgs, sb) { ok = false }
+        if (def.tools.any { it.file != null }) {
+            if (!bridge.granted(Capabilities.FILES)) fail("arquivos: o teste de validação não tem acesso ao workspace.")
+            else {
+                val w = bridge.fileOp("write", ".cue-validate/probe.txt", "ok")
+                val r = if (w.ok) bridge.fileOp("read", ".cue-validate/probe.txt", null) else w
+                bridge.fileOp("delete", ".cue-validate", null)
+                if (!w.ok || !r.ok || r.text.trim() != "ok") fail("arquivos: workspace do conector não aceitou gravar/ler — ${(if (!w.ok) w else r).text.take(300)}")
+                else sb.appendLine("✓ arquivos: workspace grava e lê")
             }
         }
+
+        // ---------------------------------------------------------- 5a. tempo real e painéis (precisam de sessão)
+        val r0 = rt
+        if (!isLoggedIn) {
+            sb.appendLine("⏳ painéis, tempo real e ferramentas HTTP: exigem login — serão testados depois que o usuário entrar.")
+        } else {
+            if (r0 != null) {
+                val err = ensureRt(base)
+                if (err != null) fail("tempo real: não conectou — $err")
+                else {
+                    r0.settle(8_000)
+                    val n = r0.received.get()
+                    if (n == 0L) fail("tempo real: conectou, mas nenhuma mensagem chegou em 8 s (confira onOpen/assinaturas).")
+                    else sb.appendLine("✓ tempo real: conectado, $n mensagem(ns) recebida(s)")
+                    val st = r0.stateSnapshot()
+                    for (k in def.realtime!!.stateKeys) {
+                        val v = st[k]
+                        if (v == null) fail("estado rt.$k: nenhuma mensagem casou com a regra (confira match/set)")
+                        else sb.appendLine("✓ estado rt.$k = " + v.take(80))
+                    }
+                    for ((c, size) in r0.collectionSizes()) {
+                        if (size == 0) fail("coleção $c: vazia (confira match/push)") else sb.appendLine("✓ coleção $c: $size item(ns)")
+                    }
+                }
+            }
+            testPanels(settings, base, sb) { ok = false }
+        }
+
+        // ---------------------------------------------------------- 4–5b. ferramentas
+        for (t in def.tools) {
+            val cap = t.shell != null || t.file != null || t.fetch != null
+            if (!ConnectorGuardrails.executableInValidation(t)) {
+                sb.appendLine("• ferramenta ${t.name}: " + (if (cap) "efeito externo (envio/ordem) — não executada; comandos e sintaxe já validados acima" else "sensível — não executada no teste"))
+                continue
+            }
+            if (!cap && !isLoggedIn) { sb.appendLine("⏳ ferramenta ${t.name}: HTTP com login — testada após entrar"); continue }
+            if (t.shell != null && !terminalReady) { fail("ferramenta ${t.name}: não executada porque o terminal/setup falhou (veja acima)"); continue }
+            val args = toolArgs[t.name].orEmpty()
+            val missing = t.params.filter { it.required && args[it.name].isNullOrBlank() }.map { it.name }
+            if (missing.isNotEmpty()) { fail("ferramenta ${t.name}: informe exemplos REAIS em args_json para ${missing.joinToString()} — sem isso não dá para provar que ela funciona"); continue }
+            val runs = if (t.shell != null || t.file?.op == "write") 2 else 1
+            var passedAll = true
+            for (n in 1..runs) {
+                lastStepRaw = null
+                val t0 = System.currentTimeMillis()
+                val out = callTool(t.name, args, settings)
+                val secs = (System.currentTimeMillis() - t0) / 1000
+                val raw = lastStepRaw.orEmpty()
+                val tag = if (n == 1) "" else " (2ª execução — idempotência)"
+                val hidden = if (t.shell != null) ConnectorGuardrails.hiddenFailure(raw) else null
+                when {
+                    out.startsWith("ERRO") || out.startsWith("RECUSAD") -> { passedAll = false; fail("ferramenta ${t.name}$tag: " + out.take(1500) + hint(out)) }
+                    out.isBlank() -> { passedAll = false; fail("ferramenta ${t.name}$tag: resposta vazia") }
+                    hidden != null -> { passedAll = false; fail("ferramenta ${t.name}$tag: terminou, mas a saída mostra falha: \"$hidden\"" + hint(hidden) + "\nSaída:\n" + raw.takeLast(1200)) }
+                    else -> if (n == 1) sb.appendLine("✓ ferramenta ${t.name} (${secs}s): " + out.replace("\n", " ⏎ ").take(300))
+                        else sb.appendLine("✓ ferramenta ${t.name}: 2ª execução também passou")
+                }
+                if (!passedAll) break
+                if (n == 1 && runs == 2 && secs > 45) { sb.appendLine("• ferramenta ${t.name}: lenta (${secs}s) — 2ª execução dispensada"); break }
+            }
+        }
+        if (warns.isNotEmpty()) {
+            sb.appendLine("Avisos (não bloqueiam; corrija se fizer sentido):")
+            warns.forEach { sb.appendLine(it.toString()) }
+        }
+        return ok to Redactor.redact(sb.toString().trim(), secrets())
+    }
+
+    /** Dica objetiva para as falhas mais comuns de terminal. */
+    private fun hint(text: String): String = when {
+        text.contains("not found") -> "\n→ comando inexistente no sandbox: instale no \"setup\" (apk add --no-cache <pacote> ou pip install --break-system-packages <pacote>)."
+        text.contains("No such file") -> "\n→ arquivo/pasta inexistente: crie com \"files\" (ou mkdir -p) e use caminhos relativos ao workspace."
+        text.contains("ModuleNotFoundError") || text.contains("ImportError") -> "\n→ módulo Python ausente: instale no \"setup\" com pip install --break-system-packages <módulo>."
+        text.contains("SyntaxError") -> "\n→ erro de sintaxe no script gravado em \"files\": corrija o conteúdo (\\n para quebras de linha)."
+        text.contains("timeout") -> "\n→ passou do tempo-limite: aumente shell.timeoutSec ou reduza o trabalho."
+        text.contains("externally-managed") -> "\n→ use pip install --break-system-packages."
+        text.contains("Permission denied") -> "\n→ sem permissão: rode scripts com o interpretador (bash x.sh / python3 x.py) em vez de ./x."
+        else -> ""
+    }
+
+    /** Fase de terminal da validação. Devolve true se o terminal (e o setup) estão prontos para as ferramentas. */
+    private suspend fun validateTerminal(settings: ConnectorSettings, toolArgs: Map<String, Map<String, String>>, sb: StringBuilder, onFail: () -> Unit): Boolean {
+        fun fail(line: String) { onFail(); sb.appendLine("✗ $line") }
+        if (!bridge.granted(Capabilities.TERMINAL)) { fail("terminal: o teste de validação não tem acesso ao sandbox."); return false }
+        val probe = bridge.shell("echo cue-validate-ok", 30)
+        if (!probe.ok || !probe.text.contains("cue-validate-ok")) { fail("terminal: sandbox indisponível — ${probe.text.take(400)}"); return false }
+        sb.appendLine("✓ terminal: sandbox isolado de validação respondeu")
+        def.setup?.let { su ->
+            val cmd = Template.renderShell(su.run, Template.Ctx(settingVars(settings)))
+            val r = bridge.ensureSetup(cmd, su.timeoutSec)
+            when {
+                r == null -> sb.appendLine("✓ setup: já preparado com este mesmo comando")
+                !r.ok -> { fail("setup falhou — ${r.text.takeLast(1500)}" + hint(r.text)); return false }
+                else -> sb.appendLine("✓ setup: rodou com sucesso" + (r.text.trim().takeIf { it.isNotEmpty() }?.let { " (" + it.lines().last().take(80) + ")" } ?: ""))
+            }
+        }
+        // comandos externos usados pelas ferramentas e pelos scripts precisam existir APÓS o setup
+        val needed = LinkedHashSet<String>()
+        def.tools.mapNotNull { it.shell }.forEach { sh ->
+            needed += ConnectorGuardrails.externalCommands(sh.run)
+            sh.files.forEach { f -> ConnectorGuardrails.syntaxInterpreter(f.path)?.let { needed += it } }
+        }
+        var ready = true
+        if (needed.isNotEmpty()) {
+            val check = "for c in " + needed.joinToString(" ") { Template.shellQuote(it) } + "; do command -v \"\$c\" >/dev/null 2>&1 || echo \"FALTA:\$c\"; done; echo fim"
+            val r = bridge.shell(check, 30)
+            val missing = r.text.lines().filter { it.startsWith("FALTA:") }.map { it.removePrefix("FALTA:").trim() }
+            if (!r.ok) { fail("terminal: não consegui conferir os comandos — ${r.text.take(300)}"); ready = false }
+            else if (missing.isNotEmpty()) {
+                fail("comando(s) inexistente(s) no sandbox: ${missing.joinToString()}. Instale no \"setup\" (Alpine: apk add --no-cache ${missing.joinToString(" ")}; Python: pip install --break-system-packages …) e confira no fim do setup com command -v.")
+                ready = false
+            } else sb.appendLine("✓ comandos disponíveis: ${needed.joinToString()}")
+        }
+        // sintaxe: scripts gravados por files e o próprio run (com os valores de exemplo)
+        for (t in def.tools) {
+            val sh = t.shell ?: continue
+            val args = toolArgs[t.name].orEmpty()
+            val vars = settingVars(settings) + t.params.associate { p -> p.name to (args[p.name]?.takeIf { it.isNotEmpty() } ?: p.allowed.firstOrNull() ?: "exemplo") }
+            val ctx = Template.Ctx(sessionVars() + vars)
+            for (fw in sh.files) {
+                val path = Template.render(fw.path, ctx)
+                val w = bridge.fileOp("write", path, Template.render(fw.content, ctx))
+                if (!w.ok) { fail("ferramenta ${t.name}: não consegui gravar '$path' — ${w.text.take(300)}"); ready = false; continue }
+                val chk = ConnectorGuardrails.syntaxCheck(path) ?: continue
+                val interp = ConnectorGuardrails.syntaxInterpreter(path)
+                if (interp != null && interp in needed && !ready) continue
+                val r = bridge.shell(chk, 30)
+                if (!r.ok) { fail("ferramenta ${t.name}: erro de sintaxe em '$path' — ${r.text.take(800)}"); ready = false }
+                else sb.appendLine("✓ ferramenta ${t.name}: sintaxe de '$path' ok")
+            }
+            val cmd = Template.renderShell(sh.run, ctx)
+            val r = bridge.shell("bash -n -c " + Template.shellQuote(cmd), 15)
+            if (!r.ok) { fail("ferramenta ${t.name}: o comando \"run\" tem erro de sintaxe do shell — ${r.text.take(600)}"); ready = false }
+        }
+        return ready
+    }
+
+    /** Fase de painéis do teste (dados reais). */
+    private suspend fun testPanels(settings: ConnectorSettings, base: Map<String, String>, sb: StringBuilder, onFail: () -> Unit) {
+        fun fail(line: String) { onFail(); sb.appendLine("✗ $line") }
         def.panels.forEachIndexed { idx, p ->
             val label = "painel $idx (${p.type}${if (p.title.isNotBlank()) " \"${p.title.take(30)}\"" else ""})"
             val r = p.request
@@ -398,52 +560,37 @@ class CustomConnector(
                     p.source.isNotEmpty() -> Reply(200, "", sourceJson(p.source, base), emptyMap())
                     else -> Reply(200, "", null, emptyMap())
                 }
-                if (reply.code !in 200..299) {
-                    ok = false; sb.appendLine("✗ $label: HTTP ${reply.code} — ${reply.body.take(200)}"); return@forEachIndexed
-                }
+                if (reply.code !in 200..299) { fail("$label: HTTP ${reply.code} — ${reply.body.take(200)}"); return@forEachIndexed }
                 val (cvals, cvars) = runCompute(p.compute, reply.json, settings, emptyMap(), emptySet())
                 if (cvals.isNotEmpty()) sb.appendLine("  cálculos: " + cvals.entries.joinToString("; ") { e -> e.key + "=" + Compute.str(if (e.value is List<*>) (e.value as List<*>).lastOrNull { it != null } else e.value).take(40) })
                 val ctx = Template.Ctx(sessionVars() + base + cvars, reply.json)
                 when (p.type) {
                     "table" -> {
                         val rows = rowsOf(p.rows, reply.json, cvals)
-                        if (rows.isEmpty()) {
-                            ok = false
-                            sb.appendLine("✗ $label: 0 linhas em ${p.rows}. Estrutura recebida:\n" + ResponseTree.outline(reply.json, 3).take(1500))
-                        } else {
+                        if (rows.isEmpty()) fail("$label: 0 linhas em ${p.rows}. Estrutura recebida:\n" + ResponseTree.outline(reply.json, 3).take(1500))
+                        else {
                             val first = p.columns.map { c -> Template.render(c.value, Template.Ctx(ctx.vars, rows[0])) }
-                            if (first.all { it.isBlank() }) { ok = false; sb.appendLine("✗ $label: ${rows.size} linhas, mas todas as colunas vieram vazias (confira os caminhos das colunas relativos a cada linha). 1ª linha:\n" + ResponseTree.outline(rows[0], 2).take(800)) }
+                            if (first.all { it.isBlank() }) fail("$label: ${rows.size} linhas, mas todas as colunas vieram vazias (confira os caminhos das colunas relativos a cada linha). 1ª linha:\n" + ResponseTree.outline(rows[0], 2).take(800))
                             else sb.appendLine("✓ $label: ${rows.size} linhas; 1ª: " + first.joinToString(" | ").take(200))
                         }
                     }
                     "stats" -> {
                         val vals = p.stats.map { Template.render(it.value, ctx) }
-                        if (vals.all { it.isBlank() || it == "-" }) { ok = false; sb.appendLine("✗ $label: valores vazios. Estrutura:\n" + ResponseTree.outline(reply.json, 3).take(1200)) }
+                        if (vals.all { it.isBlank() || it == "-" }) fail("$label: valores vazios. Estrutura:\n" + ResponseTree.outline(reply.json, 3).take(1200))
                         else sb.appendLine("✓ $label: " + vals.joinToString(" | ").take(200))
                     }
                     else -> {
                         val txt = Template.render(p.title + " " + p.text, ctx).trim()
-                        if (txt.isBlank()) { ok = false; sb.appendLine("✗ $label: texto vazio. Estrutura:\n" + ResponseTree.outline(reply.json, 3).take(1200)) }
+                        if (txt.isBlank()) fail("$label: texto vazio. Estrutura:\n" + ResponseTree.outline(reply.json, 3).take(1200))
                         else sb.appendLine("✓ $label: " + txt.take(200))
                     }
                 }
             } catch (c: kotlinx.coroutines.CancellationException) {
                 throw c
             } catch (t: Throwable) {
-                ok = false; sb.appendLine("✗ $label: ${t.message ?: t.javaClass.simpleName}")
+                fail("$label: ${t.message ?: t.javaClass.simpleName}")
             }
         }
-        for (t in def.tools) {
-            if (t.risky) { sb.appendLine("• ferramenta ${t.name}: sensível — não executada no teste"); continue }
-            if (t.shell != null || t.file != null || t.fetch != null) { sb.appendLine("• ferramenta ${t.name}: usa capacidade do aparelho (terminal/arquivos/browser) — testada só após você autorizar"); continue }
-            val args = toolArgs[t.name].orEmpty()
-            val missing = t.params.filter { it.required && args[it.name].isNullOrBlank() }.map { it.name }
-            if (missing.isNotEmpty()) { ok = false; sb.appendLine("✗ ferramenta ${t.name}: informe exemplos em args_json para ${missing.joinToString()}"); continue }
-            val out = callTool(t.name, args, settings)
-            if (out.startsWith("ERRO") || out.startsWith("RECUSAD") || out.isBlank()) { ok = false; sb.appendLine("✗ ferramenta ${t.name}: " + out.take(1500)) }
-            else sb.appendLine("✓ ferramenta ${t.name}: " + out.replace("\n", " ⏎ ").take(300))
-        }
-        return ok to Redactor.redact(sb.toString().trim(), secrets())
     }
 
     override fun orderIntents(tool: String, args: Map<String, String>): List<OrderIntent> {
