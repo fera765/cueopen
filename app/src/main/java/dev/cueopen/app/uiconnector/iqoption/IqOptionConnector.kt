@@ -33,6 +33,8 @@ import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
@@ -172,7 +174,7 @@ class IqOptionConnector(private val kv: KvStore? = null) : UiConnector {
                 ParamSpec("count", "Velas (300–1000). Padrão 600.", "integer", required = false),
                 ParamSpec("strong", "true = só sinais fortes", "boolean", required = false),
             )),
-            ToolSpec("scan_and_arm", "Agenda em background, no relógio do servidor, uma varredura de TODOS os ativos turbo/binários abertos em T−2 min usando o timeframe configurado (M1/M2/M5/M10). Em cada ativo aplica os dois candles fechados desse período, o Price Action e os filtros técnicos/riscos já configurados; não exige consenso entre timeframes. Escolhe um único candidato pelo ranqueamento Price Action, revalida em T−10 s e em T confirma o par fechado anterior, candle-alvo do mesmo timeframe e cotação atual. Se faltar dado, houver atraso ou divergência, não envia ordem. MHI não participa.", listOf(
+            ToolSpec("scan_and_arm", "Agenda em background, no relógio do servidor, uma varredura de TODOS os ativos turbo/binários abertos em T−2 min usando o timeframe configurado (M1/M2/M5/M10). Em cada ativo aplica candles fechados, Price Action e os filtros técnicos/riscos já configurados; não exige consenso entre timeframes. Escolhe um único candidato e persiste o sinal. O serviço independente do agente tenta revalidar no máximo em T−50, T−25 e T−10; em T confirma novamente o par fechado, candle-alvo, cotação e risco. Cada tentativa de revalidação termina antes da abertura; falha, atraso ou dado ausente significa nenhuma ordem. MHI não participa.", listOf(
                 ParamSpec("minutes", "Expiração da operação em minutos (1–60). Padrão 1.", "integer", required = false),
                 ParamSpec("amount", "Valor da operação (ignorado se o Masaniello estiver ligado).", "number", required = false),
             ), risky = true),
@@ -278,7 +280,7 @@ class IqOptionConnector(private val kv: KvStore? = null) : UiConnector {
                 override fun cancel(signal: IqArmedSignal) = runCatching { IqSignalAlarms.cancel(dev.cueopen.app.CueApp.instance, signal.id) }.getOrDefault(Unit)
             },
             port = object : IqSignalDispatchPort {
-                override suspend fun revalidate(signal: IqArmedSignal): String? = revalidatePersistedSignal(signal)
+                override suspend fun revalidate(signal: IqArmedSignal): IqSignalValidationResult = revalidatePersistedSignal(signal)
                 override suspend fun submit(signal: IqArmedSignal): IqSubmissionResult = submitPersistedSignal(signal)
             },
         )
@@ -480,7 +482,7 @@ class IqOptionConnector(private val kv: KvStore? = null) : UiConnector {
         }
         // reconectou: restaura cotações de operações em aberto e gatilhos de vela ainda ativos
         tracked.values.filter { it.result == null && it.activeId != 0 }.forEach { subscribeQuotes(it.activeId) }
-        armed.filter { it.status == "armado" || it.status == "revalidando T−10" || it.status.startsWith("revalidado") }
+        armed.filter { it.status == "armado" || it.status.startsWith("revalidando") || it.status.startsWith("revalidado") }
             .map { it.activeId }.distinct().forEach { subscribeQuotes(it) }
     }
 
@@ -504,7 +506,7 @@ class IqOptionConnector(private val kv: KvStore? = null) : UiConnector {
     /** Larga a assinatura de cotações quando não há mais operação aberta naquele ativo. */
     private fun pruneQuotes() {
         val needed = tracked.values.filter { it.result == null && it.expSec + 120 > serverNowSec() }.map { it.activeId }.toMutableSet()
-        needed += armed.filter { it.status == "armado" || it.status == "revalidando T−10" || it.status.startsWith("revalidado") }
+        needed += armed.filter { it.status == "armado" || it.status.startsWith("revalidando") || it.status.startsWith("revalidado") }
             .map { it.activeId }
         subscribed.filter { it !in needed }.forEach { id ->
             subscribed.remove(id)
@@ -942,11 +944,11 @@ class IqOptionConnector(private val kv: KvStore? = null) : UiConnector {
     }
 
     /** Adaptador de transporte: normaliza e descarta explicitamente qualquer candle ainda em formação. */
-    private suspend fun loadClosedCandles(asset: String, timeframe: Int, limit: Int): PriceSeries {
+    private suspend fun loadClosedCandles(asset: String, timeframe: Int, limit: Int, timeoutMs: Long = 8_000L): PriceSeries {
         val a = IqProtocol.resolveAsset(loadAssets(), asset)
             ?: throw IllegalArgumentException("Ativo '$asset' não encontrado na IQ Option.")
         val id = reqId()
-        val root = request(id, IqProtocol.getCandlesMessage(id, a.id, timeframe, limit.coerceIn(30, 200), serverNowSec()), "candles", timeoutMs = 8_000)
+        val root = request(id, IqProtocol.getCandlesMessage(id, a.id, timeframe, limit.coerceIn(30, 200), serverNowSec()), "candles", timeoutMs = timeoutMs)
         val closed = IqProtocol.parseCandles(root["msg"] as? JsonObject ?: JsonObject(emptyMap()))
             .filter { it.from + timeframe <= serverNowSec() }
             .sortedBy { it.from }
@@ -1189,7 +1191,7 @@ class IqOptionConnector(private val kv: KvStore? = null) : UiConnector {
                     subscribeQuotes(persisted.activeId)
                     pendingScans[target] = when {
                         persisted.id != record.id -> "vela já possui ${persisted.asset} ${persisted.direction.uppercase()} (${persisted.state}); não rearmado"
-                        persisted.state == IqArmedSignal.ARMED -> "${persisted.asset} ${persisted.direction.uppercase()} persistido; dispatcher independente aguardando T−10"
+                        persisted.state == IqArmedSignal.ARMED -> "${persisted.asset} ${persisted.direction.uppercase()} persistido; dispatcher independente aguardando T−50/T−25/T−10"
                         else -> "sinal expirado sem ordem: ${persisted.detail}"
                     }
                 } catch (t: Throwable) {
@@ -1203,19 +1205,19 @@ class IqOptionConnector(private val kv: KvStore? = null) : UiConnector {
             scanJobs[target] = job
             job.start()
         }
-        return "Varredura agendada: timeframe ${timeframeLabel(timeframeSeconds)}, candle-alvo às ${hms(target)}. Em T−2 min o conector analisará todos os ativos turbo/binários, escolherá no máximo um pelo ranqueamento Price Action e revalidará em T−10. O par anterior só fica confirmado quando ambos estiverem fechados até T; em T também valida o candle-alvo, cotação e risco. Outros timeframes não precisam concordar. MHI não é usado."
+        return "Varredura agendada: timeframe ${timeframeLabel(timeframeSeconds)}, candle-alvo às ${hms(target)}. Em T−2 min o conector analisa os ativos turbo/binários e persiste no máximo um sinal. Sem depender do agente, revalida no máximo em T−50, T−25 e T−10; em T confirma novamente os dois candles fechados mais recentes, o candle-alvo, a cotação e os gates de risco. Qualquer falha ou atraso além da janela resulta em nenhuma ordem. Outros timeframes não precisam concordar; MHI não é usado."
     }
 
     private suspend fun prevalidateArmed(t: Armed): String? {
-        if (!serverClockFresh()) return "relógio do servidor stale em T−10; nenhuma ordem"
+        if (!serverClockFresh()) return "relógio do servidor stale na revalidação pré-candle; nenhuma ordem"
         val cutoff = minOf(serverNowSec(), t.targetOpen)
         val series = try { priceActionPipeline.load(t.asset, t.timeframeSeconds, 150) } catch (e: Throwable) {
             if (e is kotlinx.coroutines.CancellationException) throw e
-            return "candles indisponíveis em T−10: ${e.message ?: e.javaClass.simpleName}"
+            return "candles indisponíveis na revalidação pré-candle: ${e.message ?: e.javaClass.simpleName}"
         }
         val check = analyzeSignal(series, t.targetOpen, cutoff, t.timeframeSeconds, t.settings)
-        if (!check.allowed) return "revalidação T−10 recusada: ${check.reason}"
-        if (check.direction != t.dir) return "revalidação T−10 mudou de direção (${check.direction} ≠ ${t.dir})"
+        if (!check.allowed) return "revalidação pré-candle recusada: ${check.reason}"
+        if (check.direction != t.dir) return "revalidação pré-candle mudou de direção (${check.direction} ≠ ${t.dir})"
         return null
     }
 
@@ -1225,22 +1227,31 @@ class IqOptionConnector(private val kv: KvStore? = null) : UiConnector {
         return app.uiConnectors.settings(this)
     }
 
-    private suspend fun revalidatePersistedSignal(signal: IqArmedSignal): String? {
+    private fun signalStrategyFingerprint(settings: ConnectorSettings): String = listOf(
+        signalTimeframeSeconds(settings)?.toString().orEmpty(),
+        settings.text("require_confluence").ifEmpty { "true" },
+        settings.bool("confluence_strong").toString(),
+        settings.bool("price_action_strict").toString(),
+    ).joinToString("|")
+
+    private suspend fun revalidatePersistedSignal(signal: IqArmedSignal): IqSignalValidationResult {
         val settings = currentDispatchSettings()
-            ?: return "conector desativado ou configurações indisponíveis; nenhuma ordem"
-        if (settings.bool("require_jev")) return "validação TypeSafe Jev está ligada; dispatcher não pode ignorá-la"
+            ?: return IqSignalValidationResult(failure = "conector desativado ou configurações indisponíveis; nenhuma ordem")
+        if (settings.bool("require_jev")) return IqSignalValidationResult(failure = "validação TypeSafe Jev está ligada; dispatcher não pode ignorá-la")
         if (signalTimeframeSeconds(settings) != signal.timeframeSeconds)
-            return "timeframe mudou desde o armamento; sinal invalidado"
-        riskCheck(settings)?.let { return "risco atual recusou: $it" }
+            return IqSignalValidationResult(failure = "timeframe mudou desde o armamento; sinal invalidado")
+        riskCheck(settings)?.let { return IqSignalValidationResult(failure = "risco atual recusou: $it") }
         ensureConnected()
-        if (!awaitFreshServerClock()) return "relógio do servidor ausente/stale em T−10; nenhuma ordem"
+        if (!awaitFreshServerClock()) return IqSignalValidationResult(failure = "relógio do servidor ausente/stale na revalidação pré-candle; nenhuma ordem")
         subscribeQuotes(signal.activeId)
         val armedSignal = Armed(
             asset = signal.asset, activeId = signal.activeId, dir = signal.direction,
             minutes = signal.minutes, amount = signal.amount, targetOpen = signal.targetOpenSec,
             timeframeSeconds = signal.timeframeSeconds, settings = settings, armedAt = signal.armedAtMs,
         )
-        return prevalidateArmed(armedSignal)
+        val failure = prevalidateArmed(armedSignal)
+        return if (failure != null) IqSignalValidationResult(failure = failure)
+        else IqSignalValidationResult(strategyFingerprint = signalStrategyFingerprint(settings))
     }
 
     private suspend fun submitPersistedSignal(signal: IqArmedSignal): IqSubmissionResult {
@@ -1250,8 +1261,10 @@ class IqOptionConnector(private val kv: KvStore? = null) : UiConnector {
             return IqSubmissionResult.Rejected("validação TypeSafe Jev foi ativada após o armamento; nenhuma ordem")
         if (signalTimeframeSeconds(settings) != signal.timeframeSeconds)
             return IqSubmissionResult.Rejected("timeframe mudou desde o armamento; nenhuma ordem")
+        if (signal.prevalidatedFingerprint.isNullOrBlank() || signal.prevalidatedFingerprint != signalStrategyFingerprint(settings))
+            return IqSubmissionResult.Rejected("configuração de análise mudou após a revalidação; nenhuma ordem")
         val prevalidatedAt = signal.prevalidatedAtMs
-            ?: return IqSubmissionResult.Rejected("revalidação T−10 ausente; nenhuma ordem")
+            ?: return IqSubmissionResult.Rejected("revalidação pré-candle ausente; nenhuma ordem")
         val result = buy(
             asset = signal.asset, direction = signal.direction, amount = signal.amount, minutes = signal.minutes,
             settings = settings, byAgent = true, targetOpenSec = signal.targetOpenSec,
@@ -1268,6 +1281,9 @@ class IqOptionConnector(private val kv: KvStore? = null) : UiConnector {
     fun deferSignalUntilRevalidation(signalId: String, nowEpochMs: Long, reason: String): Boolean =
         signalDispatcher.deferUntilRevalidation(signalId, nowEpochMs, reason)
 
+    /** Apaga somente sinais terminais do ledger local; operações e ordens da corretora não são tocadas. */
+    fun clearTerminalSignalHistory(): Int = signalDispatcher.clearTerminalSignals()
+
     private fun armedListText(): String {
         val now = serverNowSec()
         val lines = ArrayList<String>()
@@ -1276,7 +1292,7 @@ class IqOptionConnector(private val kv: KvStore? = null) : UiConnector {
         }
         signalDispatcher.signals().sortedBy { it.targetOpenSec }.takeLast(30).forEach { signal ->
             val status = when (signal.state) {
-                IqArmedSignal.ARMED -> if (signal.detail.startsWith("Pré-conexão falhou")) signal.detail else "armado/persistido; aguardando T−10"
+                IqArmedSignal.ARMED -> signal.detail.ifBlank { "armado/persistido; aguardando revalidação T−50/T−25/T−10" }
                 IqArmedSignal.VALIDATED -> "revalidado; aguardando alarme T"
                 IqArmedSignal.SUBMITTING -> "envio iniciado/resultado incerto; não repetir automaticamente"
                 IqArmedSignal.EXECUTED -> "EXECUTADO: ${signal.detail}"
@@ -1436,7 +1452,7 @@ class IqOptionConnector(private val kv: KvStore? = null) : UiConnector {
         val elapsed = nowSec - open
         val toNext = (next * 1000 - nowMs) / 1000.0
         val window = (settings?.num("max_entry_delay_sec", 10.0) ?: 10.0).toInt()
-        val lead = IqSignalTiming.REVALIDATION_LEAD_SECONDS.toInt()
+        val lead = IqSignalTiming.FINAL_ENTRY_LEAD_SECONDS.toInt()
         val sleepSec = (toNext - lead).let { if (it < 0) it + tf else it }.toInt().coerceAtLeast(1)
         val canEnter = window <= 0 || elapsed <= window
         return buildString {
@@ -1592,7 +1608,7 @@ class IqOptionConnector(private val kv: KvStore? = null) : UiConnector {
             val preflightAt = IqSignalTiming.revalidateAtMs(targetOpenSec)
             if (!serverClockFresh()) return "RECUSADO: relógio do servidor stale antes da ordem."
             if (prevalidatedAtMs == null || prevalidatedAtMs < preflightAt || prevalidatedAtMs >= targetMs)
-                return "RECUSADO: o sinal não concluiu a revalidação T−10 para este alvo."
+                return "RECUSADO: o sinal não concluiu a revalidação pré-candle para este alvo."
             entryWindowCheck(settings, targetOpenSec, signalTimeframe)?.let { return it }
         } else if (byAgent) entryWindowCheck(settings)?.let { return it }
         var finalAmount = amount
@@ -1610,8 +1626,15 @@ class IqOptionConnector(private val kv: KvStore? = null) : UiConnector {
                 useMm = true
             }
             if (targetOpenSec != null) {
-                val series = try { priceActionPipeline.load(a.ticker, signalTimeframe, 150) } catch (e: Throwable) {
-                    if (e is kotlinx.coroutines.CancellationException) throw e
+                // O par mais recente só fica fechado em T; confirmar uma vez, com prazo curto e sem retry após a abertura.
+                val series = try {
+                    loadClosedCandles(a.ticker, signalTimeframe, 150, timeoutMs = 1_500L)
+                } catch (e: TimeoutCancellationException) {
+                    if (!currentCoroutineContext().isActive) throw e
+                    return "RECUSADO: a confirmação final dos candles excedeu 1,5 s; nenhuma ordem foi enviada."
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                    throw e
+                } catch (e: Throwable) {
                     return "RECUSADO: candles de ${timeframeLabel(signalTimeframe)} indisponíveis na validação final; nenhuma ordem foi enviada."
                 }
                 val check = analyzeSignal(series, targetOpenSec, targetOpenSec, signalTimeframe, settings!!)
@@ -1738,8 +1761,8 @@ class IqOptionConnector(private val kv: KvStore? = null) : UiConnector {
             val now2 = serverNowMs() / 1000
             blocks += UiBlock.Table("Sinais automáticos (persistidos)", listOf("Ativo", "Dir.", "Vela", "Situação"),
                 persistedSignals.sortedBy { it.targetOpenSec }.map { signal ->
-                    val status = when (signal.state) {
-                        IqArmedSignal.ARMED -> "armado; T−10 agendado"
+                val status = when (signal.state) {
+                        IqArmedSignal.ARMED -> signal.detail.ifBlank { "armado; revalidação pré-candle pendente" }
                         IqArmedSignal.VALIDATED -> "revalidado; T agendado"
                         IqArmedSignal.SUBMITTING -> "envio iniciado/resultado incerto; não repetir"
                         IqArmedSignal.EXECUTED -> "EXECUTADO"

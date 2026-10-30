@@ -103,16 +103,18 @@ object IqSignalAlarms {
         val ledger = store(context)
         val current = ledger.get(signalId) ?: return false
         if (current.state != IqArmedSignal.ARMED) return false
-        val retryAt = IqSignalTiming.revalidateAtMs(current.targetOpenSec)
-        if (nowEpochMs >= retryAt || !canScheduleExact(context)) return false
+        val stage = IqSignalTiming.nextRevalidationStageAfter(current.targetOpenSec, current.revalidationStage, nowEpochMs)
+            ?: return false
+        if (!canScheduleExact(context)) return false
+        val retryAt = IqSignalTiming.revalidationStageAtMs(current.targetOpenSec, stage)
         val updated = ledger.update(signalId) {
             if (it.state == IqArmedSignal.ARMED)
-                it.copy(detail = "Pré-conexão falhou; tentará em T−10: ${reason.take(120)}")
+                it.copy(revalidationStage = stage, detail = "Pré-conexão falhou; tentará em T−${IqSignalTiming.REVALIDATION_STAGE_LEADS_SECONDS[stage]}: ${reason.take(100)}")
             else it
         } ?: return false
         if (updated.state != IqArmedSignal.ARMED) return false
         if (schedule(context, updated, retryAt)) return true
-        expire(context, signalId, "falha ao reagendar T−10 após pré-conexão; nenhuma ordem")
+        expire(context, signalId, "falha ao reagendar revalidação após pré-conexão; nenhuma ordem")
         return false
     }
 }

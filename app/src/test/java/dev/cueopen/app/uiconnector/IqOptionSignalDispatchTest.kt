@@ -9,6 +9,7 @@ import dev.cueopen.app.uiconnector.iqoption.IqSignalDispatchPort
 import dev.cueopen.app.uiconnector.iqoption.IqSignalLedger
 import dev.cueopen.app.uiconnector.iqoption.IqSignalTiming
 import dev.cueopen.app.uiconnector.iqoption.IqSignalStore
+import dev.cueopen.app.uiconnector.iqoption.IqSignalValidationResult
 import dev.cueopen.app.uiconnector.iqoption.IqSubmissionResult
 import dev.cueopen.app.uiconnector.iqoption.KvStore
 import kotlinx.coroutines.runBlocking
@@ -42,10 +43,11 @@ class IqOptionSignalDispatchTest {
         var duringRevalidation: (() -> Unit)? = null
         val validations = AtomicInteger()
         val submissions = AtomicInteger()
-        override suspend fun revalidate(signal: IqArmedSignal): String? {
+        override suspend fun revalidate(signal: IqArmedSignal): IqSignalValidationResult {
             validations.incrementAndGet()
             duringRevalidation?.invoke()
-            return revalidationFailure
+            return if (revalidationFailure != null) IqSignalValidationResult(failure = revalidationFailure)
+            else IqSignalValidationResult(strategyFingerprint = "mock-strategy")
         }
         override suspend fun submit(signal: IqArmedSignal): IqSubmissionResult {
             submissions.incrementAndGet()
@@ -65,6 +67,9 @@ class IqOptionSignalDispatchTest {
         armedAtMs = (target - 120) * 1_000L,
     )
 
+    private fun stageAt(signal: IqArmedSignal, stage: Int) =
+        IqSignalTiming.revalidationStageAtMs(signal.targetOpenSec, stage)
+
     private fun dispatcher(
         store: IqSignalStore,
         clock: FakeClock,
@@ -75,7 +80,7 @@ class IqOptionSignalDispatchTest {
     @Test fun `alarme revalida e envia sem acordar agente`() = runBlocking {
         val sig = signal()
         val store = IqSignalLedger(MemoryKv())
-        val clock = FakeClock(sig.targetOpenMs - 10_000L)
+        val clock = FakeClock(stageAt(sig, 0))
         val alarms = FakeAlarms()
         val broker = FakePort()
         val dispatch = dispatcher(store, clock, alarms, broker)
@@ -89,87 +94,141 @@ class IqOptionSignalDispatchTest {
         assertEquals(IqArmedSignal.EXECUTED, store.get(sig.id)?.state)
     }
 
-    @Test fun `preconexao acorda cedo e reagenda a revalidacao T menos dez`() = runBlocking {
+    @Test fun `sinal validado executa em T mais um mesmo sem novo ciclo do agente`() = runBlocking {
         val sig = signal()
         val store = IqSignalLedger(MemoryKv())
-        val clock = FakeClock(sig.targetOpenMs - 90_000L)
-        val alarms = FakeAlarms()
+        val clock = FakeClock(stageAt(sig, 0))
         val broker = FakePort()
-        val dispatch = dispatcher(store, clock, alarms, broker)
-
+        val dispatch = dispatcher(store, clock, FakeAlarms(), broker)
         dispatch.arm(sig)
-        assertEquals(IqSignalTiming.preconnectAtMs(sig.targetOpenSec), alarms.scheduled.last().second)
-        assertEquals(IqDispatchOutcome.WAITING, dispatch.wake(sig.id))
-        assertEquals(IqSignalTiming.revalidateAtMs(sig.targetOpenSec), alarms.scheduled.last().second)
-        clock.now = sig.targetOpenMs - 10_000L
         assertEquals(IqDispatchOutcome.VALIDATED, dispatch.wake(sig.id))
-        assertEquals(1, broker.validations.get())
+
+        // O LLM/agente não participa do relógio: um alarme atrasado dentro da janela pode executar.
+        clock.now = sig.targetOpenMs + 1_000L
+        assertEquals(IqDispatchOutcome.EXECUTED, dispatch.wake(sig.id))
+        assertEquals(1, broker.submissions.get())
     }
 
-    @Test fun `falha na preconexao conserva sinal para uma tentativa em T menos dez`() = runBlocking {
+    @Test fun `preconexao em T menos noventa agenda primeira revalidacao T menos cinquenta`() = runBlocking {
         val sig = signal()
         val store = IqSignalLedger(MemoryKv())
         val clock = FakeClock(sig.targetOpenMs - 90_000L)
         val alarms = FakeAlarms()
-        val broker = FakePort()
-        val dispatch = dispatcher(store, clock, alarms, broker)
+        val dispatch = dispatcher(store, clock, alarms, FakePort())
+        dispatch.arm(sig)
+
+        assertEquals(IqSignalTiming.preconnectAtMs(sig.targetOpenSec), alarms.scheduled.last().second)
+        assertEquals(IqDispatchOutcome.WAITING, dispatch.wake(sig.id))
+        assertEquals(stageAt(sig, 0), alarms.scheduled.last().second)
+        clock.now = stageAt(sig, 0)
+        assertEquals(IqDispatchOutcome.VALIDATED, dispatch.wake(sig.id))
+    }
+
+    @Test fun `falha no pre aquecimento escolhe proxima etapa futura`() = runBlocking {
+        val sig = signal()
+        val store = IqSignalLedger(MemoryKv())
+        val alarms = FakeAlarms()
+        val dispatch = dispatcher(store, FakeClock(stageAt(sig, 0)), alarms, FakePort())
         dispatch.arm(sig)
 
         assertTrue(dispatch.deferUntilRevalidation(sig.id, sig.targetOpenMs - 30_000L, "connect timeout"))
-        assertEquals(IqArmedSignal.ARMED, store.get(sig.id)?.state)
+        assertEquals(1, store.get(sig.id)?.revalidationStage)
         assertTrue(store.get(sig.id)?.detail?.contains("connect timeout") == true)
-        assertEquals(IqSignalTiming.revalidateAtMs(sig.targetOpenSec), alarms.scheduled.last().second)
-        clock.now = sig.targetOpenMs - 10_000L
-        assertEquals(IqDispatchOutcome.VALIDATED, dispatch.wake(sig.id))
+        assertEquals(stageAt(sig, 1), alarms.scheduled.last().second)
     }
 
-    @Test fun `preconexao nao pode ser adiada depois do prazo T menos dez`() {
+    @Test fun `falhas de candle tentam no maximo T menos cinquenta vinte e cinco e dez`() = runBlocking {
         val sig = signal()
         val store = IqSignalLedger(MemoryKv())
-        val alarms = FakeAlarms()
-        val dispatch = dispatcher(store, FakeClock(sig.targetOpenMs - 90_000L), alarms, FakePort())
+        val clock = FakeClock(stageAt(sig, 0))
+        val broker = FakePort().apply { revalidationFailure = "dois candles fechados indisponíveis" }
+        val dispatch = dispatcher(store, clock, FakeAlarms(), broker)
         dispatch.arm(sig)
 
-        assertFalse(dispatch.deferUntilRevalidation(sig.id, sig.targetOpenMs - 9_999L, "timeout"))
-        assertEquals(IqArmedSignal.ARMED, store.get(sig.id)?.state)
+        assertEquals(IqDispatchOutcome.WAITING, dispatch.wake(sig.id))
+        assertEquals(1, store.get(sig.id)?.revalidationStage)
+        clock.now = stageAt(sig, 1)
+        assertEquals(IqDispatchOutcome.WAITING, dispatch.wake(sig.id))
+        assertEquals(2, store.get(sig.id)?.revalidationStage)
+        clock.now = stageAt(sig, 2)
+        assertEquals(IqDispatchOutcome.EXPIRED, dispatch.wake(sig.id))
+
+        assertEquals(3, broker.validations.get())
+        assertEquals(0, broker.submissions.get())
+        assertEquals(IqArmedSignal.EXPIRED, store.get(sig.id)?.state)
+        assertTrue(store.get(sig.id)?.detail?.contains("candles fechados indisponíveis") == true)
     }
 
-    @Test fun `atraso de ate cinco segundos ainda pode revalidar antes da abertura`() = runBlocking {
+    @Test fun `etapa perdida salta para proxima tentativa futura mas nao estende alem do prazo de entrada`() = runBlocking {
         val sig = signal()
         val store = IqSignalLedger(MemoryKv())
-        val clock = FakeClock(sig.targetOpenMs - 6_000L)
+        val clock = FakeClock(sig.targetOpenMs - 30_000L)
         val alarms = FakeAlarms()
         val broker = FakePort()
         val dispatch = dispatcher(store, clock, alarms, broker)
         dispatch.arm(sig)
 
+        assertEquals(IqDispatchOutcome.WAITING, dispatch.wake(sig.id))
+        assertEquals(stageAt(sig, 1), alarms.scheduled.last().second)
+        clock.now = stageAt(sig, 1)
         assertEquals(IqDispatchOutcome.VALIDATED, dispatch.wake(sig.id))
-        assertEquals(1, broker.validations.get())
+        clock.now = sig.entryDeadlineMs + 1L
+        assertEquals(IqDispatchOutcome.EXPIRED, dispatch.wake(sig.id))
         assertEquals(0, broker.submissions.get())
     }
 
-    @Test fun `revalidacao acordada 16 segundos tarde expira sem ordem`() = runBlocking {
+    @Test fun `atraso de ate cinco segundos pode revalidar mas atraso maior salta etapa`() = runBlocking {
         val sig = signal()
         val store = IqSignalLedger(MemoryKv())
-        val clock = FakeClock(sig.targetOpenMs - 10_000L + 16_000L)
-        val alarms = FakeAlarms()
+        val clock = FakeClock(stageAt(sig, 0) + 4_000L)
         val broker = FakePort()
-        val dispatch = dispatcher(store, clock, alarms, broker)
+        val dispatch = dispatcher(store, clock, FakeAlarms(), broker)
+        dispatch.arm(sig)
+        assertEquals(IqDispatchOutcome.VALIDATED, dispatch.wake(sig.id))
+        assertEquals(1, broker.validations.get())
+
+        val other = signal(target = sig.targetOpenSec + 300L, id = "late-stage")
+        val otherClock = FakeClock(stageAt(other, 0) + 6_000L)
+        val otherAlarms = FakeAlarms()
+        val otherDispatch = dispatcher(IqSignalLedger(MemoryKv()), otherClock, otherAlarms, FakePort())
+        otherDispatch.arm(other)
+        assertEquals(IqDispatchOutcome.WAITING, otherDispatch.wake(other.id))
+        assertEquals(stageAt(other, 1), otherAlarms.scheduled.last().second)
+    }
+
+    @Test fun `perda de todas as etapas expira sem ordem`() = runBlocking {
+        val sig = signal()
+        val store = IqSignalLedger(MemoryKv())
+        val clock = FakeClock(sig.targetOpenMs + 6_000L)
+        val broker = FakePort()
+        val dispatch = dispatcher(store, clock, FakeAlarms(), broker)
         dispatch.arm(sig)
 
         assertEquals(IqDispatchOutcome.EXPIRED, dispatch.wake(sig.id))
-        assertEquals(IqArmedSignal.EXPIRED, store.get(sig.id)?.state)
+        assertEquals(0, broker.validations.get())
         assertEquals(0, broker.submissions.get())
+    }
+
+    @Test fun `relogio de servidor stale nunca valida nem envia`() = runBlocking {
+        val sig = signal()
+        val store = IqSignalLedger(MemoryKv())
+        val broker = FakePort()
+        val dispatch = dispatcher(store, FakeClock(null), FakeAlarms(), broker)
+        dispatch.arm(sig)
+
+        assertEquals(IqDispatchOutcome.EXPIRED, dispatch.wake(sig.id))
+        assertEquals(0, broker.validations.get())
+        assertEquals(0, broker.submissions.get())
+        assertTrue(store.get(sig.id)?.detail?.contains("relógio de servidor") == true)
     }
 
     @Test fun `estado serializado sobrevive reinicio do processo`() = runBlocking {
         val sig = signal()
         val kv = MemoryKv()
-        val clock = FakeClock(sig.targetOpenMs - 10_000L)
+        val clock = FakeClock(stageAt(sig, 0))
         val alarms = FakeAlarms()
         val broker = FakePort()
-        val firstProcess = dispatcher(IqSignalLedger(kv), clock, alarms, broker)
-        firstProcess.arm(sig)
+        dispatcher(IqSignalLedger(kv), clock, alarms, broker).arm(sig)
 
         val afterRestart = dispatcher(IqSignalLedger(kv), clock, alarms, broker)
         assertEquals(IqDispatchOutcome.VALIDATED, afterRestart.wake(sig.id))
@@ -183,10 +242,9 @@ class IqOptionSignalDispatchTest {
     @Test fun `entregas duplicadas nao enviam mais de uma ordem`() = runBlocking {
         val sig = signal()
         val store = IqSignalLedger(MemoryKv())
-        val clock = FakeClock(sig.targetOpenMs - 10_000L)
-        val alarms = FakeAlarms()
+        val clock = FakeClock(stageAt(sig, 0))
         val broker = FakePort()
-        val dispatch = dispatcher(store, clock, alarms, broker)
+        val dispatch = dispatcher(store, clock, FakeAlarms(), broker)
         dispatch.arm(sig)
         dispatch.wake(sig.id)
         clock.now = sig.targetOpenMs
@@ -196,79 +254,46 @@ class IqOptionSignalDispatchTest {
         assertEquals(1, broker.submissions.get())
     }
 
-    @Test fun `novo armamento no mesmo candle nao sobrescreve ordem executada`() = runBlocking {
+    @Test fun `segundo armamento no mesmo candle nao sobrescreve sinal terminal`() = runBlocking {
         val sig = signal()
         val store = IqSignalLedger(MemoryKv())
-        val clock = FakeClock(sig.targetOpenMs - 10_000L)
-        val alarms = FakeAlarms()
-        val broker = FakePort()
-        val dispatch = dispatcher(store, clock, alarms, broker)
+        val clock = FakeClock(stageAt(sig, 0))
+        val dispatch = dispatcher(store, clock, FakeAlarms(), FakePort())
         dispatch.arm(sig)
         dispatch.wake(sig.id)
         clock.now = sig.targetOpenMs
         assertEquals(IqDispatchOutcome.EXECUTED, dispatch.wake(sig.id))
 
-        val secondArming = dispatch.arm(signal(id = "different-id-same-candle"))
-
-        assertEquals(IqArmedSignal.EXECUTED, secondArming.state)
+        val duplicate = dispatch.arm(signal(id = "different-id-same-candle"))
+        assertEquals(IqArmedSignal.EXECUTED, duplicate.state)
         assertEquals(IqDispatchOutcome.DUPLICATE, dispatch.wake(sig.id))
-        assertEquals(1, broker.submissions.get())
     }
 
-    @Test fun `novo armamento no mesmo candle nao remove cancelamento explicito`() = runBlocking {
+    @Test fun `cancelamento explicito nao e sobrescrito por novo armamento no candle`() = runBlocking {
         val sig = signal()
-        val store = IqSignalLedger(MemoryKv())
-        val alarms = FakeAlarms()
-        val broker = FakePort()
-        val dispatch = dispatcher(store, FakeClock(sig.targetOpenMs - 20_000L), alarms, broker)
+        val dispatch = dispatcher(IqSignalLedger(MemoryKv()), FakeClock(stageAt(sig, 0)), FakeAlarms(), FakePort())
         dispatch.arm(sig)
         assertTrue(dispatch.cancel(sig.id))
-
-        val secondArming = dispatch.arm(signal(id = "different-id-same-candle"))
-
-        assertEquals(IqArmedSignal.CANCELLED, secondArming.state)
-        assertEquals(0, broker.submissions.get())
+        assertEquals(IqArmedSignal.CANCELLED, dispatch.arm(signal(id = "different-id-same-candle")).state)
+        assertEquals(0, dispatch.signals().count { it.state == IqArmedSignal.SUBMITTING })
     }
 
     @Test fun `segundo sinal do mesmo candle nao e inserido no ledger`() = runBlocking {
         val sig = signal()
-        val duplicate = signal(id = "another-id-same-target")
         val store = IqSignalLedger(MemoryKv())
-        val clock = FakeClock(sig.targetOpenMs - 10_000L)
-        val alarms = FakeAlarms()
-        val broker = FakePort()
-        val dispatch = dispatcher(store, clock, alarms, broker)
+        val dispatch = dispatcher(store, FakeClock(stageAt(sig, 0)), FakeAlarms(), FakePort())
         dispatch.arm(sig)
-        assertEquals(sig.id, dispatch.arm(duplicate).id)
-        dispatch.wake(sig.id)
-        clock.now = sig.targetOpenMs
-
-        assertEquals(IqDispatchOutcome.EXECUTED, dispatch.wake(sig.id))
-        assertEquals(IqDispatchOutcome.NOT_FOUND, dispatch.wake(duplicate.id))
-        assertEquals(1, broker.submissions.get())
-    }
-
-    @Test fun `candles stale na revalidacao bloqueiam envio`() = runBlocking {
-        val sig = signal()
-        val store = IqSignalLedger(MemoryKv())
-        val clock = FakeClock(sig.targetOpenMs - 10_000L)
-        val alarms = FakeAlarms()
-        val broker = FakePort().apply { revalidationFailure = "candle stale" }
-        val dispatch = dispatcher(store, clock, alarms, broker)
-        dispatch.arm(sig)
-
-        assertEquals(IqDispatchOutcome.EXPIRED, dispatch.wake(sig.id))
-        assertEquals(0, broker.submissions.get())
-        assertTrue(store.get(sig.id)?.detail?.contains("candle stale") == true)
+        val duplicate = dispatch.arm(signal(id = "another-id-same-target"))
+        assertEquals(sig.id, duplicate.id)
+        assertNull(store.get("another-id-same-target"))
     }
 
     @Test fun `cotacao stale no gate final bloqueia envio`() = runBlocking {
         val sig = signal()
         val store = IqSignalLedger(MemoryKv())
-        val clock = FakeClock(sig.targetOpenMs - 10_000L)
-        val alarms = FakeAlarms()
+        val clock = FakeClock(stageAt(sig, 0))
         val broker = FakePort().apply { submissionResult = IqSubmissionResult.Rejected("cotação stale") }
-        val dispatch = dispatcher(store, clock, alarms, broker)
+        val dispatch = dispatcher(store, clock, FakeAlarms(), broker)
         dispatch.arm(sig)
         assertEquals(IqDispatchOutcome.VALIDATED, dispatch.wake(sig.id))
         clock.now = sig.targetOpenMs
@@ -281,10 +306,9 @@ class IqOptionSignalDispatchTest {
     @Test fun `janela T ultrapassada nunca envia ordem atrasada`() = runBlocking {
         val sig = signal()
         val store = IqSignalLedger(MemoryKv())
-        val clock = FakeClock(sig.targetOpenMs - 10_000L)
-        val alarms = FakeAlarms()
+        val clock = FakeClock(stageAt(sig, 0))
         val broker = FakePort()
-        val dispatch = dispatcher(store, clock, alarms, broker)
+        val dispatch = dispatcher(store, clock, FakeAlarms(), broker)
         dispatch.arm(sig)
         dispatch.wake(sig.id)
         clock.now = sig.entryDeadlineMs + 1L
@@ -295,11 +319,9 @@ class IqOptionSignalDispatchTest {
 
     @Test fun `cancelamento explicito remove apenas sinal ainda armado`() = runBlocking {
         val sig = signal()
-        val store = IqSignalLedger(MemoryKv())
-        val clock = FakeClock(sig.targetOpenMs - 20_000L)
         val alarms = FakeAlarms()
         val broker = FakePort()
-        val dispatch = dispatcher(store, clock, alarms, broker)
+        val dispatch = dispatcher(IqSignalLedger(MemoryKv()), FakeClock(stageAt(sig, 0)), alarms, broker)
         dispatch.arm(sig)
 
         assertTrue(dispatch.cancel(sig.id))
@@ -311,10 +333,9 @@ class IqOptionSignalDispatchTest {
     @Test fun `cancelamento durante revalidacao nao e sobrescrito por VALIDATED`() = runBlocking {
         val sig = signal()
         val store = IqSignalLedger(MemoryKv())
-        val clock = FakeClock(sig.targetOpenMs - 10_000L)
-        val alarms = FakeAlarms()
+        val clock = FakeClock(stageAt(sig, 0))
         val broker = FakePort()
-        val dispatch = dispatcher(store, clock, alarms, broker)
+        val dispatch = dispatcher(store, clock, FakeAlarms(), broker)
         dispatch.arm(sig)
         broker.duringRevalidation = { assertTrue(dispatch.cancel(sig.id)) }
 
@@ -325,12 +346,31 @@ class IqOptionSignalDispatchTest {
         assertEquals(0, broker.submissions.get())
     }
 
+    @Test fun `limpar historico remove terminais e preserva sinais ativos e ambiguos`() {
+        val store = IqSignalLedger(MemoryKv())
+        val base = signal(target = 1_800_000_000L)
+        val active = base.copy(state = IqArmedSignal.ARMED)
+        val validated = base.copy(id = "validated", targetOpenSec = base.targetOpenSec + 60, state = IqArmedSignal.VALIDATED)
+        val submitting = base.copy(id = "submitting", targetOpenSec = base.targetOpenSec + 120, state = IqArmedSignal.SUBMITTING)
+        val terminalStates = listOf(IqArmedSignal.EXECUTED, IqArmedSignal.EXPIRED, IqArmedSignal.CANCELLED, IqArmedSignal.FAILED, IqArmedSignal.INVALIDATED)
+        store.put(active)
+        store.put(validated)
+        store.put(submitting)
+        terminalStates.forEachIndexed { index, state ->
+            store.put(base.copy(id = "terminal-$index", targetOpenSec = base.targetOpenSec + 180 + index * 60L, state = state))
+        }
+        val dispatcher = dispatcher(store, FakeClock(base.targetOpenMs), FakeAlarms(), FakePort())
+
+        assertEquals(terminalStates.size, dispatcher.clearTerminalSignals())
+        assertEquals(setOf(active.id, validated.id, submitting.id), dispatcher.signals().map { it.id }.toSet())
+    }
+
     @Test fun `falta de permissao de alarme exato falha fechada`() {
         val sig = signal()
         val store = IqSignalLedger(MemoryKv())
         val alarms = FakeAlarms(permission = false)
         val broker = FakePort()
-        val dispatch = dispatcher(store, FakeClock(sig.targetOpenMs - 10_000L), alarms, broker)
+        val dispatch = dispatcher(store, FakeClock(stageAt(sig, 0)), alarms, broker)
 
         assertEquals(IqArmedSignal.EXPIRED, dispatch.arm(sig).state)
         assertNull(store.get(sig.id)?.prevalidatedAtMs)
@@ -343,7 +383,7 @@ class IqOptionSignalDispatchTest {
         val store = IqSignalLedger(MemoryKv())
         val alarms = FakeAlarms()
         val broker = FakePort()
-        val clock = FakeClock(sig.targetOpenMs - 10_000L)
+        val clock = FakeClock(stageAt(sig, 0))
         val dispatch = dispatcher(store, clock, alarms, broker)
         dispatch.arm(sig)
         alarms.permission = false
@@ -355,9 +395,8 @@ class IqOptionSignalDispatchTest {
     @Test fun `ordem em estado ambiguo nao pode ser cancelada nem reenviada`() = runBlocking {
         val sig = signal()
         val store = IqSignalLedger(MemoryKv()).apply { put(sig.copy(state = IqArmedSignal.SUBMITTING)) }
-        val alarms = FakeAlarms()
         val broker = FakePort()
-        val dispatch = dispatcher(store, FakeClock(sig.targetOpenMs), alarms, broker)
+        val dispatch = dispatcher(store, FakeClock(sig.targetOpenMs), FakeAlarms(), broker)
 
         assertFalse(dispatch.cancel(sig.id))
         assertEquals(IqDispatchOutcome.UNKNOWN, dispatch.wake(sig.id))

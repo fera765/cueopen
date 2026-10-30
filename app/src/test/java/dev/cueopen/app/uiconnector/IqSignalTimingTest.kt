@@ -22,11 +22,15 @@ class IqSignalTimingTest {
         }
     }
 
-    @Test fun `analise e revalidacao ocorrem em T menos dois minutos e dez segundos`() {
+    @Test fun `analise e revalidacao tem etapas limitadas antes da abertura`() {
         val target = alignedNowSec + 600L
         assertEquals((target - 120L) * 1_000L, IqSignalTiming.analysisAtMs(target))
         assertEquals((target - 90L) * 1_000L, IqSignalTiming.preconnectAtMs(target))
-        assertEquals((target - 10L) * 1_000L, IqSignalTiming.revalidateAtMs(target))
+        assertEquals((target - 50L) * 1_000L, IqSignalTiming.revalidateAtMs(target))
+        assertEquals((target - 50L) * 1_000L, IqSignalTiming.revalidationStageAtMs(target, 0))
+        assertEquals((target - 25L) * 1_000L, IqSignalTiming.revalidationStageAtMs(target, 1))
+        assertEquals((target - 10L) * 1_000L, IqSignalTiming.revalidationStageAtMs(target, 2))
+        assertEquals(10L, IqSignalTiming.FINAL_ENTRY_LEAD_SECONDS)
     }
 
     @Test fun `somente candles fechados ate o corte sao considerados no timeframe escolhido`() {

@@ -2,6 +2,7 @@ package dev.cueopen.app.uiconnector.iqoption
 
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.isActive
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString
@@ -21,6 +22,9 @@ data class IqArmedSignal(
     val armedAtMs: Long,
     val state: String = ARMED,
     val prevalidatedAtMs: Long? = null,
+    val prevalidatedFingerprint: String? = null,
+    /** Índice da próxima etapa de revalidação (T−50, T−25 ou T−10). */
+    val revalidationStage: Int = 0,
     val detail: String = "",
 ) {
     companion object {
@@ -54,6 +58,8 @@ interface IqSignalStore {
     fun update(id: String, transform: (IqArmedSignal) -> IqArmedSignal): IqArmedSignal?
     /** Grava SUBMITTING antes do primeiro envio; bloqueia uma segunda intenção para o mesmo candle. */
     fun claimSubmission(id: String): Boolean
+    /** Remove somente histórico terminal; ARMED, VALIDATED e SUBMITTING nunca são removidos. */
+    fun deleteTerminalSignals(): Int
 }
 
 class InMemoryIqSignalStore : IqSignalStore {
@@ -78,6 +84,12 @@ class InMemoryIqSignalStore : IqSignalStore {
             return@synchronized false
         rows[id] = current.copy(state = IqArmedSignal.SUBMITTING, detail = "Envio iniciado; não repetir automaticamente")
         true
+    }
+
+    override fun deleteTerminalSignals(): Int = synchronized(lock) {
+        val ids = rows.values.filter { it.state in IqArmedSignal.TERMINAL_STATES }.map { it.id }
+        ids.forEach(rows::remove)
+        ids.size
     }
 }
 
@@ -135,6 +147,14 @@ class IqSignalLedger(private val kv: KvStore) : IqSignalStore {
         true
     }
 
+    override fun deleteTerminalSignals(): Int = synchronized(lock) {
+        val rows = loadUnsafe()
+        val remaining = rows.filterNot { it.state in IqArmedSignal.TERMINAL_STATES }
+        val removed = rows.size - remaining.size
+        if (removed > 0) saveUnsafe(remaining)
+        removed
+    }
+
     companion object { const val KEY = "iq_signal_dispatch_ledger_v1" }
 }
 
@@ -154,9 +174,15 @@ sealed interface IqSubmissionResult {
     data class Rejected(val reason: String) : IqSubmissionResult
 }
 
+data class IqSignalValidationResult(
+    val failure: String? = null,
+    /** Configuração de análise atestada na validação, comparada novamente antes da ordem. */
+    val strategyFingerprint: String? = null,
+)
+
 interface IqSignalDispatchPort {
-    /** Revalida velas/estratégia e conexão em T−10. Null significa que todos os gates passaram. */
-    suspend fun revalidate(signal: IqArmedSignal): String?
+    /** Revalida velas/estratégia e conexão em uma etapa pré-candle. */
+    suspend fun revalidate(signal: IqArmedSignal): IqSignalValidationResult
     /** Usa o mesmo caminho de buyReserved e seus gates finais; somente ACK inequívoco é Accepted. */
     suspend fun submit(signal: IqArmedSignal): IqSubmissionResult
 }
@@ -164,7 +190,7 @@ interface IqSignalDispatchPort {
 enum class IqDispatchOutcome { WAITING, VALIDATED, EXECUTED, EXPIRED, CANCELLED, DUPLICATE, UNKNOWN, NOT_FOUND }
 
 /**
- * Motor independente do loop/LLM do agente. Os alarmes o acordam em T−90, T−10 e em T; cada transição
+ * Motor independente do loop/LLM do agente. Os alarmes o acordam em T−90, T−50/T−25/T−10 e em T; cada transição
  * persistida é reentrante e o claim SUBMITTING garante no máximo uma tentativa por candle.
  */
 class IqOptionSignalDispatcher(
@@ -177,8 +203,17 @@ class IqOptionSignalDispatcher(
 
     fun signals(): List<IqArmedSignal> = store.all()
 
+    /** Limpa apenas resultados encerrados. Não cancela alarmes nem toca na lista de operações da corretora. */
+    fun clearTerminalSignals(): Int = store.deleteTerminalSignals()
+
     fun arm(signal: IqArmedSignal): IqArmedSignal {
-        val armed = signal.copy(state = IqArmedSignal.ARMED, prevalidatedAtMs = null, detail = "Aguardando revalidação T−10")
+        val armed = signal.copy(
+            state = IqArmedSignal.ARMED,
+            prevalidatedAtMs = null,
+            prevalidatedFingerprint = null,
+            revalidationStage = 0,
+            detail = "Aguardando pré-conexão T−90 e revalidação T−50",
+        )
         store.get(signal.id)?.let { return it }
         store.all().firstOrNull { it.targetOpenSec == signal.targetOpenSec }?.let { return it }
         if (!alarms.canScheduleExact()) {
@@ -206,23 +241,53 @@ class IqOptionSignalDispatcher(
         if (!alarms.canScheduleExact()) return@withLock expire(signal.id, "permissão de alarme exato revogada; nenhuma ordem")
         val now = clock.serverNowMs() ?: return@withLock expire(signal.id, "relógio de servidor indisponível/stale; nenhuma ordem")
         if (signal.state == IqArmedSignal.ARMED) {
-            val revalidateAt = IqSignalTiming.revalidateAtMs(signal.targetOpenSec)
+            val stage = signal.revalidationStage.coerceIn(0, IqSignalTiming.REVALIDATION_STAGE_LEADS_SECONDS.lastIndex)
+            val revalidateAt = IqSignalTiming.revalidationStageAtMs(signal.targetOpenSec, stage)
             if (now < revalidateAt) {
-                if (!alarms.schedule(signal, revalidateAt)) return@withLock expire(signal.id, "falha ao reagendar T−10; nenhuma ordem")
+                if (!alarms.schedule(signal, revalidateAt)) return@withLock expire(signal.id, "falha ao reagendar revalidação pré-candle; nenhuma ordem")
                 return@withLock IqDispatchOutcome.WAITING
             }
-            if (now > revalidateAt + REVALIDATION_LATE_TOLERANCE_MS || now >= signal.targetOpenMs)
-                return@withLock expire(signal.id, "T−10 atrasado; sem ordem")
-            val failure = runCatching { port.revalidate(signal) }.getOrElse {
-                if (it is kotlinx.coroutines.CancellationException) throw it
-                "revalidação T−10 falhou: ${it.message ?: it.javaClass.simpleName}"
+            if (now > revalidateAt + REVALIDATION_LATE_TOLERANCE_MS) {
+                val nextStage = IqSignalTiming.nextRevalidationStageAfter(signal.targetOpenSec, stage + 1, now)
+                if (nextStage != null)
+                    return@withLock scheduleRevalidationStage(signal.id, nextStage, "Etapa T−${IqSignalTiming.REVALIDATION_STAGE_LEADS_SECONDS[stage]} perdida; reagendada")
+                return@withLock expire(signal.id, "janela de revalidação pré-candle perdida; nenhuma ordem")
+            }
+            if (now >= signal.targetOpenMs) return@withLock expire(signal.id, "revalidação chegou após a abertura; nenhuma ordem")
+            val validation = try {
+                port.revalidate(signal)
+            } catch (cancel: kotlinx.coroutines.CancellationException) {
+                if (cancel is kotlinx.coroutines.TimeoutCancellationException && kotlinx.coroutines.currentCoroutineContext().isActive)
+                    IqSignalValidationResult(failure = "timeout durante revalidação pré-candle")
+                else throw cancel
+            } catch (t: Throwable) {
+                IqSignalValidationResult(failure = "revalidação pré-candle falhou: ${t.message ?: t.javaClass.simpleName}")
             }
             val completedAt = clock.serverNowMs()
-            if (failure != null || completedAt == null || completedAt >= signal.targetOpenMs)
-                return@withLock expire(signal.id, failure ?: "revalidação terminou tarde/relógio stale; nenhuma ordem")
+            if (completedAt == null) return@withLock expire(signal.id, "relógio do servidor ficou stale durante a revalidação; nenhuma ordem")
+            if (completedAt >= signal.targetOpenMs) return@withLock expire(signal.id, validation.failure ?: "revalidação terminou após a abertura; nenhuma ordem")
+            if (validation.failure != null) {
+                val nextStage = IqSignalTiming.nextRevalidationStageAfter(signal.targetOpenSec, stage + 1, completedAt)
+                if (nextStage != null) {
+                    val lead = IqSignalTiming.REVALIDATION_STAGE_LEADS_SECONDS[nextStage]
+                    return@withLock scheduleRevalidationStage(
+                        signal.id,
+                        nextStage,
+                        "Revalidação T−${IqSignalTiming.REVALIDATION_STAGE_LEADS_SECONDS[stage]} falhou: ${validation.failure.take(100)}; nova tentativa em T−$lead",
+                    )
+                }
+                return@withLock expire(signal.id, validation.failure)
+            }
+            if (validation.strategyFingerprint.isNullOrBlank())
+                return@withLock expire(signal.id, "revalidação sem assinatura de configuração; nenhuma ordem")
             signal = store.update(signal.id) {
                 if (it.state == IqArmedSignal.ARMED)
-                    it.copy(state = IqArmedSignal.VALIDATED, prevalidatedAtMs = completedAt, detail = "Revalidado; aguardando T")
+                    it.copy(
+                        state = IqArmedSignal.VALIDATED,
+                        prevalidatedAtMs = completedAt,
+                        prevalidatedFingerprint = validation.strategyFingerprint,
+                        detail = "Revalidado antes de T; aguardando abertura",
+                    )
                 else it
             } ?: return@withLock IqDispatchOutcome.NOT_FOUND
             if (signal.state == IqArmedSignal.CANCELLED) {
@@ -291,6 +356,24 @@ class IqOptionSignalDispatcher(
         }
     }
 
+    private fun scheduleRevalidationStage(id: String, stage: Int, detail: String): IqDispatchOutcome {
+        val updated = store.update(id) { current ->
+            if (current.state == IqArmedSignal.ARMED) current.copy(revalidationStage = stage, detail = detail.take(240)) else current
+        } ?: return IqDispatchOutcome.NOT_FOUND
+        when (updated.state) {
+            IqArmedSignal.CANCELLED -> { alarms.cancel(updated); return IqDispatchOutcome.CANCELLED }
+            IqArmedSignal.SUBMITTING -> return IqDispatchOutcome.UNKNOWN
+            IqArmedSignal.EXECUTED -> return IqDispatchOutcome.DUPLICATE
+            IqArmedSignal.EXPIRED, IqArmedSignal.FAILED, IqArmedSignal.INVALIDATED -> return IqDispatchOutcome.EXPIRED
+            IqArmedSignal.ARMED -> Unit
+            else -> return IqDispatchOutcome.EXPIRED
+        }
+        val at = IqSignalTiming.revalidationStageAtMs(updated.targetOpenSec, stage)
+        if (!runCatching { alarms.schedule(updated, at) }.getOrDefault(false))
+            return expire(id, "falha ao programar retry pré-candle; nenhuma ordem")
+        return IqDispatchOutcome.WAITING
+    }
+
     fun cancel(id: String): Boolean {
         val changed = store.update(id) { current ->
             if (current.state in IqArmedSignal.ACTIVE_STATES)
@@ -304,20 +387,22 @@ class IqOptionSignalDispatcher(
         return false
     }
 
-    /** Se o pré-aquecimento falhar, conserva o sinal e tenta novamente no T−10, nunca depois dele. O horário local só decide se ainda cabe reagendar; a ordem exige relógio fresco do servidor. */
+    /** Se o pré-aquecimento falhar, tenta a próxima etapa futura T−50/T−25/T−10; nunca autoriza com relógio local. */
     fun deferUntilRevalidation(id: String, nowEpochMs: Long, reason: String): Boolean {
         val current = store.get(id) ?: return false
         if (current.state != IqArmedSignal.ARMED) return false
-        val retryAt = IqSignalTiming.revalidateAtMs(current.targetOpenSec)
-        if (nowEpochMs >= retryAt || !alarms.canScheduleExact()) return false
+        val stage = IqSignalTiming.nextRevalidationStageAfter(current.targetOpenSec, current.revalidationStage, nowEpochMs)
+            ?: return false
+        if (!alarms.canScheduleExact()) return false
+        val retryAt = IqSignalTiming.revalidationStageAtMs(current.targetOpenSec, stage)
         val updated = store.update(id) {
             if (it.state == IqArmedSignal.ARMED)
-                it.copy(detail = "Pré-conexão falhou; tentará em T−10: ${reason.take(120)}")
+                it.copy(revalidationStage = stage, detail = "Pré-conexão falhou; tentará em T−${IqSignalTiming.REVALIDATION_STAGE_LEADS_SECONDS[stage]}: ${reason.take(100)}")
             else it
         } ?: return false
         if (updated.state != IqArmedSignal.ARMED) return false
         if (runCatching { alarms.schedule(updated, retryAt) }.getOrDefault(false)) return true
-        expire(id, "falha ao reagendar T−10 após pré-conexão; nenhuma ordem")
+        expire(id, "falha ao reagendar revalidação após pré-conexão; nenhuma ordem")
         return false
     }
 

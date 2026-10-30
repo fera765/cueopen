@@ -71,6 +71,8 @@ fun ChatScreen(nav: NavController, sessionId: String) {
     }
     androidx.activity.compose.BackHandler(enabled = session.connectorBuilder) { goBack() }
     val agent = st.agents.firstOrNull { it.id == session.agentId }
+    val activeUiConnectors = app.uiConnectors.connectors.filter { app.uiConnectors.usableBy(it, agent) }
+    val activeMcpConnectors = st.connectors.filter { it.enabled && it.connectedAt != null && it.toolsJson != null }
     val activity by app.agent.activity.collectAsStateWithLifecycle()
     val act = activity[sessionId] ?: Activity()
     val autoAgent = st.agents.firstOrNull { it.id == session.agentId && it.autonomous && it.homeSessionId == sessionId }
@@ -82,6 +84,7 @@ fun ChatScreen(nav: NavController, sessionId: String) {
     var menu by remember { mutableStateOf(false) }
     var rename by remember { mutableStateOf(false) }
     var usage by remember { mutableStateOf(false) }
+    var connectorsDialog by remember { mutableStateOf(false) }
     var mediaOpen by remember { mutableStateOf<String?>(null) }
     val cmdScope = rememberCoroutineScope()
     val ctx = LocalContext.current
@@ -147,6 +150,7 @@ fun ChatScreen(nav: NavController, sessionId: String) {
                         app.store.upsertScheduled(t); nav.navigate("scheduled/${t.id}")
                     }, leadingIcon = { Icon(Icons.Rounded.Schedule, null) })
                     DropdownMenuItem({ Text("Uso e contexto") }, { menu = false; usage = true }, leadingIcon = { Icon(Icons.Rounded.DataUsage, null) })
+                    DropdownMenuItem({ Text("Conectores") }, { menu = false; connectorsDialog = true }, leadingIcon = { Icon(Icons.Rounded.SettingsEthernet, null) })
                     DropdownMenuItem({ Text("Renomear") }, { menu = false; rename = true }, leadingIcon = { Icon(Icons.Rounded.Edit, null) })
                     if (autoAgent != null) DropdownMenuItem({ Text("Pausar agente") }, {
                         menu = false; app.agent.pauseAgent(autoAgent.id)
@@ -280,6 +284,70 @@ fun ChatScreen(nav: NavController, sessionId: String) {
                 },
             )
         }
+    }
+    if (connectorsDialog) {
+        AlertDialog(
+            onDismissRequest = { connectorsDialog = false },
+            title = { Text("Conectores deste chat") },
+            text = {
+                Column(Modifier.heightIn(max = 480.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("Somente conectores habilitados e disponíveis para este agente aparecem aqui. Abrir esta lista não conecta nem atualiza serviços.", fontSize = 12.sp, color = c.ink2)
+                    if (activeUiConnectors.isNotEmpty()) {
+                        Text("UI Connectors", fontWeight = FontWeight.SemiBold, fontSize = 13.sp, modifier = Modifier.padding(top = 4.dp))
+                        activeUiConnectors.forEach { connector ->
+                            Row(
+                                Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(c.surface2)
+                                    .clickable {
+                                        connectorsDialog = false
+                                        nav.navigate("uiconnector/${android.net.Uri.encode(connector.spec.id)}")
+                                    }.padding(12.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Column(Modifier.weight(1f)) {
+                                    Text(connector.spec.name, fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
+                                    Text(
+                                        when {
+                                            connector.isLoggedIn -> "Conectado"
+                                            app.uiConnectors.hasSavedCredentials(connector.spec.id) -> "Credenciais salvas · login necessário"
+                                            else -> "Login necessário"
+                                        },
+                                        fontSize = 11.sp,
+                                        color = c.ink2,
+                                    )
+                                }
+                                Icon(Icons.Rounded.ChevronRight, null, tint = c.ink3)
+                            }
+                        }
+                    }
+                    if (activeMcpConnectors.isNotEmpty()) {
+                        Text("Servidores MCP", fontWeight = FontWeight.SemiBold, fontSize = 13.sp, modifier = Modifier.padding(top = 4.dp))
+                        activeMcpConnectors.forEach { connector ->
+                            Row(
+                                Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(c.surface2)
+                                    .clickable {
+                                        connectorsDialog = false
+                                        nav.navigate("mcpconnector/${android.net.Uri.encode(connector.id)}")
+                                    }.padding(12.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Column(Modifier.weight(1f)) {
+                                    Text(connector.name, fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
+                                    Text("Conectado", fontSize = 11.sp, color = c.ink2)
+                                }
+                                Icon(Icons.Rounded.ChevronRight, null, tint = c.ink3)
+                            }
+                        }
+                    }
+                    if (activeUiConnectors.isEmpty() && activeMcpConnectors.isEmpty()) {
+                        Text("Nenhum conector está ativo e disponível neste chat.", fontSize = 13.sp, color = c.ink2, modifier = Modifier.padding(vertical = 8.dp))
+                    }
+                }
+            },
+            confirmButton = { TextButton({ connectorsDialog = false }) { Text("Fechar") } },
+            dismissButton = {
+                TextButton({ connectorsDialog = false; nav.navigate("connectors") }) { Text("Gerenciar") }
+            },
+        )
     }
     if (usage) {
         AlertDialog(onDismissRequest = { usage = false }, title = { Text("Uso e contexto") }, text = {

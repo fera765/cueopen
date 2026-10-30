@@ -4,8 +4,12 @@ package dev.cueopen.app.uiconnector.iqoption
 object IqSignalTiming {
     const val CANDLE_SECONDS = 60L
     const val ANALYSIS_LEAD_SECONDS = 120L
-    const val REVALIDATION_LEAD_SECONDS = 10L
+    /** Primeira revalidação tem margem para I/O; os retries ficam em T−25 e T−10. */
+    const val REVALIDATION_LEAD_SECONDS = 50L
     const val PRECONNECT_LEAD_SECONDS = 90L
+    const val FINAL_ENTRY_LEAD_SECONDS = 10L
+    val REVALIDATION_RETRY_LEADS_SECONDS = listOf(25L, FINAL_ENTRY_LEAD_SECONDS)
+    val REVALIDATION_STAGE_LEADS_SECONDS = listOf(REVALIDATION_LEAD_SECONDS) + REVALIDATION_RETRY_LEADS_SECONDS
     private const val MILLIS_PER_SECOND = 1_000L
 
     /** Próxima abertura alinhada ao timeframe escolhido e pelo menos [leadSeconds] à frente. */
@@ -29,7 +33,18 @@ object IqSignalTiming {
     fun revalidateAtMs(targetOpenSec: Long, leadSeconds: Long = REVALIDATION_LEAD_SECONDS): Long =
         Math.subtractExact(Math.multiplyExact(targetOpenSec, MILLIS_PER_SECOND), leadSeconds * MILLIS_PER_SECOND)
 
-    /** Acorda o serviço antes de T−10 para aquecer/reconectar a sessão sem envolver o agente. */
+    fun revalidationStageAtMs(targetOpenSec: Long, stage: Int): Long {
+        val lead = REVALIDATION_STAGE_LEADS_SECONDS.getOrNull(stage)
+            ?: throw IllegalArgumentException("etapa de revalidação inválida: $stage")
+        return revalidateAtMs(targetOpenSec, lead)
+    }
+
+    /** Próxima etapa ainda futura; o tempo local pode escolher apenas quando reagendar, nunca autorizar uma ordem. */
+    fun nextRevalidationStageAfter(targetOpenSec: Long, firstStage: Int, nowEpochMs: Long): Int? =
+        (firstStage.coerceAtLeast(0) until REVALIDATION_STAGE_LEADS_SECONDS.size)
+            .firstOrNull { revalidationStageAtMs(targetOpenSec, it) > nowEpochMs }
+
+    /** Acorda o serviço antes de T−50 para aquecer/reconectar a sessão sem envolver o agente. */
     fun preconnectAtMs(targetOpenSec: Long, leadSeconds: Long = PRECONNECT_LEAD_SECONDS): Long =
         Math.subtractExact(Math.multiplyExact(targetOpenSec, MILLIS_PER_SECOND), leadSeconds * MILLIS_PER_SECOND)
 

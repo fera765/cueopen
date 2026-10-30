@@ -137,6 +137,7 @@ fun CueNav(nav: NavHostController, startOnboarding: Boolean) {
         composable("files") { FilesScreen(nav) }
         composable("memory") { MemoryScreen(nav) }
         composable("connectors") { ConnectorsScreen(nav) }
+        composable("mcpconnector/{id}") { e -> McpConnectorSettingsScreen(nav, e.arguments!!.getString("id")!!) }
         composable("uiconnector/edit/{id}") { e -> UiConnectorEditorScreen(nav, e.arguments!!.getString("id")!!) }
         composable("uiconnector/{id}") { e -> UiConnectorScreen(nav, e.arguments!!.getString("id")!!) }
         composable("settings") { SettingsScreen(nav) }

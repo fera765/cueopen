@@ -33,6 +33,7 @@ import dev.cueopen.app.uiconnector.SettingType
 import dev.cueopen.app.uiconnector.Tone
 import dev.cueopen.app.uiconnector.UiBlock
 import dev.cueopen.app.uiconnector.UiConnector
+import dev.cueopen.app.uiconnector.iqoption.IqOptionConnector
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
@@ -143,6 +144,7 @@ fun UiConnectorScreen(nav: NavController, id: String) {
     var busy by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
     var notice by remember { mutableStateOf<String?>(null) }
+    var clearSignalHistoryConfirm by remember(id) { mutableStateOf(false) }
     val fields = remember { mutableStateMapOf<String, String>() }
     var remember_ by remember { mutableStateOf(true) }
     var enabled by remember { mutableStateOf(hub.enabled(id)) }
@@ -172,6 +174,20 @@ fun UiConnectorScreen(nav: NavController, id: String) {
             delay(connector.refreshMs().coerceIn(500L, 60_000L))
         }
     }
+
+    if (clearSignalHistoryConfirm) AlertDialog(
+        onDismissRequest = { clearSignalHistoryConfirm = false },
+        title = { Text("Limpar histórico de sinais?") },
+        text = { Text("Remove somente sinais encerrados deste aparelho. Sinais ativos, envios com resultado incerto e operações da IQ Option não serão cancelados nem apagados.") },
+        confirmButton = {
+            TextButton(onClick = {
+                val removed = (connector as? IqOptionConnector)?.clearTerminalSignalHistory() ?: 0
+                notice = "Histórico local encerrado removido: $removed sinal(is). Sinais ativos e operações da corretora foram preservados."
+                clearSignalHistoryConfirm = false
+            }) { Text("Limpar histórico", color = c.err) }
+        },
+        dismissButton = { TextButton(onClick = { clearSignalHistoryConfirm = false }) { Text("Cancelar") } },
+    )
 
     Scaffold(containerColor = c.bg, topBar = {
         CueTopBar(connector.spec.name, { nav.popBackStack() }) {
@@ -237,6 +253,17 @@ fun UiConnectorScreen(nav: NavController, id: String) {
                                 }
                             }
                         }
+                    }
+                }
+            }
+            if (connector is IqOptionConnector) item {
+                Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).background(c.surface).border(1.dp, c.line, RoundedCornerShape(16.dp)).padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("Histórico de sinais automáticos", fontWeight = FontWeight.SemiBold)
+                    Text("Limpa somente resultados já encerrados no ledger local. Sinais armados ou validados e envios de resultado incerto ficam protegidos.", fontSize = 12.sp, color = c.ink2)
+                    OutlinedButton(onClick = { clearSignalHistoryConfirm = true }, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(14.dp)) {
+                        Icon(Icons.Rounded.DeleteOutline, null, tint = c.err)
+                        Spacer(Modifier.width(8.dp))
+                        Text("Limpar sinais encerrados", color = c.err)
                     }
                 }
             }
