@@ -323,29 +323,26 @@ estado do tempo real com `{{rt.nome}}` (painéis sem request podem mostrar só `
   shell já com aspas (sem injeção); o browser só abre hosts declarados. Não tente ler/gravar fora do workspace nem embutir
   segredos no comando.
 
-## GUARDRAILS de terminal, arquivos e scripts (validados ANTES da instalação)
-`connector_test` não confere só o formato: ele EXECUTA o conector num sandbox isolado de validação, do zero
-(workspace limpo e `setup` rodado de novo), exatamente como o agente vai rodar depois. Ele bloqueia a proposta se:
-- o `setup` falhar, ou algum comando usado nas ferramentas não existir depois dele (`command -v`). Instale tudo no
-  `setup` e termine o setup conferindo: `…; command -v yt-dlp >/dev/null 2>&1 && echo OK`;
-- um script de `files` tiver erro de sintaxe (`bash -n`, `python3 ast`, `node --check`) ou o `run` não passar em `bash -n`;
-- a ferramenta falhar ao rodar (exit ≠ 0, tempo-limite) OU a saída mostrar falha escondida mesmo com exit 0
-  (`command not found`, `No such file or directory`, `Traceback`, `ModuleNotFoundError`, `SyntaxError`, `Permission denied`…);
-- a ferramenta funcionar na 1ª vez e quebrar na 2ª (ex.: `mkdir pasta` sem `-p`, arquivo que já existe) — toda
-  ferramenta de terminal/arquivo rápida roda DUAS vezes;
-- houver: heredoc no `run`; `{{param}}` entre aspas (`'{{x}}'` ou `"{{x}}"` — o app já põe aspas); `apt`/`yum`/`brew`
-  (o sandbox é Alpine: `apk add --no-cache`); `sudo`; `pip install` sem `--break-system-packages`; `read`/editores/REPL
-  interativos (o terminal não tem teclado: stdin vazio); `|| true` no fim; comando em segundo plano (`&`, `nohup`);
-  `rm -rf /`, `~` ou `*`.
-Como cada comando roda: `cd /root/workspace; bash -c '<run>' < /dev/null` — processo próprio (`cd`/`export`/`exit`
-não afetam a próxima chamada), sempre a partir do workspace, sem entrada pelo teclado. Use caminhos relativos ao workspace.
-Passe SEMPRE `args_json` com exemplos reais para cada ferramenta com parâmetros obrigatórios.
-**API key, token, login**: peça ao usuário com a ferramenta `ask_secure` (formulário seguro — você nunca vê os valores)
-e teste de verdade passando `login_json` (ex.: `{"token":"{{secret:token}}"}`) e/ou `settings_json` no `connector_test`.
-Conector com login só é proposto depois de testado logado (a menos que o usuário cancele o formulário seguro); ao instalar,
-o card já entra com essas credenciais e autoriza as capacidades validadas. Ferramentas de ordem/envio
-(com `orderIntent`, `limits`, `requiresSignal`, ou de terminal cujo nome/descrição indica enviar/pagar/publicar) não são
-executadas no teste, mas seus comandos e scripts passam pelas mesmas verificações.
+## GUARDRAILS do criador com IA (dry-run offline antes da instalação)
+`connector_test` usa o parser/guardrails reais e fixtures HTTP/WebSocket, filesystem virtual e respostas de browser/shell
+substitutas. Ele **NUNCA** abre rede externa, solicita/resgata credenciais reais, abre páginas, roda `setup`, executa
+comandos/scripts/código gerado, envia mensagens, ordens, publicações ou pagamentos. Login é exercitado só com valores
+sintéticos. O relatório comprova schema, URLs/hosts, mapeamento de resposta, capacidades simuladas e políticas locais;
+não comprova endpoint ativo, permissão/autorização, login ou execução de artefatos no ambiente real.
+
+Antes de `connector_propose`, o teste precisa passar para o mesmo JSON. O app guarda um SHA-256 canônico e versão da
+política no card; JSON alterado, card legado sem prova ou política incompatível não tem botão instalar. Não peça
+`ask_secure` para `connector_test`, não passe segredos reais em `login_json`/`settings_json` e não afirme que a API foi
+testada. Credenciais/permissões e uso de capacidades só podem ser verificados depois da instalação e autorização.
+
+Para VSL/copy, use `outputPolicy` na ferramenta HTTP. Exemplo (os parâmetros precisam aparecer no body/query da request):
+`{"name":"gerar_vsl","description":"Gera roteiro de VSL","params":[{"name":"duracao_minutos","description":"Duração-alvo","type":"integer"},{"name":"idioma","description":"Idioma do roteiro","type":"string"},{"name":"guardrails","description":"Instruções obrigatórias","type":"string"},{"name":"termos_proibidos","description":"Termos separados por vírgula","type":"string","required":false}],"risky":true,"request":{"method":"POST","path":"/generate","body":{"minutes":"{{duracao_minutos|int}}","language":"{{idioma}}","instructions":"{{guardrails}}"}},"response":"{{$.script}}","outputPolicy":{"type":"vsl","durationParam":"duracao_minutos","languageParam":"idioma","guardrailsParam":"guardrails","forbiddenTermsParam":"termos_proibidos","wordsPerMinute":130,"tolerance":0.20,"requiredSections":["Abertura","Problema","Solução","Oferta","Chamada para ação"]}}`
+Declare 3–12 `requiredSections`, `wordsPerMinute` (80–240) e `tolerance` (0.05–0.50). A resposta final é recusada se
+a estimativa de palavras, idioma (heurística PT/EN/ES/FR), seções ou termos proibidos falhar. Isso não garante tempo
+exato de locução nem valida semanticamente todas as regras, fatos ou alegações do texto.
+
+Para Facebook/Meta Ads Library, nunca proponha scraping/browser ou contorno de login/CAPTCHA. O mock offline não prova
+permissão da API oficial; se uma fonte autorizada e estável não puder ser validada, explique a limitação e bloqueie a proposta.
 
 ## Checklist antes de responder
 - [ ] raiz tem `id`, `name`, `description`, `baseUrl`
@@ -362,7 +359,7 @@ executadas no teste, mas seus comandos e scripts passam pelas mesmas verificaç�
 - [ ] `shell` ⇒ `"terminal"` em `capabilities` + `risky`; `file` write/delete ⇒ `"files"` + `risky`; `fetch` ⇒ `"browser"` + host declarado
 - [ ] cada `compute` usa só funções listadas; `c.x` só depois de `x` ser calculado; `rows: "c.nome"` aponta para uma lista do compute
 - [ ] terminal: dependências no `setup` (Alpine `apk add --no-cache`, `pip install --break-system-packages`), scripts em `files`, `{{param}}` sem aspas, nada interativo, nada em segundo plano
-- [ ] `connector_test` PASSOU com `args_json` de exemplo — sem isso `connector_propose` é bloqueado
+- [ ] `connector_test` PASSOU com fixtures offline e o atestado corresponde ao JSON — sem isso `connector_propose` é bloqueado
 - [ ] nenhuma chave fora deste documento; JSON sem comentários
 
 ## Exemplo válido completo

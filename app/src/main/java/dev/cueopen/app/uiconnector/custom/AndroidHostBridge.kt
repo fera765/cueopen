@@ -16,40 +16,9 @@ import java.io.File
 class AndroidHostBridge(
     private val def: CustomDef,
     private val isGranted: (String) -> Boolean,
-    /** Ambiente do sandbox. Produção: `__uic__<id>`; validação do criador: [validationSession]. */
+    /** Ambiente isolado do conector, usado somente depois da instalação e autorização. */
     private val sessionId: String = "__uic__${def.id}",
 ) : HostBridge {
-
-    companion object {
-        /** Ambiente ISOLADO usado só para validar um conector antes da instalação (nunca o de produção). */
-        fun validationSession(id: String) = "__uic__${id}__v"
-
-        /**
-         * Ponte do teste de validação: concede todas as capacidades DECLARADAS, mas só dentro do
-         * ambiente descartável de validação. Limpa o workspace e a marca do setup antes, para provar que o conector
-         * funciona a partir do zero (nada sobrando de execuções anteriores).
-         */
-        fun forValidation(def: CustomDef): AndroidHostBridge {
-            val sid = validationSession(def.id)
-            runCatching { CueApp.instance.sandbox.workspaceFor(sid).deleteRecursively() }
-            // o setup roda de novo a cada teste: prova que ele prepara o ambiente sozinho
-            runCatching { java.io.File(CueApp.instance.sandbox.publicFor(sid), ".setup-ok").delete() }
-            return AndroidHostBridge(def, { true }, sid)
-        }
-
-        /** Libera terminal e browser do ambiente de validação (os arquivos ficam para inspeção). */
-        fun releaseValidation(id: String) {
-            val sid = validationSession(id)
-            runCatching { CueApp.instance.terminals.close(sid) }
-            runCatching { CueApp.instance.closeBrowser(sid) }
-        }
-
-        /** Apaga o ambiente de validação inteiro (ex.: depois que o conector foi instalado). */
-        fun deleteValidation(id: String) {
-            releaseValidation(id)
-            runCatching { CueApp.instance.sandbox.deleteEnvironment(validationSession(id)) }
-        }
-    }
 
     override fun granted(capability: String): Boolean = capability in def.capabilities && isGranted(capability)
 

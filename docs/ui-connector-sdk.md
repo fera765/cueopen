@@ -186,33 +186,58 @@ velas reais da Binance.
 - Ferramenta com `send` envia uma mensagem e, com `await.match` (ex.: `{"$.request_id": "{{rid}}"}`), espera a resposta
   correspondente; `{{rid}}` é único por chamada. Ordens via `send` seguem as mesmas proteções: `risky` (confirmação),
   `limits` (teto do usuário) e `requiresSignal` + `orderIntent` (validação TypeSafe Jev + coordenação entre agentes).
-- O criador com IA só libera a instalação de conectores sem login depois do `connector_test`, que conecta de verdade,
-  espera mensagens e confere se cada `set` e cada coleção recebeu dados.
+- O criador com IA só libera a instalação depois de `connector_test` passar em um dry-run offline; esse teste não prova acesso, login ou disponibilidade do serviço real.
 
 ## Guardrails do criador com IA (validação antes da instalação)
 
-Um conector criado pelo chat **Criar com a IA** só chega ao card "Instalar conector" depois de passar em
-`connector_test` com o mesmo JSON — para **todos** os conectores, inclusive os com login (`connector_propose`
-é bloqueado em código). Para conectores com terminal/arquivos/browser o teste roda de verdade num ambiente
-isolado de validação (`__uic__<id>__v`, workspace limpo e setup rodado de novo a cada teste):
+Um conector criado pelo chat **Criar com a IA** só chega ao card de instalação depois de passar em `connector_test`
+com o mesmo JSON. O resultado é vinculado por SHA-256 canônico à definição e guardado no próprio card; JSON alterado,
+proposta antiga sem prova ou versão de política incompatível não mostra botão de instalação.
 
-1. **Estático** (`ConnectorGuardrails.staticCheck`): heredoc no `run`, `{{param}}` entre aspas, `apt`/`yum`/`brew`
-   (o sandbox é Alpine), `sudo`, `pip install` sem `--break-system-packages`, `read`/editores interativos,
-   `|| true` no fim, comandos em segundo plano, `rm -rf /`, scripts chamados sem `files` que os criem, aspas abertas.
-2. **Ambiente**: sandbox responde; `setup` roda e precisa terminar com exit 0; cada comando externo usado pelas
-   ferramentas é conferido com `command -v` depois do setup.
-3. **Sintaxe**: cada arquivo de `files` passa em `bash -n` / `python3 ast.parse` / `node --check` / JSON, e o `run`
-   renderizado com os exemplos passa em `bash -n`.
-4. **Execução real**: cada ferramenta de terminal/arquivos/browser roda com os exemplos de `args_json` — duas
-   vezes quando rápida (idempotência) — e a saída crua é varrida por falhas escondidas mesmo com exit 0
-   (`command not found`, `No such file or directory`, `Traceback`, `ModuleNotFoundError`, `SyntaxError`…).
-   Ferramentas de ordem/envio (`orderIntent`, `limits`, `requiresSignal`, ou terminal que envia/paga/publica)
-   nunca rodam no teste.
+O pipeline usa parser e guardrails reais do SDK, mas substitui toda integração externa por fixtures locais:
 
-Credenciais: conector que exige login/API key só é proposto depois de `connector_test` logado. O agente pede os dados
-com `ask_secure` (formulário seguro: valores só no aparelho, nunca no modelo/histórico/log) e testa com
-`login_json`/`settings_json` usando `{{secret:nome}}`. Ao instalar, o card autoriza as capacidades validadas e entra
-com as mesmas credenciais.
+1. **Schema e segurança estática:** parser, templates, hosts, HTTPS/WSS, declarações de capacidades e
+   `ConnectorGuardrails.staticCheck` são verificados. URLs e hosts são conferidos sem abrir socket externo.
+2. **Requests/painéis/ferramentas:** HTTP e WebSocket recebem respostas determinísticas de mocks; os templates,
+   tabelas e saídas são renderizados. Login, quando declarado, usa valores sintéticos descartáveis — nunca pede nem
+   resolve credenciais reais. Ações, ordens e mensagens de envio não são reproduzidas.
+3. **Filesystem/capacidades:** operações `file` usam um filesystem virtual e gravação seguida de leitura é conferida.
+   Browser é substituído por fixture; nenhuma página é aberta. Qualquer ferramenta com `shell` ou qualquer `setup`
+   falha fechado, porque não há executor que comprove isolamento de rede/IO para código arbitrário. Nenhum comando,
+   script ou código gerado é executado.
+4. **Gate de instalação:** `connector_propose` exige o atestado atual para o mesmo JSON; o card revalida o SHA-256
+   antes de exibir e novamente antes de salvar. O card avisa que serviço/login real e execução de capacidades ficam
+   para depois da instalação e da autorização do usuário.
+
+Não coloque segredos fixos no JSON. `connector_test` não precisa de `ask_secure`, `login_json` nem token real.
+O teste offline não comprova que uma API aceita as credenciais, que um endpoint ainda existe, nem que uma permissão
+foi concedida. Para fontes sem API pública e autorizada, não use scraping, CAPTCHA ou contorno de login; explique a
+limitação e não proponha o conector. Em especial, o dry-run não pode provar autorização da Meta para a Biblioteca de
+Anúncios, então essa fonte fica bloqueada até existir alternativa autorizada validável.
+
+## Política de saída para copy/VSL
+
+Uma ferramenta de geração textual pode declarar `outputPolicy` para o app recusar saídas fora do contrato. A requisição
+precisa enviar duração, idioma e as instruções de guardrail; o texto final (`response`) é medido depois de renderizar:
+
+```json
+"outputPolicy": {
+  "type": "vsl",
+  "durationParam": "duracao_minutos",
+  "languageParam": "idioma",
+  "guardrailsParam": "guardrails",
+  "forbiddenTermsParam": "termos_proibidos",
+  "wordsPerMinute": 130,
+  "tolerance": 0.20,
+  "requiredSections": ["Abertura", "Problema", "Solução", "Oferta", "Chamada para ação"]
+}
+```
+
+`durationParam` deve ser numérico (1–240 min), `languageParam` e `guardrailsParam` texto, e pelo menos 3 seções
+são obrigatórias. A contagem estimada usa palavras/minuto e tolerância configurada; o idioma é uma heurística local
+para português, inglês, espanhol ou francês; cabeçalhos explícitos são conferidos na ordem declarada e `forbiddenTermsParam` bloqueia termos separados
+por vírgula/ponto e vírgula/linha. Isso não garante tempo exato de fala, não interpreta todas as instruções em linguagem
+natural e não faz revisão factual/semântica. O serviço gerador ainda precisa ser autorizado e testado fora do dry-run.
 
 Em produção cada comando de conector roda isolado: `cd /root/workspace; bash -c '<run>' < /dev/null` — processo
 próprio (cd/export/exit não vazam para a próxima chamada nem matam a sessão do terminal) e sem stdin.

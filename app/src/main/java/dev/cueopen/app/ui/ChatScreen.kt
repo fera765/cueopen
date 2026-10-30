@@ -747,7 +747,10 @@ private fun ConnectorProposalCard(p: ChatItem.ConnectorProposal, sessionId: Stri
     var busy by remember(p.id) { mutableStateOf(false) }
     var error by remember(p.id) { mutableStateOf<String?>(null) }
     val exists = remember(p.id, p.installed) { app.uiConnectors.isCustom(p.connectorId) }
-    // Capacidades já validadas no sandbox: autorizadas junto com a instalação (o usuário pode desmarcar).
+    val validationValid = remember(p.id, p.json, p.validation) {
+        dev.cueopen.app.uiconnector.custom.ConnectorAttestationPolicy.isInstallable(p.json, p.validation)
+    }
+    // Capacidades são autorizadas somente no momento da instalação (o usuário pode desmarcar).
     var grantCaps by remember(p.id) { mutableStateOf(true) }
     val secretsReady = sessionId != null && p.loginSecrets.isNotEmpty() &&
         p.loginSecrets.values.all { v -> dev.cueopen.app.agent.SecretVault.missing(sessionId, v).isEmpty() }
@@ -761,7 +764,7 @@ private fun ConnectorProposalCard(p: ChatItem.ConnectorProposal, sessionId: Stri
             Spacer(Modifier.width(10.dp))
             Column(Modifier.weight(1f)) {
                 Text(p.name, fontWeight = FontWeight.SemiBold, fontSize = 16.sp)
-                Text(if (p.installed) "Conector instalado" else "Conector validado · pronto para instalar", fontSize = 12.sp, color = if (p.installed) c.ok else c.ink2)
+                Text(if (p.installed) "Conector instalado" else if (validationValid) "Dry-run offline aprovado · pronto para instalar" else "Validação ausente ou desatualizada", fontSize = 12.sp, color = if (p.installed) c.ok else c.ink2)
             }
         }
         Text(p.description, fontSize = 13.sp, color = c.ink2)
@@ -769,17 +772,24 @@ private fun ConnectorProposalCard(p: ChatItem.ConnectorProposal, sessionId: Stri
         if (p.tools.isNotEmpty()) Text("Ferramentas do agente: " + p.tools.joinToString(), fontSize = 12.sp, color = c.ink3)
         if (!p.installed && p.capabilities.isNotEmpty()) Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).clickable { grantCaps = !grantCaps }.padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
             Checkbox(grantCaps, { grantCaps = it })
-            Text("Autorizar " + p.capabilities.joinToString { dev.cueopen.app.uiconnector.custom.Capabilities.label(it) } + " (já testado no sandbox isolado)", fontSize = 12.sp, color = c.ink2)
+            Text("Autorizar " + p.capabilities.joinToString { dev.cueopen.app.uiconnector.custom.Capabilities.label(it) } + " (a execução real começa após sua autorização)", fontSize = 12.sp, color = c.ink2)
         }
         if (!p.installed && secretsReady) Text("🔒 Entra com as credenciais que você enviou no formulário seguro (testadas).", fontSize = 12.sp, color = c.ink2)
         error?.let { Text(it, fontSize = 12.sp, color = c.err) }
         if (p.installed) {
             Text("Pronto: ative-o no agente em Agents → editar → UI Conectores.", fontSize = 12.sp, color = c.ink2)
+        } else if (!validationValid) {
+            Text("Instalação bloqueada. Volte ao criador e rode connector_test novamente para este JSON.", fontSize = 12.sp, color = c.err)
         } else {
             Button(
                 onClick = {
                     scope.launch {
                         busy = true; error = null
+                        if (!dev.cueopen.app.uiconnector.custom.ConnectorAttestationPolicy.isInstallable(p.json, p.validation)) {
+                            error = "A validação não corresponde mais a esta definição. Volte ao criador e teste novamente."
+                            busy = false
+                            return@launch
+                        }
                         app.uiConnectors.saveCustom(p.json)
                             .onSuccess {
                                 if (grantCaps) p.capabilities.forEach { cap -> app.uiConnectors.setCapabilityGranted(p.connectorId, cap, true) }
@@ -796,7 +806,7 @@ private fun ConnectorProposalCard(p: ChatItem.ConnectorProposal, sessionId: Stri
                 },
                 enabled = !busy, modifier = Modifier.fillMaxWidth().height(48.dp), shape = RoundedCornerShape(14.dp),
             ) { Text(if (exists) "Atualizar conector" else "Instalar conector", fontWeight = FontWeight.SemiBold) }
-            Text("Só fala com ${p.host} (HTTPS). O agente só usa o conector se você ativar nele.", fontSize = 11.sp, color = c.ink3)
+            Text("Dry-run validou o contrato com mocks locais; API/login reais e comandos não foram executados. O agente só usa o conector se você o ativar.", fontSize = 11.sp, color = c.ink3)
         }
     }
 }

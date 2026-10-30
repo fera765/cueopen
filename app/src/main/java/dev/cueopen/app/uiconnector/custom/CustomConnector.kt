@@ -367,11 +367,17 @@ class CustomConnector(
                 val head = if (t.response.isNotBlank()) Template.render(t.response, Template.Ctx(ctxL, reply.json)) + "\n" else ""
                 return head + lines.joinToString("\n")
             }
-            if (t.response.isNotBlank()) Template.render(t.response, Template.Ctx(sessionVars() + vars + cvars, reply.json)).ifBlank {
+            val output = if (t.response.isNotBlank()) Template.render(t.response, Template.Ctx(sessionVars() + vars + cvars, reply.json)).ifBlank {
                 "ERRO: o modelo de resposta ficou vazio. Estrutura recebida:\n" + ResponseTree.outline(reply.json, 3).take(1500)
             }
             else if (cvals.isNotEmpty()) cvals.entries.joinToString("\n") { "${it.key}: ${Compute.str(it.value).take(600)}" }
             else reply.body.take(4000)
+            val policy = t.vslOutputPolicy
+            if (policy != null) {
+                val result = VslOutputGuardrails.validate(output, args, policy)
+                if (!result.passed) return "ERRO: saída VSL não passou nas guardrails:\n" + result.errors.joinToString("\n")
+            }
+            output
         } catch (c: kotlinx.coroutines.CancellationException) {
             throw c
         } catch (e: Throwable) {
@@ -385,17 +391,9 @@ class CustomConnector(
     @Volatile private var lastStepRaw: String? = null
 
     /**
-     * Teste real do conector (usado pelo criador com IA antes de liberar a instalação). Com os GUARDRAILS
-     * ([ConnectorGuardrails]) ele valida TUDO que o conector vai executar, e não só o formato:
-     *  1. análise estática de setup, comandos, scripts e arquivos (erros bloqueiam);
-     *  2. sandbox disponível, `setup` rodado de verdade, cada comando externo conferido com `command -v`;
-     *  3. cada script gravado por `files` passa no verificador de sintaxe (bash -n / python ast / node --check)
-     *     e o próprio `run` passa em `bash -n`;
-     *  4. cada ferramenta de terminal/arquivos/browser RODA no ambiente isolado de validação — duas vezes
-     *     quando rápida (a 2ª pega o que só funciona na 1ª: mkdir sem -p, arquivo que já existe…) — e a saída
-     *     crua é varrida por falhas escondidas (command not found, Traceback…) mesmo com exit 0;
-     *  5. painéis, tempo real e ferramentas HTTP com dados reais (quando não exige login).
-     * Ordens, envios e ferramentas com efeito externo nunca são executadas. Devolve (passou, relatório).
+     * Harness de integração usado pelos testes que injetam HttpExec/HostBridge. Pode fazer I/O real se receber
+     * implementações de produção e, portanto, NÃO é chamado pelo criador com IA nem é prova pré-instalação.
+     * O builder usa [ConnectorDryRunValidator], exclusivamente com mocks offline. Devolve (passou, relatório).
      */
     suspend fun selfTest(settings: ConnectorSettings, toolArgs: Map<String, Map<String, String>>): Pair<Boolean, String> {
         val sb = StringBuilder()

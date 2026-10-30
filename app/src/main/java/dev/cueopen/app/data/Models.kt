@@ -1,5 +1,6 @@
 package dev.cueopen.app.data
 
+import dev.cueopen.app.uiconnector.custom.ConnectorValidationAttestation
 import kotlinx.serialization.Serializable
 import java.util.UUID
 
@@ -64,7 +65,7 @@ sealed class ChatItem {
         val caption: String = "",
     ) : ChatItem()
 
-    /** Conector UI gerado e validado pelo agente, aguardando o usuário tocar em Instalar. */
+    /** Conector UI aprovado em dry-run offline, aguardando o usuário tocar em Instalar. */
     @Serializable
     data class ConnectorProposal(
         override val id: String = newId(),
@@ -76,10 +77,12 @@ sealed class ChatItem {
         val tools: List<String> = emptyList(),
         val json: String,
         val installed: Boolean = false,
-        /** Capacidades do aparelho (terminal/files/browser) já validadas — autorizadas ao instalar. */
+        /** Capacidades declaradas no JSON; o dry-run não as executa e a autorização cabe ao usuário. */
         val capabilities: List<String> = emptyList(),
-        /** Login testado com dados do formulário seguro: campo → marcador {{secret:nome}} (nunca o valor). */
+        /** Campo legado para compatibilidade com cards antigos; o builder atual não guarda credenciais. */
         val loginSecrets: Map<String, String> = emptyMap(),
+        /** Prova persistida do dry-run offline, vinculada ao SHA-256 canônico do JSON proposto. */
+        val validation: ConnectorValidationAttestation? = null,
     ) : ChatItem()
 
     /** Perguntas de múltipla escolha do agente (ask_question): aparece só quando há uma dúvida real. */

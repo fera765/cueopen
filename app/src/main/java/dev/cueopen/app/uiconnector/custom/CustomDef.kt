@@ -56,6 +56,17 @@ data class FileStep(val op: String, val path: String, val content: String?)
 /** Passo de BROWSER: abre [url] (host declarado) e devolve o texto renderizado da página. */
 data class FetchStep(val url: String, val waitSec: Int)
 
+/** Verificações pós-condición para saídas de texto. VSL mede duração por palavras, não por promessa de exatidão. */
+data class VslOutputPolicy(
+    val durationParam: String,
+    val languageParam: String,
+    val guardrailsParam: String,
+    val wordsPerMinute: Int,
+    val tolerance: Double,
+    val requiredSections: List<String>,
+    val forbiddenTermsParam: String = "",
+)
+
 data class ToolDef(
     val name: String, val description: String, val params: List<ParamSpec>, val risky: Boolean, val requiresSignal: Boolean,
     val intent: IntentDef?, val limits: List<LimitDef>, val request: ReqDef?, val response: String,
@@ -69,6 +80,7 @@ data class ToolDef(
     val shell: ShellStep? = null,
     val file: FileStep? = null,
     val fetch: FetchStep? = null,
+    val vslOutputPolicy: VslOutputPolicy? = null,
 )
 data class LoginDef(val fields: List<LoginField>, val request: ReqDef?, val extract: Map<String, String>, val verify: ReqDef?)
 
@@ -472,7 +484,7 @@ object CustomDefParser {
             val tools = ArrayList<ToolDef>()
             arr(o, "tools", "$", 30).forEachIndexed { i, to ->
                 val p = "$.tools[$i]"
-                known(to, p, setOf("name", "description", "params", "risky", "requiresSignal", "orderIntent", "limits", "request", "response", "list", "send", "source", "compute", "shell", "file", "fetch"))
+                known(to, p, setOf("name", "description", "params", "risky", "requiresSignal", "orderIntent", "limits", "request", "response", "list", "send", "source", "compute", "shell", "file", "fetch", "outputPolicy"))
                 val params = ArrayList<ParamSpec>()
                 arr(to, "params", p, 12).forEachIndexed { j, pa ->
                     val pp = "$p.params[$j]"
@@ -537,6 +549,42 @@ object CustomDefParser {
                 if (requiresSignal && !risky) errors.add("$p: requiresSignal exige risky = true.")
                 val response = str(to, "response", p)
                 tpl(response, "$p.response", outVars, true)
+                var vslPolicy: VslOutputPolicy? = null
+                val vpo = obj(to, "outputPolicy", p)
+                if (vpo != null) {
+                    known(vpo, "$p.outputPolicy", setOf("type", "durationParam", "languageParam", "guardrailsParam", "forbiddenTermsParam", "wordsPerMinute", "tolerance", "requiredSections"))
+                    val policyType = str(vpo, "type", "$p.outputPolicy", required = true)
+                    if (policyType != "vsl") errors.add("$p.outputPolicy.type deve ser \"vsl\".")
+                    val durationParam = str(vpo, "durationParam", "$p.outputPolicy", required = true)
+                    val languageParam = str(vpo, "languageParam", "$p.outputPolicy", required = true)
+                    val guardrailsParam = str(vpo, "guardrailsParam", "$p.outputPolicy", required = true)
+                    val forbiddenTermsParam = str(vpo, "forbiddenTermsParam", "$p.outputPolicy")
+                    val wpm = str(vpo, "wordsPerMinute", "$p.outputPolicy", def = "130").toIntOrNull()
+                    if (wpm == null || wpm !in 80..240) errors.add("$p.outputPolicy.wordsPerMinute deve estar entre 80 e 240.")
+                    val tolerance = str(vpo, "tolerance", "$p.outputPolicy", def = "0.20").toDoubleOrNull()
+                    if (tolerance == null || tolerance !in 0.05..0.50) errors.add("$p.outputPolicy.tolerance deve estar entre 0.05 e 0.50.")
+                    val sections = (vpo["requiredSections"] as? JsonArray)?.mapNotNull { (it as? JsonPrimitive)?.takeIf { x -> x.isString }?.content } ?: emptyList()
+                    if (sections.size !in 3..12 || sections.any { it.isBlank() || it.length > 80 })
+                        errors.add("$p.outputPolicy.requiredSections deve conter de 3 a 12 títulos não vazios (até 80 caracteres cada).")
+                    if (sections.map { it.trim().lowercase() }.distinct().size != sections.size)
+                        errors.add("$p.outputPolicy.requiredSections não pode repetir títulos.")
+                    fun requireParam(id: String, expected: Set<String>, label: String) {
+                        val prm = params.firstOrNull { it.name == id }
+                        if (id.isBlank() || prm == null) errors.add("$p.outputPolicy.$label deve apontar para um parâmetro existente.")
+                        else if (prm.type !in expected) errors.add("$p.outputPolicy.$label tem tipo incompatível (${prm.type}).")
+                    }
+                    requireParam(durationParam, setOf("number", "integer"), "durationParam")
+                    requireParam(languageParam, setOf("string"), "languageParam")
+                    requireParam(guardrailsParam, setOf("string"), "guardrailsParam")
+                    if (forbiddenTermsParam.isNotBlank()) requireParam(forbiddenTermsParam, setOf("string"), "forbiddenTermsParam")
+                    if (treq == null || response.isBlank() || to["list"] != null) errors.add("$p.outputPolicy exige request HTTP, response textual e não pode usar list.")
+                    val requestTexts = treq?.let { listOf(it.path, it.url) + it.query.values + it.headers.values + it.form.values + Template.strings(it.body) }.orEmpty()
+                    for ((id, label) in listOf(durationParam to "durationParam", languageParam to "languageParam", guardrailsParam to "guardrailsParam")) {
+                        if (id.isNotBlank() && requestTexts.none { Regex("\\{\\{\\s*${Regex.escape(id)}(?:\\s*\\||\\s*}})").containsMatchIn(it) })
+                            errors.add("$p.outputPolicy.$label não é enviado na requisição de geração.")
+                    }
+                    vslPolicy = VslOutputPolicy(durationParam, languageParam, guardrailsParam, wpm ?: 130, tolerance ?: 0.20, sections, forbiddenTermsParam)
+                }
                 var list: ListDef? = null
                 val lso = obj(to, "list", p)
                 if (lso != null) {
@@ -552,7 +600,7 @@ object CustomDefParser {
                 }
                 val tname = str(to, "name", p, required = true)
                 val tdesc = str(to, "description", p, required = true)
-                tools.add(ToolDef(tname, tdesc, params, risky, requiresSignal, intent, limits, treq, response, list, tsend, tsource, tcomp, tshell, tfile, tfetch))
+                tools.add(ToolDef(tname, tdesc, params, risky, requiresSignal, intent, limits, treq, response, list, tsend, tsource, tcomp, tshell, tfile, tfetch, vslPolicy))
             }
             if (baseUrl.isEmpty() && (usesNetwork || rt != null)) errors.add("$.baseUrl é obrigatório quando o conector faz requisições ou usa tempo real.")
             return CustomDef(id, name, description, version, accent, baseUrl, host, headers, login, settings, panels, actions, tools, allowed, rt, capabilities, setup)
