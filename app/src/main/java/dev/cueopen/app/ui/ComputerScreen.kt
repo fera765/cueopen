@@ -387,8 +387,9 @@ fun FilesPane(root: File, guestRoot: String) {
             dirHistory.isNotEmpty() -> dir = dirHistory.removeAt(dirHistory.lastIndex)
         }
     }
+    var tick by remember(root) { mutableIntStateOf(0) }
     var listing by remember(root) { mutableStateOf(FilesSnapshot(emptyList(), emptyList())) }
-    LaunchedEffect(dir) {
+    LaunchedEffect(dir, tick) {
         while (true) {
             val snapshot = withContext(Dispatchers.IO) { readFilesSnapshot(dir) }
             if (snapshot.stamps != listing.stamps) listing = snapshot
