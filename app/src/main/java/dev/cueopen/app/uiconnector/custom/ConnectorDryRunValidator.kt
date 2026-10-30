@@ -1,5 +1,6 @@
 package dev.cueopen.app.uiconnector.custom
 
+import dev.cueopen.app.files.TextReplace
 import dev.cueopen.app.uiconnector.ConnectorSettings
 import dev.cueopen.app.uiconnector.UiBlock
 import kotlinx.serialization.json.Json
@@ -128,8 +129,21 @@ object ConnectorDryRunValidator {
                 }
                 val fileStep = tool.file
                 val filePath = fileStep?.let { Template.render(it.path, Template.Ctx(args)) }
+                var expectedAfterReplace: String? = null
                 if (fileStep?.op == "write" && filePath != null) {
                     fileFixtures[filePath] = Template.render(fileStep.content.orEmpty(), Template.Ctx(args))
+                }
+                if (fileStep?.op == "replace" && filePath != null) {
+                    val ctx = Template.Ctx(args)
+                    val oldText = Template.render(fileStep.oldText.orEmpty(), ctx)
+                    val newText = Template.render(fileStep.newText.orEmpty(), ctx)
+                    val initial = fileFixtures[filePath] ?: oldText
+                    val seeded = bridge.fileOp("write", filePath, initial)
+                    if (!seeded.ok) {
+                        report.appendLine("✗ ferramenta ${tool.name}: não foi possível preparar fixture virtual (${seeded.text.take(500)})")
+                        return Result(false, redact(report.toString(), conn), null)
+                    }
+                    expectedAfterReplace = TextReplace.apply(initial, oldText, newText, fileStep.allowMultiple).updatedText
                 }
                 http.fixture = responseFixture(def, tool, args)
                 val out = conn.callTool(tool.name, args, settings)
@@ -143,6 +157,15 @@ object ConnectorDryRunValidator {
                         report.appendLine("✗ ferramenta ${tool.name}: leitura do filesystem virtual diverge do conteúdo gravado")
                         return Result(false, redact(report.toString(), conn), null)
                     }
+                }
+                if (fileStep?.op == "replace" && filePath != null) {
+                    val actual = bridge.fileOp("read", filePath, null)
+                    if (!actual.ok || expectedAfterReplace == null || actual.text != expectedAfterReplace) {
+                        report.appendLine("✗ ferramenta ${tool.name}: resultado do replace diverge do esperado no filesystem virtual")
+                        return Result(false, redact(report.toString(), conn), null)
+                    }
+                    fileFixtures[filePath] = actual.text
+                    report.appendLine("✓ ferramenta ${tool.name}: substituição verificada no filesystem virtual")
                 }
                 if (fileStep?.op == "delete" && filePath != null) fileFixtures.remove(filePath)
                 if (tool.vslOutputPolicy != null) {

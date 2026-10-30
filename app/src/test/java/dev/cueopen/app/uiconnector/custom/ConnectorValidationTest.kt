@@ -50,6 +50,13 @@ class ConnectorValidationTest {
         assertTrue(broken.errors.any { it.contains("guardrailsParam não é enviado") })
     }
 
+    @Test fun `parser orienta correção de aspas e vírgulas em JSON inválido`() {
+        val parsed = CustomDefParser.parse("""{"id":"teste", "name":"sem vírgula" "version":"1.0"}""")
+        assertNull(parsed.def)
+        assertTrue(parsed.errors.single(), parsed.errors.single().contains("JSON inválido"))
+        assertTrue(parsed.errors.single(), parsed.errors.single().contains("Confira vírgulas e aspas"))
+    }
+
     @Test fun `atestado só libera mesmo JSON e versão de política atual`() {
         val json = """{"a":1,"b":{"y":2,"x":3}}"""
         val proof = ConnectorAttestationPolicy.issue(json, ConnectorAttestationPolicy.REQUIRED_CHECKS)
@@ -81,7 +88,7 @@ class ConnectorValidationTest {
         }
     }
 
-    @Test fun `pipeline offline escreve e relê arquivo no filesystem virtual`() = runBlocking {
+    @Test fun `pipeline offline escreve substitui e relê arquivo no filesystem virtual`() = runBlocking {
         val json = """{
           "id":"filetest","name":"Teste de arquivo","description":"Escreve e relê artefato no workspace virtual",
           "version":"1.0","baseUrl":"https://files.example.com","capabilities":["files"],
@@ -89,6 +96,9 @@ class ConnectorValidationTest {
             {"name":"gravar","description":"Grava o artefato solicitado","risky":true,
              "params":[{"name":"path","description":"Caminho"},{"name":"content","description":"Conteúdo"}],
              "file":{"op":"write","path":"{{path}}","content":"{{content}}"}},
+            {"name":"editar","description":"Substitui um trecho do artefato","risky":true,
+             "params":[{"name":"path","description":"Caminho"},{"name":"old","description":"Trecho antigo"},{"name":"new","description":"Trecho novo"}],
+             "file":{"op":"replace","path":"{{path}}","oldText":"{{old}}","newText":"{{new}}"}},
             {"name":"ler","description":"Lê o artefato solicitado",
              "params":[{"name":"path","description":"Caminho"}],"file":{"op":"read","path":"{{path}}"}}
           ]
@@ -97,11 +107,13 @@ class ConnectorValidationTest {
         assertNotNull(parsed.errors.joinToString("\n"), parsed.def)
         val args = mapOf(
             "gravar" to mapOf("path" to "outputs/vsl.md", "content" to "Roteiro de teste gerado."),
+            "editar" to mapOf("path" to "outputs/vsl.md", "old" to "Roteiro de teste", "new" to "Roteiro atualizado"),
             "ler" to mapOf("path" to "outputs/vsl.md"),
         )
         val result = ConnectorDryRunValidator.validate(json, parsed.def!!, args)
         assertTrue(result.report, result.passed)
         assertTrue(result.report.contains("filesystem virtual"))
+        assertTrue(result.report.contains("substituição verificada"))
     }
 
     @Test fun `Biblioteca de Anúncios não passa por scraping nem por mock offline`() {

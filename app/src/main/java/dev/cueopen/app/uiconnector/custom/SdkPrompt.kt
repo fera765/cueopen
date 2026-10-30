@@ -29,6 +29,17 @@ nome diferente ou valor fora das regras faz o conector ser recusado.
    dentro de "connector").
 4. Nunca invente endpoints: use os caminhos reais da API que o usuário indicou. Se não souber, pergunte.
 
+## Compatibilidade e limites
+O SDK combina adaptadores declarativos: HTTP/HTTPS para APIs e formatos de resposta suportados; WebSocket `wss://` para
+eventos em tempo real; `compute` para transformações; e `terminal`, `files` ou `browser` somente quando declarados e
+autorizados. Isso atende muitos tipos de serviço sem código arbitrário, mas **não significa compatibilidade universal**:
+um protocolo ou mecanismo de autenticação não representado neste esquema exige um adaptador novo, não um endpoint inventado.
+O parser, os guardrails e o dry-run offline validam estrutura e contratos com mocks; não provam disponibilidade, permissões,
+limites de uso nem o comportamento ao vivo do serviço. Descreva essas limitações e nunca prometa ausência total de erros.
+
+Mantenha cada ferramenta pequena e com parâmetros tipados/descritivos: o schema anunciado ao modelo é o contrato que o
+parser e a validação aplicam. Prefira validação/dry-run antes da instalação e dê mensagens de erro acionáveis.
+
 ## Esquema completo
 
 ### Raiz
@@ -204,14 +215,16 @@ Roda só na 1ª vez (fica marcado; re-roda se você mudar o comando). Use-o para
   Cada arquivo é gravado direto no filesystem (sem passar pelo shell), confinado ao workspace do conector. `path` relativo
   (sem `/` inicial, sem `..`); `content` pode usar `{{param}}` e `{{s.setting}}`. Conteúdo grande com muitas linhas: sempre `files`.
 
-**Passo de arquivo** (`file`) — exige `"files"`; `write`/`delete` exigem `"risky": true`:
+**Passo de arquivo** (`file`) — exige `"files"`; `write`/`delete`/`replace` exigem `"risky": true`:
 ```
 {"name": "ler", "description": "...", "file": {"op": "read", "path": "download.mp4"}}
 {"name": "salvar", "description": "...", "risky": true, "file": {"op": "write", "path": "nota.txt", "content": "{{texto}}"}}
+{"name": "ajustar_texto", "description": "...", "risky": true, "params": [{"name": "novo", "description": "Texto novo"}], "file": {"op": "replace", "path": "config.json", "oldText": "\"status\": \"antigo\"", "newText": "\"status\": \"{{novo}}\"", "allowMultiple": false}}
 {"name": "listar", "description": "...", "file": {"op": "list", "path": ""}}
 ```
-- `op`: `read` | `write` | `list` | `delete`. `path` é **relativo ao workspace** do conector (sem `/` inicial, sem `..`).
-  `content` só em `write`. A saída vira o retorno da ferramenta (lido também por `response`/`compute`).
+- `op`: `read` | `write` | `list` | `delete` | `replace`. `path` é **relativo ao workspace** do conector (sem `/` inicial, sem `..`).
+- `content` só em `write`. `replace` usa `oldText` e `newText`; primeiro tenta correspondência literal, depois tolera apenas diferenças de whitespace/indentação. Sem fuzzy match: se nada casar ou o trecho aparecer mais de uma vez, não altera o arquivo. `allowMultiple: true` substitui todas as ocorrências intencionalmente. A gravação ocorre por rename atômico e a saída descreve estratégia e quantidade.
+- Aspas e quebras de linha dentro de strings JSON devem ser escapadas (`\"` e `\n`); gere objetos de dados via tool/schema, não monte JSON concatenando fragmentos de texto. A saída vira o retorno da ferramenta (lido também por `response`/`compute`).
 
 **Passo de browser** (`fetch`) — exige `"browser"`:
 ```

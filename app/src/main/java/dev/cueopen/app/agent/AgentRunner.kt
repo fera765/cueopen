@@ -11,6 +11,7 @@ import dev.cueopen.app.data.SessionStatus
 import dev.cueopen.app.data.Skill
 import dev.cueopen.app.data.StepStatus
 import dev.cueopen.app.data.Store
+import dev.cueopen.app.files.AtomicTextFile
 import dev.cueopen.app.llm.OpenRouter
 import dev.cueopen.app.llm.ToolCall
 import dev.cueopen.app.llm.bool
@@ -1114,7 +1115,7 @@ class AgentRunner(
             appendLine("Você tem um COMPUTADOR próprio:")
             appendLine("- Terminal Linux (Alpine, via proot) — ferramenta `shell`. Workspace da tarefa: ${sandbox.guestPath(sessionId)}. Instale pacotes com `apk add`, `pip install`, `npm i`. O usuário vê cada comando ao vivo.")
             appendLine("- Browser real (WebView) — ferramentas browser_* (inclui browser_network e browser_console para depurar).")
-            appendLine("- Arquivos — file_read / file_write / file_list.")
+            appendLine("- Arquivos — file_read / file_write / file_edit / file_list.")
             appendLine()
             appendLine("Modo de trabalho:")
             appendLine("1. Tarefas com várias etapas: chame `update_plan` e atualize ao concluir fases.")
@@ -1124,7 +1125,7 @@ class AgentRunner(
             appendLine("2b. ERRO: se uma ferramenta falhar, leia a mensagem, diagnostique e MUDE a abordagem (outro caminho/comando/argumento). Nunca repita a mesma chamada que falhou. Se ficar bloqueado, finalize explicando o motivo em vez de entrar em loop.")
             appendLine("3. Economize contexto: leia só o necessário (head/grep), mande saídas longas para arquivo.")
             appendLine("3a. Trabalhe APENAS no seu workspace (${sandbox.guestPath(sessionId)}); não leia /root/workspace de outras tarefas.")
-            appendLine("3b. Arquivos: use file_write (nunca heredoc gigante no shell). Arquivos grandes em partes com append=true. Depois confira com `ls -la` ou file_read.")
+            appendLine("3b. Arquivos: para alterar um trecho de arquivo existente, prefira file_edit com old_text e new_text; exige correspondência única e não faz substituição aproximada. Use allow_multiple só quando todas as ocorrências devam mudar. Use file_write para criar/sobrescrever arquivo inteiro; arquivos grandes em partes com append=true. Depois confira com file_read.")
             appendLine("3c. Ao gerar imagem/SVG/HTML/PDF, mostre ao usuário com `show_file`.")
             appendLine("3d. Com plano ativo, chame `complete_step` ao concluir CADA fase, antes de seguir para a próxima.")
             appendLine("3e. EFICIÊNCIA DE CONTEXTO: busque primeiro símbolos/termos e leia apenas trechos necessários; limite saídas; não despeje arquivos/logs inteiros no contexto. Preserve requisitos, decisões, evidências, caminhos, erros e pendências. Não alegue economia percentual sem medir uso real.")
@@ -1148,7 +1149,7 @@ class AgentRunner(
             appendLine("7. MODO CONTÍNUO: se o usuário pedir para monitorar, acompanhar, repetir ou rodar por horas/dias, NÃO finalize. Faça a verificação, registre em notes_write e chame `sleep` (minutos até a próxima verificação). Repita até o usuário pausar.")
             appendLine("8. Fora do modo contínuo, termine com `finish` (resumo curto + arquivos). Responda no idioma do usuário.")
             appendLine("8a. DÚVIDA REAL → `ask_question`: só quando o usuário pediu uma tarefa E existe uma dúvida verdadeira que muda o resultado (ex.: qual de duas abordagens, público, formato, escopo) e errar custaria refazer muito trabalho ou algo irreversível. NÃO use para confirmar (\"posso começar?\"), para coisas que você descobre pesquisando/lendo arquivos, nem para preferências triviais — nesses casos assuma o mais razoável e diga o que assumiu. No máximo UMA vez por pedido, com 1–4 perguntas objetivas e 2–4 opções cada (\"Outra resposta\" já aparece). Depois das respostas, siga direto.")
-            appendLine("8b0. DADOS SENSÍVEIS → `ask_secure`: para API key, token, e-mail/senha, dados de login ou de formulário, NUNCA peça para o usuário digitar no chat — chame ask_secure com os campos. Você nunca verá os valores; depois use o marcador {{secret:<nome>}} nos argumentos (shell, browser_type, browser_navigate, file_write, ferramentas uic_*/mcp_*, connector_test login_json/settings_json/args_json) que o app troca pelo valor na execução. Nunca tente imprimir, ecoar ou adivinhar o valor. Se o usuário colar um segredo no chat, use-o só se necessário e recomende o formulário seguro.")
+            appendLine("8b0. DADOS SENSÍVEIS → `ask_secure`: para API key, token, e-mail/senha, dados de login ou de formulário, NUNCA peça para o usuário digitar no chat — chame ask_secure com os campos. Você nunca verá os valores; depois use o marcador {{secret:<nome>}} nos argumentos (shell, browser_type, browser_navigate, file_write, file_edit, ferramentas uic_*/mcp_*, connector_test login_json/settings_json/args_json) que o app troca pelo valor na execução. Nunca tente imprimir, ecoar ou adivinhar o valor. Se o usuário colar um segredo no chat, use-o só se necessário e recomende o formulário seguro.")
             SecretVault.names(sessionId).takeIf { it.isNotEmpty() }?.let { appendLine("8b1. Dados seguros já disponíveis nesta tarefa (use o marcador, sem pedir de novo): " + it.joinToString { n -> "{{secret:$n}}" }) }
             appendLine("8b. ELEMENTOS CueUI: quando um elemento interativo ajudar na resposta (opções para o usuário tocar, gráfico, calculadora, tabela, estatísticas, passos, barra de progresso, aviso, chave→valor), inclua um bloco ```cueui com UM objeto JSON `{\"type\": ...}`. O chat renderiza nativo; NÃO escreva o JSON como texto nem explique o bloco. Tipos e campos: " +
                 "buttons {items:[{label, send?|copy?|url?, tone?}]} (send = texto enviado a você ao tocar); " +
@@ -1292,6 +1293,12 @@ class AgentRunner(
         add(tool("file_write", "Cria/sobrescreve um arquivo de texto (cria as pastas). Arquivos grandes: escreva em partes com append=true (~150 linhas por chamada).", buildJsonObject {
             put("path", str("Caminho do ARQUIVO (relativo ao workspace ou absoluto)")); put("content", str("Conteúdo")); put("append", bool("true = acrescenta ao final"))
         }, listOf("path", "content")))
+        add(tool("file_edit", "Substitui um trecho literal em arquivo existente dentro do workspace da tarefa. old_text/new_text são texto cru; a ferramenta tenta literal primeiro e aceita apenas diferenças de whitespace como fallback. Recusa se não houver match único, se houver ambiguidade ou se o arquivo exceder 8 MB. allow_multiple=false por padrão; true altera todas as ocorrências. A gravação é atômica.", buildJsonObject {
+            put("path", str("Arquivo existente, relativo ao workspace (ou /root/workspace/...)"))
+            put("old_text", str("Trecho exato a localizar; use \\n para quebras de linha no argumento JSON"))
+            put("new_text", str("Texto de substituição; pode ser vazio para remover o trecho"))
+            put("allow_multiple", bool("true somente se quiser substituir todas as ocorrências; padrão false"))
+        }, listOf("path", "old_text", "new_text")))
         add(tool("complete_step", "Marca a próxima fase do plano como concluída. Chame SEMPRE ao terminar cada fase.", buildJsonObject { put("note", str("O que foi feito")) }))
         add(tool("show_file", "Mostra um arquivo gerado (imagem, SVG, HTML, PDF, código) direto no chat para o usuário.", buildJsonObject {
             put("path", str("Caminho do arquivo")); put("caption", str("Legenda curta"))
@@ -1923,7 +1930,7 @@ class AgentRunner(
 
         val (title, kind) = when (call.name) {
             "shell" -> "Executando comando" to Activity.Kind.TERMINAL
-            "file_write" -> "Editando arquivo" to Activity.Kind.EDITOR
+            "file_write", "file_edit" -> "Editando arquivo" to Activity.Kind.EDITOR
             "file_read" -> "Lendo arquivo" to Activity.Kind.EDITOR
             "file_list" -> "Listando arquivos" to Activity.Kind.EDITOR
             "multi_agents" -> "Delegando subtarefas em paralelo" to Activity.Kind.THINKING
@@ -1963,7 +1970,7 @@ class AgentRunner(
         }
         val argPreview = when (call.name) {
             "shell" -> s("command")
-            "file_write", "file_read", "file_list" -> s("path").ifBlank { cwd }
+            "file_write", "file_edit", "file_read", "file_list" -> s("path").ifBlank { cwd }
             "browser_navigate" -> s("url")
             "browser_type" -> s("text")
             "browser_click" -> "#${i("index")}"
@@ -2429,6 +2436,30 @@ class AgentRunner(
                                 val lines = f.useLines { it.count() }
                                 val preview = runCatching { f.useLines { seq -> seq.take(10).joinToString("\n") } }.getOrDefault("")
                                 "OK: ${if (append) "conteúdo acrescentado" else "arquivo salvo"} (${f.name}) — ${f.length()} bytes, $lines linhas.\n[Prévia das primeiras 10 linhas]\n$preview"
+                            }
+                        }
+                    }
+                }
+                "file_edit" -> {
+                    val path = s("path").trim()
+                    if (path.isBlank()) "ERRO: informe path."
+                    else {
+                        val workspace = sandbox.workspaceFor(sessionId).canonicalFile
+                        val target = runCatching { sandbox.hostFile(path, sessionId).canonicalFile }.getOrNull()
+                        when {
+                            target == null -> "ERRO: caminho inválido."
+                            target.path != workspace.path && !target.path.startsWith(workspace.path + File.separator) ->
+                                "ERRO: file_edit só pode modificar arquivos dentro do workspace desta tarefa."
+                            !target.isFile -> "ERRO: arquivo existente não encontrado: $path. Use file_list/file_read antes de editar."
+                            else -> {
+                                val oldText = SecretVault.resolve(sessionId, s("old_text"))
+                                val newText = SecretVault.resolve(sessionId, s("new_text"))
+                                val result = AtomicTextFile.replace(target, oldText, newText, b("allow_multiple"))
+                                if (!result.success) "ERRO: ${result.error ?: "substituição recusada"}"
+                                else {
+                                    val mode = if (result.strategy == "exact") "literal" else "whitespace"
+                                    "OK: ${target.relativeTo(workspace).path}: ${result.replacements} ocorrência(s) substituída(s) ($mode)."
+                                }
                             }
                         }
                     }

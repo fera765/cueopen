@@ -1,6 +1,7 @@
 package dev.cueopen.app.uiconnector.custom
 
 import dev.cueopen.app.CueApp
+import dev.cueopen.app.files.AtomicTextFile
 import java.io.File
 
 /**
@@ -136,6 +137,24 @@ class AndroidHostBridge(
                     BridgeResult(ok, if (ok) "OK: '$path' removido." else "nada para remover em '$path'.")
                 }
                 else -> BridgeResult(false, "operação de arquivo desconhecida: '$op'")
+            }
+        } catch (c: kotlinx.coroutines.CancellationException) {
+            throw c
+        } catch (t: Throwable) {
+            BridgeResult(false, t.message ?: t.javaClass.simpleName)
+        }
+    }
+
+    override suspend fun replaceFile(path: String, oldText: String, newText: String, allowMultiple: Boolean): BridgeResult {
+        val root = workspace().apply { mkdirs() }
+        val target = BridgeSecurity.confine(root, path)
+            ?: return BridgeResult(false, "caminho inválido '$path' (fora do workspace do conector).")
+        return try {
+            val result = AtomicTextFile.replace(target, oldText, newText, allowMultiple)
+            if (!result.success) BridgeResult(false, result.error ?: "substituição recusada")
+            else {
+                val mode = if (result.strategy == "exact") "literal" else "whitespace"
+                BridgeResult(true, "OK: ${target.relativeTo(root).path}: ${result.replacements} ocorrência(s) substituída(s) ($mode).")
             }
         } catch (c: kotlinx.coroutines.CancellationException) {
             throw c

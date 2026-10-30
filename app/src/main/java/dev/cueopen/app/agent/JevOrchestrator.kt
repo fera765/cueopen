@@ -25,7 +25,7 @@ object JevOrchestrator {
 
     /** Grupos de ferramentas nativas (o nome do grupo é o que o modelo passa em tools_load). */
     val GROUPS: Map<String, Set<String>> = linkedMapOf(
-        "core" to setOf("update_plan", "shell", "file_write", "file_read", "file_list", "complete_step", "show_file",
+        "core" to setOf("update_plan", "shell", "file_write", "file_edit", "file_read", "file_list", "complete_step", "show_file",
             "browser_navigate", "browser_read", "browser_snapshot", "browser_click", "browser_type", "browser_scroll", "browser_back",
             "notes_write", "memory_save", "memory_search", "skill_load", "ask_user", "ask_question", "ask_secure", "finish", "tools_load"),
         "web_dev" to setOf("browser_js", "browser_network", "browser_console"),

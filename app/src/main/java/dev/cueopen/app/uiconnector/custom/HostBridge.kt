@@ -1,5 +1,6 @@
 package dev.cueopen.app.uiconnector.custom
 
+import dev.cueopen.app.files.TextReplace
 import java.io.File
 
 /**
@@ -34,6 +35,18 @@ interface HostBridge {
 
     /** Operação de arquivo dentro do workspace do conector: read | write | list | delete. */
     suspend fun fileOp(op: String, path: String, content: String?): BridgeResult
+
+    /** Substitui texto em arquivo existente; a implementação padrão atende bridges virtuais de teste. */
+    suspend fun replaceFile(path: String, oldText: String, newText: String, allowMultiple: Boolean = false): BridgeResult {
+        val current = fileOp("read", path, null)
+        if (!current.ok) return current
+        val plan = TextReplace.apply(current.text, oldText, newText, allowMultiple)
+        if (!plan.success) return BridgeResult(false, plan.error ?: "substituição recusada")
+        val written = fileOp("write", path, plan.updatedText)
+        if (!written.ok) return written
+        val mode = if (plan.strategy == "exact") "literal" else "whitespace"
+        return BridgeResult(true, "OK: ${plan.replacements} ocorrência(s) substituída(s) ($mode).")
+    }
 
     /** Abre uma URL https (host declarado) no browser e devolve o texto renderizado da página. */
     suspend fun fetch(url: String, waitSec: Int): BridgeResult
@@ -85,7 +98,7 @@ object BridgeSecurity {
     const val MAX_TIMEOUT = 300
     /** O setup (instalar dependências) pode demorar mais que um comando comum. */
     const val MAX_SETUP_TIMEOUT = 900
-    val FILE_OPS = setOf("read", "write", "list", "delete")
+    val FILE_OPS = setOf("read", "write", "list", "delete", "replace")
 
     fun clampTimeout(sec: Int): Int = sec.coerceIn(MIN_TIMEOUT, MAX_TIMEOUT)
     fun clampSetupTimeout(sec: Int): Int = sec.coerceIn(MIN_TIMEOUT, MAX_SETUP_TIMEOUT)

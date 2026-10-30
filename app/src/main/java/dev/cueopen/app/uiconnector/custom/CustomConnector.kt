@@ -342,7 +342,14 @@ class CustomConnector(
                     val ctxF = Template.Ctx(sessionVars() + vars)
                     val fpath = Template.render(t.file.path, ctxF)
                     val content = t.file.content?.let { Template.render(it, ctxF) }
-                    val r = bridge.fileOp(t.file.op, fpath, content)
+                    val r = if (t.file.op == "replace") {
+                        bridge.replaceFile(
+                            fpath,
+                            Template.render(t.file.oldText.orEmpty(), ctxF),
+                            Template.render(t.file.newText.orEmpty(), ctxF),
+                            t.file.allowMultiple,
+                        )
+                    } else bridge.fileOp(t.file.op, fpath, content)
                     lastStepRaw = r.text
                     if (!r.ok) return "ERRO: " + Redactor.redact(r.text.take(2000), secrets())
                     Reply(200, r.text, ResponseTree.parse(r.text, null), emptyMap())

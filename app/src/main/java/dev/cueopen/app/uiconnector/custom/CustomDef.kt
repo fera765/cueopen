@@ -18,8 +18,9 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 
 /*
- * Definição declarativa (JSON) de um conector criado pelo usuário. Só HTTP/REST: nada é executado,
- * apenas requisições para UM host HTTPS declarado em baseUrl. Referência completa em docs/ui-connector-sdk.md.
+ * Definição declarativa (JSON) de um conector criado pelo usuário: HTTP, realtime, compute e capacidades
+ * locais explicitamente autorizadas. O parser e os guardrails validam a definição antes da instalação.
+ * Referência completa em docs/ui-connector-sdk.md.
  */
 
 data class ReqDef(
@@ -51,8 +52,15 @@ data class FileWrite(val path: String, val content: String)
  * [run] (modelo shell-seguro) no sandbox do conector, com tempo-limite.
  */
 data class ShellStep(val run: String, val timeoutSec: Int, val files: List<FileWrite> = emptyList())
-/** Passo de ARQUIVO no workspace do conector: op read|write|list|delete; [content] só para write. */
-data class FileStep(val op: String, val path: String, val content: String?)
+/** Passo de ARQUIVO no workspace do conector; replace troca oldText por newText sem shell. */
+data class FileStep(
+    val op: String,
+    val path: String,
+    val content: String?,
+    val oldText: String? = null,
+    val newText: String? = null,
+    val allowMultiple: Boolean = false,
+)
 /** Passo de BROWSER: abre [url] (host declarado) e devolve o texto renderizado da página. */
 data class FetchStep(val url: String, val waitSec: Int)
 
@@ -127,11 +135,22 @@ object CustomDefParser {
         return t.trim()
     }
 
+    private fun jsonSyntaxError(text: String, cause: Throwable): String {
+        val detail = (cause.message ?: "erro de sintaxe").take(180)
+        val offset = Regex("""offset\s+(\d+)""", RegexOption.IGNORE_CASE).find(detail)?.groupValues?.get(1)?.toIntOrNull()
+        val location = offset?.takeIf { it in 0..text.length }?.let { at ->
+            val before = text.substring(0, at)
+            "linha ${before.count { it == '\n' } + 1}, coluna ${before.length - (before.lastIndexOf('\n') + 1) + 1}"
+        }
+        val where = location?.let { " ($it)" }.orEmpty()
+        return "JSON inválido$where: $detail. Confira vírgulas e aspas; dentro de strings, escape aspas como \\\" e quebras de linha como \\n."
+    }
+
     fun parse(input: String): Parsed {
         val text = stripFences(input)
         if (text.length > MAX_CHARS) return Parsed(null, listOf("Definição maior que 64 KB."), emptyList())
         val root = try { Json.parseToJsonElement(text) } catch (t: Exception) {
-            return Parsed(null, listOf("JSON inválido: ${(t.message ?: "erro de sintaxe").take(180)}"), emptyList())
+            return Parsed(null, listOf(jsonSyntaxError(text, t)), emptyList())
         }
         val o = root as? JsonObject ?: return Parsed(null, listOf("A raiz deve ser um objeto JSON { … }."), emptyList())
         val c = Ctx()
@@ -635,15 +654,24 @@ object CustomDefParser {
         fun fileStep(o: JsonObject?, path: String, vars: Set<String>, caps: Set<String>, risky: Boolean): FileStep? {
             if (o == null) return null
             if (Capabilities.FILES !in caps) errors.add("$path exige \"files\" na lista capabilities do conector.")
-            known(o, path, setOf("op", "path", "content"))
+            known(o, path, setOf("op", "path", "content", "oldText", "newText", "allowMultiple"))
             val op = str(o, "op", path, required = true).lowercase()
-            if (op !in BridgeSecurity.FILE_OPS) errors.add("$path.op deve ser read, write, list ou delete.")
-            if ((op == "write" || op == "delete") && !risky) errors.add("$path: op '$op' exige \"risky\": true.")
+            if (op !in BridgeSecurity.FILE_OPS) errors.add("$path.op deve ser read, write, list, delete ou replace.")
+            if ((op == "write" || op == "delete" || op == "replace") && !risky) errors.add("$path: op '$op' exige \"risky\": true.")
             val fp = str(o, "path", path, required = op != "list")
             tpl(fp, "$path.path", vars, false)
             val content = if (op == "write") str(o, "content", path) else null
             if (op == "write") tpl(content.orEmpty(), "$path.content", vars, false)
-            return FileStep(op, fp, content)
+            val oldText = if (op == "replace") str(o, "oldText", path, required = true) else null
+            val newText = if (op == "replace") str(o, "newText", path, required = true) else null
+            if (op == "replace") {
+                tpl(oldText.orEmpty(), "$path.oldText", vars, false)
+                tpl(newText.orEmpty(), "$path.newText", vars, false)
+            } else if (o.containsKey("oldText") || o.containsKey("newText") || o.containsKey("allowMultiple")) {
+                errors.add("$path: oldText, newText e allowMultiple só são aceitos com op 'replace'.")
+            }
+            val allowMultiple = if (op == "replace") bool(o, "allowMultiple", path, false) else false
+            return FileStep(op, fp, content, oldText, newText, allowMultiple)
         }
 
         /** Passo de browser: abre uma URL https de um host declarado e lê a página renderizada. */
