@@ -287,7 +287,8 @@ class IqOptionConnector(private val kv: KvStore? = null) : UiConnector {
     private fun serverNowSec(): Long = serverNowMs() / 1000
     private fun serverClockFresh(maxAgeMs: Long = 30_000L): Boolean {
         val syncedAt = serverSyncElapsedMs
-        val age = android.os.SystemClock.elapsedRealtime() - syncedAt
+        val elapsed = runCatching { android.os.SystemClock.elapsedRealtime() }.getOrNull() ?: return false
+        val age = elapsed - syncedAt
         return syncedAt > 0L && age in 0..maxAgeMs
     }
 

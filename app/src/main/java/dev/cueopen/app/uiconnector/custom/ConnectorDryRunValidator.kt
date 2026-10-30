@@ -162,6 +162,7 @@ object ConnectorDryRunValidator {
             if (def.tools.any { it.file != null || it.shell != null || it.fetch != null }) {
                 report.appendLine("✓ capacidades: filesystem virtual e transporte de browser substituto; nenhum comando/código ou página real foi executado")
             } else report.appendLine("✓ capacidades: nenhuma capacidade de aparelho declarada")
+            report.appendLine("✓ rede externa: nenhuma chamada externa foi feita; respostas exclusivamente mock local")
             report.appendLine("✓ efeitos externos: ações, ordens e envios não foram executados")
             warnings.forEach { report.appendLine("Aviso (não bloqueante): $it") }
             val checks = ConnectorAttestationPolicy.REQUIRED_CHECKS
