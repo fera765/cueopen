@@ -157,6 +157,7 @@ fun CueNav(nav: NavHostController, startOnboarding: Boolean) {
         composable("uiconnector/edit/{id}") { e -> UiConnectorEditorScreen(nav, e.arguments!!.getString("id")!!) }
         composable("uiconnector/{id}") { e -> UiConnectorScreen(nav, e.arguments!!.getString("id")!!) }
         composable("settings") { SettingsScreen(nav) }
+        composable("proxy") { ProxyScreen(nav) }
         composable("wallet") { WalletScreen(nav) }
         composable("wallet/send") { WalletSendScreen(nav) }
         composable("wallet/receive") { WalletReceiveScreen(nav) }

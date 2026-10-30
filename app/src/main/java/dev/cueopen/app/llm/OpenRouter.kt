@@ -26,6 +26,8 @@ import okhttp3.Response
 import java.io.IOException
 import java.net.URI
 import java.util.concurrent.TimeUnit
+import dev.cueopen.app.CueApp
+import dev.cueopen.app.proxy.ProxyScope
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 
@@ -38,10 +40,13 @@ class LlmRequestFailure(message: String, val retryable: Boolean, cause: Throwabl
 /** Transporte OpenAI-compatible (OpenRouter por padrão), com suporte opcional ao System One do Jev. */
 class OpenRouter(private val settings: () -> Settings) {
     private val json = Json { ignoreUnknownKeys = true }
-    private val http = OkHttpClient.Builder()
-        .connectTimeout(30, TimeUnit.SECONDS)
-        .readTimeout(5, TimeUnit.MINUTES)
-        .build()
+    private val baseHttp = OkHttpClient.Builder().connectTimeout(30, TimeUnit.SECONDS).readTimeout(5, TimeUnit.MINUTES).build()
+    private fun http(): OkHttpClient {
+        val app = runCatching { CueApp.instance }.getOrElse {
+            throw IOException("CueApp ainda não inicializou; recusando conexão Agent/API direta.", it)
+        }
+        return app.proxyHttpClient(ProxyScope.AGENT_API, baseHttp)
+    }
 
     // modelos que recusam reasoning desligado (lembrado em runtime para não repetir o erro)
     private val forceReasoning = java.util.Collections.synchronizedSet(mutableSetOf<String>())
@@ -75,7 +80,7 @@ class OpenRouter(private val settings: () -> Settings) {
                 val request = Request.Builder().url(endpoint(s.baseUrl, "models")).apply {
                     if (s.apiKey.isNotBlank()) header("Authorization", "Bearer ${s.apiKey}")
                 }.get().build()
-                http.newCall(request).execute().use { response ->
+                http().newCall(request).execute().use { response ->
                     if (!response.isSuccessful) return@use
                     val root = json.parseToJsonElement(response.body?.string().orEmpty()).jsonObject
                     val entries = root["data"]?.jsonArray ?: return@use
@@ -147,7 +152,7 @@ class OpenRouter(private val settings: () -> Settings) {
                 .post(buildBody(disableReasoning, structuredOutput).toString().toRequestBody("application/json".toMediaType()))
                 .build()
             return try {
-                http.newCall(req).execute().use { response -> response.code to response.body?.string().orEmpty() }
+                http().newCall(req).execute().use { response -> response.code to response.body?.string().orEmpty() }
             } catch (e: IOException) {
                 throw LlmRequestFailure("Falha de comunicação com o provedor: ${e.message ?: "erro de rede"}", retryable = true, cause = e)
             }
@@ -221,7 +226,7 @@ class OpenRouter(private val settings: () -> Settings) {
             }
             .post(body.toString().toRequestBody("application/json".toMediaType()))
             .build()
-        http.newCall(request).execute().use { response ->
+        http().newCall(request).execute().use { response ->
             val text = response.body?.string().orEmpty()
             if (!response.isSuccessful) {
                 val message = runCatching { json.parseToJsonElement(text).jsonObject["error"]?.jsonObject?.get("message")?.jsonPrimitive?.content }.getOrNull()

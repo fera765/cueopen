@@ -18,6 +18,16 @@ class IqActiveBalanceSelectionTest {
         assertNull(state.activeId())
     }
 
+    @Test fun `switch pending distinguishes an active switch from a failed selection`() {
+        val state = IqActiveBalanceSelection()
+        state.observeServerConfirmation(10L)
+        state.beginSwitch(20L)
+        assertTrue(state.switchPending())
+        state.finishSwitch(20L)
+        assertFalse(state.switchPending())
+        assertNull(state.activeId())
+    }
+
     @Test fun `evento de outra carteira nao confirma o alvo pendente`() {
         val state = IqActiveBalanceSelection()
         state.observeServerConfirmation(10L)

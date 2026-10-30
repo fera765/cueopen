@@ -8,6 +8,8 @@ class IqActiveBalanceSelection {
 
     @Synchronized fun activeId(): Long? = confirmedId
 
+    @Synchronized fun switchPending(): Boolean = pendingId != null
+
     @Synchronized fun beginSwitch(targetId: Long) {
         pendingId = targetId
         confirmedId = null

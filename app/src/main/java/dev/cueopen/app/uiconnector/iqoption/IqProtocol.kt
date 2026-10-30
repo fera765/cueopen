@@ -50,7 +50,7 @@ object IqProtocol {
     data class MarginPos(val id: Long, val instrument: String, val type: String, val side: String, val amount: Double, val leverage: Int,
                          val openPrice: Double?, val pnl: Double?, val status: String)
     data class Candle(val from: Long, val open: Double, val close: Double, val min: Double, val max: Double, val volume: Double)
-    data class OptionAck(val optionId: Long?, val error: String?, val openPrice: Double? = null)
+    data class OptionAck(val optionId: Long?, val error: String?, val openPrice: Double? = null, val expSec: Long? = null)
     data class OptionClosed(val optionId: Long, val result: String, val profit: Double?)
 
     sealed interface LoginOutcome {
@@ -291,7 +291,10 @@ object IqProtocol {
         val msg = root["msg"].obj() ?: return null
         return when (root["name"].str()) {
             "profile" -> parseProfile(msg)?.activeBalanceId
-            "balance-changed" -> if (msg["current_balance"].obj() != null) parseBalanceChanged(msg)?.id else null
+            // `balance-changed` declara a carteira atual em formato aninhado ou plano;
+            // o coordenador ainda compara o ID recebido com o alvo solicitado.
+            "balance-changed" -> if (msg["current_balance"] == null || msg["current_balance"].obj() != null)
+                parseBalanceChanged(msg)?.id else null
             else -> null
         }
     }
@@ -331,7 +334,10 @@ object IqProtocol {
         val msg = root["msg"]
         val m = msg.obj()
         val id = m?.get("id").lng()
-        if (id != null && (status == null || status in 2000..2999)) return OptionAck(id, null, m?.get("value").dbl()?.takeIf { it > 0 })
+        if (id != null && (status == null || status in 2000..2999)) return OptionAck(
+            id, null, m?.get("value").dbl()?.takeIf { it > 0 },
+            (m?.get("expiration_time").lng() ?: m?.get("expired").lng() ?: m?.get("exp").lng())?.let(::epochSeconds),
+        )
         val text = m?.get("message").str() ?: msg.str() ?: m?.get("error").str()
         return OptionAck(null, text ?: "A IQ Option recusou a ordem" + (status?.let { " (status $it)" } ?: "") + ".")
     }
@@ -344,6 +350,8 @@ object IqProtocol {
         val profit = m["profit_amount"].dbl() ?: m["win_amount"].dbl()
         return OptionClosed(id, result, profit)
     }
+
+    private fun epochSeconds(value: Long): Long = if (value > 100_000_000_000L) value / 1000 else value
 
     // ------------------------------------------------------------------ regras de negócio puras
     /**

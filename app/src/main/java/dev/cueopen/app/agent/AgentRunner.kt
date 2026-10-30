@@ -20,6 +20,7 @@ import dev.cueopen.app.llm.strArray
 import dev.cueopen.app.llm.tool
 import dev.cueopen.app.sandbox.Sandbox
 import dev.cueopen.app.trading.TradeCoordinator
+import dev.cueopen.app.uiconnector.iqoption.IqTradeWaitDirective
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.sync.withLock
@@ -51,7 +52,10 @@ import kotlinx.serialization.json.Json
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
+import java.util.HashMap
 import java.util.Locale
+
+private val iqOptionTradeWakeTag = Regex("""\[\[IQOPTION_TRADES:([0-9,]+)]]$""")
 
 /** O que o "computador" do agente está fazendo agora (mostrado no card ao vivo do chat). */
 data class Activity(val kind: Kind = Kind.IDLE, val detail: String = "") {
@@ -364,18 +368,37 @@ class AgentRunner(
             intentNoActionTurns = 0
             var stopLoop: SessionStatus? = null
             var sleepReq: Pair<Int, String>? = null // (segundos, motivo)
+            val tradeIdsAfterSleep = linkedSetOf<Long>()
+            val tradeCallCache = HashMap<String, ToolResult>()
             val resultHashes = HashMap<String, Int>()
             val resultLong = HashSet<String>()
             for (call in reply.toolCalls) {
                 // Auto-recuperação: uma exceção em qualquer ferramenta vira um erro acionável devolvido
                 // ao modelo (nunca derruba o loop do agente).
-                val result = try {
-                    runTool(sessionId, call, allowDeviceTools = tokenBudgetOverride == null)
+                val tradeResultTool = call.name == "uic_iqoption_open_option" || call.name == "uic_iqoption_get_trade_result"
+                val cacheKey = call.name + "|" + normArgs(call.argsJson)
+                val cachedTradeResult = if (tradeResultTool) tradeCallCache[cacheKey] else null
+                val rawResult = try {
+                    cachedTradeResult ?: runTool(sessionId, call, allowDeviceTools = tokenBudgetOverride == null)
                 } catch (c: kotlinx.coroutines.CancellationException) {
                     throw c
                 } catch (t: Throwable) {
                     runCatching { dev.cueopen.app.diag.ErrorLog.log(errorSource(call.name), "${t.javaClass.simpleName}: ${t.message.orEmpty()}", sessionId, call.name) }
                     ToolResult(output = "ERRO ao executar a ferramenta \"${call.name}\": ${t.message?.take(300) ?: t.javaClass.simpleName}. Diagnostique a causa, ajuste os argumentos/abordagem e tente de outra forma; não repita a mesma chamada. Se estiver bloqueado, chame finish explicando.")
+                }
+                if (tradeResultTool && cachedTradeResult == null) tradeCallCache[cacheKey] = rawResult
+                val consumedWait = if (tradeResultTool) IqTradeWaitDirective.consume(rawResult.output) else null
+                val outputText = consumedWait?.output ?: rawResult.output
+                val result = rawResult.copy(output = if (cachedTradeResult != null)
+                    "Chamada idêntica já executada nesta resposta; resultado reutilizado para evitar uma segunda ordem/consulta.\n$outputText"
+                else outputText)
+                val tradeWaits = consumedWait?.waits.orEmpty()
+                tradeWaits.forEach { tradeIdsAfterSleep += it.tradeId }
+                val directiveSeconds = tradeWaits.maxOfOrNull { it.seconds }
+                if (directiveSeconds != null) {
+                    val current = sleepReq
+                    if (current == null || directiveSeconds > current.first)
+                        sleepReq = directiveSeconds to "aguardar vencimento da(s) opção(ões) ${tradeWaits.joinToString { it.tradeId.toString() }}; fazer uma única verificação ao final"
                 }
                 resultHashes[call.id] = result.output.hashCode()
                 if (result.output.length > 200) resultLong.add(call.id)
@@ -386,7 +409,10 @@ class AgentRunner(
                     it.copy(llm = it.llm + LlmMessage("tool", ctxOut, toolCallId = call.id, name = call.name))
                 }
                 if (result.stop != null) stopLoop = result.stop
-                if (result.sleepSeconds != null) sleepReq = result.sleepSeconds to result.output
+                if (result.sleepSeconds != null) {
+                    val current = sleepReq
+                    if (current == null || result.sleepSeconds > current.first) sleepReq = result.sleepSeconds to result.output
+                }
             }
             // Loop de ferramentas: mesma ação repetida SEM progresso → avisa o modelo e, só se insistir muito, interrompe.
             // Ferramentas de ambiente (browser, aparelho, shell, conectores) mudam de estado entre chamadas — rolar,
@@ -437,7 +463,11 @@ class AgentRunner(
                 return
             }
             val sl = sleepReq
-            if (sl != null) { sleepAndWake(sessionId, sl.first, sl.second); steps = 0; continue }
+            if (sl != null) {
+                sleepAndWake(sessionId, sl.first, sl.second, afterTradeIds = tradeIdsAfterSleep, preserveContinuous = tradeIdsAfterSleep.isEmpty())
+                steps = 0
+                continue
+            }
             steps++
             // Aviso de proximidade do limite: pede para priorizar a entrega antes do corte abrupto.
             if (steps == (maxSteps - 2).coerceAtLeast(1) && store.session(sessionId)?.continuous != true) {
@@ -453,18 +483,56 @@ class AgentRunner(
     }
 
     /** Modo contínuo: dorme (o serviço em foreground + wakelock mantém o processo vivo) e retoma. */
-    private suspend fun sleepAndWake(sessionId: String, seconds: Int, reason: String) {
+    private suspend fun sleepAndWake(
+        sessionId: String, seconds: Int, reason: String,
+        afterTradeIds: Set<Long> = emptySet(), preserveContinuous: Boolean = true,
+    ) {
         val wake = System.currentTimeMillis() + seconds.coerceAtLeast(1) * 1000L
-        store.editSession(sessionId) { it.copy(status = SessionStatus.SLEEPING, wakeAt = wake, wakeReason = reason, continuous = true) }
+        val tag = afterTradeIds.takeIf { it.isNotEmpty() }?.sorted()?.joinToString(",")?.let { " [[IQOPTION_TRADES:$it]]" }.orEmpty()
+        val continuous = store.session(sessionId)?.continuous ?: false
+        store.editSession(sessionId) {
+            it.copy(status = SessionStatus.SLEEPING, wakeAt = wake, wakeReason = reason + tag,
+                continuous = if (preserveContinuous) true else continuous)
+        }
         setActivity(sessionId, Activity(Activity.Kind.IDLE, "Aguardando até ${java.text.SimpleDateFormat(if (seconds < 120) "HH:mm:ss" else "HH:mm", Locale.getDefault()).format(Date(wake))}"))
-        dev.cueopen.app.sandbox.SandboxService.start(ctx, "Agente em modo contínuo")
+        dev.cueopen.app.sandbox.SandboxService.start(ctx, if (preserveContinuous) "Agente em modo contínuo" else "Aguardando vencimento da opção")
         store.flush()
         while (System.currentTimeMillis() < wake) kotlinx.coroutines.delay(minOf(30_000L, wake - System.currentTimeMillis()).coerceAtLeast(1000))
         wakeUp(sessionId)
+        val ids = afterTradeIds.ifEmpty { tradeIdsFromWakeReason(store.session(sessionId)?.wakeReason.orEmpty()) }
+        if (ids.isNotEmpty()) checkExpiredTradesOnce(sessionId, ids)
     }
 
+    /** One event-driven local result read after the broker expiry; no repeated network polling. */
+    private suspend fun checkExpiredTradesOnce(sessionId: String, tradeIds: Set<Long>) {
+        val session = store.session(sessionId) ?: return
+        val agent = store.agent(session.agentId)
+        for (id in tradeIds) {
+            val result = runCatching {
+                dev.cueopen.app.CueApp.instance.uiConnectors.callTool(
+                    agent, agent?.id ?: sessionId, "uic_iqoption_get_trade_result",
+                    buildJsonObject { put("id", id) },
+                )
+            }.getOrElse { "ERRO na única verificação pós-vencimento: ${it.message ?: it.javaClass.simpleName}" }
+            val safe = SecretVault.redact(sessionId, result)
+            val failed = safe.startsWith("ERRO") || safe.startsWith("RECUSADO")
+            store.addItem(sessionId, ChatItem.Step(
+                tool = "uic_iqoption_get_trade_result", title = "Verificação única após vencimento",
+                args = "opção $id", result = safe.take(4000), status = if (failed) StepStatus.ERROR else StepStatus.OK,
+            ))
+            store.editSession(sessionId) {
+                it.copy(llm = it.llm + LlmMessage("user",
+                    "[Sistema] Após aguardar o vencimento da opção $id, fiz uma única verificação do evento de resultado: $safe. Não repita a consulta; se o evento ainda não chegou, explique que o protocolo desta sessão não confirma uma consulta histórica e aguarde uma atualização posterior."))
+            }
+        }
+    }
+
+    private fun tradeIdsFromWakeReason(reason: String): Set<Long> =
+        iqOptionTradeWakeTag.find(reason)?.groupValues?.getOrNull(1)?.split(',')
+            ?.mapNotNull { it.toLongOrNull()?.takeIf { id -> id > 0L } }?.toSet().orEmpty()
+
     private fun wakeUp(sessionId: String) {
-        val r = store.session(sessionId)?.wakeReason.orEmpty()
+        val r = iqOptionTradeWakeTag.replace(store.session(sessionId)?.wakeReason.orEmpty(), "").trim()
         val now = SimpleDateFormat("dd/MM HH:mm:ss", Locale.getDefault()).format(Date())
         store.editSession(sessionId) {
             it.copy(status = SessionStatus.RUNNING, wakeAt = null,
@@ -877,7 +945,10 @@ class AgentRunner(
             jobs[s.id] = scope.launch {
                 try {
                     while (System.currentTimeMillis() < wake) kotlinx.coroutines.delay(minOf(30_000L, wake - System.currentTimeMillis()).coerceAtLeast(1000))
-                    wakeUp(s.id); loop(s.id)
+                    val tradeIds = tradeIdsFromWakeReason(s.wakeReason)
+                    wakeUp(s.id)
+                    if (tradeIds.isNotEmpty()) checkExpiredTradesOnce(s.id, tradeIds)
+                    loop(s.id)
                 } catch (c: kotlinx.coroutines.CancellationException) { throw c
                 } catch (t: Throwable) {
                     runCatching { dev.cueopen.app.diag.ErrorLog.log("agent", "retomada contínua: ${t.javaClass.simpleName}: ${t.message.orEmpty()}", s.id, "resume") }

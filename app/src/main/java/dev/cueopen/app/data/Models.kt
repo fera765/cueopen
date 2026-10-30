@@ -315,6 +315,10 @@ data class Settings(
     val keepRecentMessages: Int = 10,
     /** Migração única do consentimento de background dos agentes autônomos preexistentes. */
     val deviceBackgroundConsentMigrated: Boolean = false,
+    /** IDs refer to profiles held by the encrypted proxy store, never credentials. */
+    val browserProxyId: String? = null,
+    val terminalProxyId: String? = null,
+    val agentApiProxyId: String? = null,
 )
 
 @Serializable

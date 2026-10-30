@@ -89,10 +89,17 @@ class IqProtocolTest {
         val changed = obj("""{"name":"balance-changed","msg":{"current_balance":{"id":333,"type":1,"amount":2}}}""")
         assertEquals(333L, IqProtocol.confirmedActiveBalanceId(changed))
         val flat = obj("""{"name":"balance-changed","msg":{"id":333,"type":1,"amount":2}}""")
-        assertNull(IqProtocol.confirmedActiveBalanceId(flat))
+        assertEquals(333L, IqProtocol.confirmedActiveBalanceId(flat))
         val scalar = obj("""{"name":"balance-changed","msg":{"id":333,"type":1,"amount":2,"current_balance":2}}""")
         assertNull(IqProtocol.confirmedActiveBalanceId(scalar))
         assertNull(IqProtocol.confirmedActiveBalanceId(obj("""{"name":"result","msg":{"id":333}}""")))
+    }
+
+    @Test fun `ack de opcao preserva expiracao explicita do servidor em segundos ou milissegundos`() {
+        val seconds = IqProtocol.parseOptionAck(obj("""{"status":2000,"msg":{"id":9,"expiration_time":1700000060}}"""))
+        assertEquals(1_700_000_060L, seconds.expSec)
+        val millis = IqProtocol.parseOptionAck(obj("""{"status":2000,"msg":{"id":10,"expired":1700000060000}}"""))
+        assertEquals(1_700_000_060L, millis.expSec)
     }
 
     @Test fun `initialization-data lista ativos abertos e fechados`() {

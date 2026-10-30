@@ -56,7 +56,10 @@ import java.util.concurrent.atomic.AtomicLong
  *  - o agente respeita valor máximo por operação e máximo de operações abertas;
  *  - resultados de opções são recebidos do servidor; Forex exibe o P/L atual informado pela corretora.
  */
-class IqOptionConnector(private val kv: KvStore? = null) : UiConnector {
+class IqOptionConnector(
+    private val kv: KvStore? = null,
+    private val httpClientProvider: ((OkHttpClient) -> OkHttpClient)? = null,
+) : UiConnector {
 
     override val spec = UiConnectorSpec(
         id = "iqoption",
@@ -85,6 +88,7 @@ class IqOptionConnector(private val kv: KvStore? = null) : UiConnector {
             SettingSpec("max_forex_open", "Máx. de posições Forex abertas", "Limite de posições Forex abertas pelo agente.", SettingType.NUMBER, "3"),
             SettingSpec("max_leverage", "Alavancagem máxima", "Maior alavancagem que o agente pode usar em Forex.", SettingType.NUMBER, "10"),
             SettingSpec("max_stop_loss_pct", "Stop loss máximo (%)", "Stop loss obrigatório máximo em % do valor investido em Forex.", SettingType.NUMBER, "50"),
+            SettingSpec("forex_monitor_interval_sec", "Atualizar posições Forex a cada (s)", "Frequência configurável para consultar e atualizar as posições Forex no painel conectado (5–300 s; padrão 30). SL/TP são enviados à corretora na abertura.", SettingType.NUMBER, "30"),
         ),
         tools = listOf(
             ToolSpec("open_assets", "Lista todos os ativos abertos agora: opções Turbo/binárias (inclui OTC) e Forex.", listOf(
@@ -121,7 +125,10 @@ class IqOptionConnector(private val kv: KvStore? = null) : UiConnector {
     )
 
     // ------------------------------------------------------------------ estado
-    private class Waiter(val reqId: String?, val names: Set<String>, val deferred: CompletableDeferred<JsonObject>)
+    private class Waiter(
+        val reqId: String?, val names: Set<String>, val deferred: CompletableDeferred<JsonObject>,
+        val requiresActiveBalance: Boolean = false, val targetBalanceId: Long? = null,
+    )
 
     private data class Tracked(
         val id: Long, val asset: String, val direction: String, val amount: Double,
@@ -129,10 +136,12 @@ class IqOptionConnector(private val kv: KvStore? = null) : UiConnector {
         val result: String? = null, val profit: Double? = null,
         val activeId: Int = 0, val entry: Double? = null,
         val byAgent: Boolean = false, val settled: Boolean = false,
+        val expiryConfirmed: Boolean = false,
     )
 
-    private val client = OkHttpClient.Builder()
+    private val baseClient = OkHttpClient.Builder()
         .connectTimeout(15, TimeUnit.SECONDS).readTimeout(30, TimeUnit.SECONDS).pingInterval(20, TimeUnit.SECONDS).build()
+    private val client: OkHttpClient get() = httpClientProvider?.invoke(baseClient) ?: baseClient
     private val mutex = Mutex()
     private val connectionRetryBackoff = ConnectorRetryBackoff()
     /** Reserva comum mantida até ACK para novas ordens e troca de conta. */
@@ -173,8 +182,7 @@ class IqOptionConnector(private val kv: KvStore? = null) : UiConnector {
     @Volatile private var ws: WebSocket? = null
     @Volatile private var authenticated = false
     @Volatile private var creds: Map<String, String>? = null
-    @Volatile private var serverEpochAtSyncMs = 0L
-    @Volatile private var serverElapsedAtSyncMs = 0L
+    private val serverClock = IqServerClock()
     @Volatile private var assets: List<IqProtocol.Asset> = emptyList()
     @Volatile private var assetsAt = 0L
 
@@ -185,11 +193,9 @@ class IqOptionConnector(private val kv: KvStore? = null) : UiConnector {
     private fun serverNowSec(): Long = serverNowMs() / 1000
     private fun serverNowMs(): Long {
         val elapsed = android.os.SystemClock.elapsedRealtime()
-        val syncedAt = serverElapsedAtSyncMs
-        val age = elapsed - syncedAt
-        return if (serverEpochAtSyncMs > 0L && syncedAt > 0L && age in 0..30_000L) serverEpochAtSyncMs + age
-        else System.currentTimeMillis()
+        return serverClock.nowMs(elapsed) ?: System.currentTimeMillis()
     }
+    private fun synchronizedServerNowSec(): Long? = serverClock.nowSec(android.os.SystemClock.elapsedRealtime())
     private fun reqId() = "cue-" + counter.getAndIncrement()
     private fun err(detail: String) = runCatching { ErrorLog.log("uiconnector", "iqoption: $detail", null, "iqoption") }
 
@@ -234,7 +240,7 @@ class IqOptionConnector(private val kv: KvStore? = null) : UiConnector {
     private suspend fun connectLocked(email: String, password: String) {
         closeSocket()
         ssid = withContext(Dispatchers.IO) { httpLogin(email, password) }
-        val profileWaiter = Waiter(null, setOf("profile"), CompletableDeferred())
+        val profileWaiter = Waiter(null, setOf("profile", "balance-changed"), CompletableDeferred(), requiresActiveBalance = true)
         waiters += profileWaiter
         try {
             val sid = ssid ?: error("Sessão inválida.")
@@ -250,9 +256,9 @@ class IqOptionConnector(private val kv: KvStore? = null) : UiConnector {
             })
             withTimeout(20_000) { profileWaiter.deferred.await() }
         } catch (t: TimeoutCancellationException) {
-            err("sem 'profile' após autenticar; mensagens recentes: ${recentNames()}")
+            err("sem perfil/carteira ativa confirmados após autenticar; mensagens recentes: ${recentNames()}")
             closeSocket()
-            throw IllegalStateException("A IQ Option não confirmou a sessão. O protocolo pode ter mudado ou o login foi bloqueado; baixe o log de erros em Configurações.")
+            throw IllegalStateException("A IQ Option não confirmou uma carteira ativa após autenticar. O protocolo pode ter mudado ou a conta está indisponível; novas ordens permanecem bloqueadas. Baixe o log de erros em Configurações.")
         } finally {
             waiters.remove(profileWaiter)
         }
@@ -277,9 +283,10 @@ class IqOptionConnector(private val kv: KvStore? = null) : UiConnector {
         subscribed.clear()
         authenticated = false
         ws = null
-        serverEpochAtSyncMs = 0L
-        serverElapsedAtSyncMs = 0L
+        serverClock.clear()
         activeBalanceSelection.invalidate()
+        balances.clear()
+        marketAccountId = null
         val failure = IOException("Conexão com a IQ Option perdida: $reason")
         waiters.forEach { it.deferred.completeExceptionally(failure) }
         waiters.clear()
@@ -291,9 +298,10 @@ class IqOptionConnector(private val kv: KvStore? = null) : UiConnector {
         ws = null
         authenticated = false
         subscribed.clear()
-        serverEpochAtSyncMs = 0L
-        serverElapsedAtSyncMs = 0L
+        serverClock.clear()
         activeBalanceSelection.invalidate()
+        balances.clear()
+        marketAccountId = null
     }
 
     override suspend fun logout() = accountOrderCoordinator.runReserved { logoutReserved() }
@@ -308,14 +316,14 @@ class IqOptionConnector(private val kv: KvStore? = null) : UiConnector {
         marketAccountId = null
         tracked.clear()
         quotes.clear()
-        serverEpochAtSyncMs = 0L; serverElapsedAtSyncMs = 0L
+        serverClock.clear()
         assets = emptyList()
         allAssets = emptyList()
         activeBalanceSelection.invalidate()
     }
 
     private suspend fun ensureConnected() {
-        fun ready(): Boolean = authenticated && ws != null
+        fun ready(): Boolean = authenticated && ws != null && (activeBalance() != null || activeBalanceSelection.switchPending())
         if (ready()) return
         val c = creds ?: error("Sessão da IQ Option não iniciada. Faça login no conector.")
         mutex.withLock {
@@ -369,9 +377,7 @@ class IqOptionConnector(private val kv: KvStore? = null) : UiConnector {
             "timeSync" -> {
                 val serverMs = (root["msg"] as? JsonPrimitive)?.longOrNull
                 if (serverMs != null) {
-                    val elapsed = android.os.SystemClock.elapsedRealtime()
-                    serverEpochAtSyncMs = serverMs
-                    serverElapsedAtSyncMs = elapsed
+                    serverClock.update(serverMs, android.os.SystemClock.elapsedRealtime())
                 }
             }
             "profile" -> {
@@ -379,13 +385,13 @@ class IqOptionConnector(private val kv: KvStore? = null) : UiConnector {
                 if (p != null) {
                     p.balances.forEach { balances[it.id] = it }
                     activeBalanceSelection.observeServerConfirmation(IqProtocol.confirmedActiveBalanceId(root))
-                    val confirmed = activeBalanceSelection.activeId()
+                    val confirmed = activeBalanceSelection.activeId()?.takeIf { balances.containsKey(it) }
                     if (confirmed != null) {
                         val previous = marketAccountId
                         marketAccountId = confirmed
                         if (previous != null && previous != confirmed) resetMarketCircuit()
+                        authenticated = true
                     }
-                    authenticated = true
                 }
             }
             "balance-changed" -> {
@@ -398,6 +404,7 @@ class IqOptionConnector(private val kv: KvStore? = null) : UiConnector {
                         marketAccountId = confirmedActive
                         resetMarketCircuit()
                     }
+                    if (activeBalance() != null) authenticated = true
                 }
             }
             "option-closed", "socket-option-closed" -> {
@@ -421,11 +428,16 @@ class IqOptionConnector(private val kv: KvStore? = null) : UiConnector {
             "socket-option-opened", "option-opened" -> {
                 // operações abertas fora do app (web/celular) também aparecem e são acompanhadas ao vivo
                 val o = IqProtocol.parseOptionOpened(root)
-                if (o != null && !tracked.containsKey(o.optionId)) {
+                if (o != null) {
+                    val existing = tracked[o.optionId]
+                    if (existing != null) {
+                        tracked[o.optionId] = existing.copy(expSec = o.expSec, expiryConfirmed = true, entry = existing.entry ?: o.openPrice)
+                    } else {
                     val acc = activeBalance()
                     val ticker = (allAssets + assets).firstOrNull { it.id == o.activeId }?.ticker ?: "#${o.activeId}"
                     tracked[o.optionId] = Tracked(o.optionId, ticker, o.direction, o.amount, o.expSec, acc?.isPractice ?: true, acc?.currency ?: "",
-                        activeId = o.activeId, entry = o.openPrice)
+                        activeId = o.activeId, entry = o.openPrice, expiryConfirmed = true)
+                    }
                     subscribeQuotes(o.activeId)
                 }
             }
@@ -433,7 +445,9 @@ class IqOptionConnector(private val kv: KvStore? = null) : UiConnector {
         val rid = (root["request_id"] as? JsonPrimitive)?.contentOrNull
         for (w in waiters) {
             val match = (w.reqId != null && rid == w.reqId) || ((w.reqId == null || rid == null) && name in w.names)
-            if (match && w.deferred.complete(root)) waiters.remove(w)
+            val targetMatches = w.targetBalanceId == null || IqProtocol.confirmedActiveBalanceId(root) == w.targetBalanceId
+            val accountReady = !w.requiresActiveBalance || (authenticated && activeBalance() != null)
+            if (match && targetMatches && accountReady && w.deferred.complete(root)) waiters.remove(w)
         }
     }
 
@@ -556,6 +570,10 @@ class IqOptionConnector(private val kv: KvStore? = null) : UiConnector {
 
     private fun countdown(sec: Long) = "${sec / 60}:${String.format(Locale.US, "%02d", sec % 60)}"
 
+    private fun expiryUtc(epochSec: Long): String = SimpleDateFormat("dd/MM/yyyy HH:mm:ss 'UTC'", Locale.US)
+        .apply { timeZone = TimeZone.getTimeZone("UTC") }
+        .format(Date(epochSec * 1_000L))
+
     /** Situação ao vivo de uma opção aberta: tempo restante + ganhando/perdendo agora pela cotação real. */
     private fun liveStatus(t: Tracked, now: Long): String {
         val price = quotes[t.activeId]
@@ -570,10 +588,11 @@ class IqOptionConnector(private val kv: KvStore? = null) : UiConnector {
     // ------------------------------------------------------------------ posições Forex
     @Volatile private var cachedForexPositions: List<IqProtocol.MarginPos>? = null
     @Volatile private var cachedForexPositionsAt = 0L
+    @Volatile private var forexMonitorIntervalMs = IqForexMonitoringInterval.DEFAULT_MS
 
     private suspend fun marginPositions(force: Boolean = false): List<IqProtocol.MarginPos> {
-        val now = System.currentTimeMillis()
-        cachedForexPositions?.takeIf { !force && now - cachedForexPositionsAt < 2_000L }?.let { return it }
+        val now = android.os.SystemClock.elapsedRealtime()
+        cachedForexPositions?.takeIf { !force && now - cachedForexPositionsAt < forexMonitorIntervalMs }?.let { return it }
         val acc = activeBalance() ?: return emptyList()
         val id = reqId()
         val root = request(id, IqProtocol.getPositionsMessage(id, acc.id), "positions", timeoutMs = 12_000)
@@ -631,7 +650,11 @@ class IqOptionConnector(private val kv: KvStore? = null) : UiConnector {
         else "A IQ Option recusou fechar a posição Forex $positionId (status ${ack.status ?: "desconhecido"})."
     }
 
-    override fun refreshMs(): Long = if (tracked.values.any { it.result == null }) 1_000 else 4_000
+    override fun refreshMs(): Long = when {
+        tracked.values.any { it.result == null } -> 1_000
+        cachedForexPositions != null -> forexMonitorIntervalMs
+        else -> 4_000
+    }
 
     // ------------------------------------------------------------------ ações de negócio
     private fun money(b: IqProtocol.Balance) = String.format(Locale.US, "%.2f %s", b.amount, b.currency).trim()
@@ -647,7 +670,7 @@ class IqOptionConnector(private val kv: KvStore? = null) : UiConnector {
         val b = balances.values.firstOrNull { if (wantReal) it.isReal else it.isPractice }
             ?: error("Esta conta não tem uma carteira ${if (wantReal) "REAL" else "DEMO"} disponível.")
         if (activeBalanceSelection.activeId() == b.id) return "A conta ${b.label} já está ativa (${money(b)})."
-        val waiter = Waiter(null, setOf("balance-changed", "profile"), CompletableDeferred())
+        val waiter = Waiter(null, setOf("balance-changed", "profile"), CompletableDeferred(), targetBalanceId = b.id)
         waiters += waiter
         activeBalanceSelection.beginSwitch(b.id)
         var confirmed = false
@@ -770,13 +793,27 @@ class IqOptionConnector(private val kv: KvStore? = null) : UiConnector {
         }
         if (active.kind !in setOf("turbo", "binary")) return "Somente opções Turbo/binárias podem ser abertas por open_option."
         if (!active.open) return "O ativo ${active.ticker} está fechado/suspenso agora."
-        val expiration = IqProtocol.expirationFor(serverNowSec(), minutes)
+        val synchronizedNow = synchronizedServerNowSec()
+            ?: return "RECUSADO: não há timeSync recente da IQ Option. Não vou calcular vencimento pelo relógio local; reconecte e tente novamente."
+        val requestedExpiration = IqProtocol.expirationFor(synchronizedNow, minutes)
         subscribeQuotes(active.id)
-        val ack = manualExecution.openOption(IqOptionOrder(account.id, active.id, side, expiration, amount, IqProtocol.isTurbo(minutes)))
+        val ack = manualExecution.openOption(IqOptionOrder(account.id, active.id, side, requestedExpiration, amount, IqProtocol.isTurbo(minutes)))
         val optionId = ack.optionId ?: run { err("opção recusada: ${ack.error}"); return "RECUSADA pela IQ Option: ${ack.error}" }
-        tracked[optionId] = Tracked(optionId, active.ticker, side, amount, expiration, account.isPractice, account.currency,
-            activeId = active.id, entry = ack.openPrice ?: quotes[active.id], byAgent = byAgent)
-        return "Opção ABERTA na conta ${account.label}: ${active.ticker} ${side.uppercase()} ${money(account.copy(amount = amount))} · expira em ~${minutes} min (id $optionId). Consulte get_trade_result ou positions."
+        val prior = tracked[optionId]
+        val actualExpiry = prior?.takeIf { it.expiryConfirmed }?.expSec ?: ack.expSec?.takeIf { it > 0L }
+        val expiry = actualExpiry ?: requestedExpiration
+        val expiryConfirmed = prior?.expiryConfirmed == true || ack.expSec?.let { it > 0L } == true
+        tracked[optionId] = (prior ?: Tracked(optionId, active.ticker, side, amount, expiry, account.isPractice, account.currency)).copy(
+            asset = active.ticker, direction = side, amount = amount, expSec = expiry,
+            demo = account.isPractice, currency = account.currency, activeId = active.id,
+            entry = prior?.entry ?: ack.openPrice ?: quotes[active.id], byAgent = byAgent,
+            expiryConfirmed = expiryConfirmed,
+        )
+        val nowAfterAck = synchronizedServerNowSec() ?: synchronizedNow
+        val waitSeconds = IqTradeWaitDirective.secondsUntilExpiry(expiry, nowAfterAck)
+        val expiryKind = if (expiryConfirmed) "confirmado pela IQ Option" else "solicitado com relógio sincronizado; aguardando confirmação do servidor"
+        val output = "Opção ABERTA na conta ${account.label}: ${active.ticker} ${side.uppercase()} ${money(account.copy(amount = amount))} · vencimento ${expiryUtc(expiry)} ($expiryKind; ${minutes} min; id $optionId). O resultado final vem do evento de fechamento da IQ Option; não farei consultas repetidas."
+        return if (byAgent && tracked[optionId]?.result == null) IqTradeWaitDirective.append(output, optionId, waitSeconds) else output
     }
 
     private fun positionsText(): String {
@@ -807,7 +844,19 @@ class IqOptionConnector(private val kv: KvStore? = null) : UiConnector {
         val trade = tracked[id] ?: return "A opção $id não está no acompanhamento desta sessão. Use positions; o protocolo disponível não confirma histórico de Forex já fechado."
         val result = trade.result
         return if (result == null) {
-            "Opção $id ${trade.asset} ${trade.direction.uppercase()} ainda em execução · ${liveStatus(trade, serverNowSec())}."
+            val now = synchronizedServerNowSec()
+            val remaining = now?.let { (trade.expSec - it).coerceAtLeast(0L) }
+            val expiryText = if (trade.expiryConfirmed) "vencimento confirmado" else "vencimento solicitado, sem confirmação explícita do evento"
+            val output = if (remaining == null) {
+                "Não há timeSync recente da IQ Option para calcular com segurança o prazo restante da opção $id. O resultado virá do evento de fechamento; não vou consultar usando horário local."
+            } else if (remaining > 0L) {
+                "Opção $id ${trade.asset} ${trade.direction.uppercase()} ainda em execução; $expiryText para ${expiryUtc(trade.expSec)} · faltam ~${remaining}s. O resultado vem do evento de fechamento; nenhuma consulta será repetida antes do prazo."
+            } else {
+                "O vencimento de ${expiryUtc(trade.expSec)} da opção $id já passou, mas o evento final ainda não chegou nesta sessão. O protocolo usado não oferece uma consulta de histórico confirmada; não vou fazer polling. Verifique positions mais tarde."
+            }
+            if (trade.byAgent && remaining != null && remaining > 0L)
+                IqTradeWaitDirective.append(output, id, IqTradeWaitDirective.secondsUntilExpiry(trade.expSec, now))
+            else output
         } else {
             "Resultado final da opção $id ${trade.asset} ${trade.direction.uppercase()}: ${resultLabel(result)}" +
                 (trade.profit?.let { " · valor informado pela IQ Option ${String.format(Locale.US, "%.2f", it)}" } ?: ".")
@@ -816,9 +865,15 @@ class IqOptionConnector(private val kv: KvStore? = null) : UiConnector {
 
     // ------------------------------------------------------------------ UI declarativa
     override suspend fun snapshot(settings: ConnectorSettings): List<UiBlock> {
+        forexMonitorIntervalMs = IqForexMonitoringInterval.milliseconds(settings.num("forex_monitor_interval_sec", 30.0))
         val blocks = mutableListOf<UiBlock>()
         val connectError = runCatching { ensureConnected() }.exceptionOrNull()
         val acc = activeBalance()
+        if (connectError == null && acc == null && activeBalanceSelection.switchPending()) {
+            blocks += UiBlock.Header("IQ Option", "Troca de conta em andamento", "TROCANDO", Tone.WARN)
+            blocks += UiBlock.Note("Aguardando confirmação da carteira solicitada. Nenhuma nova ordem será liberada até confirmar o ID correto.", Tone.WARN)
+            return blocks
+        }
         if (connectError != null || acc == null) {
             blocks += UiBlock.Header("IQ Option", "Desconectado", "OFFLINE", Tone.BAD)
             blocks += UiBlock.Note(connectError?.let { friendly(it) } ?: "Aguardando dados da conta…", Tone.WARN)

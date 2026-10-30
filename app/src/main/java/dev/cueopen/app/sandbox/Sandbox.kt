@@ -15,6 +15,10 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import java.io.File
 import java.util.TimeZone
 import java.util.concurrent.TimeUnit
+import dev.cueopen.app.CueApp
+import dev.cueopen.app.proxy.ProxyEnvironment
+import dev.cueopen.app.proxy.ProxyScope
+import dev.cueopen.app.proxy.ProxyValidator
 
 /**
  * Sandbox Linux local — mesma arquitetura do terminal do Acode:
@@ -97,6 +101,9 @@ class Sandbox(private val ctx: Context) {
     private val http = OkHttpClient.Builder().readTimeout(10, TimeUnit.MINUTES).build()
     private var axsProcess: Process? = null
 
+    /** Downloads externos do bootstrap usam o escopo Terminal; AXS localhost mantém [http] direto. */
+    private fun terminalHttp(): OkHttpClient = CueApp.instance.proxyHttpClient(ProxyScope.TERMINAL, http)
+
     fun isInstalled() = File(prefix, ".configured").exists() && File(alpineDir, "bin/busybox").exists()
 
     fun workspaceFor(sessionId: String) = File(publicFor(sessionId), "workspace").apply { mkdirs() }
@@ -136,10 +143,19 @@ class Sandbox(private val ctx: Context) {
         "PATH" to "/system/bin:/system/xbin",
         "CONNECTORS_ROOT" to connectorsDir.absolutePath,
     )
+    private fun terminalProxyEnv(): Map<String, String> {
+        val app = CueApp.instance
+        val selectedId = app.store.settings.terminalProxyId ?: return emptyMap()
+        val profile = app.proxyStore.profiles().firstOrNull { it.id == selectedId }
+            ?: throw IllegalStateException("O perfil de proxy selecionado para o Terminal não existe mais.")
+        val validation = ProxyValidator.validate(profile, ProxyScope.TERMINAL)
+        check(validation.valid) { "Perfil de proxy inválido para o Terminal: ${validation.message}" }
+        return ProxyEnvironment.variables(profile)
+    }
 
     fun prepareScripts() = writeScripts()
 
-    fun envArray(sessionId: String? = null): Array<String> = (env() + mapOf(
+    fun envArray(sessionId: String? = null): Array<String> = (env() + terminalProxyEnv() + mapOf(
         "TERM" to "xterm-256color", "LANG" to "C.UTF-8", "COLORTERM" to "truecolor",
         "ALPINE_ROOT" to (sessionId?.let { rootfsFor(it).absolutePath } ?: alpineDir.absolutePath),
         "SESSION_PUBLIC_ROOT" to (sessionId?.let { publicFor(it).absolutePath } ?: publicDir.absolutePath),
@@ -168,7 +184,7 @@ class Sandbox(private val ctx: Context) {
             val url = "https://dl-cdn.alpinelinux.org/alpine/v3.21/releases/$alpineArch/alpine-minirootfs-3.21.0-$alpineArch.tar.gz"
             val tar = File(ctx.cacheDir, "alpine.tar.gz")
             appendLog("⬇️  Baixando sistema de arquivos ($alpineArch)…")
-            http.newCall(Request.Builder().url(url).build()).execute().use { r ->
+            terminalHttp().newCall(Request.Builder().url(url).build()).execute().use { r ->
                 require(r.isSuccessful) { "HTTP ${r.code} ao baixar Alpine" }
                 val body = r.body!!
                 val total = body.contentLength()
@@ -210,7 +226,7 @@ class Sandbox(private val ctx: Context) {
 
     private fun runHost(cmd: List<String>, extraEnv: Map<String, String> = emptyMap()): Int {
         val pb = ProcessBuilder(cmd).directory(prefix).redirectErrorStream(true)
-        pb.environment().putAll(env() + extraEnv)
+        pb.environment().putAll(env() + extraEnv + terminalProxyEnv())
         val p = pb.start()
         p.inputStream.bufferedReader().forEachLine { appendLog(it) }
         return p.waitFor()
@@ -234,7 +250,7 @@ class Sandbox(private val ctx: Context) {
         val pb = ProcessBuilder(
             "/system/bin/sh", File(prefix, "init-sandbox.sh").absolutePath, "/bin/sh", "-c", wrapped,
         ).directory(prefix).redirectErrorStream(true)
-        pb.environment().putAll(env())
+        pb.environment().putAll(env() + terminalProxyEnv())
         val proc = pb.start()
         val out = StringBuilder()
         val reader = Thread {
@@ -275,7 +291,7 @@ class Sandbox(private val ctx: Context) {
         SandboxService.start(ctx, "Terminal ativo")
         val pb = ProcessBuilder("/system/bin/sh", File(prefix, "init-sandbox.sh").absolutePath)
             .directory(prefix).redirectErrorStream(true)
-        pb.environment().putAll(env())
+        pb.environment().putAll(env() + terminalProxyEnv())
         axsProcess = pb.start().also { p ->
             Thread { runCatching { p.inputStream.bufferedReader().forEachLine { appendLog("[axs] $it") } } }.start()
         }

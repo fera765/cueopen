@@ -106,6 +106,8 @@ fun SettingsScreen(nav: NavController) {
             }
             SectionLabel("Notificações")
             ToggleRow("Avisar ao concluir tarefas agendadas", "", s.notifyOnDone) { v -> app.store.updateSettings { it.copy(notifyOnDone = v) } }
+            SectionLabel("Rede")
+            SettingsLink(Icons.Rounded.SettingsEthernet, "Proxy", "Perfis e seleções independentes para Browser, Terminal e Agent/API") { nav.navigate("proxy") }
             SectionLabel("Computador")
             SettingsLink(Icons.Rounded.Computer, "Sandbox Linux", "Instalar, pacotes, reinstalar") { nav.navigate("sandbox") }
             SettingsLink(Icons.Rounded.Terminal, "Abrir terminal", "Shell interativo no Alpine") { nav.navigate("terminal") }
@@ -349,4 +351,83 @@ fun ReplayScreen(nav: NavController, sessionId: String) {
             }
         }
     }
+}
+
+@Composable
+fun ProxyScreen(nav: NavController) {
+    val app = CueApp.instance
+    val c = Cue.c
+    val scope = rememberCoroutineScope()
+    val state by app.store.state.collectAsStateWithLifecycle()
+    val browserProxyStatus by app.browserProxyStatus.collectAsStateWithLifecycle()
+    var profiles by remember { mutableStateOf(app.proxyStore.profiles()) }
+    var editing by remember { mutableStateOf<dev.cueopen.app.proxy.ProxyProfile?>(null) }
+    fun save(p: dev.cueopen.app.proxy.ProxyProfile) { profiles = (profiles.filterNot { it.id == p.id } + p); app.proxyStore.saveProfiles(profiles); editing = null; app.applyBrowserProxy() }
+    Scaffold(containerColor = c.bg, topBar = { CueTopBar("Proxy", { nav.popBackStack() }) }) { pad ->
+        Column(Modifier.padding(pad).verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Text("Selecione um perfil por escopo. O padrão é direto, sem proxy.", color = c.ink2, fontSize = 13.sp)
+            Text("Browser: o ProxyController afeta todos os WebViews deste processo, não um BrowserHost individual. WebView não recebe credenciais.", color = c.ink2, fontSize = 12.sp)
+            if (!androidx.webkit.WebViewFeature.isFeatureSupported(androidx.webkit.WebViewFeature.PROXY_OVERRIDE))
+                Text("Este WebView não oferece ProxyController; a seleção Browser não pode ser aplicada nesta versão do sistema.", color = c.err, fontSize = 12.sp)
+            Text("Status Browser: $browserProxyStatus", color = if (browserProxyStatus.startsWith("Falha") || browserProxyStatus.startsWith("Indisponível") || browserProxyStatus.startsWith("Navegação bloqueada")) c.err else c.ink2, fontSize = 12.sp)
+            Text("Terminal: aplica variáveis de proxy ao shell e ao bootstrap do Sandbox; HTTP/SOCKS, sem credenciais. O suporte depende do programa de linha de comando.", color = c.ink2, fontSize = 12.sp)
+            Text("Agent/API: modelo e próximo login/reconnect IQ Option. HTTP CONNECT autenticado usa Basic para o proxy em conexão não cifrada; use apenas proxy/rede confiáveis. SOCKS autenticado não é suportado. WebSocket ativo exige reconexão.", color = c.ink2, fontSize = 12.sp)
+            ProxyScopeRow("Browser", state.settings.browserProxyId, profiles, dev.cueopen.app.proxy.ProxyScope.BROWSER) { id -> app.store.updateSettings { it.copy(browserProxyId = id) }; app.applyBrowserProxy() }
+            ProxyScopeRow("Terminal", state.settings.terminalProxyId, profiles, dev.cueopen.app.proxy.ProxyScope.TERMINAL) { id -> app.store.updateSettings { it.copy(terminalProxyId = id) } }
+            ProxyScopeRow("Agent/API", state.settings.agentApiProxyId, profiles, dev.cueopen.app.proxy.ProxyScope.AGENT_API) { id -> app.store.updateSettings { it.copy(agentApiProxyId = id) } }
+            listOf("Browser" to state.settings.browserProxyId to dev.cueopen.app.proxy.ProxyScope.BROWSER, "Terminal" to state.settings.terminalProxyId to dev.cueopen.app.proxy.ProxyScope.TERMINAL, "Agent/API" to state.settings.agentApiProxyId to dev.cueopen.app.proxy.ProxyScope.AGENT_API).forEach { entry ->
+                val selectedId = entry.first.second
+                val selected = selectedId?.let { id -> profiles.firstOrNull { it.id == id } }
+                if (selectedId != null && selected == null) Text("${entry.first.first}: perfil selecionado ausente; uso bloqueado até escolher outro perfil ou Direto.", color = c.err, fontSize = 12.sp)
+                if (selected != null) {
+                    val check = dev.cueopen.app.proxy.ProxyValidator.validate(selected, entry.second)
+                    if (!check.valid) Text("${entry.first.first}: ${check.message}", color = c.err, fontSize = 12.sp)
+                }
+            }
+            profiles.forEach { p ->
+                CueCard {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) { Text(p.name, fontWeight = FontWeight.SemiBold); Text("${p.scheme.name} ${p.host}:${p.port}" + if (p.hasCredentials) " · credencial protegida" else "", fontSize = 12.sp, color = c.ink2) }
+                        TextButton({ editing = p }) { Text("Editar") }
+                        TextButton({ profiles = profiles.filterNot { it.id == p.id }; app.proxyStore.saveProfiles(profiles); app.proxyStore.saveCredentials(p.id, null); app.store.updateSettings { it.copy(browserProxyId = if (it.browserProxyId == p.id) null else it.browserProxyId, terminalProxyId = if (it.terminalProxyId == p.id) null else it.terminalProxyId, agentApiProxyId = if (it.agentApiProxyId == p.id) null else it.agentApiProxyId) }; app.applyBrowserProxy() }) { Text("Remover", color = c.err) }
+                    }
+                }
+            }
+            PillButton("Adicionar perfil", Icons.Rounded.Add, modifier = Modifier.fillMaxWidth()) { editing = dev.cueopen.app.proxy.ProxyProfile() }
+        }
+    }
+    editing?.let { p -> ProxyEditor(p, { save(it) }, { editing = null }) }
+}
+
+@Composable
+private fun ProxyScopeRow(
+    label: String, selected: String?, profiles: List<dev.cueopen.app.proxy.ProxyProfile>,
+    proxyScope: dev.cueopen.app.proxy.ProxyScope, onSelect: (String?) -> Unit,
+) {
+    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+        Text(label, Modifier.weight(1f), fontWeight = FontWeight.Medium)
+        var expanded by remember { mutableStateOf(false) }
+        Box { OutlinedButton({ expanded = true }) { Text(profiles.firstOrNull { it.id == selected }?.name ?: if (selected == null) "Direto" else "Perfil ausente") }; DropdownMenu(expanded, { expanded = false }) { DropdownMenuItem({ Text("Direto") }, { onSelect(null); expanded = false }); profiles.filter { dev.cueopen.app.proxy.ProxyValidator.validate(it, proxyScope).valid }.forEach { p -> DropdownMenuItem({ Text(p.name) }, { onSelect(p.id); expanded = false }) } } }
+    }
+}
+
+@Composable
+private fun ProxyEditor(initial: dev.cueopen.app.proxy.ProxyProfile, onSave: (dev.cueopen.app.proxy.ProxyProfile) -> Unit, onCancel: () -> Unit) {
+    val c = Cue.c
+    var p by remember(initial) { mutableStateOf(initial) }
+    var user by remember(initial) { mutableStateOf("") }
+    var pass by remember(initial) { mutableStateOf("") }
+    var removeCredentials by remember(initial) { mutableStateOf(false) }
+    AlertDialog(onDismissRequest = onCancel, title = { Text("Perfil de proxy") }, text = {
+        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            CueField(p.name, { p = p.copy(name = it) }, "Nome")
+            CueField(p.host, { p = p.copy(host = it) }, "Host")
+            CueField(p.port.toString(), { p = p.copy(port = it.toIntOrNull() ?: 0) }, "Porta")
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) { dev.cueopen.app.proxy.ProxyScheme.values().forEach { s -> Chip(s.name, p.scheme == s) { p = p.copy(scheme = s) } } }
+            CueField(user, { user = it }, "Usuário opcional")
+            CueField(pass, { pass = it }, "Senha opcional", password = true)
+            Text("Credenciais ficam temporariamente neste formulário e são cifradas com Android Keystore antes de persistir; não vão ao estado compartilhado, logs ou prompts. Terminal e WebView recusam perfis autenticados.", fontSize = 11.sp, color = c.ink2)
+            if (p.hasCredentials) TextButton({ removeCredentials = true; p = p.copy(hasCredentials = false); user = ""; pass = "" }) { Text("Remover credenciais", color = c.err) }
+        }
+    }, confirmButton = { TextButton({ val hasNewCredentials = user.isNotBlank() || pass.isNotBlank(); if (hasNewCredentials) CueApp.instance.proxyStore.saveCredentials(p.id, dev.cueopen.app.proxy.ProxyCredentials(user, pass)) else if (removeCredentials) CueApp.instance.proxyStore.saveCredentials(p.id, null); onSave(p.copy(hasCredentials = hasNewCredentials || (p.hasCredentials && !removeCredentials))) }) { Text("Salvar") } }, dismissButton = { TextButton(onCancel) { Text("Cancelar") } })
 }

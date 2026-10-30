@@ -12,6 +12,7 @@ import dev.cueopen.app.uiconnector.custom.CustomConnectorStore
 import dev.cueopen.app.uiconnector.custom.CustomDef
 import dev.cueopen.app.uiconnector.custom.CustomDefParser
 import dev.cueopen.app.uiconnector.iqoption.IqOptionConnector
+import dev.cueopen.app.proxy.ProxyScope
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.serialization.json.JsonArray
@@ -20,6 +21,7 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.put
+import java.io.IOException
 import java.util.concurrent.ConcurrentHashMap
 
 /**
@@ -38,6 +40,7 @@ class UiConnectorHub(context: Context) {
     companion object { const val BACKUP_FORMAT = "cueopen-uiconnectors-backup" }
 
     private val ctx = context.applicationContext
+    private val cueApp = ctx as? dev.cueopen.app.CueApp
     private val prefs = ctx.getSharedPreferences("uic_prefs", Context.MODE_PRIVATE)
     val vault = CredentialVault(ctx)
     private val customStore = CustomConnectorStore(ctx)
@@ -54,6 +57,9 @@ class UiConnectorHub(context: Context) {
         override fun put(key: String, value: String) {
             check(sp.edit().putString(key, value).commit()) { "Não foi possível persistir o estado do conector IQ Option." }
         }
+    }, httpClientProvider = { base ->
+        cueApp?.proxyHttpClient(ProxyScope.AGENT_API, base)
+            ?: throw IOException("CueApp indisponível; recusando conexão IQ Option direta.")
     }), dev.cueopen.app.uiconnector.gmail.GmailConnector(ctx)).filter { c ->
         val problems = SpecValidator.validate(c.spec)
         if (problems.isNotEmpty()) ErrorLog.log("uiconnector", "spec inválido (${c.spec.id}): " + problems.joinToString("; "))
