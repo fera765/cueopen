@@ -15,7 +15,7 @@ import dev.cueopen.app.CueApp
  * depois reagenda o próximo. Isso substitui o loop de 60s (que morria quando o app era morto).
  */
 object Heartbeat {
-    const val ACTION = "dev.cueopen.HEARTBEAT"
+    const val ACTION = "com.fluwy.bot.HEARTBEAT"
     const val EXTRA_AGENT = "agent"
 
     private fun pi(ctx: Context, agentId: String): PendingIntent {

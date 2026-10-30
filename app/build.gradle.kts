@@ -11,7 +11,7 @@ android {
     namespace = "dev.cueopen.app"
     compileSdk = 35
     defaultConfig {
-        applicationId = "dev.cueopen.app"
+        applicationId = "com.fluwy.bot"
         minSdk = 26
         // targetSdk 28 (igual ao build F-Droid do Acode) permite executar binários
         // do sandbox a partir de filesDir. Os .so do proot também vêm em jniLibs.

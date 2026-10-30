@@ -54,13 +54,13 @@
         </receiver>
 
         <receiver android:name=".scheduler.HeartbeatReceiver" android:exported="false">
-            <intent-filter><action android:name="dev.cueopen.HEARTBEAT" /></intent-filter>
+            <intent-filter><action android:name="com.fluwy.bot.HEARTBEAT" /></intent-filter>
         </receiver>
 
         <service
             android:name=".device.CueNotificationListener"
             android:exported="false"
-            android:label="CueOpen"
+            android:label="@string/app_name"
             android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE">
             <intent-filter><action android:name="android.service.notification.NotificationListenerService" /></intent-filter>
         </service>
