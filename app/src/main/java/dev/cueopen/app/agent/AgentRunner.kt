@@ -299,7 +299,8 @@ class AgentRunner(
                         throw c
                     } catch (t: Throwable) {
                         attempt++
-                        val retryable = (t as? dev.cueopen.app.llm.LlmRequestFailure)?.retryable == true
+                        val llmFailure = t as? dev.cueopen.app.llm.LlmRequestFailure
+                        val retryable = llmFailure?.retryable == true
                         if (!retryable || attempt >= 3) {
                             runCatching { dev.cueopen.app.diag.ErrorLog.log("agent", "LLM falhou após $attempt tentativa(s): ${t.javaClass.simpleName}: ${t.message.orEmpty()}", sessionId, "llm") }
                             val attempts = if (attempt == 1) "Não repeti porque a falha não foi classificada como transitória." else "Tentei $attempt vezes."
@@ -307,8 +308,10 @@ class AgentRunner(
                             store.editSession(sessionId) { it.copy(status = SessionStatus.WAITING_USER) }
                             return
                         }
-                        setActivity(sessionId, Activity(Activity.Kind.THINKING, "Erro no modelo — tentando de novo ($attempt/3)"))
-                        kotlinx.coroutines.delay(1500L * attempt)
+                        val delayMs = dev.cueopen.app.llm.LlmRetryPolicy.delayMillis(attempt, llmFailure.retryAfterMillis)
+                        val waitLabel = (delayMs / 1_000L).coerceAtLeast(1L)
+                        setActivity(sessionId, Activity(Activity.Kind.THINKING, "Erro no modelo — aguardando ${waitLabel}s antes de tentar de novo ($attempt/3)"))
+                        kotlinx.coroutines.delay(delayMs)
                     }
                 }
                 @Suppress("UNREACHABLE_CODE") return

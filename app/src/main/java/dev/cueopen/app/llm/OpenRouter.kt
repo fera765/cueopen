@@ -35,7 +35,12 @@ data class ToolCall(val id: String, val name: String, val argsJson: String)
 data class Usage(val prompt: Long = 0, val completion: Long = 0, val cached: Long = 0)
 data class LlmReply(val content: String?, val toolCalls: List<ToolCall>, val rawToolCallsJson: String?, val usage: Usage = Usage(), val truncated: Boolean = false)
 
-class LlmRequestFailure(message: String, val retryable: Boolean, cause: Throwable? = null) : IOException(message, cause)
+class LlmRequestFailure(
+    message: String,
+    val retryable: Boolean,
+    cause: Throwable? = null,
+    val retryAfterMillis: Long? = null,
+) : IOException(message, cause)
 
 /** Transporte OpenAI-compatible (OpenRouter por padrão), com suporte opcional ao System One do Jev. */
 class OpenRouter(private val settings: () -> Settings) {
@@ -51,6 +56,7 @@ class OpenRouter(private val settings: () -> Settings) {
     // modelos que recusam reasoning desligado (lembrado em runtime para não repetir o erro)
     private val forceReasoning = java.util.Collections.synchronizedSet(mutableSetOf<String>())
 
+    private data class HttpResult(val code: Int, val body: String, val retryAfterMillis: Long?)
     private data class ModelPrice(val prompt: Double, val completion: Double, val cacheRead: Double?)
     @Volatile private var priceCacheAt = 0L
     @Volatile private var priceCache: Map<String, ModelPrice> = emptyMap()
@@ -140,7 +146,7 @@ class OpenRouter(private val settings: () -> Settings) {
             // `reasoning` e headers abaixo são extensões da OpenRouter, não do protocolo OpenAI geral.
             if (openRouter && disableReasoning) put("reasoning", buildJsonObject { put("enabled", false); put("exclude", true) })
         }
-        fun once(disableReasoning: Boolean, structuredOutput: Boolean): Pair<Int, String> {
+        fun once(disableReasoning: Boolean, structuredOutput: Boolean): HttpResult {
             val req = Request.Builder()
                 .url(endpoint(s.baseUrl, "chat/completions"))
                 .apply {
@@ -152,7 +158,13 @@ class OpenRouter(private val settings: () -> Settings) {
                 .post(buildBody(disableReasoning, structuredOutput).toString().toRequestBody("application/json".toMediaType()))
                 .build()
             return try {
-                http().newCall(req).execute().use { response -> response.code to response.body?.string().orEmpty() }
+                http().newCall(req).execute().use { response ->
+                    HttpResult(
+                        code = response.code,
+                        body = response.body?.string().orEmpty(),
+                        retryAfterMillis = LlmRetryPolicy.retryAfterMillis(response.header("Retry-After")),
+                    )
+                }
             } catch (e: IOException) {
                 throw LlmRequestFailure("Falha de comunicação com o provedor: ${e.message ?: "erro de rede"}", retryable = true, cause = e)
             }
@@ -161,12 +173,14 @@ class OpenRouter(private val settings: () -> Settings) {
         var structuredOutput = jsonResponse
         var code = 0
         var text = ""
+        var retryAfterMillis: Long? = null
         var attempts = 0
         while (attempts < 3) {
             attempts++
             val result = once(disable, structuredOutput)
-            code = result.first
-            text = result.second
+            code = result.code
+            text = result.body
+            retryAfterMillis = result.retryAfterMillis
             if (code == 400 && structuredOutput && (text.contains("response_format", true) || text.contains("json_object", true))) {
                 structuredOutput = false
                 continue
@@ -181,7 +195,11 @@ class OpenRouter(private val settings: () -> Settings) {
         if (code !in 200..299) {
             val msg = runCatching { json.parseToJsonElement(text).jsonObject["error"]?.jsonObject?.get("message")?.jsonPrimitive?.content }.getOrNull()
             val retryable = code == 408 || code == 425 || code == 429 || code in 500..599
-            throw LlmRequestFailure("HTTP $code — ${msg ?: text.take(160)}", retryable = retryable)
+            throw LlmRequestFailure(
+                "HTTP $code — ${msg ?: text.take(160)}",
+                retryable = retryable,
+                retryAfterMillis = retryAfterMillis,
+            )
         }
         val root = json.parseToJsonElement(text).jsonObject
         root["error"]?.let { throw IOException("LLM: $it") }
