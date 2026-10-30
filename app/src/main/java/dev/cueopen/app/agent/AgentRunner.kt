@@ -248,7 +248,7 @@ class AgentRunner(
             // TypeSafe Jev: decide quais ferramentas/conectores e quanto knowledge/memória entram neste passo
             val allTools = tools(agent, allowMultiAgent = tokenBudgetOverride == null, builder = s.connectorBuilder)
             val (jplan, stepTools) = jevPlan(sessionId, s, allTools)
-            val sys = LlmMessage("system", systemPrompt(sessionId, agent, s, jplan))
+            val sys = LlmMessage("system", systemPrompt(sessionId, agent, s, jplan, allowDeviceTools = tokenBudgetOverride == null))
             var history = ctxMgr.microCompact(s.llm, sessionId)
             if (history.firstOrNull()?.role != "user") history = listOf(LlmMessage("user", "[Contexto anterior compactado no resumo da sessão. Continue de onde parou.]")) + history
             // Resiliência: tenta a chamada; em erro, reenvia (backoff) e só desiste após 3 falhas.
@@ -370,7 +370,7 @@ class AgentRunner(
                 // Auto-recuperação: uma exceção em qualquer ferramenta vira um erro acionável devolvido
                 // ao modelo (nunca derruba o loop do agente).
                 val result = try {
-                    runTool(sessionId, call)
+                    runTool(sessionId, call, allowDeviceTools = tokenBudgetOverride == null)
                 } catch (c: kotlinx.coroutines.CancellationException) {
                     throw c
                 } catch (t: Throwable) {
@@ -914,7 +914,13 @@ class AgentRunner(
         return plan to kept
     }
 
-    private fun systemPrompt(sessionId: String, agent: AgentProfile?, session: Session, jplan: JevOrchestrator.Plan? = null): String {
+    private fun systemPrompt(
+        sessionId: String,
+        agent: AgentProfile?,
+        session: Session,
+        jplan: JevOrchestrator.Plan? = null,
+        allowDeviceTools: Boolean = true,
+    ): String {
         val st = store.state.value
         val lastUser = session.llm.lastOrNull { it.role == "user" }?.content.orEmpty()
         val query = lastUser + " " + session.summary.take(1500)
@@ -956,8 +962,18 @@ class AgentRunner(
             appendLine("5. Fatos duradouros sobre o usuário/projeto: `memory_save`. Para lembrar algo antigo: `memory_search`.")
             appendLine("6. Para usar uma skill, chame `skill_load` com o nome e siga as instruções.")
             appendLine("6b. AUTONOMIA: se o usuário pedir para monitorar/acompanhar/repetir algo ao longo do tempo (ex.: \"a cada 20 min verifique o mercado\"), chame set_schedule com o intervalo em minutos. Se ele não der intervalo mas a tarefa for contínua, escolha um intervalo razoável e econômico. Para parar, set_schedule minutes=0.")
-            val caps = agent?.deviceCaps.orEmpty().filter { dev.cueopen.app.device.DeviceCaps.granted(ctx, it) }
-            if (caps.isNotEmpty()) appendLine("6c. Você tem acesso ao aparelho: " + caps.joinToString(", ") { dev.cueopen.app.device.DeviceCaps.all.firstOrNull { d -> d.id == it }?.title ?: it } + ". Use as ferramentas device_* quando fizer sentido.")
+            val requestedCaps = if (allowDeviceTools) agent?.deviceCaps.orEmpty() else emptyList()
+            val grantedCaps = requestedCaps.filter { dev.cueopen.app.device.DeviceCaps.granted(ctx, it) }
+            val allDeviceTools = dev.cueopen.app.device.DeviceCapPolicy.availableTools(requestedCaps, grantedCaps)
+            val deviceGroupInContext = jplan == null || "device" in jplan.groups
+            val promptDeviceTools = if (deviceGroupInContext) allDeviceTools else emptySet()
+            dev.cueopen.app.device.DeviceCapPolicy.agentGuidance(promptDeviceTools).forEach { appendLine("6c. $it") }
+            if (deviceGroupInContext) {
+                val missingGrants = requestedCaps.filter { it != dev.cueopen.app.device.DeviceCaps.SMS && !dev.cueopen.app.device.DeviceCaps.granted(ctx, it) }
+                if (missingGrants.isNotEmpty()) appendLine("6c. Capacidades ligadas no perfil, mas sem autorização Android vigente: " + missingGrants.joinToString(", ") { cap -> dev.cueopen.app.device.DeviceCaps.all.firstOrNull { it.id == cap }?.title ?: cap } + ". Informe a permissão necessária; não use shell, browser, notificações ou outro caminho para contorná-la.")
+                if (dev.cueopen.app.device.DeviceCaps.SMS in requestedCaps && !dev.cueopen.app.device.DeviceCaps.hasSmsRole(ctx))
+                    appendLine("6c. A leitura da caixa de entrada SMS não está disponível neste app, que não é elegível a app padrão de SMS. Não solicite ROLE_SMS nem use notificações ou outra via lateral. device_sms_compose, se estiver no schema, apenas abre um rascunho para revisão do usuário.")
+            }
             appendLine("6c. TEMPO DE VELA (trading de opções/velas): nunca durma um tempo fixo esperando o candle. Para toda operação AUTOMÁTICA na IQ Option, use uic_iqoption_scan_and_arm — não chame buy direto nem arm_signal para pular a seleção T−2. O scanner usa o timeframe configurado (M1/M2/M5/M10), agenda no relógio do servidor em T−2 min, revalida em T−10 s e mantém o gatilho em background; acompanhe armed_list e cancele com disarm. Os dois candles do período escolhido só ficam confirmados quando ambos fecharam antes/de T; em T valide o par final e o candle-alvo do mesmo período. Não exija consenso de outros timeframes nem use MHI. Não durma até T para então analisar. Se precisar esperar manualmente, chame candle_clock e passe server_now_epoch_ms ao sleep para acordar 10 s antes; se T−10 já passou, espere o próximo alvo. Dados stale/inconsistentes ou janela perdida significam não operar.")
             appendLine("7. MODO CONTÍNUO: se o usuário pedir para monitorar, acompanhar, repetir ou rodar por horas/dias, NÃO finalize. Faça a verificação, registre em notes_write e chame `sleep` (minutos até a próxima verificação). Repita até o usuário pausar.")
             appendLine("8. Fora do modo contínuo, termine com `finish` (resumo curto + arquivos). Responda no idioma do usuário.")
@@ -1246,12 +1262,12 @@ class AgentRunner(
                 put("min_accuracy", int("Acurácia mínima (0-100); o piso de 70 não pode ser rebaixado"))
             }, listOf("signals_json")))
         }
-        // Uma ferramenta de aparelho exige simultaneamente agente com opt-in e grant Android vigente.
+        // Cada ferramenta exige opt-in do agente; leituras/recursos protegidos também exigem grant Android.
         val caps = if (allowMultiAgent) agent?.deviceCaps.orEmpty() else emptyList()
         val grantedCaps = caps.filter { dev.cueopen.app.device.DeviceCaps.granted(ctx, it) }
         val deviceTools = dev.cueopen.app.device.DeviceCapPolicy.availableTools(caps, grantedCaps)
         if ("device_notifications" in deviceTools)
-            add(tool("device_notifications", "Lê as notificações recentes do aparelho (apps como WhatsApp, Gmail…).", buildJsonObject {
+            add(tool("device_notifications", "Lê notificações recentes autorizadas; o conteúdo do app padrão de SMS é excluído e não pode ser usado para ler a caixa de entrada.", buildJsonObject {
                 put("filter", str("Filtrar por app ou texto (opcional)")); put("limit", int("Máximo (padrão 30)"))
             }))
         if ("device_notify" in deviceTools)
@@ -1263,18 +1279,18 @@ class AgentRunner(
         if ("device_overlay" in deviceTools)
             add(tool("device_overlay", "Mostra um balão flutuante sobre os outros apps.", buildJsonObject { put("text", str("Texto")) }, listOf("text")))
         if ("device_bluetooth" in deviceTools)
-            add(tool("device_bluetooth", "Lista somente dispositivos Bluetooth já pareados com este aparelho; não inicia varredura.", buildJsonObject {}))
+            add(tool("device_bluetooth", "Lista somente dispositivos Bluetooth já pareados; exige a permissão atual de dispositivos próximos e não inicia varredura.", buildJsonObject {}))
         if ("device_bluetooth_pair" in deviceTools)
-            add(tool("device_bluetooth_pair", "Abre as Configurações de Bluetooth do Android para você ativar ou parear um dispositivo manualmente.", buildJsonObject {}))
+            add(tool("device_bluetooth_pair", "Abre as Configurações de Bluetooth; você ativa ou pareia manualmente. Não lê dispositivos e não exige BLUETOOTH_CONNECT.", buildJsonObject {}))
         if ("device_calendar_read" in deviceTools)
             add(tool("device_calendar_read", "Lê eventos dos próximos dias sem salvá-los no app.", buildJsonObject { put("days", int("Horizonte em dias (1–30, padrão 7)")) }))
         if ("device_calendar_create" in deviceTools)
-            add(tool("device_calendar_create", "Preenche um rascunho no editor de calendário do Android; o usuário revisa e salva.", buildJsonObject {
+            add(tool("device_calendar_create", "Abre um rascunho no editor de calendário do Android sem ler a agenda; o usuário revisa e salva.", buildJsonObject {
                 put("title", str("Título do evento")); put("start_epoch_ms", str("Início como epoch em milissegundos")); put("end_epoch_ms", str("Fim como epoch em milissegundos"))
                 put("description", str("Descrição opcional")); put("location", str("Local opcional"))
             }, listOf("title", "start_epoch_ms", "end_epoch_ms")))
         if ("device_contacts" in deviceTools)
-            add(tool("device_contacts", "Pesquisa contatos do aparelho sem copiar a agenda para o armazenamento do app.", buildJsonObject { put("query", str("Nome ou número (opcional)")) }))
+            add(tool("device_contacts", "Localiza contatos por nome ou número após pedido do usuário; retorna somente nome e telefone, no máximo 10 resultados. Requer READ_CONTACTS e não exporta a agenda.", buildJsonObject { put("query", str("Nome ou número específico para buscar")) }, listOf("query")))
         if ("device_call_log" in deviceTools)
             add(tool("device_call_log", "Lê o histórico recente de chamadas, se o Android/política do dispositivo permitir.", buildJsonObject { put("limit", int("Máximo de registros (1–50, padrão 20)")) }))
         if ("device_location" in deviceTools)
@@ -1533,7 +1549,7 @@ class AgentRunner(
                     }
     }
 
-    private suspend fun runTool(sessionId: String, call: ToolCall): ToolResult {
+    private suspend fun runTool(sessionId: String, call: ToolCall, allowDeviceTools: Boolean): ToolResult {
         val parsed = runCatching { json.parseToJsonElement(call.argsJson).jsonObject }
         if (parsed.isFailure && call.argsJson.isNotBlank() && call.argsJson != "{}") {
             store.addItem(sessionId, ChatItem.Step(tool = call.name, title = "Argumentos cortados", args = call.name, result = call.argsJson.takeLast(300), status = StepStatus.ERROR))
@@ -1543,10 +1559,13 @@ class AgentRunner(
         val a: JsonObject = parsed.getOrDefault(JsonObject(emptyMap()))
         fun s(k: String) = a[k]?.jsonPrimitive?.contentOrNull.orEmpty()
         dev.cueopen.app.device.DeviceCapPolicy.requiredCapability(call.name)?.let { capability ->
+            if (!allowDeviceTools)
+                return ToolResult("RECUSADO: ferramentas Android não estão disponíveis nesta execução de worker.")
             val agent = store.agent(store.session(sessionId)?.agentId)
             if (agent == null || capability !in agent.deviceCaps)
                 return ToolResult("RECUSADO: este agente não tem opt-in para '${dev.cueopen.app.device.DeviceCaps.all.firstOrNull { it.id == capability }?.title ?: capability}'.")
-            if (!dev.cueopen.app.device.DeviceCaps.granted(ctx, capability))
+            if (dev.cueopen.app.device.DeviceCapPolicy.requiresSystemGrant(call.name) &&
+                !dev.cueopen.app.device.DeviceCaps.granted(ctx, capability))
                 return ToolResult("RECUSADO: a permissão Android desta capability foi revogada ou não foi concedida. Habilite-a nas permissões deste agente e confirme no Android.")
         }
         fun i(k: String) = a[k]?.jsonPrimitive?.intOrNull

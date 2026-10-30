@@ -677,7 +677,8 @@ fun DevicePermissionsCard(a: dev.cueopen.app.data.AgentProfile, onChange: (dev.c
                         Text(cap.desc, fontSize = 12.sp, color = c.ink2)
                         if (on) Text(dev.cueopen.app.device.DeviceCaps.status(ctx, cap.id), fontSize = 11.sp,
                             color = if (granted) c.ok else c.warn,
-                            modifier = Modifier.clickable { requestCap(cap.id) })
+                            modifier = if (cap.id == dev.cueopen.app.device.DeviceCaps.SMS) Modifier
+                                else Modifier.clickable { requestCap(cap.id) })
                     }
                     Switch(on, { v ->
                         onChange(a.copy(deviceCaps = if (v) a.deviceCaps + cap.id else a.deviceCaps - cap.id))

@@ -2,6 +2,7 @@ package dev.cueopen.app.device
 
 import android.service.notification.NotificationListenerService
 import android.service.notification.StatusBarNotification
+import android.provider.Telephony
 import dev.cueopen.app.data.now
 
 /**
@@ -12,7 +13,14 @@ import dev.cueopen.app.data.now
 class CueNotificationListener : NotificationListenerService() {
     override fun onNotificationPosted(sbn: StatusBarNotification) {
         runCatching {
-            val e = sbn.notification.extras
+            val notification = sbn.notification
+            val defaultSmsPackage = runCatching { Telephony.Sms.getDefaultSmsPackage(this) }.getOrNull()
+            if (!NotificationPrivacyPolicy.shouldCapture(
+                    sbn.packageName,
+                    defaultSmsPackage,
+                    notification.category == android.app.Notification.CATEGORY_MESSAGE,
+                )) return
+            val e = notification.extras
             val title = e.getCharSequence(android.app.Notification.EXTRA_TITLE)?.toString().orEmpty()
             val text = e.getCharSequence(android.app.Notification.EXTRA_TEXT)?.toString()
                 ?: e.getCharSequence(android.app.Notification.EXTRA_BIG_TEXT)?.toString().orEmpty()

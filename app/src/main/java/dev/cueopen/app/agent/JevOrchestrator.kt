@@ -53,7 +53,7 @@ object JevOrchestrator {
         "schedule" to listOf("monitor", "acompanh", "a cada", "agend", "todo dia", "toda hora", "de hora em hora", "continu", "periodic", "lembr", "aguard", "espera", "minutos", "vela"),
         "skills_admin" to listOf("crie uma skill", "criar skill", "nova skill", "salve como skill"),
         "wallet" to listOf("carteira", "wallet", "solana", "sol ", "token", "swap", "saldo", "comprar", "vender", "day trade", "daytrade", "trade", "cripto", "crypto", "memecoin", "stop loss", "take profit", "liquidez", "pump", "jupiter", "usdc"),
-        "device" to listOf("notifica", "print da tela", "captura de tela", "screenshot", "balao", "overlay", "celular", "aparelho", "bluetooth", "calendario", "ligaçao", "ligacao", "chamada", "contato", "localizaçao", "localizacao", "sms", "microfone"),
+        "device" to listOf("notifica", "print da tela", "captura de tela", "screenshot", "balao", "overlay", "celular", "aparelho", "bluetooth", "dispositivo pareado", "dispositivos pareados", "dispositivos proximos", "calendario", "ligaçao", "ligacao", "chamada", "contato", "contacts", "contact list", "address book", "agenda telefonica", "agenda de contatos", "telefone", "numero do contato", "localizaçao", "localizacao", "sms", "mensagem de texto", "microfone"),
         "connector_builder" to listOf("conector", "connector"),
     )
 

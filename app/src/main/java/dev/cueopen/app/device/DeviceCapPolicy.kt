@@ -35,14 +35,48 @@ object DeviceCapPolicy {
         BACKGROUND to emptySet(),
     )
 
-    /** Ferramentas disponíveis apenas se o agente pediu a capability e o sistema ainda a concede. */
+    /** Operações que leem dados protegidos ou exigem autorização atual do Android. */
+    private val systemGatedTools = setOf(
+        "device_bluetooth", "device_calendar_read", "device_call_log", "device_contacts",
+        "device_location", "device_sms_read", "device_microphone", "device_notifications",
+        "device_notify", "device_screenshot", "device_overlay",
+    )
+
+    val allTools: Set<String> = toolsByCapability.values.flatten().toSet()
+
+    /** Leituras exigem opt-in do agente e grant Android; handoffs visíveis exigem só opt-in. */
     fun availableTools(agentCapabilities: Collection<String>, systemGrants: Collection<String>): Set<String> {
-        val enabled = agentCapabilities.toSet().intersect(systemGrants.toSet())
-        return enabled.flatMapTo(linkedSetOf()) { toolsByCapability[it].orEmpty() }
+        val optedIn = agentCapabilities.toSet()
+        val granted = systemGrants.toSet()
+        return optedIn.flatMapTo(linkedSetOf()) { capability ->
+            toolsByCapability[capability].orEmpty().filterTo(linkedSetOf()) { tool ->
+                !requiresSystemGrant(tool) || capability in granted
+            }
+        }
     }
 
     fun requiredCapability(tool: String): String? =
         toolsByCapability.entries.firstOrNull { tool in it.value }?.key
+
+    fun requiresSystemGrant(tool: String): Boolean = tool in systemGatedTools
+
+    /** Bluetooth CONNECT é permissão runtime no Android 12+, independente do targetSdk legado do app. */
+    fun bluetoothConnectRuntimePermissionRequired(sdkInt: Int): Boolean = sdkInt >= 31
+
+    /** Instruções incluídas no prompt apenas para ferramentas que realmente estão no schema atual. */
+    fun agentGuidance(availableTools: Collection<String>): List<String> {
+        val tools = availableTools.toSet()
+        if (tools.isEmpty()) return emptyList()
+        return buildList {
+            add("Ferramentas Android disponíveis neste agente: ${tools.sorted().joinToString(", ")}. Use a ferramenta adequada quando o pedido corresponder; nunca improvise acesso a uma capacidade ausente.")
+            if ("device_contacts" in tools) add("Contatos: use device_contacts para localizar uma pessoa por nome ou número quando o usuário pedir. A busca é específica e limitada; se pedirem a agenda inteira, pergunte qual pessoa ou subconjunto. Retorne somente os dados necessários; não faça exportação/listagem em massa nem divulgue contatos sem relação com o pedido.")
+            if ("device_notifications" in tools) add("Notificações: nunca use device_notifications para ler SMS nem contornar as regras de acesso à caixa de entrada; notificações do app padrão de SMS são ocultadas.")
+            if ("device_sms_read" in tools) add("SMS: device_sms_read só pode ser usado quando este app for o padrão de SMS e o Android conceder READ_SMS. Nunca leia mensagens por notificações, arquivos ou outra via alternativa.")
+            if ("device_sms_compose" in tools) add("SMS: device_sms_compose abre apenas um rascunho no app de mensagens; o usuário revisa e toca em Enviar. Nunca envie SMS diretamente.")
+            if ("device_bluetooth" in tools) add("Bluetooth: device_bluetooth lista somente dispositivos já pareados e não inicia varredura.")
+            if ("device_bluetooth_pair" in tools) add("Bluetooth: device_bluetooth_pair apenas abre as Configurações; pareamento e alterações ficam sob controle do usuário.")
+        }
+    }
 
     /** Migra apenas uma vez o consentimento que agentes autônomos já tinham antes desta capability. */
     fun migrateLegacyBackgroundConsent(

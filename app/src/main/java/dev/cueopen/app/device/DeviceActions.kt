@@ -58,7 +58,6 @@ object DeviceActions {
     }
 
     fun createCalendarEvent(ctx: Context, title: String, startMillis: Long, endMillis: Long, description: String, location: String): String {
-        requireGrant(ctx, DeviceCaps.CALENDAR)
         require(title.isNotBlank()) { "Informe o título do evento." }
         require(endMillis > startMillis) { "O fim do evento deve ser posterior ao início." }
         val intent = Intent(Intent.ACTION_INSERT).setData(CalendarContract.Events.CONTENT_URI)
@@ -73,21 +72,23 @@ object DeviceActions {
 
     fun contacts(ctx: Context, query: String = ""): String {
         requireGrant(ctx, DeviceCaps.CONTACTS)
+        val term = DeviceContactsPolicy.normalizeQuery(query)
         val uri = ContactsContract.CommonDataKinds.Phone.CONTENT_URI
         val projection = arrayOf(
             ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME,
             ContactsContract.CommonDataKinds.Phone.NUMBER,
         )
-        val term = query.trim().take(80)
-        val selection = if (term.isBlank()) null else "${ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME} LIKE ? OR ${ContactsContract.CommonDataKinds.Phone.NUMBER} LIKE ?"
-        val args = if (term.isBlank()) null else arrayOf("%$term%", "%$term%")
+        val selection = "${ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME} LIKE ? ESCAPE '\\' OR ${ContactsContract.CommonDataKinds.Phone.NUMBER} LIKE ? ESCAPE '\\'"
+        val pattern = DeviceContactsPolicy.likePattern(term)
+        val args = arrayOf(pattern, pattern)
         val cursor = ctx.contentResolver.query(uri, projection, selection, args, "${ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME} ASC")
             ?: return "O provedor de contatos não retornou dados."
         return cursor.use { c ->
             val name = c.getColumnIndexOrThrow(ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME)
             val number = c.getColumnIndexOrThrow(ContactsContract.CommonDataKinds.Phone.NUMBER)
             val rows = mutableListOf<String>()
-            while (c.moveToNext() && rows.size < 50) rows += "${c.getString(name).orEmpty()} · ${c.getString(number).orEmpty()}"
+            while (c.moveToNext() && rows.size < DeviceContactsPolicy.MAX_RESULTS)
+                rows += "${c.getString(name).orEmpty()} · ${c.getString(number).orEmpty()}"
             rows.ifEmpty { listOf("Nenhum contato correspondente foi encontrado.") }.joinToString("\n")
         }
     }
