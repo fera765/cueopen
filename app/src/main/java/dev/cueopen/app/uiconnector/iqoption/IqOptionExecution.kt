@@ -8,6 +8,7 @@ data class IqOptionOrder(
     val expirationSeconds: Long,
     val amount: Double,
     val turbo: Boolean,
+    val timeoutMs: Int = 15_000,
 )
 
 /** Fronteira de envio: estratégia e política não conhecem WebSocket, request_id ou payload JSON. */

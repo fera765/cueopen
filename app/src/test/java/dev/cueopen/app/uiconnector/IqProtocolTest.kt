@@ -180,7 +180,8 @@ class IqProtocolTest {
 
     @Test fun `timeframes aceitos`() {
         assertEquals(60, IqProtocol.timeframeSeconds("60")); assertEquals(60, IqProtocol.timeframeSeconds("1m"))
-        assertEquals(300, IqProtocol.timeframeSeconds("5m")); assertEquals(3600, IqProtocol.timeframeSeconds("1h"))
+        assertEquals(120, IqProtocol.timeframeSeconds("2m")); assertEquals(300, IqProtocol.timeframeSeconds("5m"))
+        assertEquals(600, IqProtocol.timeframeSeconds("10m")); assertEquals(3600, IqProtocol.timeframeSeconds("1h"))
         assertEquals(30, IqProtocol.timeframeSeconds("30s"))
         assertNull(IqProtocol.timeframeSeconds("7")); assertNull(IqProtocol.timeframeSeconds("abc"))
     }

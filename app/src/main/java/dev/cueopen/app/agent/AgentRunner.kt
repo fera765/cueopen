@@ -957,7 +957,7 @@ class AgentRunner(
             appendLine("6b. AUTONOMIA: se o usuário pedir para monitorar/acompanhar/repetir algo ao longo do tempo (ex.: \"a cada 20 min verifique o mercado\"), chame set_schedule com o intervalo em minutos. Se ele não der intervalo mas a tarefa for contínua, escolha um intervalo razoável e econômico. Para parar, set_schedule minutes=0.")
             val caps = agent?.deviceCaps.orEmpty()
             if (caps.isNotEmpty()) appendLine("6c. Você tem acesso ao aparelho: " + caps.joinToString(", ") { dev.cueopen.app.device.DeviceCaps.all.firstOrNull { d -> d.id == it }?.title ?: it } + ". Use as ferramentas device_* quando fizer sentido.")
-            appendLine("6c. TEMPO DE VELA (trading de opções/velas): nunca durma um tempo fixo (ex.: 1 min) esperando a próxima vela — isso acorda no MEIO dela. Descubra quanto falta para a próxima vela (candle_clock do conector, se existir, usa o relógio do servidor; senão calcule pelo horário da vela) e use sleep com seconds = (segundos até a próxima vela − ~6) ou sleep align_candle_seconds=<tempo gráfico>. Ao acordar: confira o relógio, analise rápido e entre nos PRIMEIROS segundos da vela, para que a operação cubra exatamente a vela analisada (na IQ Option, entrar com menos de 30 s para o fim do minuto empurra a expiração para o minuto seguinte). Se a ordem for recusada por janela de entrada, obedeça o tempo de espera indicado.")
+            appendLine("6c. TEMPO DE VELA (trading de opções/velas): nunca durma um tempo fixo esperando o candle. Para toda operação AUTOMÁTICA na IQ Option, use uic_iqoption_scan_and_arm — não chame buy direto nem arm_signal para pular a seleção T−2. O scanner usa o timeframe configurado (M1/M2/M5/M10), agenda no relógio do servidor em T−2 min, revalida em T−10 s e mantém o gatilho em background; acompanhe armed_list e cancele com disarm. Os dois candles do período escolhido só ficam confirmados quando ambos fecharam antes/de T; em T valide o par final e o candle-alvo do mesmo período. Não exija consenso de outros timeframes nem use MHI. Não durma até T para então analisar. Se precisar esperar manualmente, chame candle_clock e passe server_now_epoch_ms ao sleep para acordar 10 s antes; se T−10 já passou, espere o próximo alvo. Dados stale/inconsistentes ou janela perdida significam não operar.")
             appendLine("7. MODO CONTÍNUO: se o usuário pedir para monitorar, acompanhar, repetir ou rodar por horas/dias, NÃO finalize. Faça a verificação, registre em notes_write e chame `sleep` (minutos até a próxima verificação). Repita até o usuário pausar.")
             appendLine("8. Fora do modo contínuo, termine com `finish` (resumo curto + arquivos). Responda no idioma do usuário.")
             appendLine("8a. DÚVIDA REAL → `ask_question`: só quando o usuário pediu uma tarefa E existe uma dúvida verdadeira que muda o resultado (ex.: qual de duas abordagens, público, formato, escopo) e errar custaria refazer muito trabalho ou algo irreversível. NÃO use para confirmar (\"posso começar?\"), para coisas que você descobre pesquisando/lendo arquivos, nem para preferências triviais — nesses casos assuma o mais razoável e diga o que assumiu. No máximo UMA vez por pedido, com 1–4 perguntas objetivas e 2–4 opções cada (\"Outra resposta\" já aparece). Depois das respostas, siga direto.")
@@ -1027,8 +1027,8 @@ class AgentRunner(
                         val noJev = usable.filter { it.spec.tools.any { t -> t.requiresSignal } && it.spec.settings.any { s2 -> s2.id == "require_jev" } && !hub.settings(it).bool("require_jev") }.map { it.spec.name }
                         val needJev = usable.filter { it.spec.tools.any { t -> t.requiresSignal } && (it.spec.settings.none { s2 -> s2.id == "require_jev" } || hub.settings(it).bool("require_jev")) }.map { it.spec.name }
                         if (needJev.isNotEmpty()) appendLine("- ORDENS em ${needJev.joinToString()}: ANTES de CADA compra e CADA venda chame typesafe_jev_check (venue = id do conector, id = ticker, direction call/put) e só opere com ✅ OPERAR; o app recusa ordens sem validação (uso único, 5 min). Operações CURTAS usam compra (call) e venda (put); operações LONGAS (acima do limite de minutos curtos do conector) só de COMPRA (call).")
-                        if (noJev.isNotEmpty()) appendLine("- ENTRADA AUTOMÁTICA (IQ Option, Jev desligado): ~2 min antes da vela, valide vários ativos e arme os aprovados com arm_signal (asset, direction, minutes). Eles ficam com o GATILHO DE PREÇO armado: no início da vela, call entra quando o preço cai abaixo da abertura e put quando sobe acima; a PRIMEIRA entrada que disparar invalida as demais (uma por vez). Acompanhe com armed_list e cancele com disarm. Prefira este fluxo a ficar acordando no minuto exato.")
-                        if (noJev.isNotEmpty()) appendLine("- ORDENS em ${noJev.joinToString()}: a validação TypeSafe Jev está DESLIGADA nas configurações — NÃO chame typesafe_jev_check para este conector; decida pela confluência dos indicadores, estratégias e filtros do próprio conector, e opere direto (os demais filtros do app — janela da vela, entrada contra o candle, regras de risco — continuam valendo).")
+                        if (noJev.isNotEmpty()) appendLine("- ENTRADA AUTOMÁTICA (IQ Option, Jev desligado): use uic_iqoption_scan_and_arm. Ele varre ativos turbo/binários abertos em T−2 min no timeframe configurado (M1/M2/M5/M10), usa dois candles fechados desse período, Price Action e TechnicalSuite se o filtro estiver ligado, e escolhe um candidato pelo ranqueamento Price Action já existente. Não usa MHI nem exige consenso de períodos diferentes. Revalida em T−10 s; em T confirma os dois candles anteriores, o candle-alvo, a cotação atual e as regras de risco. Se faltar dado, houver atraso ou divergência, não opera. Acompanhe armed_list; use disarm para cancelar. Não durma até T.")
+                        if (noJev.isNotEmpty()) appendLine("- ORDENS em ${noJev.joinToString()}: a validação TypeSafe Jev está DESLIGADA — NÃO chame typesafe_jev_check para este conector. Siga somente Price Action, o timeframe configurado, o filtro TechnicalSuite se ligado, os dois candles do período escolhido e os limites da janela/risco; não invoque estratégias MHI.")
                         appendLine("- Solana day trade e conectores de trading têm capital e posições independentes: não use um para cobrir o outro. Se a resposta disser que outro agente está operando o ativo, aguarde ou escolha outro; faça uma ordem por vez.")
                     }
                     appendLine("- A sessão e as credenciais são gerenciadas pelo app; você nunca vê nem pede senha. Se uma ferramenta responder que é preciso fazer login, avise o usuário.")
@@ -1150,11 +1150,12 @@ class AgentRunner(
         if (builder) add(tool("connector_propose", "Mostra ao usuário o card 'Instalar conector' no chat. Só aceita definição que passou em connector_test com o MESMO JSON (guardrails: nada é proposto sem validação completa).", buildJsonObject {
             put("json", str("Definição JSON completa e válida do conector"))
         }, listOf("json")))
-        if (allowMultiAgent) add(tool("sleep", "Modo contínuo: pausa e depois retoma automaticamente. Use UM modo: minutes, seconds, ou align_candle_seconds (acorda lead_seconds ANTES da abertura da próxima vela daquele tempo gráfico — use em trading para pegar o INÍCIO da vela, nunca um tempo fixo de 1 min que cai no meio dela).", buildJsonObject {
+        if (allowMultiAgent) add(tool("sleep", "Modo contínuo: pausa e depois retoma automaticamente. Use UM modo: minutes, seconds, ou align_candle_seconds. Para IQ Option, copie server_now_epoch_ms de candle_clock para calcular pelo relógio do servidor; por padrão acorda 10 s antes da próxima abertura.", buildJsonObject {
             put("minutes", int("Minutos até a próxima verificação (1-1440)"))
-            put("seconds", int("Segundos até a próxima verificação (5-86400) — para esperas curtas e precisas"))
-            put("align_candle_seconds", int("Tempo gráfico da vela em segundos (60, 300, 900…): acorda pouco antes da próxima vela abrir"))
-            put("lead_seconds", int("Com align_candle_seconds: quantos segundos antes da abertura acordar (padrão 6, 2-30)"))
+            put("seconds", int("Segundos até a próxima verificação (1-86400) — para esperas curtas e precisas"))
+            put("align_candle_seconds", int("Tempo gráfico em segundos (60=M1, 120=M2, 300=M5, 600=M10): acorda antes da próxima abertura"))
+            put("lead_seconds", int("Com align_candle_seconds: quantos segundos antes da abertura acordar (padrão 10, 2-30)"))
+            put("server_now_epoch_ms", str("Opcional: epoch em milissegundos copiado do campo server_now_epoch_ms de candle_clock IQ Option"))
             put("reason", str("O que fazer ao acordar"))
         }, listOf("reason")))
         if (allowMultiAgent) add(tool("create_skill", "Cria uma nova skill na biblioteca do usuário.", buildJsonObject {
@@ -1239,7 +1240,7 @@ class AgentRunner(
         // Só oferece a ferramenta quando ela é realmente exigida: day trade Solana, ou um conector de ordem com o Jev LIGADO.
         if (allowMultiAgent && (agent?.let { WalletAgentPolicyStore(ctx.applicationContext).canAgentDayTrade(it.id) } == true ||
                 runCatching { dev.cueopen.app.CueApp.instance.uiConnectors.jevRequiredBy(agent) }.getOrDefault(false))) {
-            add(tool("typesafe_jev_check", "OBRIGATÓRIO antes de QUALQUER ordem de COMPRA ou VENDA (Solana day trade e IQ Option): avalia cada sinal com o avaliador de acurácia configurado. Jev usa System One; modelo de chat comum usa adapter JSON estrito e NÃO tem a calibração do Jev. Só se os pisos locais de acurácia e confiança forem atingidos o app cria autorização de uso único (5 min). Sem ela, wallet_swap e as ferramentas de ordem dos conectores são RECUSADOS. Envie dados REAIS (preço, velas, tendência, liquidez). Não invente números. Para venue=iqoption o app ANEXA SOZINHO o contexto real (35 indicadores, estratégias MHI com assertividade e sinal do quadrante, estado da vela e gerenciamento) — basta id, venue, direction e horizon_minutes.", buildJsonObject {
+            add(tool("typesafe_jev_check", "OBRIGATÓRIO antes de QUALQUER ordem de COMPRA ou VENDA (Solana day trade e IQ Option): avalia cada sinal com o avaliador de acurácia configurado. Jev usa System One; modelo de chat comum usa adapter JSON estrito e NÃO tem a calibração do Jev. Só se os pisos locais de acurácia e confiança forem atingidos o app cria autorização de uso único (5 min). Sem ela, wallet_swap e as ferramentas de ordem dos conectores são RECUSADOS. Envie dados REAIS (preço, candles fechados, tendência, liquidez). Não invente números. Para venue=iqoption o app anexa automaticamente candles fechados, resumo técnico, Price Action e gerenciamento — basta id, venue, direction e horizon_minutes.", buildJsonObject {
                 put("signals_json", str("JSON array de sinais: {\"id\":\"<mint Solana ou ticker, ex.: EURUSD>\",\"venue\":\"solana|iqoption\",\"direction\":\"buy|sell (Solana) ou call|put (IQ Option)\",\"horizon_minutes\":5,\"data\":\"resumo com preço, velas OHLCV, tendência, liquidez\"}"))
                 put("min_accuracy", int("Acurácia mínima (0-100); o piso de 70 não pode ser rebaixado"))
             }, listOf("signals_json")))
@@ -1591,16 +1592,16 @@ class AgentRunner(
                 val (secs, title, note) = when {
                     align != null && align >= 5 -> {
                         val tf = align.coerceIn(5, 86_400)
-                        val lead = (i("lead_seconds") ?: 6).coerceIn(2, 30)
-                        val nowMs = System.currentTimeMillis()
+                        val lead = (i("lead_seconds") ?: 10).coerceIn(2, 30)
+                        val nowMs = s("server_now_epoch_ms").toLongOrNull() ?: System.currentTimeMillis()
                         var nextOpen = (nowMs / 1000 / tf + 1) * tf // próxima abertura (epoch s, alinhada ao tempo gráfico)
                         var wait = (nextOpen * 1000 - nowMs) / 1000.0 - lead
-                        if (wait < 3) { nextOpen += tf; wait += tf } // perto demais: mira a vela seguinte
+                        if (wait < 0) { nextOpen += tf; wait += tf } // lead já passou: mira a abertura seguinte
                         val hhmmss = SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date(nextOpen * 1000))
                         Triple(wait.toInt().coerceAtLeast(1), "Aguardando a próxima vela de ${tfLabel(tf)} (abre $hhmmss)",
                             "Acordo ${lead}s antes da vela de ${tfLabel(tf)} que abre às $hhmmss — analise e entre no INÍCIO dela.")
                     }
-                    i("seconds") != null -> { val sc = i("seconds")!!.coerceIn(5, 86_400); Triple(sc, "Aguardando ${sc}s", "") }
+                    i("seconds") != null -> { val sc = i("seconds")!!.coerceIn(1, 86_400); Triple(sc, "Aguardando ${sc}s", "") }
                     else -> { val m = (i("minutes") ?: 5).coerceIn(1, 1440); Triple(m * 60, "Aguardando $m min", "") }
                 }
                 store.addItem(sessionId, ChatItem.Step(tool = "sleep", title = title, args = s("reason"), result = note, status = StepStatus.OK))
