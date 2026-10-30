@@ -90,6 +90,13 @@ fun ChatScreen(nav: NavController, sessionId: String) {
     val ctx = LocalContext.current
     val c = Cue.c
 
+    LaunchedEffect(sessionId) {
+        ctx.getSharedPreferences(dev.cueopen.app.assistant.AssistantRoutingPolicy.PREFERENCES, android.content.Context.MODE_PRIVATE)
+            .edit()
+            .putString(dev.cueopen.app.assistant.AssistantRoutingPolicy.KEY_ACTIVE_SESSION_ID, sessionId)
+            .apply()
+    }
+
     // Auto-scroll: segue o stream enquanto o usuário está no fim; se ele rolar para cima, assume o controle.
     var follow by remember { mutableStateOf(true) }
     val atBottom by remember {

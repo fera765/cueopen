@@ -1,9 +1,12 @@
 package dev.cueopen.app
 
+import android.Manifest
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.background
@@ -40,6 +43,15 @@ import kotlinx.coroutines.withContext
 class MainActivity : ComponentActivity() {
     private val pendingSession = mutableStateOf<String?>(null)
     private val sharedText = mutableStateOf<String?>(null)
+    private val pendingRoute = mutableStateOf<String?>(null)
+    private val pendingMicrophonePermission = mutableStateOf(false)
+    private val microphonePermissionRequest = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        android.widget.Toast.makeText(
+            this,
+            if (granted) "Microfone autorizado. Invoque o assistente novamente." else "O microfone não foi autorizado.",
+            android.widget.Toast.LENGTH_SHORT,
+        ).show()
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -70,6 +82,24 @@ class MainActivity : ComponentActivity() {
                             pendingSession.value = null
                         }
                     }
+                    val route = pendingRoute.value
+                    LaunchedEffect(route) {
+                        if (route != null) {
+                            nav.navigate(route) { launchSingleTop = true }
+                            pendingRoute.value = null
+                        }
+                    }
+                    val askForMicrophone = pendingMicrophonePermission.value
+                    LaunchedEffect(askForMicrophone) {
+                        if (askForMicrophone) {
+                            pendingMicrophonePermission.value = false
+                            if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+                                microphonePermissionRequest.launch(Manifest.permission.RECORD_AUDIO)
+                            } else {
+                                android.widget.Toast.makeText(this@MainActivity, "Microfone já autorizado. Invoque o assistente novamente.", android.widget.Toast.LENGTH_SHORT).show()
+                            }
+                        }
+                    }
                     val shared = sharedText.value
                     LaunchedEffect(shared) { if (shared != null) { nav.navigate("home?draft=${Uri.encode(shared)}"); sharedText.value = null } }
                 }
@@ -83,13 +113,26 @@ class MainActivity : ComponentActivity() {
 
     private fun handleIntent(i: Intent?) {
         i ?: return
+        val assistantChat = if (i.action == dev.cueopen.app.assistant.AssistantRoutingPolicy.ACTION_OPEN_CHAT) {
+            i.getStringExtra(dev.cueopen.app.assistant.AssistantRoutingPolicy.EXTRA_SESSION_ID)
+                ?.takeIf { CueApp.instance.store.session(it) != null }
+        } else null
+        when (i.action) {
+            dev.cueopen.app.assistant.AssistantRoutingPolicy.ACTION_OPEN_SETTINGS -> pendingRoute.value = "settings"
+            dev.cueopen.app.assistant.AssistantRoutingPolicy.ACTION_OPEN_CHAT -> {
+                pendingSession.value = assistantChat
+            }
+            dev.cueopen.app.assistant.AssistantRoutingPolicy.ACTION_REQUEST_MICROPHONE -> pendingMicrophonePermission.value = true
+        }
         val extraId = i.getStringExtra(SessionNotificationRouting.EXTRA_SESSION_ID)
             ?: i.getStringExtra(SessionNotificationRouting.EXTRA_SESSION)
         val deepLinkId = i.data?.takeIf { it.scheme == "cueopen" && it.host == "chat" }
             ?.pathSegments?.lastOrNull()
         val candidate = SessionNotificationRouting.candidateId(extraId, deepLinkId)
         // IDs ausentes/desconhecidos não podem criar uma rota chat/{id} inexistente.
-        pendingSession.value = candidate?.takeIf { CueApp.instance.store.session(it) != null }
+        if (i.action != dev.cueopen.app.assistant.AssistantRoutingPolicy.ACTION_OPEN_CHAT) {
+            pendingSession.value = candidate?.takeIf { CueApp.instance.store.session(it) != null }
+        }
         if (i.action == Intent.ACTION_SEND) {
             val text = i.getStringExtra(Intent.EXTRA_TEXT)
             @Suppress("DEPRECATION") val uri = i.getParcelableExtra<Uri>(Intent.EXTRA_STREAM)

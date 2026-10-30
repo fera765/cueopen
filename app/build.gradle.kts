@@ -24,8 +24,8 @@ android {
         // do sandbox a partir de filesDir. Os .so do proot também vêm em jniLibs.
         targetSdk = 28
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
-        versionCode = 54
-        versionName = "4.17.2"
+        versionCode = 55
+        versionName = "4.17.3"
         ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64") }
     }
     signingConfigs {
@@ -40,6 +40,10 @@ android {
         }
     }
     buildTypes {
+        debug {
+            // Use a keystore externa aprovada em builds locais de entrega, quando configurada.
+            if (cueopenSigningStore != null) signingConfig = signingConfigs.getByName("cueopen")
+        }
         release {
             // build otimizado: R8 (minify + otimização) deixa o Compose bem mais fluido que o debug
             isMinifyEnabled = true

@@ -81,6 +81,14 @@
             </intent-filter>
         </service>
 
+        <receiver
+            android:name=".assistant.AssistantCommandReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.fluwy.bot.action.ASSISTANT_COMMAND" />
+            </intent-filter>
+        </receiver>
+
         <service
             android:name=".assistant.FluwyRecognitionService"
             android:exported="true"
