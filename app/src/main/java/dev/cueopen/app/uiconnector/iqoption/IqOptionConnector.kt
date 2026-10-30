@@ -17,7 +17,6 @@ import dev.cueopen.app.uiconnector.ToolSpec
 import dev.cueopen.app.uiconnector.UiBlock
 import dev.cueopen.app.uiconnector.UiConnector
 import dev.cueopen.app.uiconnector.UiConnectorSpec
-import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.SupervisorJob
@@ -47,7 +46,6 @@ import java.util.Date
 import java.util.Locale
 import java.util.TimeZone
 import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicLong
 
@@ -130,11 +128,6 @@ class IqOptionConnector(
     )
 
     // ------------------------------------------------------------------ estado
-    private class Waiter(
-        val reqId: String?, val names: Set<String>, val deferred: CompletableDeferred<JsonObject>,
-        val requiresActiveBalance: Boolean = false, val targetBalanceId: Long? = null,
-    )
-
     private data class Tracked(
         val id: Long, val asset: String, val direction: String, val amount: Double,
         val expSec: Long, val demo: Boolean, val currency: String,
@@ -158,9 +151,9 @@ class IqOptionConnector(
     override val supportsPushUpdates: Boolean = true
     override val fallbackRefreshMs: Long? get() = cachedForexPositions?.let { forexMonitorIntervalMs }
     private val debug: ConnectorDebugLog get() = CueApp.instance.connectorDebugLog
-    private val waiters = CopyOnWriteArrayList<Waiter>()
-    private val balances = ConcurrentHashMap<Long, IqProtocol.Balance>()
-    private val activeBalanceSelection = IqActiveBalanceSelection()
+    private val accountMessageFlow = IqAccountMessageFlow()
+    private val balances get() = accountMessageFlow.balances
+    private val activeBalanceSelection get() = accountMessageFlow.selection
     @Volatile private var marketAccountId: Long? = null
     private val tracked = ConcurrentHashMap<Long, Tracked>()
     private val quotes = ConcurrentHashMap<Int, Double>()
@@ -190,7 +183,7 @@ class IqOptionConnector(
 
     @Volatile private var ssid: String? = null
     @Volatile private var ws: WebSocket? = null
-    @Volatile private var authenticated = false
+    private val authenticated get() = accountMessageFlow.authenticated
     @Volatile private var creds: Map<String, String>? = null
     private val serverClock = IqServerClock()
     @Volatile private var assets: List<IqProtocol.Asset> = emptyList()
@@ -219,7 +212,7 @@ class IqOptionConnector(
 
     private fun recentNames(): String = synchronized(seen) { seen.toList().distinct().joinToString(",") }
 
-    private fun activeBalance(): IqProtocol.Balance? = activeBalanceSelection.activeId()?.let { balances[it] }
+    private fun activeBalance(): IqProtocol.Balance? = accountMessageFlow.activeBalance()
 
     // ------------------------------------------------------------------ login / sessão
     override suspend fun login(credentials: Map<String, String>): Result<Unit> =
@@ -257,15 +250,13 @@ class IqOptionConnector(
         closeSocket()
         ssid = withContext(Dispatchers.IO) { httpLogin(email, password) }
         debug.rememberSecrets("iqoption", listOfNotNull(ssid))
-        val profileWaiter = Waiter(null, setOf("profile", "balance-changed"), CompletableDeferred(), requiresActiveBalance = true)
-        waiters += profileWaiter
+        val sid = ssid ?: error("Sessão inválida.")
+        val req = Request.Builder().url(IqProtocol.WS_URL)
+            .header("Origin", IqProtocol.ORIGIN).header("User-Agent", UA).build()
+        // Geração: callbacks de um socket antigo (já fechado) nunca podem derrubar a conexão nova.
+        val myGen = generation.get()
+        val profileWaiter = accountMessageFlow.beginConnection(myGen)
         try {
-            val sid = ssid ?: error("Sessão inválida.")
-            val req = Request.Builder().url(IqProtocol.WS_URL)
-                .header("Origin", IqProtocol.ORIGIN).header("User-Agent", UA).build()
-            // Geração: callbacks de um socket antigo (já fechado) nunca podem derrubar a conexão nova.
-            val myGen = generation.get()
-            activeBalanceSelection.beginConnection(myGen)
             val wsStartedAt = System.nanoTime()
             debug.recordEvent("iqoption", "websocket", "connecting", IqProtocol.WS_URL)
             ws = client.newWebSocket(req, object : WebSocketListener() {
@@ -299,7 +290,7 @@ class IqOptionConnector(
             closeSocket()
             throw IllegalStateException("A IQ Option não confirmou uma carteira ativa após autenticar. O protocolo pode ter mudado ou a conta está indisponível; novas ordens permanecem bloqueadas. Baixe o log de erros em Configurações.")
         } finally {
-            waiters.remove(profileWaiter)
+            accountMessageFlow.removeWaiter(profileWaiter)
         }
     }
 
@@ -329,7 +320,7 @@ class IqOptionConnector(
     private fun dropConnection(reason: String) {
         generation.incrementAndGet() // invalida callbacks tardios do socket perdido
         subscribed.clear()
-        authenticated = false
+        accountMessageFlow.markUnauthenticated()
         ws = null
         serverClock.clear()
         val previousFailure = activeBalanceSelection.failureMessage()
@@ -345,8 +336,7 @@ class IqOptionConnector(
         balances.clear()
         marketAccountId = null
         val failure = IOException("Conexão com a IQ Option perdida: $reason")
-        waiters.forEach { it.deferred.completeExceptionally(failure) }
-        waiters.clear()
+        accountMessageFlow.failWaiters(failure)
         debug.recordEvent("iqoption", "websocket", "connection dropped; account selection requires confirmation")
         _stateChanges.tryEmit(Unit)
     }
@@ -355,10 +345,10 @@ class IqOptionConnector(
         generation.incrementAndGet() // invalida os callbacks do socket que está sendo fechado
         runCatching { ws?.close(1000, null) }
         ws = null
-        authenticated = false
+        accountMessageFlow.markUnauthenticated()
         subscribed.clear()
         serverClock.clear()
-        activeBalanceSelection.invalidate()
+        accountMessageFlow.invalidateAccount()
         balances.clear()
         marketAccountId = null
     }
@@ -378,7 +368,7 @@ class IqOptionConnector(
         serverClock.clear()
         assets = emptyList()
         allAssets = emptyList()
-        activeBalanceSelection.invalidate()
+        accountMessageFlow.invalidateAccount()
         _stateChanges.tryEmit(Unit)
         debug.recordEvent("iqoption", "authentication", "logged out")
     }
@@ -435,49 +425,25 @@ class IqOptionConnector(
         val name = (root["name"] as? JsonPrimitive)?.contentOrNull ?: return
         noteSeen(name)
         val msg = root["msg"] as? JsonObject
-        var stateChanged = false
+        val accountUpdate = accountMessageFlow.onMessage(root, eventGeneration)
+        var stateChanged = accountUpdate?.stateChanged ?: false
+        if (accountUpdate != null) {
+            val confirmed = accountUpdate.activeBalanceId
+            if (confirmed != null) {
+                val previous = marketAccountId
+                marketAccountId = confirmed
+                if (previous != null && previous != confirmed) resetMarketCircuit()
+            }
+            if (accountUpdate.serverBalanceId != null && !accountUpdate.accepted) {
+                val label = if (accountUpdate.eventName == "profile") "profile" else "balance event"
+                debug.recordEvent("iqoption", "account-event", "stale or unrelated $label ignored; active wallet unchanged")
+            }
+        }
         when (name) {
             "timeSync" -> {
                 val serverMs = (root["msg"] as? JsonPrimitive)?.longOrNull
                 if (serverMs != null) {
                     serverClock.update(serverMs, android.os.SystemClock.elapsedRealtime())
-                }
-            }
-            "profile" -> {
-                val p = if (msg != null) IqProtocol.parseProfile(msg) else null
-                if (p != null) {
-                    p.balances.forEach { b -> if (balances.put(b.id, b) != b) stateChanged = true }
-                    val previousId = activeBalanceSelection.activeId()
-                    val serverId = IqProtocol.confirmedActiveBalanceId(root)
-                    val accepted = activeBalanceSelection.observeServerConfirmation(serverId, eventGeneration)
-                    val confirmed = activeBalanceSelection.activeId()?.takeIf { balances.containsKey(it) }
-                    if (confirmed != null) {
-                        val previous = marketAccountId
-                        marketAccountId = confirmed
-                        if (previous != null && previous != confirmed) resetMarketCircuit()
-                        if (!authenticated) stateChanged = true
-                        authenticated = true
-                    }
-                    if (previousId != confirmed) stateChanged = true
-                    if (serverId != null && !accepted) debug.recordEvent("iqoption", "account-event", "stale or unrelated profile ignored; active wallet unchanged")
-                }
-            }
-            "balance-changed" -> {
-                val b = if (msg != null) IqProtocol.parseBalanceChanged(msg) else null
-                if (b != null) {
-                    if (balances.put(b.id, b) != b) stateChanged = true
-                    val previousId = activeBalanceSelection.activeId()
-                    val serverId = IqProtocol.confirmedActiveBalanceId(root)
-                    val accepted = activeBalanceSelection.observeServerConfirmation(serverId, eventGeneration)
-                    val confirmedActive = activeBalanceSelection.activeId()
-                    if (confirmedActive != null && confirmedActive != marketAccountId) {
-                        marketAccountId = confirmedActive
-                        resetMarketCircuit()
-                    }
-                    if (previousId != confirmedActive) stateChanged = true
-                    if (activeBalance() != null && !authenticated) stateChanged = true
-                    if (activeBalance() != null) authenticated = true
-                    if (serverId != null && !accepted) debug.recordEvent("iqoption", "account-event", "stale or unrelated balance event ignored; active wallet unchanged")
                 }
             }
             "option-closed", "socket-option-closed" -> {
@@ -523,24 +489,16 @@ class IqOptionConnector(
                 }
             }
         }
-        val rid = (root["request_id"] as? JsonPrimitive)?.contentOrNull
-        for (w in waiters) {
-            val match = (w.reqId != null && rid == w.reqId) || ((w.reqId == null || rid == null) && name in w.names)
-            val targetMatches = w.targetBalanceId == null || IqProtocol.confirmedActiveBalanceId(root) == w.targetBalanceId
-            val accountReady = !w.requiresActiveBalance || (authenticated && activeBalance() != null)
-            if (match && targetMatches && accountReady && w.deferred.complete(root)) waiters.remove(w)
-        }
         if (stateChanged) _stateChanges.tryEmit(Unit)
     }
 
     private suspend fun request(reqId: String, payload: String, vararg names: String, timeoutMs: Long = 12_000): JsonObject {
         ensureConnected()
-        val w = Waiter(reqId, names.toSet(), CompletableDeferred())
-        waiters += w
+        val w = accountMessageFlow.registerWaiter(reqId, names.toSet())
         val started = System.nanoTime()
         return try {
             if (ws?.send(payload) != true) {
-                authenticated = false
+                accountMessageFlow.markUnauthenticated()
                 error("Conexão com a IQ Option indisponível; tente novamente.")
             }
             debug.recordEvent("iqoption", "websocket-request", "sent type=${names.joinToString("+").take(100)} request_id=${reqId.take(40)}")
@@ -550,7 +508,7 @@ class IqOptionConnector(
             debug.recordFailure("iqoption", "websocket-request", t, IqProtocol.WS_URL, "WEBSOCKET", (System.nanoTime() - started) / 1_000_000L)
             error("A IQ Option não respondeu a tempo.")
         } finally {
-            waiters.remove(w)
+            accountMessageFlow.removeWaiter(w)
         }
     }
 
@@ -693,7 +651,7 @@ class IqOptionConnector(
     private suspend fun openForexReserved(args: Map<String, String>, settings: ConnectorSettings): String {
         ensureConnected()
         if (!settings.bool("allow_margin_agent")) return "RECUSADO: o usuário não liberou o agente para operar Forex nas configurações do conector."
-        val acc = activeBalance() ?: return "RECUSADO: nenhuma carteira ativa foi confirmada pelo servidor; confirme a conta antes de operar."
+        val acc = accountMessageFlow.orderBalance() ?: return "RECUSADO: nenhuma carteira ativa foi confirmada pelo servidor; confirme a conta antes de operar."
         if (acc.isReal && !settings.bool("allow_real_agent")) return "RECUSADO: a conta ativa é REAL e o agente não foi liberado para ela."
         val side = args["side"].orEmpty().lowercase()
         if (side != "buy" && side != "sell") return "side deve ser buy ou sell."
@@ -758,10 +716,8 @@ class IqOptionConnector(
         val b = balances.values.filter { if (wantReal) it.isReal else it.isPractice }.minByOrNull { it.id }
             ?: error("Esta conta não tem uma carteira ${if (wantReal) "REAL" else "DEMO"} disponível.")
         if (activeBalanceSelection.activeId() == b.id) return "A conta ${b.label} já está ativa (${money(b)})."
-        val waiter = Waiter(null, setOf("balance-changed", "profile"), CompletableDeferred(), targetBalanceId = b.id)
-        waiters += waiter
         val switchGeneration = generation.get()
-        activeBalanceSelection.beginSwitch(b.id, switchGeneration)
+        val waiter = accountMessageFlow.beginSwitch(b.id, switchGeneration)
         _stateChanges.tryEmit(Unit)
         val targetType = if (b.isReal) "REAL" else "DEMO"
         debug.recordEvent("iqoption", "account-switch", "requested target=$targetType")
@@ -791,8 +747,8 @@ class IqOptionConnector(
             _stateChanges.tryEmit(Unit)
             return "RECUSADO: $failureMessage"
         } finally {
-            waiters.remove(waiter)
-            activeBalanceSelection.finishSwitch(b.id, confirmed, failureMessage)
+            accountMessageFlow.removeWaiter(waiter)
+            accountMessageFlow.finishSwitch(b.id, confirmed, failureMessage)
             _stateChanges.tryEmit(Unit)
         }
     }
@@ -811,7 +767,7 @@ class IqOptionConnector(
         } catch (t: Throwable) {
             if (t is kotlinx.coroutines.CancellationException && t !is TimeoutCancellationException) throw t
             val reason = "Não foi possível confirmar a carteira após reconectar: ${friendly(t)}. Nenhuma ordem será liberada; tente sincronizar novamente."
-            activeBalanceSelection.failReconciliation(reason)
+            accountMessageFlow.failReconciliation(reason)
             debug.recordFailure("iqoption", "account-sync", t, IqProtocol.WS_URL, "GET")
             _stateChanges.tryEmit(Unit)
             throw IllegalStateException(reason)
@@ -898,7 +854,7 @@ class IqOptionConnector(
         if (side != "call" && side != "put") return "direction deve ser call ou put."
         if (!amount.isFinite() || amount <= 0.0) return "amount deve ser finito e maior que zero."
         if (minutes !in 1..60) return "minutes deve estar entre 1 e 60."
-        val account = activeBalance() ?: return "RECUSADO: nenhuma carteira ativa foi confirmada pelo servidor; confirme a conta antes de operar."
+        val account = accountMessageFlow.orderBalance() ?: return "RECUSADO: nenhuma carteira ativa foi confirmada pelo servidor; confirme a conta antes de operar."
         if (byAgent && settings != null) {
             if (account.isReal && !settings.bool("allow_real_agent"))
                 return "RECUSADO: a conta ativa é REAL e o usuário não liberou o agente para operar nela. Troque para DEMO no conector ou libere a conta REAL nas configurações."
