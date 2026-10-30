@@ -58,8 +58,11 @@ fun McpConnectorSettingsScreen(nav: NavController, id: String) {
                 }
             }.onSuccess { result ->
                 app.store.upsertConnector(result)
+                app.connectorDebugLog.recordEvent(id, "oauth", if (result.lastError == null) "connected" else "connection failed; server detail omitted")
+                if (result.lastError != null) app.connectorDebugLog.recordFailure(id, "oauth", IllegalStateException("MCP connection returned an error; detail omitted"))
                 notice = result.lastError?.let { "Não foi possível conectar: $it" } ?: "Conector conectado."
             }.onFailure { error ->
+                app.connectorDebugLog.recordFailure(id, "oauth", error)
                 val current = app.store.connector(id) ?: enabledCandidate
                 app.store.upsertConnector(current.copy(lastError = error.message ?: "Falha na conexão"))
                 notice = error.message ?: "Falha na conexão."
@@ -86,6 +89,10 @@ fun McpConnectorSettingsScreen(nav: NavController, id: String) {
                     busy = true
                     scope.launch {
                         val result = Connectors.refreshTools(app.store, connector)
+                        result.lastError?.let {
+                            app.connectorDebugLog.recordEvent(id, "tools-refresh", "failed; server detail omitted")
+                            app.connectorDebugLog.recordFailure(id, "tools-refresh", IllegalStateException("MCP refresh returned an error; detail omitted"))
+                        }
                         notice = result.lastError?.let { "Falha ao atualizar: $it" }
                             ?: "Ferramentas atualizadas (${runCatching { JSONArray(result.toolsJson ?: "[]").length() }.getOrDefault(0)} disponíveis)."
                         busy = false
@@ -145,6 +152,7 @@ fun McpConnectorSettingsScreen(nav: NavController, id: String) {
                     if (description.isNotBlank()) Text(description, fontSize = 12.sp, color = c.ink2, modifier = Modifier.padding(top = 3.dp))
                 }
             }
+            item { ConnectorDebugSection(id) }
         }
     }
 }

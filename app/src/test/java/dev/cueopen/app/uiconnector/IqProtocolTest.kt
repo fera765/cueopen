@@ -81,14 +81,15 @@ class IqProtocolTest {
             {"id":222,"type":1,"amount":8,"currency":"BRL"}]}}""")
         val knownBalances = IqProtocol.parseProfile(initial["msg"]!!.jsonObject)!!.balances.associateBy { it.id }
         val selection = IqActiveBalanceSelection()
-        assertTrue(selection.observeServerConfirmation(111L))
-        selection.beginSwitch(222L)
+        selection.beginConnection(1L)
+        assertTrue(selection.observeServerConfirmation(111L, 1L))
+        selection.beginSwitch(222L, 1L)
 
         // Simula o ACK do broker após o usuário confirmar REAL: só chega balance_id, sem balances.
         val partial = obj("""{"name":"profile","msg":{"balance_id":222}}""")
         val parsed = IqProtocol.parseProfile(partial["msg"]!!.jsonObject)!!
         assertTrue(parsed.balances.isEmpty())
-        assertTrue(selection.observeServerConfirmation(IqProtocol.confirmedActiveBalanceId(partial)))
+        assertTrue(selection.observeServerConfirmation(IqProtocol.confirmedActiveBalanceId(partial), 1L))
         assertEquals(222L, selection.activeId()?.let { knownBalances[it]?.id })
         selection.finishSwitch(222L, confirmed = true)
         assertEquals(222L, selection.activeId())

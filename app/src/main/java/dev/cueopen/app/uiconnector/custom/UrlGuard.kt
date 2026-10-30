@@ -93,9 +93,12 @@ interface HttpExec {
 }
 
 /** Executor real (OkHttp): sem redirecionamentos, 20 s, resposta limitada a 2 MB (feeds RSS grandes). */
-class OkHttpExec(permissive: Boolean = false) : HttpExec {
+class OkHttpExec(
+    permissive: Boolean = false,
+    private val clientProvider: ((OkHttpClient) -> OkHttpClient)? = null,
+) : HttpExec {
     companion object { const val MAX_BODY = 2L * 1024 * 1024 }
-    private val client: OkHttpClient = OkHttpClient.Builder()
+    private val baseClient: OkHttpClient = OkHttpClient.Builder()
         .followRedirects(false)
         .followSslRedirects(false)
         .connectTimeout(15, TimeUnit.SECONDS)
@@ -104,6 +107,8 @@ class OkHttpExec(permissive: Boolean = false) : HttpExec {
         .apply { if (!permissive) dns(SafeDns()) }
         .build()
 
+    private fun client(): OkHttpClient = clientProvider?.invoke(baseClient) ?: baseClient
+
     override suspend fun exec(r: HttpReq): HttpRes = withContext(Dispatchers.IO) {
         val m = r.method.uppercase()
         val hasBody = m == "POST" || m == "PUT" || m == "PATCH" || (m == "DELETE" && r.body != null)
@@ -111,7 +116,7 @@ class OkHttpExec(permissive: Boolean = false) : HttpExec {
         val req = Request.Builder().url(r.url).method(m, body).apply {
             r.headers.forEach { (k, v) -> header(k, v) }
         }.build()
-        client.newCall(req).execute().use { res ->
+        client().newCall(req).execute().use { res ->
             HttpRes(res.code, res.headers.toMultimap(), res.peekBody(MAX_BODY).string())
         }
     }

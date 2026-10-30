@@ -29,6 +29,41 @@ data class ProxyProfile(
 
 enum class ProxyScope { BROWSER, TERMINAL, AGENT_API }
 
+@Serializable
+data class ProxyRotationSettings(
+    val enabled: Boolean = false,
+    val intervalMinutes: Int = 10,
+    val browserProfileIds: List<String> = emptyList(),
+    val terminalProfileIds: List<String> = emptyList(),
+    val agentApiProfileIds: List<String> = emptyList(),
+) {
+    fun profileIds(scope: ProxyScope): List<String> = when (scope) {
+        ProxyScope.BROWSER -> browserProfileIds
+        ProxyScope.TERMINAL -> terminalProfileIds
+        ProxyScope.AGENT_API -> agentApiProfileIds
+    }
+}
+
+/** Pure selection policy; [pick] is injectable so tests never need a live proxy or nondeterministic RNG. */
+object ProxyRotationPolicy {
+    fun nextProfileId(
+        currentId: String?,
+        candidates: List<String>,
+        profiles: List<ProxyProfile>,
+        scope: ProxyScope,
+        pick: Int,
+    ): String? {
+        val byId = profiles.associateBy { it.id }
+        val eligible = candidates.distinct().filter { id ->
+            val profile = byId[id] ?: return@filter false
+            ProxyValidator.validate(profile, scope).valid
+        }
+        val alternatives = eligible.filterNot { it == currentId }
+        if (alternatives.isEmpty()) return null
+        return alternatives[Math.floorMod(pick, alternatives.size)]
+    }
+}
+
 data class ProxyCredentials(val username: String, val password: String) {
     override fun toString(): String = "ProxyCredentials(username=[redacted], password=[redacted])"
 }
@@ -77,6 +112,12 @@ class ProxyStore(private val context: Context) {
     private val prefs = context.applicationContext.getSharedPreferences("proxy_profiles", Context.MODE_PRIVATE)
     private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
     private val keyAlias = "cueopen.proxy.credentials"
+    fun rotationSettings(): ProxyRotationSettings = runCatching {
+        json.decodeFromString<ProxyRotationSettings>(prefs.getString("rotation", "") ?: "")
+    }.getOrDefault(ProxyRotationSettings()).normalized()
+    fun saveRotationSettings(value: ProxyRotationSettings) {
+        prefs.edit().putString("rotation", json.encodeToString(value.normalized())).apply()
+    }
     fun profiles(): List<ProxyProfile> = runCatching { json.decodeFromString<List<ProxyProfile>>(prefs.getString("profiles", "[]")!!) }.getOrDefault(emptyList())
     fun saveProfiles(value: List<ProxyProfile>) { prefs.edit().putString("profiles", json.encodeToString(value)).apply() }
     fun credentials(id: String): ProxyCredentials? = prefs.getString("credential.$id", null)?.let { decrypt(it) }
@@ -91,3 +132,10 @@ class ProxyStore(private val context: Context) {
     private fun encrypt(value: String): String { val c = Cipher.getInstance("AES/GCM/NoPadding"); c.init(Cipher.ENCRYPT_MODE, secretKey()); return Base64.encodeToString(c.iv + c.doFinal(value.toByteArray(Charsets.UTF_8)), Base64.NO_WRAP) }
     private fun decrypt(value: String): ProxyCredentials? = runCatching { val raw = Base64.decode(value, Base64.NO_WRAP); val c = Cipher.getInstance("AES/GCM/NoPadding"); c.init(Cipher.DECRYPT_MODE, secretKey(), GCMParameterSpec(128, raw.copyOfRange(0, 12))); val parts = String(c.doFinal(raw.copyOfRange(12, raw.size)), Charsets.UTF_8).split('\u0000', limit = 2); ProxyCredentials(parts[0], parts[1]) }.getOrNull()
 }
+
+private fun ProxyRotationSettings.normalized(): ProxyRotationSettings = copy(
+    intervalMinutes = intervalMinutes.coerceIn(1, 1_440),
+    browserProfileIds = browserProfileIds.distinct().take(100),
+    terminalProfileIds = terminalProfileIds.distinct().take(100),
+    agentApiProfileIds = agentApiProfileIds.distinct().take(100),
+)

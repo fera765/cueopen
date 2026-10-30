@@ -9,6 +9,7 @@ import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.*
@@ -20,6 +21,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -361,8 +363,30 @@ fun ProxyScreen(nav: NavController) {
     val state by app.store.state.collectAsStateWithLifecycle()
     val browserProxyStatus by app.browserProxyStatus.collectAsStateWithLifecycle()
     var profiles by remember { mutableStateOf(app.proxyStore.profiles()) }
+    var rotation by remember { mutableStateOf(app.proxyStore.rotationSettings()) }
+    var intervalText by remember(rotation.intervalMinutes) { mutableStateOf(rotation.intervalMinutes.toString()) }
     var editing by remember { mutableStateOf<dev.cueopen.app.proxy.ProxyProfile?>(null) }
-    fun save(p: dev.cueopen.app.proxy.ProxyProfile) { profiles = (profiles.filterNot { it.id == p.id } + p); app.proxyStore.saveProfiles(profiles); editing = null; app.applyBrowserProxy() }
+    fun saveRotation(next: dev.cueopen.app.proxy.ProxyRotationSettings) {
+        rotation = next
+        intervalText = next.intervalMinutes.toString()
+        app.configureProxyRotation(next)
+    }
+    fun selectProxy(scope: dev.cueopen.app.proxy.ProxyScope, id: String?) {
+        app.store.updateSettings { s -> when (scope) {
+            dev.cueopen.app.proxy.ProxyScope.BROWSER -> s.copy(browserProxyId = id)
+            dev.cueopen.app.proxy.ProxyScope.TERMINAL -> s.copy(terminalProxyId = id)
+            dev.cueopen.app.proxy.ProxyScope.AGENT_API -> s.copy(agentApiProxyId = id)
+        } }
+        app.connectorDebugLog.recordEvent("proxy", "selection", "scope=${scope.name} profile_id=${id ?: "direct"}")
+        if (scope == dev.cueopen.app.proxy.ProxyScope.BROWSER) app.applyBrowserProxy()
+    }
+    fun save(p: dev.cueopen.app.proxy.ProxyProfile) {
+        profiles = (profiles.filterNot { it.id == p.id } + p)
+        app.proxyStore.saveProfiles(profiles)
+        app.connectorDebugLog.recordEvent("proxy", "profile", "saved profile_id=${p.id}")
+        editing = null
+        app.applyBrowserProxy()
+    }
     Scaffold(containerColor = c.bg, topBar = { CueTopBar("Proxy", { nav.popBackStack() }) }) { pad ->
         Column(Modifier.padding(pad).verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             Text("Selecione um perfil por escopo. O padrão é direto, sem proxy.", color = c.ink2, fontSize = 13.sp)
@@ -372,9 +396,9 @@ fun ProxyScreen(nav: NavController) {
             Text("Status Browser: $browserProxyStatus", color = if (browserProxyStatus.startsWith("Falha") || browserProxyStatus.startsWith("Indisponível") || browserProxyStatus.startsWith("Navegação bloqueada")) c.err else c.ink2, fontSize = 12.sp)
             Text("Terminal: aplica variáveis de proxy ao shell e ao bootstrap do Sandbox; HTTP/SOCKS, sem credenciais. O suporte depende do programa de linha de comando.", color = c.ink2, fontSize = 12.sp)
             Text("Agent/API: modelo e próximo login/reconnect IQ Option. HTTP CONNECT autenticado usa Basic para o proxy em conexão não cifrada; use apenas proxy/rede confiáveis. SOCKS autenticado não é suportado. WebSocket ativo exige reconexão.", color = c.ink2, fontSize = 12.sp)
-            ProxyScopeRow("Browser", state.settings.browserProxyId, profiles, dev.cueopen.app.proxy.ProxyScope.BROWSER) { id -> app.store.updateSettings { it.copy(browserProxyId = id) }; app.applyBrowserProxy() }
-            ProxyScopeRow("Terminal", state.settings.terminalProxyId, profiles, dev.cueopen.app.proxy.ProxyScope.TERMINAL) { id -> app.store.updateSettings { it.copy(terminalProxyId = id) } }
-            ProxyScopeRow("Agent/API", state.settings.agentApiProxyId, profiles, dev.cueopen.app.proxy.ProxyScope.AGENT_API) { id -> app.store.updateSettings { it.copy(agentApiProxyId = id) } }
+            ProxyScopeRow("Browser", state.settings.browserProxyId, profiles, dev.cueopen.app.proxy.ProxyScope.BROWSER) { id -> selectProxy(dev.cueopen.app.proxy.ProxyScope.BROWSER, id) }
+            ProxyScopeRow("Terminal", state.settings.terminalProxyId, profiles, dev.cueopen.app.proxy.ProxyScope.TERMINAL) { id -> selectProxy(dev.cueopen.app.proxy.ProxyScope.TERMINAL, id) }
+            ProxyScopeRow("Agent/API", state.settings.agentApiProxyId, profiles, dev.cueopen.app.proxy.ProxyScope.AGENT_API) { id -> selectProxy(dev.cueopen.app.proxy.ProxyScope.AGENT_API, id) }
             listOf("Browser" to state.settings.browserProxyId to dev.cueopen.app.proxy.ProxyScope.BROWSER, "Terminal" to state.settings.terminalProxyId to dev.cueopen.app.proxy.ProxyScope.TERMINAL, "Agent/API" to state.settings.agentApiProxyId to dev.cueopen.app.proxy.ProxyScope.AGENT_API).forEach { entry ->
                 val selectedId = entry.first.second
                 val selected = selectedId?.let { id -> profiles.firstOrNull { it.id == id } }
@@ -384,19 +408,100 @@ fun ProxyScreen(nav: NavController) {
                     if (!check.valid) Text("${entry.first.first}: ${check.message}", color = c.err, fontSize = 12.sp)
                 }
             }
+            CueCard {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("Rotação automática", fontWeight = FontWeight.SemiBold, fontSize = 16.sp)
+                    Text("Desligada por padrão. Quando habilitada, alterna sem repetição entre perfis válidos e não altera conexões long-lived já abertas.", color = c.ink2, fontSize = 12.sp)
+                    ToggleRow("Habilitar rotação", "A rotação começa após o intervalo definido.", rotation.enabled) { enabled ->
+                        saveRotation(rotation.copy(enabled = enabled))
+                    }
+                    OutlinedTextField(
+                        intervalText,
+                        { intervalText = it.filter(Char::isDigit).take(4) },
+                        label = { Text("Intervalo em minutos (1–1440)") },
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    OutlinedButton(onClick = {
+                        val minutes = intervalText.toIntOrNull()?.takeIf { it in 1..1_440 }
+                        if (minutes == null) android.widget.Toast.makeText(nav.context, "Informe um intervalo entre 1 e 1440 minutos.", android.widget.Toast.LENGTH_SHORT).show()
+                        else saveRotation(rotation.copy(intervalMinutes = minutes))
+                    }) { Text("Aplicar intervalo") }
+                    ProxyRotationPool("Pool Browser", dev.cueopen.app.proxy.ProxyScope.BROWSER, profiles, rotation.browserProfileIds) { ids ->
+                        saveRotation(rotation.copy(browserProfileIds = ids))
+                    }
+                    ProxyRotationPool("Pool Terminal", dev.cueopen.app.proxy.ProxyScope.TERMINAL, profiles, rotation.terminalProfileIds) { ids ->
+                        saveRotation(rotation.copy(terminalProfileIds = ids))
+                    }
+                    ProxyRotationPool("Pool Agent/API", dev.cueopen.app.proxy.ProxyScope.AGENT_API, profiles, rotation.agentApiProfileIds) { ids ->
+                        saveRotation(rotation.copy(agentApiProfileIds = ids))
+                    }
+                    Text("A troca de perfil vale para novas chamadas HTTP/WebSocket e novos comandos do Terminal. WebSockets ativos da IQ Option não são reiniciados automaticamente; reconectar é uma ação separada.", color = c.ink3, fontSize = 11.sp)
+                }
+            }
             profiles.forEach { p ->
                 CueCard {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Column(Modifier.weight(1f)) { Text(p.name, fontWeight = FontWeight.SemiBold); Text("${p.scheme.name} ${p.host}:${p.port}" + if (p.hasCredentials) " · credencial protegida" else "", fontSize = 12.sp, color = c.ink2) }
                         TextButton({ editing = p }) { Text("Editar") }
-                        TextButton({ profiles = profiles.filterNot { it.id == p.id }; app.proxyStore.saveProfiles(profiles); app.proxyStore.saveCredentials(p.id, null); app.store.updateSettings { it.copy(browserProxyId = if (it.browserProxyId == p.id) null else it.browserProxyId, terminalProxyId = if (it.terminalProxyId == p.id) null else it.terminalProxyId, agentApiProxyId = if (it.agentApiProxyId == p.id) null else it.agentApiProxyId) }; app.applyBrowserProxy() }) { Text("Remover", color = c.err) }
+                        TextButton({
+                            profiles = profiles.filterNot { it.id == p.id }
+                            app.proxyStore.saveProfiles(profiles)
+                            app.proxyStore.saveCredentials(p.id, null)
+                            app.store.updateSettings { it.copy(browserProxyId = if (it.browserProxyId == p.id) null else it.browserProxyId, terminalProxyId = if (it.terminalProxyId == p.id) null else it.terminalProxyId, agentApiProxyId = if (it.agentApiProxyId == p.id) null else it.agentApiProxyId) }
+                            saveRotation(rotation.copy(
+                                browserProfileIds = rotation.browserProfileIds - p.id,
+                                terminalProfileIds = rotation.terminalProfileIds - p.id,
+                                agentApiProfileIds = rotation.agentApiProfileIds - p.id,
+                            ))
+                            app.connectorDebugLog.recordEvent("proxy", "profile", "removed profile_id=${p.id}")
+                            app.applyBrowserProxy()
+                        }) { Text("Remover", color = c.err) }
                     }
                 }
             }
             PillButton("Adicionar perfil", Icons.Rounded.Add, modifier = Modifier.fillMaxWidth()) { editing = dev.cueopen.app.proxy.ProxyProfile() }
+            ConnectorDebugSection("proxy")
         }
     }
     editing?.let { p -> ProxyEditor(p, { save(it) }, { editing = null }) }
+}
+
+@Composable
+private fun ProxyRotationPool(
+    title: String,
+    scope: dev.cueopen.app.proxy.ProxyScope,
+    profiles: List<dev.cueopen.app.proxy.ProxyProfile>,
+    selectedIds: List<String>,
+    onSelectionChange: (List<String>) -> Unit,
+) {
+    val c = Cue.c
+    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        Text(title, fontWeight = FontWeight.Medium, fontSize = 13.sp)
+        val eligible = profiles.filter { dev.cueopen.app.proxy.ProxyValidator.validate(it, scope).valid }
+        if (eligible.isEmpty()) Text("Nenhum perfil válido para este escopo.", color = c.ink3, fontSize = 11.sp)
+        eligible.forEach { profile ->
+            val checked = profile.id in selectedIds
+            Row(
+                Modifier.fillMaxWidth().clickable {
+                    val updated = if (checked) selectedIds - profile.id else selectedIds + profile.id
+                    onSelectionChange(updated.distinct())
+                },
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Checkbox(checked = checked, onCheckedChange = { value ->
+                    val updated = if (value) selectedIds + profile.id else selectedIds - profile.id
+                    onSelectionChange(updated.distinct())
+                })
+                Column {
+                    Text(profile.name, fontSize = 12.sp)
+                    Text("${profile.scheme.name} · ${profile.host}:${profile.port}", color = c.ink3, fontSize = 10.sp)
+                }
+            }
+        }
+        if (selectedIds.size < 2) Text("Selecione ao menos 2 perfis para alternar neste escopo.", color = c.ink3, fontSize = 10.sp)
+    }
 }
 
 @Composable

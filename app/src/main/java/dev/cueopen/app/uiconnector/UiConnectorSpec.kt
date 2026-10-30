@@ -1,5 +1,8 @@
 package dev.cueopen.app.uiconnector
 
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.emptyFlow
+
 /*
  * CueOpen UI Connector SDK — contrato público (open source).
  *
@@ -114,10 +117,19 @@ interface UiConnector {
     val spec: UiConnectorSpec
     val isLoggedIn: Boolean
 
+    /** Eventos de estado reais (WebSocket/listener); vazio quando o conector não possui push. */
+    val stateChanges: Flow<Unit> get() = emptyFlow()
+
+    /** Sem push: usa refresh com backoff limitado só enquanto a tela está visível. */
+    val supportsPushUpdates: Boolean get() = false
+
+    /** Polling complementar opcional para partes do estado que não possuem eventos push. */
+    val fallbackRefreshMs: Long? get() = if (supportsPushUpdates) null else refreshMs()
+
     suspend fun login(credentials: Map<String, String>): Result<Unit>
     suspend fun logout()
 
-    /** Estado atual para a UI (consultado periodicamente enquanto a tela está aberta). */
+    /** Estado atual para a UI (ao abrir, após evento ou por fallback limitado enquanto visível). */
     suspend fun snapshot(settings: ConnectorSettings): List<UiBlock>
 
     /** Ação disparada pelo USUÁRIO na UI (botões/segmentados). Sem os limites do agente. */

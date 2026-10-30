@@ -12,6 +12,9 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
@@ -82,8 +85,11 @@ interface WsExec {
 }
 
 /** WebSocket real (OkHttp): DNS anti-rede-privada, sem redirecionamentos, ping a cada 20 s. */
-class OkHttpWs(permissive: Boolean = false) : WsExec {
-    private val client: OkHttpClient = OkHttpClient.Builder()
+class OkHttpWs(
+    permissive: Boolean = false,
+    private val clientProvider: ((OkHttpClient) -> OkHttpClient)? = null,
+) : WsExec {
+    private val baseClient: OkHttpClient = OkHttpClient.Builder()
         .followRedirects(false)
         .followSslRedirects(false)
         .connectTimeout(15, TimeUnit.SECONDS)
@@ -92,9 +98,11 @@ class OkHttpWs(permissive: Boolean = false) : WsExec {
         .apply { if (!permissive) dns(SafeDns()) }
         .build()
 
+    private fun client(): OkHttpClient = clientProvider?.invoke(baseClient) ?: baseClient
+
     override fun open(url: String, headers: Map<String, String>, listener: WsListener): WsConn {
         val req = Request.Builder().url(url).apply { headers.forEach { (k, v) -> header(k, v) } }.build()
-        val ws = client.newWebSocket(req, object : WebSocketListener() {
+        val ws = client().newWebSocket(req, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) = listener.onOpen()
             override fun onMessage(webSocket: WebSocket, text: String) = listener.onText(text)
             override fun onMessage(webSocket: WebSocket, bytes: ByteString) = listener.onText(bytes.utf8())
@@ -131,6 +139,7 @@ class RealtimeSession(
     private val hosts: Set<String>,
     private val ws: WsExec,
     private val permissive: Boolean = false,
+    private val connectorId: String = "custom",
 ) {
     companion object {
         const val MAX_MSG = 1024 * 1024
@@ -141,6 +150,8 @@ class RealtimeSession(
     private class Waiter(val match: Map<String, String>, val result: CompletableDeferred<JsonElement>)
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val _updates = MutableSharedFlow<Unit>(extraBufferCapacity = 1, onBufferOverflow = BufferOverflow.DROP_OLDEST)
+    val updates: SharedFlow<Unit> = _updates
     private val lock = Mutex()
     private val state = ConcurrentHashMap<String, String>()
     private val cols = ConcurrentHashMap<String, LinkedHashMap<String, JsonElement>>()
@@ -156,6 +167,14 @@ class RealtimeSession(
         private set
     val received = AtomicLong(0)
     private var seq = 0L
+
+    private fun debugEvent(summary: String, endpoint: String? = null) {
+        runCatching { dev.cueopen.app.CueApp.instance.connectorDebugLog.recordEvent(connectorId, "websocket", summary, endpoint) }
+    }
+
+    private fun debugFailure(error: Throwable, endpoint: String? = null) {
+        runCatching { dev.cueopen.app.CueApp.instance.connectorDebugLog.recordFailure(connectorId, "websocket", error, endpoint) }
+    }
 
     /** Variáveis de estado para os modelos: rt.<chave>. */
     fun vars(): Map<String, String> = state.entries.associate { "rt." + it.key to it.value } +
@@ -186,21 +205,30 @@ class RealtimeSession(
         val gate = CompletableDeferred<String?>()
         conn = try {
             ws.open(url, headers, object : WsListener {
-                override fun onOpen() { if (myGen == generation) gate.complete(null) }
+                override fun onOpen() {
+                    if (myGen == generation) {
+                        gate.complete(null)
+                        debugEvent("connected", url)
+                        _updates.tryEmit(Unit)
+                    }
+                }
                 override fun onText(text: String) { if (myGen == generation) handle(text) }
                 override fun onClosed(reason: String) {
                     if (myGen != generation) return
                     gate.complete(reason)
+                    debugEvent("closed; remote detail omitted")
                     dropped(reason)
                 }
             })
         } catch (t: Throwable) {
             lastError = t.message ?: t.javaClass.simpleName
+            debugFailure(t, url)
             return lastError
         }
         val outcome = withTimeoutOrNull(12_000) { listOf(gate.await()) }
         val err = if (outcome == null) "tempo esgotado ao conectar" else outcome[0]
         if (err != null) {
+            debugEvent(if (outcome == null) "connection timeout" else "connection rejected; remote detail omitted", url)
             conn?.runCatching { close() }
             conn = null
             lastError = err
@@ -208,6 +236,7 @@ class RealtimeSession(
         }
         connected = true
         lastError = null
+        _updates.tryEmit(Unit)
         for (m in def.onOpen) sendRendered(m, emptyMap())
         startHeartbeat(myGen)
         return null
@@ -228,6 +257,7 @@ class RealtimeSession(
     private fun dropped(reason: String) {
         connected = false
         lastError = reason
+        _updates.tryEmit(Unit)
         heartbeatJob?.cancel()
         waiters.forEach { it.result.completeExceptionally(IllegalStateException("conexão caiu: $reason")) }
         waiters.clear()
@@ -299,11 +329,12 @@ class RealtimeSession(
         received.incrementAndGet()
         val msg = ResponseTree.parse(text, null) ?: JsonObject(mapOf("body" to JsonPrimitive(text)))
         for (w in waiters) if (!w.result.isCompleted && matches(msg, w.match)) { w.result.complete(msg); break }
+        var stateChanged = false
         for (r in def.rules) {
             if (!matches(msg, r.match)) continue
             for ((k, path) in r.set) {
                 val v = JsonPath.text(JsonPath.first(msg, path))
-                if (v.isNotEmpty()) state[k] = v.take(4000)
+                if (v.isNotEmpty() && state.put(k, v.take(4000)) != v.take(4000)) stateChanged = true
             }
             if (r.pushTo.isNotEmpty()) {
                 val items = if (r.pushItem == "$") listOf(msg) else JsonPath.select(msg, r.pushItem)
@@ -314,10 +345,12 @@ class RealtimeSession(
                         val k = key.ifEmpty { "#" + (++seq) }
                         col.remove(k)
                         col[k] = item
-                        while (col.size > r.pushMax) col.remove(col.keys.first())
-                    }
+                    while (col.size > r.pushMax) col.remove(col.keys.first())
                 }
+                stateChanged = true
             }
+        }
+        if (stateChanged) _updates.tryEmit(Unit)
         }
     }
 

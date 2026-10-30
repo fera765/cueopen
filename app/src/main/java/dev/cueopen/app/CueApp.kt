@@ -6,6 +6,10 @@ import android.app.NotificationManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
 import dev.cueopen.app.agent.AgentRunner
 import dev.cueopen.app.browser.BrowserHost
 import dev.cueopen.app.data.Store
@@ -32,9 +36,13 @@ class CueApp : Application() {
     lateinit var store: Store; private set
     lateinit var sandbox: Sandbox; private set
     lateinit var proxyStore: ProxyStore; private set
+    val connectorDebugLog: dev.cueopen.app.diag.ConnectorDebugLog by lazy {
+        dev.cueopen.app.diag.ConnectorDebugLog(java.io.File(filesDir, "connector-debug"))
+    }
     private val browsers = java.util.concurrent.ConcurrentHashMap<String, BrowserHost>()
     private val proxyExecutor = Executors.newSingleThreadExecutor { Thread(it, "browser-proxy").apply { isDaemon = true } }
     private val browserProxyGeneration = AtomicLong(0)
+    private var proxyRotationJob: Job? = null
     private val _browserProxyStatus = MutableStateFlow("Aguardando configuração")
     val browserProxyStatus: StateFlow<String> = _browserProxyStatus.asStateFlow()
     /** Cada chat mantém seu próprio WebView, cookies, URL, histórico e estado de rede. */
@@ -66,7 +74,9 @@ class CueApp : Application() {
         }
         store = Store(this)
         proxyStore = ProxyStore(this)
+        connectorDebugLog
         applyBrowserProxy()
+        restartProxyRotation()
         sandbox = Sandbox(this)
         store.onDeleteWorkspace = { sid -> runCatching { sandbox.deleteEnvironment(sid) }; runCatching { sandbox.workspaceFor(sid).deleteRecursively() } }
         llm = OpenRouter { store.settings }
@@ -106,6 +116,60 @@ class CueApp : Application() {
             }
         }
         return builder.build()
+    }
+
+    /** Saves and applies the optional, per-scope rotation policy. Disabled by default. */
+    fun configureProxyRotation(value: dev.cueopen.app.proxy.ProxyRotationSettings) {
+        proxyStore.saveRotationSettings(value)
+        restartProxyRotation()
+    }
+
+    private fun restartProxyRotation() {
+        proxyRotationJob?.cancel()
+        val config = proxyStore.rotationSettings()
+        if (!config.enabled) return
+        if (ProxyScope.entries.all { config.profileIds(it).isEmpty() }) {
+            connectorDebugLog.recordEvent("proxy", "rotation", "enabled but no profile pools are configured")
+            return
+        }
+        proxyRotationJob = applicationScope.launch {
+            while (isActive) {
+                delay(config.intervalMinutes.coerceIn(1, 1_440) * 60_000L)
+                val latest = proxyStore.rotationSettings()
+                if (!latest.enabled) break
+                val profiles = proxyStore.profiles()
+                for (scope in ProxyScope.entries) {
+                    val pool = latest.profileIds(scope)
+                    if (pool.isEmpty()) continue
+                    val current = when (scope) {
+                        ProxyScope.BROWSER -> store.settings.browserProxyId
+                        ProxyScope.TERMINAL -> store.settings.terminalProxyId
+                        ProxyScope.AGENT_API -> store.settings.agentApiProxyId
+                    }
+                    val next = dev.cueopen.app.proxy.ProxyRotationPolicy.nextProfileId(
+                        current, pool, profiles, scope, kotlin.random.Random.nextInt(),
+                    )
+                    if (next == null) {
+                        connectorDebugLog.recordEvent("proxy", "rotation", "no eligible alternate profile for scope=${scope.name}")
+                        continue
+                    }
+                    store.updateSettings { s -> when (scope) {
+                        ProxyScope.BROWSER -> s.copy(browserProxyId = next)
+                        ProxyScope.TERMINAL -> s.copy(terminalProxyId = next)
+                        ProxyScope.AGENT_API -> s.copy(agentApiProxyId = next)
+                    } }
+                    when (scope) {
+                        ProxyScope.BROWSER -> applyBrowserProxy()
+                        ProxyScope.TERMINAL -> Unit // variables are resolved when each terminal command starts
+                        ProxyScope.AGENT_API -> Unit // new HTTP calls and new WebSockets use the new profile; active sockets are not forcibly restarted
+                    }
+                    connectorDebugLog.recordEvent(
+                        "proxy", "rotation",
+                        "scope=${scope.name} selected profile_id=$next; existing long-lived transports are unchanged",
+                    )
+                }
+            }
+        }
     }
 
     /** Android WebView proxy override is process-wide, never per BrowserHost. */

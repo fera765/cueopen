@@ -97,7 +97,9 @@ class GmailConnector(private val ctx: Context) : UiConnector {
     )
 
     private val json = Json { ignoreUnknownKeys = true; isLenient = true }
-    private val http = OkHttpClient.Builder().connectTimeout(15, TimeUnit.SECONDS).readTimeout(25, TimeUnit.SECONDS).followRedirects(false).build()
+    private val baseHttp = OkHttpClient.Builder().connectTimeout(15, TimeUnit.SECONDS).readTimeout(25, TimeUnit.SECONDS).followRedirects(false).build()
+    private fun httpClient() = dev.cueopen.app.CueApp.instance.proxyHttpClient(dev.cueopen.app.proxy.ProxyScope.AGENT_API, baseHttp)
+    private fun debugLog() = runCatching { dev.cueopen.app.CueApp.instance.connectorDebugLog }.getOrNull()
     private val mutex = Mutex()
 
     @Volatile private var clientId: String? = null
@@ -124,12 +126,14 @@ class GmailConnector(private val ctx: Context) : UiConnector {
     // ------------------------------------------------------------------ OAuth
     override suspend fun login(credentials: Map<String, String>): Result<Unit> = mutex.withLock {
         try {
+            debugLog()?.rememberSecrets("gmail", listOfNotNull(credentials["client_secret"], credentials["refresh_token"]))
             val id = credentials["client_id"]?.trim().orEmpty()
             val sec = credentials["client_secret"]?.trim().orEmpty()
             if (!id.endsWith(".apps.googleusercontent.com")) return@withLock Result.failure(IllegalArgumentException("Client ID inválido: deve terminar em .apps.googleusercontent.com (Google Cloud → APIs e serviços → Credenciais → ID do cliente OAuth do tipo App para computador)."))
             if (sec.isEmpty()) return@withLock Result.failure(IllegalArgumentException("Informe o client secret do mesmo ID do cliente OAuth."))
             val saved = credentials["refresh_token"]?.trim().orEmpty()
             val rt = if (saved.isNotEmpty()) saved else interactive(id, sec)
+            debugLog()?.rememberSecrets("gmail", listOf(id, sec, rt))
             clientId = id; clientSecret = sec; refreshToken = rt
             accessToken = null; accessExpiry = 0
             refreshAccess()
@@ -139,6 +143,7 @@ class GmailConnector(private val ctx: Context) : UiConnector {
             throw c
         } catch (t: Throwable) {
             refreshToken = null; accessToken = null
+            debugLog()?.recordFailure("gmail", "oauth-login", t)
             Result.failure(IllegalStateException(Redactor.redact(t.message ?: t.javaClass.simpleName, listOfNotNull(credentials["client_secret"], credentials["refresh_token"]))))
         }
     }
@@ -210,19 +215,28 @@ class GmailConnector(private val ctx: Context) : UiConnector {
     }
 
     private fun tokenCall(body: FormBody): JsonObject {
-        http.newCall(Request.Builder().url(TOKEN_URL).post(body).build()).execute().use { r ->
-            val txt = r.body?.string().orEmpty()
-            val o = runCatching { json.parseToJsonElement(txt).jsonObject }.getOrNull() ?: JsonObject(emptyMap())
-            if (!r.isSuccessful) {
-                val err = o["error"]?.jsonPrimitive?.contentOrNull ?: "HTTP ${r.code}"
-                val hint = when (err) {
-                    "invalid_grant" -> " — autorização expirada ou revogada; faça login de novo (em projetos em modo Teste o Google expira a autorização em 7 dias)."
-                    "invalid_client", "unauthorized_client" -> " — confira o client ID/secret (tipo App para computador)."
-                    else -> ""
+        val req = Request.Builder().url(TOKEN_URL).post(body).build()
+        val started = System.nanoTime()
+        try {
+            httpClient().newCall(req).execute().use { r ->
+                val txt = r.body?.string().orEmpty()
+                debugLog()?.recordHttp("gmail", req.method, req.url.toString(), req.headers.names(),
+                    (System.nanoTime() - started) / 1_000_000L, r.code, "OAuth token response; body omitted")
+                val o = runCatching { json.parseToJsonElement(txt).jsonObject }.getOrNull() ?: JsonObject(emptyMap())
+                if (!r.isSuccessful) {
+                    val err = o["error"]?.jsonPrimitive?.contentOrNull ?: "HTTP ${r.code}"
+                    val hint = when (err) {
+                        "invalid_grant" -> " — autorização expirada ou revogada; faça login de novo (em projetos em modo Teste o Google expira a autorização em 7 dias)."
+                        "invalid_client", "unauthorized_client" -> " — confira o client ID/secret (tipo App para computador)."
+                        else -> ""
+                    }
+                    error("Google recusou o token: $err$hint")
                 }
-                error("Google recusou o token: $err$hint")
+                return o
             }
-            return o
+        } catch (t: Throwable) {
+            debugLog()?.recordFailure("gmail", "oauth-token", t, req.url.toString(), req.method, (System.nanoTime() - started) / 1_000_000L)
+            throw t
         }
     }
 
@@ -232,6 +246,7 @@ class GmailConnector(private val ctx: Context) : UiConnector {
             .add("refresh_token", refreshToken ?: error("sem login")).add("grant_type", "refresh_token").build()
         val o = tokenCall(body)
         accessToken = o["access_token"]?.jsonPrimitive?.contentOrNull ?: error("resposta sem access_token")
+        debugLog()?.rememberSecrets("gmail", listOfNotNull(clientId, clientSecret, refreshToken, accessToken))
         val exp = o["expires_in"]?.jsonPrimitive?.contentOrNull?.toLongOrNull() ?: 3600
         accessExpiry = System.currentTimeMillis() + (exp - 60) * 1000
     }
@@ -244,14 +259,22 @@ class GmailConnector(private val ctx: Context) : UiConnector {
 
     private suspend fun call(build: (Request.Builder) -> Request.Builder, retry: Boolean = true): JsonObject = withContext(Dispatchers.IO) {
         val req = build(Request.Builder()).header("Authorization", "Bearer ${token()}").build()
-        http.newCall(req).execute().use { r ->
-            val txt = r.body?.string().orEmpty()
-            if (r.code == 401 && retry) { accessToken = null; return@withContext call(build, false) }
-            if (!r.isSuccessful) {
-                val msg = runCatching { json.parseToJsonElement(txt).jsonObject["error"]?.jsonObject?.get("message")?.jsonPrimitive?.contentOrNull }.getOrNull()
-                error("Gmail API HTTP ${r.code}: ${msg ?: txt.take(200)}")
+        val started = System.nanoTime()
+        try {
+            httpClient().newCall(req).execute().use { r ->
+                val txt = r.body?.string().orEmpty()
+                debugLog()?.recordHttp("gmail", req.method, req.url.toString(), req.headers.names(),
+                    (System.nanoTime() - started) / 1_000_000L, r.code, "Gmail API response; body and message omitted")
+                if (r.code == 401 && retry) { accessToken = null; return@withContext call(build, false) }
+                if (!r.isSuccessful) {
+                    val msg = runCatching { json.parseToJsonElement(txt).jsonObject["error"]?.jsonObject?.get("message")?.jsonPrimitive?.contentOrNull }.getOrNull()
+                    error("Gmail API HTTP ${r.code}: ${msg ?: txt.take(200)}")
+                }
+                runCatching { json.parseToJsonElement(txt).jsonObject }.getOrDefault(JsonObject(emptyMap()))
             }
-            runCatching { json.parseToJsonElement(txt).jsonObject }.getOrDefault(JsonObject(emptyMap()))
+        } catch (t: Throwable) {
+            if (t !is kotlinx.coroutines.CancellationException) debugLog()?.recordFailure("gmail", "api", t, req.url.toString(), req.method, (System.nanoTime() - started) / 1_000_000L)
+            throw t
         }
     }
 
@@ -262,7 +285,12 @@ class GmailConnector(private val ctx: Context) : UiConnector {
         refreshToken = null; accessToken = null; email = ""
         if (rt != null) runCatching {
             withContext(Dispatchers.IO) {
-                http.newCall(Request.Builder().url("https://oauth2.googleapis.com/revoke").post(FormBody.Builder().add("token", rt).build()).build()).execute().close()
+                val req = Request.Builder().url("https://oauth2.googleapis.com/revoke").post(FormBody.Builder().add("token", rt).build()).build()
+                val started = System.nanoTime()
+                httpClient().newCall(req).execute().use { r ->
+                    debugLog()?.recordHttp("gmail", req.method, req.url.toString(), req.headers.names(),
+                        (System.nanoTime() - started) / 1_000_000L, r.code, "OAuth revoke; body omitted")
+                }
             }
         }
     }

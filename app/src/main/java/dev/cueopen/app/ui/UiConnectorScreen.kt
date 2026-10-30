@@ -25,6 +25,9 @@ import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.repeatOnLifecycle
 import androidx.navigation.NavController
 import dev.cueopen.app.CueApp
 import dev.cueopen.app.ui.theme.Cue
@@ -33,8 +36,14 @@ import dev.cueopen.app.uiconnector.SettingType
 import dev.cueopen.app.uiconnector.Tone
 import dev.cueopen.app.uiconnector.UiBlock
 import dev.cueopen.app.uiconnector.UiConnector
+import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 @Composable
 private fun toneColor(t: Tone): Color {
@@ -160,6 +169,7 @@ fun UiConnectorScreen(nav: NavController, id: String) {
     val connector = hub.get(id)
     if (connector == null) { LaunchedEffect(Unit) { nav.popBackStack() }; return }
     val scope = rememberCoroutineScope()
+    val lifecycleOwner = LocalLifecycleOwner.current
 
     var loggedIn by remember { mutableStateOf(connector.isLoggedIn) }
     var blocks by remember { mutableStateOf<List<UiBlock>>(emptyList()) }
@@ -171,9 +181,16 @@ fun UiConnectorScreen(nav: NavController, id: String) {
     var enabled by remember { mutableStateOf(hub.enabled(id)) }
     var agentRequired by remember { mutableStateOf(hub.agentRequired(id)) }
 
-    suspend fun refresh() {
-        blocks = runCatching { connector.snapshot(hub.settings(connector)) }
-            .getOrElse { listOf(UiBlock.Note(it.message ?: it.javaClass.simpleName, Tone.BAD)) }
+    val refreshMutex = remember(id) { Mutex() }
+    suspend fun refresh(): Boolean = refreshMutex.withLock {
+        val next = runCatching { connector.snapshot(hub.settings(connector)) }
+            .getOrElse {
+                CueApp.instance.connectorDebugLog.recordFailure(id, "snapshot", it)
+                listOf(UiBlock.Note(it.message ?: it.javaClass.simpleName, Tone.BAD))
+            }
+        val changed = next != blocks
+        if (changed) blocks = next
+        changed
     }
 
     // Reconecta sozinho com as credenciais do cofre ao abrir a tela.
@@ -184,15 +201,34 @@ fun UiConnectorScreen(nav: NavController, id: String) {
             busy = false
         }
     }
-    // Painel ao vivo: atualiza a cada 5 s enquanto logado e a tela está aberta.
-    // Sincronização contínua: segue o estado REAL do conector (o agente pode ter entrado/operado em segundo plano)
-    // e usa o intervalo pedido pelo conector (tempo real: 1 s com operação aberta).
-    LaunchedEffect(id) {
-        while (true) {
-            val live = connector.isLoggedIn
-            if (live != loggedIn) loggedIn = live
-            if (live) refresh()
-            delay(connector.refreshMs().coerceIn(500L, 60_000L))
+    // A tela observa eventos do conector enquanto visível. Sem push, usa fallback
+    // exponencial limitado; não mantém ciclo de atualização oculto em background.
+    LaunchedEffect(id, loggedIn, lifecycleOwner) {
+        lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
+            coroutineScope {
+                if (connector.isLoggedIn) {
+                    loggedIn = true
+                    refresh()
+                }
+                launch {
+                    connector.stateChanges.collect {
+                        val live = connector.isLoggedIn
+                        if (live != loggedIn) loggedIn = live
+                        if (live) refresh()
+                    }
+                }
+                val baseInterval = connector.fallbackRefreshMs?.coerceIn(5_000L, 60_000L) ?: awaitCancellation()
+                var interval = baseInterval
+                while (isActive) {
+                    delay(interval)
+                    val live = connector.isLoggedIn
+                    if (live != loggedIn) loggedIn = live
+                    if (live) {
+                        val changed = refresh()
+                        interval = if (changed) baseInterval else (interval * 2).coerceAtMost(60_000L)
+                    } else interval = baseInterval
+                }
+            }
         }
     }
 
@@ -298,6 +334,7 @@ fun UiConnectorScreen(nav: NavController, id: String) {
                     fontSize = 11.sp, color = c.ink3,
                 )
             }
+            item { ConnectorDebugSection(id) }
         }
     }
 }

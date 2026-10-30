@@ -2,6 +2,7 @@ package dev.cueopen.app.proxy
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -47,5 +48,28 @@ class ProxyModelsTest {
         val sanitized = ProxyEnvironment.sanitizeForDisplay(value)
         assertFalse(sanitized.contains("secret"))
         assertFalse(ProxyEnvironment.sanitizeForDisplay("socks5h://user:secret@proxy.example:1080").contains("secret"))
+    }
+
+    @Test fun rotationIsOffByDefaultAndNeverRepeatsCurrentProfile() {
+        assertFalse(ProxyRotationSettings().enabled)
+        val second = profile.copy(id = "proxy-second", name = "Second", host = "proxy2.example")
+        assertEquals("proxy-second", ProxyRotationPolicy.nextProfileId(
+            profile.id, listOf(profile.id, second.id), listOf(profile, second), ProxyScope.BROWSER, pick = 0,
+        ))
+        assertNull(ProxyRotationPolicy.nextProfileId(
+            profile.id, listOf(profile.id), listOf(profile), ProxyScope.BROWSER, pick = 123,
+        ))
+    }
+
+    @Test fun rotationExcludesProfilesInvalidForTheSelectedScope() {
+        val credentialed = profile.copy(id = "credentialed", hasCredentials = true)
+        assertNull(ProxyRotationPolicy.nextProfileId(
+            currentId = "direct", candidates = listOf(credentialed.id), profiles = listOf(credentialed),
+            scope = ProxyScope.BROWSER, pick = 0,
+        ))
+        assertEquals("credentialed", ProxyRotationPolicy.nextProfileId(
+            currentId = null, candidates = listOf(credentialed.id), profiles = listOf(credentialed),
+            scope = ProxyScope.AGENT_API, pick = 0,
+        ))
     }
 }

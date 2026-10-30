@@ -60,11 +60,12 @@ object Connectors {
 
     /** Busca servidores MCP remotos no registro oficial. Usa busca remota e fallback local para versões do registro que não aceitam o parâmetro search. */
     suspend fun searchRegistry(query: String, limit: Int = 30): List<Catalog> = withContext(Dispatchers.IO) {
-        fun request(url: String): String = http.newCall(
-            Request.Builder().url(url).header("Accept", "application/json").build()
-        ).execute().use { r ->
-            if (!r.isSuccessful) error("Registro MCP respondeu HTTP ${r.code}: ${r.body?.string()?.take(180).orEmpty()}")
-            r.body?.string() ?: error("O registro MCP retornou uma resposta vazia.")
+        fun request(url: String): String {
+            val req = Request.Builder().url(url).header("Accept", "application/json").build()
+            return httpCall("mcp-registry", req, "registry response; body omitted").use { r ->
+                if (!r.isSuccessful) error("Registro MCP respondeu HTTP ${r.code}: ${r.body?.string()?.take(180).orEmpty()}")
+                r.body?.string() ?: error("O registro MCP retornou uma resposta vazia.")
+            }
         }
         val base = "https://registry.modelcontextprotocol.io/v0/servers?limit=${limit.coerceIn(1, 100)}"
         val body = if (query.isBlank()) request(base) else runCatching {
@@ -108,7 +109,22 @@ object Connectors {
         }
     }
 
-    private val http = OkHttpClient.Builder().connectTimeout(12, TimeUnit.SECONDS).readTimeout(30, TimeUnit.SECONDS).callTimeout(45, TimeUnit.SECONDS).retryOnConnectionFailure(true).build()
+    private val baseHttp = OkHttpClient.Builder().connectTimeout(12, TimeUnit.SECONDS).readTimeout(30, TimeUnit.SECONDS).callTimeout(45, TimeUnit.SECONDS).retryOnConnectionFailure(true).build()
+    private fun httpClient() = dev.cueopen.app.CueApp.instance.proxyHttpClient(dev.cueopen.app.proxy.ProxyScope.AGENT_API, baseHttp)
+    private fun debugLog() = runCatching { dev.cueopen.app.CueApp.instance.connectorDebugLog }.getOrNull()
+    private fun httpCall(connectorId: String, request: Request, summary: String): Response {
+        val started = System.nanoTime()
+        try {
+            val response = httpClient().newCall(request).execute()
+            debugLog()?.recordHttp(connectorId, request.method, request.url.toString(), request.headers.names(),
+                (System.nanoTime() - started) / 1_000_000L, response.code, summary)
+            return response
+        } catch (t: Throwable) {
+            if (t !is kotlinx.coroutines.CancellationException)
+                debugLog()?.recordFailure(connectorId, "http", t, request.url.toString(), request.method, (System.nanoTime() - started) / 1_000_000L)
+            throw t
+        }
+    }
     private val sessions = java.util.concurrent.ConcurrentHashMap<String, String>() // connectorId -> Mcp-Session-Id
     private val jsonType = "application/json".toMediaType()
     private var rpcId = 1
@@ -119,7 +135,8 @@ object Connectors {
     private fun b64url(b: ByteArray) = Base64.encodeToString(b, Base64.URL_SAFE or Base64.NO_WRAP or Base64.NO_PADDING)
 
     private fun getJson(url: String): JSONObject? = runCatching {
-        http.newCall(Request.Builder().url(url).header("Accept", "application/json").build()).execute().use { r ->
+        val req = Request.Builder().url(url).header("Accept", "application/json").build()
+        httpCall("mcp-oauth", req, "OAuth discovery response; body omitted").use { r ->
             if (r.isSuccessful) JSONObject(r.body!!.string()) else null
         }
     }.getOrNull()
@@ -159,7 +176,8 @@ object Connectors {
             .put("response_types", JSONArray().put("code")).put("application_type", "native")
             .put("token_endpoint_auth_method", "none")
             .put("scope", prm?.optJSONArray("scopes_supported")?.let { a -> (0 until a.length()).joinToString(" ") { a.getString(it) } } ?: "")
-        val clientId = http.newCall(Request.Builder().url(regEp).post(reg.toString().toRequestBody(jsonType)).build()).execute().use { r ->
+        val registrationRequest = Request.Builder().url(regEp).post(reg.toString().toRequestBody(jsonType)).build()
+        val clientId = httpCall(c.id, registrationRequest, "OAuth dynamic client registration; body omitted").use { r ->
             val body = r.body?.string().orEmpty()
             if (!r.isSuccessful) error("Registro dinâmico de cliente falhou (HTTP ${r.code}): ${body.take(200)}. O servidor pode exigir cadastro prévio ou não aceitar clientes públicos.")
             JSONObject(body).getString("client_id")
@@ -187,7 +205,8 @@ object Connectors {
         val form = FormBody.Builder().add("grant_type", "authorization_code").add("code", code)
             .add("redirect_uri", redirect).add("client_id", clientId).add("code_verifier", verifier).add("resource", c.url)
             .build()
-        val tok = http.newCall(Request.Builder().url(tokenEp).post(form).header("Accept", "application/json").build()).execute().use { r ->
+        val tokenRequest = Request.Builder().url(tokenEp).post(form).header("Accept", "application/json").build()
+        val tok = httpCall(c.id, tokenRequest, "OAuth token exchange; body omitted").use { r ->
             val body = r.body?.string().orEmpty()
             if (!r.isSuccessful) error("Troca de token falhou (HTTP ${r.code}): ${body.take(200)}")
             JSONObject(body)
@@ -230,7 +249,8 @@ object Connectors {
         val form = FormBody.Builder().add("grant_type", "refresh_token").add("refresh_token", rt).add("client_id", c.clientId ?: "").add("resource", c.url)
             .apply { c.clientSecret?.let { add("client_secret", it) } }.build()
         return runCatching {
-            http.newCall(Request.Builder().url(ep).post(form).header("Accept", "application/json").build()).execute().use { r ->
+            val req = Request.Builder().url(ep).post(form).header("Accept", "application/json").build()
+            httpCall(c.id, req, "OAuth token refresh; body omitted").use { r ->
                 if (!r.isSuccessful) return null
                 val t = JSONObject(r.body!!.string())
                 c.copy(accessToken = t.getString("access_token"), refreshToken = t.optString("refresh_token").ifBlank { rt },
@@ -253,6 +273,7 @@ object Connectors {
     }
 
     private fun rpc(c: Connector, method: String, params: JSONObject?, notify: Boolean = false): JSONObject {
+        debugLog()?.rememberSecrets(c.id, listOfNotNull(c.accessToken, c.refreshToken, c.clientSecret))
         val id = synchronized(this) { rpcId++ }
         val payload = JSONObject().put("jsonrpc", "2.0").put("method", method).apply {
             if (!notify) put("id", id); if (params != null) put("params", params)
@@ -261,7 +282,8 @@ object Connectors {
             .header("Accept", "application/json, text/event-stream").header("MCP-Protocol-Version", "2025-06-18")
         c.accessToken?.let { rb.header("Authorization", "Bearer $it") }
         sessions[c.id]?.let { rb.header("Mcp-Session-Id", it) }
-        http.newCall(rb.build()).execute().use { r ->
+        val request = rb.build()
+        httpCall(c.id, request, "MCP JSON-RPC method=$method; bodies and session IDs omitted").use { r ->
             if (r.code == 401) {
                 val www = r.header("WWW-Authenticate").orEmpty()
                 throw AuthRequired(Regex("resource_metadata=\"([^\"]+)\"").find(www)?.groupValues?.get(1))
@@ -317,6 +339,8 @@ object Connectors {
             val updated = (store.connector(c.id) ?: c).copy(toolsJson = tools.toString(), lastError = null, connectedAt = c.connectedAt ?: System.currentTimeMillis())
             store.upsertConnector(updated); updated
         } catch (t: Throwable) {
+            if (t !is kotlinx.coroutines.CancellationException)
+                debugLog()?.recordFailure(c.id, "tools-refresh", t, c.url, "POST")
             val updated = (store.connector(c.id) ?: c).copy(lastError = t.message)
             store.upsertConnector(updated); updated
         }
@@ -365,8 +389,13 @@ object Connectors {
                     else -> "[${p.optString("type")}]"
                 }
             }
+            if (res.optBoolean("isError")) debugLog()?.recordEvent(c.id, "tool-call", "MCP reported an error; response content omitted")
             (if (res.optBoolean("isError")) "ERRO do conector: " else "") + text.ifBlank { res.toString().take(4000) }
-        } catch (t: Throwable) { "Falha no conector ${c.name}: ${t.message}" }
+        } catch (t: Throwable) {
+            if (t is kotlinx.coroutines.CancellationException) throw t
+            debugLog()?.recordFailure(c.id, "tool-call", t, c.url, "POST")
+            "Falha no conector ${c.name}: ${t.message}"
+        }
     }
 
     @Suppress("unused") private fun JsonElement.str() = toString()

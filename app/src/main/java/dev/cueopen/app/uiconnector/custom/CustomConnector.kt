@@ -13,6 +13,8 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.emptyFlow
 import java.net.URLEncoder
 
 /**
@@ -21,7 +23,9 @@ import java.net.URLEncoder
  */
 class CustomConnector(
     val def: CustomDef,
-    private val http: HttpExec = OkHttpExec(),
+    private val http: HttpExec = OkHttpExec(clientProvider = { base ->
+        dev.cueopen.app.CueApp.instance.proxyHttpClient(dev.cueopen.app.proxy.ProxyScope.AGENT_API, base)
+    }),
     private val permissive: Boolean = false,
     ws: WsExec? = null,
     /** Ponte para terminal/arquivos/browser (capacidades do aparelho). Padrão: nega tudo. */
@@ -30,7 +34,15 @@ class CustomConnector(
     override val spec = def.toSpec()
 
     /** Sessão de tempo real (WebSocket) quando a definição tem o bloco "realtime". */
-    val rt: RealtimeSession? = def.realtime?.let { RealtimeSession(it, def.hosts, ws ?: OkHttpWs(permissive), permissive) }
+    val rt: RealtimeSession? = def.realtime?.let {
+        val socket = ws ?: OkHttpWs(permissive) { base ->
+            dev.cueopen.app.CueApp.instance.proxyHttpClient(dev.cueopen.app.proxy.ProxyScope.AGENT_API, base)
+        }
+        RealtimeSession(it, def.hosts, socket, permissive, def.id)
+    }
+    override val stateChanges: Flow<Unit> get() = rt?.updates ?: emptyFlow()
+    override val supportsPushUpdates: Boolean get() = rt != null
+    override val fallbackRefreshMs: Long? get() = if (rt == null || def.panels.any { it.request != null }) refreshMs() else null
 
     private fun defaultSettings(): Map<String, String> = def.settings.associate { "s.${it.id}" to it.default }
 
@@ -90,6 +102,8 @@ class CustomConnector(
 
     override val isLoggedIn: Boolean get() = creds != null || def.login.fields.isEmpty()
 
+    private fun debugLog() = runCatching { dev.cueopen.app.CueApp.instance.connectorDebugLog }.getOrNull()
+
     private class Reply(val code: Int, val body: String, val json: JsonElement?, val headers: Map<String, List<String>>)
 
     private fun sessionVars(): Map<String, String> = (creds ?: emptyMap()) + extracted + (rt?.vars() ?: emptyMap())
@@ -122,7 +136,17 @@ class CustomConnector(
             else -> Template.renderJson(r.body, ctx).toString()
         }
         val ctype = if (isForm) "application/x-www-form-urlencoded" else "application/json; charset=utf-8"
-        val res = http.exec(HttpReq(r.method, url, headers, body, ctype))
+        val debug = debugLog()
+        debug?.rememberSecrets(def.id, secrets())
+        val started = System.nanoTime()
+        val res = try {
+            http.exec(HttpReq(r.method, url, headers, body, ctype))
+        } catch (t: Throwable) {
+            if (t is kotlinx.coroutines.CancellationException) throw t
+            debug?.recordFailure(def.id, "http", t, url, r.method, (System.nanoTime() - started) / 1_000_000L)
+            throw t
+        }
+        debug?.recordHttp(def.id, r.method, url, headers.keys, (System.nanoTime() - started) / 1_000_000L, res.code, "resposta recebida; corpo omitido")
         val parsed = ResponseTree.parse(res.body, res.headers["content-type"]?.firstOrNull())
         return Reply(res.code, res.body, parsed, res.headers)
     }
@@ -139,6 +163,7 @@ class CustomConnector(
 
     override suspend fun login(credentials: Map<String, String>): Result<Unit> {
         return try {
+            debugLog()?.rememberSecrets(def.id, credentials.values)
             val lr = def.login.request
             val ex = LinkedHashMap<String, String>()
             if (lr != null) {
