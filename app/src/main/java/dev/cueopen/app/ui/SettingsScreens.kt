@@ -125,7 +125,7 @@ fun SettingsScreen(nav: NavController) {
             val diagnosticContext = remember(nav) { nav.context.applicationContext }
             LaunchedEffect(logRefresh) {
                 val diagnosticSnapshot = withContext(Dispatchers.IO) {
-                    val crashText = java.io.File(app.filesDir, "last_crash.txt").takeIf { it.exists() }?.readText()
+                    val crashText = dev.cueopen.app.diag.ErrorLog.lastCrashFile(diagnosticContext).takeIf { it.exists() }?.readText()
                     val bytes = dev.cueopen.app.diag.ErrorLog.sizeBytes(diagnosticContext)
                     val tail = dev.cueopen.app.diag.ErrorLog.readAll(diagnosticContext).takeLast(2500)
                     Triple(crashText, bytes, tail)
@@ -178,15 +178,15 @@ fun SettingsScreen(nav: NavController) {
                         }
                     }) { Icon(Icons.Rounded.ContentCopy, null, Modifier.size(16.dp)); Spacer(Modifier.width(6.dp)); Text("Copiar") }
                 }
-                TextButton(onClick = {
-                    val context = nav.context.applicationContext
-                    scope.launch {
-                        withContext(Dispatchers.IO) { dev.cueopen.app.diag.ErrorLog.clear(context) }
-                        logRefresh++
-                    }
-                }) {
-                    Text("Limpar log", color = c.err)
+            }
+            if (logBytes >= 0L && (logBytes > 0L || lastCrash != null)) TextButton(onClick = {
+                val context = nav.context.applicationContext
+                scope.launch {
+                    withContext(Dispatchers.IO) { dev.cueopen.app.diag.ErrorLog.clear(context) }
+                    logRefresh++
                 }
+            }) {
+                Text("Limpar logs e último erro", color = c.err)
             }
             SectionLabel("Dados")
             SettingsLink(Icons.Rounded.DeleteSweep, "Apagar todas as tarefas", "Agents, skills e knowledge são mantidos", tint = c.err) { confirmClear = true }

@@ -29,6 +29,22 @@ class DeviceCapPolicyTest {
             setOf(DeviceCapPolicy.CALENDAR), emptySet()))
     }
 
+    @Test fun accessibilityToolsRequireThisAgentOptInAndTheGlobalAndroidServiceGrant() {
+        val allAccessibilityTools = setOf(
+            "device_accessibility_open_app", "device_accessibility_read_screen",
+            "device_accessibility_click", "device_accessibility_type",
+            "device_accessibility_scroll", "device_accessibility_back",
+        )
+        assertEquals(emptySet<String>(), DeviceCapPolicy.availableTools(
+            setOf(DeviceCapPolicy.ACCESSIBILITY), emptySet()))
+        assertEquals(emptySet<String>(), DeviceCapPolicy.availableTools(
+            emptySet(), setOf(DeviceCapPolicy.ACCESSIBILITY)))
+        assertEquals(allAccessibilityTools, DeviceCapPolicy.availableTools(
+            setOf(DeviceCapPolicy.ACCESSIBILITY), setOf(DeviceCapPolicy.ACCESSIBILITY)))
+        assertTrue(allAccessibilityTools.all { DeviceCapPolicy.requiredCapability(it) == DeviceCapPolicy.ACCESSIBILITY })
+        assertTrue(allAccessibilityTools.all(DeviceCapPolicy::requiresSystemGrant))
+    }
+
     @Test fun sensitiveReadsStillRequireBothAgentOptInAndAndroidGrant() {
         val tools = DeviceCapPolicy.availableTools(
             setOf(DeviceCapPolicy.CONTACTS, DeviceCapPolicy.BLUETOOTH),

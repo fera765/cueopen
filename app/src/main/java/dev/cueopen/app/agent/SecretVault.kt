@@ -18,6 +18,7 @@ import java.util.concurrent.ConcurrentHashMap
 object SecretVault {
     val NAME = Regex("^[a-z][a-z0-9_]{0,31}$")
     private val REF = Regex("\\{\\{\\s*secret:([a-z][a-z0-9_]{0,31})\\s*\\}\\}")
+    private val EXACT_REF = Regex("^\\s*\\{\\{\\s*secret:([a-z][a-z0-9_]{0,31})\\s*\\}\\}\\s*$")
     private val vault = ConcurrentHashMap<String, LinkedHashMap<String, String>>()
 
     fun put(sessionId: String, values: Map<String, String>) {
@@ -38,6 +39,12 @@ object SecretVault {
         REF.findAll(text).map { it.groupValues[1] }.distinct().filter { !has(sessionId, it) }.toList()
 
     fun references(text: String): List<String> = REF.findAll(text).map { it.groupValues[1] }.distinct().toList()
+
+    /** Returns a vault value only when the entire input is one exact, existing secure reference. */
+    fun resolveExact(sessionId: String, text: String): String? {
+        val name = EXACT_REF.matchEntire(text)?.groupValues?.get(1) ?: return null
+        return get(sessionId, name)
+    }
 
     /** Troca `{{secret:nome}}` pelo valor real (só na execução; nunca devolva o resultado ao modelo sem [redact]). */
     fun resolve(sessionId: String, text: String): String {

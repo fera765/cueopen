@@ -35,6 +35,15 @@ private class RealAndroidCapabilityState(private val ctx: Context) : AndroidCapa
             enabled.split(':').mapNotNull(ComponentName::unflattenFromString)
                 .any { it.packageName == ctx.packageName && it.className == CueNotificationListener::class.java.name }
         }
+        DeviceCaps.ACCESSIBILITY -> {
+            val enabledServices = Settings.Secure.getString(
+                ctx.contentResolver,
+                Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES,
+            ).orEmpty()
+            val expected = ComponentName(ctx, FluwyAccessibilityService::class.java)
+            Settings.Secure.getInt(ctx.contentResolver, Settings.Secure.ACCESSIBILITY_ENABLED, 0) == 1 &&
+                enabledServices.split(':').mapNotNull(ComponentName::unflattenFromString).any { it == expected }
+        }
         DeviceCaps.OVERLAY -> Settings.canDrawOverlays(ctx)
         DeviceCaps.SCREEN -> ScreenCapture.hasPermission()
         else -> true
@@ -57,6 +66,7 @@ object DeviceCaps {
     const val OVERLAY = DeviceCapPolicy.OVERLAY
     const val SCREEN = DeviceCapPolicy.SCREEN
     const val BACKGROUND = DeviceCapPolicy.BACKGROUND
+    const val ACCESSIBILITY = DeviceCapPolicy.ACCESSIBILITY
 
     val all = listOf(
         Cap(BLUETOOTH, "Bluetooth / dispositivos próximos", "Ver dispositivos já pareados. Para parear outro, o Android abre as Configurações e você confirma lá."),
@@ -71,6 +81,7 @@ object DeviceCaps {
         Cap(NOTIF_POST, "Enviar notificações", "Permitir que o agente mostre avisos na barra de status."),
         Cap(OVERLAY, "Sobrepor à tela", "Mostrar um balão flutuante; exige autorização especial nas Configurações."),
         Cap(SCREEN, "Capturar a tela", "Captura pontual após a confirmação do diálogo de projeção do Android."),
+        Cap(ACCESSIBILITY, "Navegar em outros apps", "Permite ler controles/textos visíveis e abrir, tocar, rolar e preencher campos em outros apps. O Android dá o serviço ao app inteiro; somente agentes com esta opção poderão solicitar ações. O conteúdo lido vai ao modelo configurado e pode aparecer no histórico local. Não captura screenshots."),
     )
 
     private fun hasPermission(state: AndroidCapabilityState, permission: String, appOp: String? = null): Boolean =
@@ -123,6 +134,7 @@ object DeviceCaps {
         NOTIF_POST -> if (Build.VERSION.SDK_INT >= 33) hasPermission(state, android.Manifest.permission.POST_NOTIFICATIONS, appOpFor(android.Manifest.permission.POST_NOTIFICATIONS)) else true
         OVERLAY -> state.specialAccessGranted(OVERLAY)
         SCREEN -> state.specialAccessGranted(SCREEN)
+        ACCESSIBILITY -> state.specialAccessGranted(ACCESSIBILITY)
         else -> false
     }
 
@@ -130,12 +142,14 @@ object DeviceCaps {
         id == BLUETOOTH && usesNearbyRuntimePermission() && !granted(ctx, id) -> "Android 12+: conceda Dispositivos próximos (BLUETOOTH_CONNECT) na janela do Android."
         granted(ctx, id) && id == BACKGROUND -> "Autorizada para este agente. Toque para revisar otimização da bateria; o Android ainda pode interromper ciclos."
         granted(ctx, id) && id == PHONE_CALLS -> "Autorizada. Cada chamada abre o discador para sua confirmação."
+        granted(ctx, id) && id == ACCESSIBILITY -> "Serviço ativo no Android; o opt-in deste perfil limita o uso a este agente."
         granted(ctx, id) -> "Concedida no Android"
         runtimePermissions(ctx, id).isNotEmpty() -> "Toque para conceder na janela do Android →"
         id == BLUETOOTH -> "Permissão de Bluetooth indisponível; verifique a versão do Android."
         id == BACKGROUND -> "Ativa para este agente; o sistema pode impor limites de bateria."
         id == PHONE_CALLS -> "Cada chamada será confirmada no discador do Android."
         id == NOTIF_READ -> "Toque para habilitar em Acesso a notificações →"
+        id == ACCESSIBILITY -> "Toque para abrir Configurações → Acessibilidade e ativar Fluwy manualmente →"
         id == OVERLAY -> "Toque para autorizar nas Configurações →"
         id == SCREEN -> "Toque para iniciar a captura e confirmar no Android →"
         else -> "Toque para conceder no Android →"
@@ -145,6 +159,7 @@ object DeviceCaps {
     fun request(ctx: Context, id: String) {
         val intent = when (id) {
             NOTIF_READ -> Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)
+            ACCESSIBILITY -> Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)
             NOTIF_POST -> Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).putExtra(Settings.EXTRA_APP_PACKAGE, ctx.packageName)
             OVERLAY -> Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:${ctx.packageName}"))
             SCREEN -> Intent(ctx, ScreenCapture.RequestActivity::class.java)

@@ -4,6 +4,8 @@ import dev.cueopen.app.data.LlmMessage
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -63,6 +65,36 @@ object ToolCallHistoryNormalizer {
         return output
     }
 
+    /** Redacts typed UI text before assistant tool calls are persisted or sent again to a provider. */
+    fun redactSensitiveToolArguments(raw: String?): String? {
+        if (raw.isNullOrBlank()) return raw
+        return runCatching {
+            val calls = json.parseToJsonElement(raw).jsonArray
+            JsonArray(calls.map(::redactToolCall)).toString()
+        }.getOrNull()
+    }
+
+    private fun redactToolCall(element: JsonElement): JsonElement {
+        val call = runCatching { element.jsonObject }.getOrNull() ?: return element
+        val function = runCatching { call["function"]?.jsonObject }.getOrNull() ?: return element
+        val name = runCatching { function["name"]?.jsonPrimitive?.content }.getOrNull()
+        if (name != "device_accessibility_type") return element
+
+        val originalArguments = function["arguments"]
+        val argumentsAreString = originalArguments is JsonPrimitive && originalArguments.isString
+        val parsedArguments = runCatching {
+            if (argumentsAreString) json.parseToJsonElement(originalArguments!!.jsonPrimitive.content).jsonObject
+            else originalArguments?.jsonObject
+        }.getOrNull()
+        val safeArguments = JsonObject((parsedArguments?.toMutableMap() ?: mutableMapOf()).apply {
+            put("text", JsonPrimitive("[oculto]"))
+        })
+        val safeFunction = JsonObject(function.toMutableMap().apply {
+            put("arguments", if (argumentsAreString || originalArguments == null) JsonPrimitive(safeArguments.toString()) else safeArguments)
+        })
+        return JsonObject(call.toMutableMap().apply { put("function", safeFunction) })
+    }
+
     private data class ParsedCall(val ref: CallRef, val raw: JsonElement)
 
     private fun parseCalls(raw: String): List<ParsedCall> = runCatching {
@@ -72,7 +104,7 @@ object ToolCallHistoryNormalizer {
                 val id = call["id"]?.jsonPrimitive?.content?.takeIf { it.isNotBlank() } ?: return@runCatching null
                 val name = call["function"]?.jsonObject?.get("name")?.jsonPrimitive?.content?.takeIf { it.isNotBlank() }
                     ?: return@runCatching null
-                ParsedCall(CallRef(id, name), element)
+                ParsedCall(CallRef(id, name), redactToolCall(element))
             }.getOrNull()
         }
     }.getOrDefault(emptyList())

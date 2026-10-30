@@ -39,7 +39,10 @@ object JevOrchestrator {
             "device_notifications", "device_notify", "device_screenshot", "device_overlay",
             "device_bluetooth", "device_bluetooth_pair", "device_calendar_read", "device_calendar_create",
             "device_call_log", "device_contacts", "device_location",
-            "device_dial", "device_microphone"
+            "device_dial", "device_microphone",
+            "device_accessibility_open_app", "device_accessibility_read_screen",
+            "device_accessibility_click", "device_accessibility_type",
+            "device_accessibility_scroll", "device_accessibility_back"
         ),
         "connector_builder" to setOf("connector_spec", "connector_validate", "connector_test", "connector_propose"),
     )
@@ -53,7 +56,7 @@ object JevOrchestrator {
         "schedule" to listOf("monitor", "acompanh", "a cada", "agend", "todo dia", "toda hora", "de hora em hora", "continu", "periodic", "lembr", "aguard", "espera", "minutos", "vela"),
         "skills_admin" to listOf("crie uma skill", "criar skill", "nova skill", "salve como skill"),
         "wallet" to listOf("carteira", "wallet", "solana", "sol ", "token", "swap", "saldo", "comprar", "vender", "day trade", "daytrade", "trade", "cripto", "crypto", "memecoin", "stop loss", "take profit", "liquidez", "pump", "jupiter", "usdc"),
-        "device" to listOf("notifica", "print da tela", "captura de tela", "screenshot", "balao", "overlay", "celular", "aparelho", "bluetooth", "dispositivo pareado", "dispositivos pareados", "dispositivos proximos", "calendario", "ligaçao", "ligacao", "chamada", "contato", "contacts", "contact list", "address book", "agenda telefonica", "agenda de contatos", "telefone", "numero do contato", "localizaçao", "localizacao", "microfone"),
+        "device" to listOf("notifica", "print da tela", "captura de tela", "screenshot", "balao", "overlay", "celular", "aparelho", "bluetooth", "dispositivo pareado", "dispositivos pareados", "dispositivos proximos", "calendario", "ligaçao", "ligacao", "chamada", "contato", "contacts", "contact list", "address book", "agenda telefonica", "agenda de contatos", "telefone", "numero do contato", "localizaçao", "localizacao", "microfone", "navegar no aplicativo", "navegar nos apps", "abrir aplicativo", "abrir app", "outro aplicativo", "whatsapp", "spotify"),
         "connector_builder" to listOf("conector", "connector"),
     )
 

@@ -643,6 +643,7 @@ fun DevicePermissionsCard(a: dev.cueopen.app.data.AgentProfile, onChange: (dev.c
     val ctx = LocalContext.current
     var open by remember { mutableStateOf(a.deviceCaps.isNotEmpty()) }
     var tick by remember { mutableIntStateOf(0) }
+    var showAccessibilityDisclosure by remember(a.id) { mutableStateOf(false) }
     val permissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { tick++ }
     fun requestCap(id: String) {
         // O launcher/Settings só é aberto quando o estado real do Android está faltante.
@@ -683,13 +684,41 @@ fun DevicePermissionsCard(a: dev.cueopen.app.data.AgentProfile, onChange: (dev.c
                                 else Modifier.clickable { requestCap(cap.id) })
                     }
                     Switch(on, { v ->
-                        onChange(a.copy(deviceCaps = if (v) a.deviceCaps + cap.id else a.deviceCaps - cap.id))
-                        if (v && !dev.cueopen.app.device.DeviceCaps.granted(ctx, cap.id)) requestCap(cap.id)
+                        if (cap.id == dev.cueopen.app.device.DeviceCaps.ACCESSIBILITY && v) {
+                            showAccessibilityDisclosure = true
+                        } else {
+                            onChange(a.copy(deviceCaps = if (v) (a.deviceCaps + cap.id).distinct() else a.deviceCaps - cap.id))
+                            if (v && !dev.cueopen.app.device.DeviceCaps.granted(ctx, cap.id)) requestCap(cap.id)
+                        }
                     }, colors = SwitchDefaults.colors(checkedTrackColor = c.ink, checkedThumbColor = c.bg))
                 }
             }
-            Text("O agente só usa uma capacidade se ela estiver ligada neste perfil e concedida pelo Android. Desligar aqui bloqueia este agente, mas não revoga o acesso global do app; para isso, revogue-o também nas Configurações do Android. Ligações e eventos exigem confirmação no Android; ciclos em background dependem dos limites do sistema.",
+            Text("O agente só usa uma capacidade se ela estiver ligada neste perfil e concedida pelo Android. A acessibilidade é concedida ao app pelo Android, mas o toggle do perfil bloqueia cada Agent separadamente; desligue-o aqui ou revogue o serviço nas Configurações. Ligações e eventos exigem confirmação no Android; ciclos em background dependem dos limites do sistema.",
                 fontSize = 11.sp, color = c.ink3, modifier = Modifier.padding(14.dp))
         }
+    }
+    if (showAccessibilityDisclosure) {
+        AlertDialog(
+            onDismissRequest = { showAccessibilityDisclosure = false },
+            title = { Text("Navegar em outros aplicativos?") },
+            text = {
+                Text(
+                    "O serviço poderá ler texto e controles visíveis e tocar, rolar ou preencher campos para executar tarefas que você pedir. Esse conteúdo pode ser enviado ao modelo configurado e permanecer no histórico local da tarefa até você excluí-la. Campos de senha são ocultados; não serão feitas capturas de tela. O Android concede o serviço ao app inteiro, mas somente Agents com este toggle ligado recebem as ferramentas. Você pode desligar o Agent aqui ou revogar globalmente em Configurações > Acessibilidade > Fluwy Bot.",
+                    modifier = Modifier.heightIn(max = 320.dp).verticalScroll(rememberScrollState()),
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    showAccessibilityDisclosure = false
+                    onChange(a.copy(deviceCaps = (a.deviceCaps + dev.cueopen.app.device.DeviceCaps.ACCESSIBILITY).distinct()))
+                    if (!dev.cueopen.app.device.DeviceCaps.granted(ctx, dev.cueopen.app.device.DeviceCaps.ACCESSIBILITY)) {
+                        dev.cueopen.app.device.DeviceCaps.request(ctx, dev.cueopen.app.device.DeviceCaps.ACCESSIBILITY)
+                    }
+                }) { Text("Entendi, continuar") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showAccessibilityDisclosure = false }) { Text("Cancelar") }
+            },
+        )
     }
 }

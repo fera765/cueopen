@@ -50,6 +50,14 @@ class DeviceAccessTest {
     }
 
     @Test
+    fun accessibilityDependsOnTheActualAndroidSpecialAccess() {
+        val state = FakeState()
+        assertFalse(DeviceCaps.granted(state, DeviceCaps.ACCESSIBILITY))
+        state.special += DeviceCaps.ACCESSIBILITY
+        assertTrue(DeviceCaps.granted(state, DeviceCaps.ACCESSIBILITY))
+    }
+
+    @Test
     fun phoneCallsAndBackgroundRemainAgentOnlyConsent() {
         val state = FakeState()
         assertTrue(DeviceCaps.granted(state, DeviceCaps.PHONE_CALLS))

@@ -117,6 +117,7 @@ fun ConnectorDebugSection(connectorId: String) {
                 OutlinedButton(onClick = {
                     scope.launch {
                         withContext(Dispatchers.IO) { logStore.clear(connectorId) }
+                        CueApp.instance.store.clearConnectorLastError(connectorId)
                         logText = ""
                     }
                 }) {

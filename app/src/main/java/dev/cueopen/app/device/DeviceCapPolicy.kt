@@ -17,6 +17,7 @@ object DeviceCapPolicy {
     const val OVERLAY = "overlay"
     const val SCREEN = "screen"
     const val BACKGROUND = "background"
+    const val ACCESSIBILITY = "accessibility"
 
     private val toolsByCapability = linkedMapOf(
         BLUETOOTH to setOf("device_bluetooth", "device_bluetooth_pair"),
@@ -31,6 +32,11 @@ object DeviceCapPolicy {
         SCREEN to setOf("device_screenshot"),
         OVERLAY to setOf("device_overlay"),
         BACKGROUND to emptySet(),
+        ACCESSIBILITY to setOf(
+            "device_accessibility_open_app", "device_accessibility_read_screen",
+            "device_accessibility_click", "device_accessibility_type",
+            "device_accessibility_scroll", "device_accessibility_back",
+        ),
     )
 
     /** Operações que leem dados protegidos ou exigem autorização atual do Android. */
@@ -38,6 +44,9 @@ object DeviceCapPolicy {
         "device_bluetooth", "device_calendar_read", "device_call_log", "device_contacts",
         "device_location", "device_microphone", "device_notifications",
         "device_notify", "device_screenshot", "device_overlay",
+        "device_accessibility_open_app", "device_accessibility_read_screen",
+        "device_accessibility_click", "device_accessibility_type",
+        "device_accessibility_scroll", "device_accessibility_back",
     )
 
     val allTools: Set<String> = toolsByCapability.values.flatten().toSet()
@@ -75,6 +84,9 @@ object DeviceCapPolicy {
             if ("device_notifications" in tools) add("Notificações: use device_notifications apenas para notificações permitidas pela política de privacidade do app; não tente contornar restrições de acesso a conteúdo.")
             if ("device_bluetooth" in tools) add("Bluetooth: device_bluetooth lista somente dispositivos já pareados e não inicia varredura.")
             if ("device_bluetooth_pair" in tools) add("Bluetooth: device_bluetooth_pair apenas abre as Configurações; pareamento e alterações ficam sob controle do usuário.")
+            if ("device_accessibility_read_screen" in tools) add(
+                "Acessibilidade: só use para uma tarefa explicitamente pedida. Abra o app, leia a árvore visível, use o snapshot_id e element_id atuais, e releia após cada mudança; controles podem mudar ou não estar acessíveis. Não capture screenshots como fallback. Campos de senha aparecem ocultos; nunca peça nem exponha credenciais, use ask_secure e marcadores {{secret:nome}} quando necessário. Só envie mensagens/publicações quando o usuário pediu claramente esse destino e conteúdo, respeitando a confirmação exigida pela ação."
+            )
         }
     }
 

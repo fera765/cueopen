@@ -68,7 +68,7 @@ class CueApp : Application() {
         // registra falhas para diagnóstico (Configurações > Último erro / Logs de erros)
         val prev = Thread.getDefaultUncaughtExceptionHandler()
         Thread.setDefaultUncaughtExceptionHandler { t, e ->
-            runCatching { java.io.File(filesDir, "last_crash.txt").writeText("${java.util.Date()}\n${t.name}\n${e.stackTraceToString()}") }
+            runCatching { dev.cueopen.app.diag.ErrorLog.lastCrashFile(this).writeText("${java.util.Date()}\n${t.name}\n${e.stackTraceToString()}") }
             runCatching { dev.cueopen.app.diag.ErrorLog.log("crash", "${t.name}: ${e.stackTraceToString()}") }
             prev?.uncaughtException(t, e)
         }

@@ -35,8 +35,13 @@ class ContextManager(private val store: Store, private val sandbox: Sandbox, pri
 
     // ---------- Camada 1 ----------
     /** Salva a saída completa da ferramenta e devolve a versão que entra no contexto. */
-    fun storeToolOutput(sessionId: String, callId: String, output: String, limit: Int = 8_000): String {
+    fun storeToolOutput(sessionId: String, callId: String, output: String, limit: Int = 8_000, persistLongOutput: Boolean = true): String {
         if (output.length <= limit) return output
+        if (!persistLongOutput) {
+            val head = output.take(limit / 2)
+            val tail = output.takeLast(limit / 2)
+            return "$head\n…[${output.length - limit} caracteres omitidos; saída de acessibilidade grande não foi arquivada por privacidade]…\n$tail"
+        }
         val dir = File(sandbox.workspaceFor(sessionId), ".cue/out").apply { mkdirs() }
         // nome pelo CONTEÚDO: a mesma saída sempre cai no mesmo arquivo (nada de cópias em cadeia)
         val f = File(dir, "o" + Integer.toHexString(output.hashCode()) + "_" + output.length + ".txt")
@@ -65,10 +70,14 @@ class ContextManager(private val store: Store, private val sandbox: Sandbox, pri
             when {
                 i in oldTools && (m.content?.length ?: 0) > 240 -> {
                     val full = m.content ?: ""
-                    val ptr = if (sessionId != null) stash(sessionId, full) else null
-                    val head = full.take(200).trimEnd()
-                    m.copy(content = head + "\n…[resultado antigo recolhido para não inflar o contexto" +
-                        (if (ptr != null) " — recupere o conteúdo completo com file_read path=$ptr" else "") + "]")
+                    if (m.name?.startsWith("device_accessibility_") == true) {
+                        m.copy(content = "[Saída antiga de acessibilidade omitida do contexto; releia a tela atual se precisar.]")
+                    } else {
+                        val ptr = if (sessionId != null) stash(sessionId, full) else null
+                        val head = full.take(200).trimEnd()
+                        m.copy(content = head + "\n…[resultado antigo recolhido para não inflar o contexto" +
+                            (if (ptr != null) " — recupere o conteúdo completo com file_read path=$ptr" else "") + "]")
+                    }
                 }
                 // narração antiga do assistente (sem ferramentas): só o começo basta como fio da meada
                 m.role == "assistant" && i != lastAssistant && m.toolCallsJson.isNullOrBlank() && (m.content?.length ?: 0) > 280 ->
@@ -107,7 +116,9 @@ class ContextManager(private val store: Store, private val sandbox: Sandbox, pri
         val tail = current.llm.subList(cut, current.llm.size)
         val transcript = buildString {
             head.forEach { m ->
-                val body = (m.content ?: "").take(1500)
+                val body = if (m.role == "tool" && m.name?.startsWith("device_accessibility_") == true)
+                    "[Conteúdo da tela omitido do resumo persistente por privacidade.]"
+                else (m.content ?: "").take(1500)
                 val calls = m.toolCallsJson?.let { " [chamou ferramentas: ${it.take(400)}]" }.orEmpty()
                 append("${m.role.uppercase()}${m.name?.let { "($it)" } ?: ""}: $body$calls\n")
             }

@@ -294,7 +294,8 @@ class AgentRunner(
             }
             val modelId = stepModel(agent)
             store.editSession(sessionId) {
-                it.copy(llm = it.llm + LlmMessage("assistant", reply.content, toolCallsJson = reply.rawToolCallsJson),
+                it.copy(llm = it.llm + LlmMessage("assistant", reply.content,
+                    toolCallsJson = ToolCallHistoryNormalizer.redactSensitiveToolArguments(reply.rawToolCallsJson)),
                     tokensIn = it.tokensIn + reply.usage.prompt, tokensOut = it.tokensOut + reply.usage.completion,
                     tokensCached = it.tokensCached + reply.usage.cached, llmCalls = it.llmCalls + 1,
                     modelUsed = modelId)
@@ -404,7 +405,10 @@ class AgentRunner(
                 if (result.output.length > 200) resultLong.add(call.id)
                 // a especificação do SDK (connector_spec) vai inteira: cortá-la fazia o agente ler a sobra por arquivo em loop
                 // nenhum valor do formulário seguro volta para o modelo, mesmo que uma ferramenta o ecoe
-                val ctxOut = ctxMgr.storeToolOutput(sessionId, call.id, SecretVault.redact(sessionId, result.output), limit = if (call.name == "connector_spec") 60_000 else 8_000)
+                val ctxOut = ctxMgr.storeToolOutput(
+                    sessionId, call.id, SecretVault.redact(sessionId, result.output),
+                    limit = if (call.name == "connector_spec") 60_000 else 8_000,
+                    persistLongOutput = !call.name.startsWith("device_accessibility_"))
                 store.editSession(sessionId) {
                     it.copy(llm = it.llm + LlmMessage("tool", ctxOut, toolCallId = call.id, name = call.name))
                 }
@@ -1376,6 +1380,31 @@ class AgentRunner(
             add(tool("device_dial", "Abre o discador do Android; o usuário revisa e toca em Ligar. Nunca inicia chamada diretamente.", buildJsonObject { put("phone", str("Número a discar")) }, listOf("phone")))
         if ("device_microphone" in deviceTools)
             add(tool("device_microphone", "Abre reconhecimento de voz do Android com UI visível para o usuário. O áudio não é salvo pelo app.", buildJsonObject {}))
+        if ("device_accessibility_open_app" in deviceTools)
+            add(tool("device_accessibility_open_app", "Abre um aplicativo instalado pelo nome exato ou pacote. Use apenas quando a tarefa do usuário pedir uma ação nesse app.", buildJsonObject {
+                put("app", str("Nome exato do app ou pacote Android"))
+            }, listOf("app")))
+        if ("device_accessibility_read_screen" in deviceTools)
+            add(tool("device_accessibility_read_screen", "Lê somente a árvore de texto/controles visíveis da janela atual; não captura screenshot. Senhas são ocultadas. IDs temporários expiram ou invalidam após mudanças.", buildJsonObject {}))
+        if ("device_accessibility_click" in deviceTools)
+            add(tool("device_accessibility_click", "Toca um controle visível do snapshot atual. Releia a tela após a ação.", buildJsonObject {
+                put("snapshot_id", str("ID retornado por device_accessibility_read_screen"))
+                put("element_id", int("ID do elemento no snapshot atual"))
+            }, listOf("snapshot_id", "element_id")))
+        if ("device_accessibility_type" in deviceTools)
+            add(tool("device_accessibility_type", "Substitui o texto de um campo editável acessível no snapshot atual; não use para credenciais em texto livre. Para segredos use ask_secure e o marcador correspondente. O texto não é exibido no log da ação.", buildJsonObject {
+                put("snapshot_id", str("ID retornado por device_accessibility_read_screen"))
+                put("element_id", int("ID do campo editável no snapshot atual"))
+                put("text", str("Texto a definir; segredos devem ser marcadores ask_secure"))
+            }, listOf("snapshot_id", "element_id", "text")))
+        if ("device_accessibility_scroll" in deviceTools)
+            add(tool("device_accessibility_scroll", "Rola um controle visível para cima ou para baixo. Releia a tela após a ação.", buildJsonObject {
+                put("snapshot_id", str("ID retornado por device_accessibility_read_screen"))
+                put("element_id", int("ID do contêiner ou item no snapshot atual"))
+                put("direction", str("up ou down"))
+            }, listOf("snapshot_id", "element_id", "direction")))
+        if ("device_accessibility_back" in deviceTools)
+            add(tool("device_accessibility_back", "Aciona Voltar no Android e invalida o snapshot atual.", buildJsonObject {}))
         if (allowMultiAgent) connectorTools().forEach { add(it) }
         // UI Connectors (ex.: IQ Option): só os que este agente pode usar (toggle por agente / "Agent required?").
         runCatching { dev.cueopen.app.CueApp.instance.uiConnectors.toolDefinitions(agent) }.getOrDefault(emptyList()).forEach { add(it) }
@@ -1821,6 +1850,12 @@ class AgentRunner(
             "device_dial" -> "Abrindo discador" to Activity.Kind.THINKING
             "device_microphone" -> "Abrindo reconhecimento de voz" to Activity.Kind.THINKING
             "device_screenshot" -> "Capturando tela" to Activity.Kind.THINKING
+            "device_accessibility_open_app" -> "Abrindo aplicativo" to Activity.Kind.THINKING
+            "device_accessibility_read_screen" -> "Lendo controles visíveis" to Activity.Kind.THINKING
+            "device_accessibility_click" -> "Tocando no aplicativo" to Activity.Kind.THINKING
+            "device_accessibility_type" -> "Preenchendo campo" to Activity.Kind.THINKING
+            "device_accessibility_scroll" -> "Rolando aplicativo" to Activity.Kind.THINKING
+            "device_accessibility_back" -> "Voltando no aplicativo" to Activity.Kind.THINKING
             "device_notify", "device_overlay" -> "Avisando no aparelho" to Activity.Kind.THINKING
             "browser_console" -> "Lendo console" to Activity.Kind.BROWSER
             "create_skill" -> "Criando skill" to Activity.Kind.THINKING
@@ -1835,11 +1870,19 @@ class AgentRunner(
             "remember", "memory_save" -> s("fact")
             "memory_search" -> s("query")
             "notes_write" -> s("content").take(60)
+            "device_accessibility_open_app" -> s("app").take(60)
+            "device_accessibility_click", "device_accessibility_scroll" -> "element ${i("element_id")?.toString() ?: "?"}"
+            "device_accessibility_type" -> "element ${i("element_id")?.toString() ?: "?"} · texto oculto"
             "create_skill" -> s("name")
             else -> ""
         }
         val step = ChatItem.Step(tool = call.name, title = title, args = argPreview)
-        val executionId = executions.begin(sessionId, call.name, call.argsJson)
+        val executionArguments = if (call.name == "device_accessibility_type") buildJsonObject {
+            put("snapshot_id", s("snapshot_id"))
+            put("element_id", i("element_id") ?: -1)
+            put("text", "[oculto]")
+        }.toString() else call.argsJson
+        val executionId = executions.begin(sessionId, call.name, executionArguments)
         store.addItem(sessionId, step)
         setActivity(sessionId, Activity(kind, argPreview.take(80)))
         if (kind == Activity.Kind.BROWSER) browserFor(sessionId).setAgentControl(true)
@@ -2345,6 +2388,20 @@ class AgentRunner(
                 "device_bluetooth_pair" -> dev.cueopen.app.device.DeviceActions.openBluetoothSettings(ctx)
                 "device_dial" -> dev.cueopen.app.device.DeviceActions.openDialer(ctx, s("phone"))
                 "device_microphone" -> dev.cueopen.app.device.DeviceActions.microphone(ctx)
+                "device_accessibility_open_app" -> dev.cueopen.app.device.DeviceAccessibilityActions.openApp(ctx, sessionId, s("app"))
+                "device_accessibility_read_screen" -> dev.cueopen.app.device.DeviceAccessibilityActions.readScreen(sessionId)
+                "device_accessibility_click" -> dev.cueopen.app.device.DeviceAccessibilityActions.click(
+                    sessionId, s("snapshot_id"), i("element_id") ?: -1)
+                "device_accessibility_type" -> {
+                    val rawText = s("text")
+                    val exactSecret = SecretVault.resolveExact(sessionId, rawText)
+                    dev.cueopen.app.device.DeviceAccessibilityActions.typeText(
+                        sessionId, s("snapshot_id"), i("element_id") ?: -1,
+                        exactSecret ?: SecretVault.resolve(sessionId, rawText), exactSecret != null)
+                }
+                "device_accessibility_scroll" -> dev.cueopen.app.device.DeviceAccessibilityActions.scroll(
+                    sessionId, s("snapshot_id"), i("element_id") ?: -1, s("direction"))
+                "device_accessibility_back" -> dev.cueopen.app.device.DeviceAccessibilityActions.back(sessionId)
                 "device_notify" -> { notifyRaw(s("title").ifBlank { "CueOpen" }, plainText(s("text"))); "Notificação enviada." }
                 "device_overlay" -> { dev.cueopen.app.device.Overlay.show(ctx, s("text")); "Balão exibido." }
                 "device_screenshot" -> {

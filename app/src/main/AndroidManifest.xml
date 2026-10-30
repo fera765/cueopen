@@ -127,6 +127,19 @@
             <intent-filter><action android:name="android.service.notification.NotificationListenerService" /></intent-filter>
         </service>
 
+        <service
+            android:name=".device.FluwyAccessibilityService"
+            android:exported="true"
+            android:label="@string/fluwy_accessibility_service_label"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/fluwy_accessibility_service" />
+        </service>
+
         <activity android:name=".device.DeviceVoiceInputActivity" android:exported="false"
             android:theme="@android:style/Theme.Translucent.NoTitleBar" />
 

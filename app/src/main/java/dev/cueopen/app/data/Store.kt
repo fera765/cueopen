@@ -161,6 +161,7 @@ class Store(context: Context) {
         st.copy(connectors = if (st.connectors.any { it.id == c.id }) st.connectors.map { if (it.id == c.id) c else it } else st.connectors + c)
     }
     fun connector(id: String) = _state.value.connectors.firstOrNull { it.id == id }
+    fun clearConnectorLastError(id: String) = update { it.withConnectorLastErrorCleared(id) }
     fun deleteConnector(id: String) = update { it.copy(connectors = it.connectors.filterNot { c -> c.id == id }) }
 
     fun upsertMemory(m: MemoryItem) = update { st ->
@@ -169,4 +170,10 @@ class Store(context: Context) {
     fun deleteMemory(id: String) = update { it.copy(memories = it.memories.filterNot { m -> m.id == id }) }
 
     fun updateSettings(fn: (Settings) -> Settings) = update { it.copy(settings = fn(it.settings)) }
+}
+
+internal fun AppState.withConnectorLastErrorCleared(id: String): AppState {
+    val target = connectors.firstOrNull { it.id == id } ?: return this
+    if (target.lastError == null) return this
+    return copy(connectors = connectors.map { if (it.id == id) it.copy(lastError = null) else it })
 }

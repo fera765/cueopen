@@ -1,1 +1,5 @@
-<resources><string name="app_name">Fluwy Bot</string></resources>
+<resources>
+    <string name="app_name">Fluwy Bot</string>
+    <string name="fluwy_accessibility_service_label">Fluwy Bot — navegação por acessibilidade</string>
+    <string name="fluwy_accessibility_service_description">Permite que agentes autorizados por perfil leiam texto e controles visíveis e interajam com outros aplicativos durante tarefas solicitadas. O conteúdo lido pode ser enviado ao modelo configurado e aparecer no histórico local. Campos de senha são ocultados. Não captura screenshots. Revogue em Configurações do Android &gt; Acessibilidade.</string>
+</resources>

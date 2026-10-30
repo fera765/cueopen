@@ -32,6 +32,7 @@ class FluwyAssistantSession(baseContext: Context) : VoiceInteractionSession(base
     private val mainHandler = Handler(Looper.getMainLooper())
     private val speechTurn = AssistantSpeechTurn()
     private val recognitionLoop = AssistantRecognitionLoop()
+    private val voiceActivityGate = AssistantVoiceActivityGate()
     private var orb: AssistantOrbView? = null
     private var screenshotPreview: ImageView? = null
     private var speechRecognizer: SpeechRecognizer? = null
@@ -213,6 +214,7 @@ class FluwyAssistantSession(baseContext: Context) : VoiceInteractionSession(base
             runCatching { recognizer.destroy() }
             return
         }
+        voiceActivityGate.beginAttempt()
         speechRecognizer = recognizer
         activeRecognitionGate = finalResultGate
         liveTranscript = ""
@@ -231,16 +233,16 @@ class FluwyAssistantSession(baseContext: Context) : VoiceInteractionSession(base
                 if (!isCurrentAttempt(recognizer, finalResultGate)) return
                 listening = true
                 providerEndedSpeech = false
-                noteSpeechActivity()
                 orb?.setListening(true)
                 orb?.contentDescription = "Ouvindo e transcrevendo sua fala ao vivo."
             }
 
             override fun onRmsChanged(rmsdB: Float) {
                 if (!isCurrentAttempt(recognizer, finalResultGate)) return
-                val amplitude = ((rmsdB + 2.5f) / 13.5f).coerceIn(0f, 1f)
-                orb?.setRms(amplitude)
-                if (!providerEndedSpeech && amplitude >= VOICE_ACTIVITY_THRESHOLD) noteSpeechActivity()
+                val amplitude = AssistantVoiceActivityGate.normalizedAmplitude(rmsdB)
+                val gatedSpeech = voiceActivityGate.onRmsChanged(rmsdB, SystemClock.elapsedRealtime())
+                orb?.setRms(if (gatedSpeech) amplitude else 0f)
+                if (!providerEndedSpeech && gatedSpeech) noteSpeechActivity()
             }
 
             override fun onBufferReceived(buffer: ByteArray?) = Unit
@@ -263,16 +265,18 @@ class FluwyAssistantSession(baseContext: Context) : VoiceInteractionSession(base
             }
 
             override fun onResults(results: Bundle?) {
-                val text = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+                val candidate = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
                     ?.firstOrNull()?.trim()?.take(MAX_TRANSCRIPT_LENGTH).orEmpty()
+                val text = candidate.takeIf(voiceActivityGate::acceptsFinal).orEmpty()
                 handleRecognitionResults(recognizer, finalResultGate, text)
             }
 
             override fun onPartialResults(partialResults: Bundle?) {
-                if (!isCurrentAttempt(recognizer, finalResultGate) || providerEndedSpeech) return
+                if (!isCurrentAttempt(recognizer, finalResultGate) || providerEndedSpeech || !voiceActivityGate.acceptsPartial()) return
                 val partial = partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
                     ?.firstOrNull()?.trim()?.take(MAX_TRANSCRIPT_LENGTH).orEmpty()
                 if (partial.isNotBlank()) {
+                    noteSpeechActivity()
                     liveTranscript = partial
                     orb?.contentDescription = "Transcrevendo ao vivo: ${partial.take(120)}. A pausa de 2 segundos envia a mensagem."
                 }
@@ -495,6 +499,5 @@ class FluwyAssistantSession(baseContext: Context) : VoiceInteractionSession(base
         const val RESTART_AFTER_RESULT_MS = 250L
         const val TERMINAL_CALLBACK_TIMEOUT_MS = 10_000L
         const val MAX_TRANSCRIPT_LENGTH = 4_000
-        const val VOICE_ACTIVITY_THRESHOLD = 0.12f
     }
 }

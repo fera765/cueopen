@@ -71,4 +71,23 @@ class ConnectorDebugLogTest {
             dir.deleteRecursively()
         }
     }
+
+    @Test fun `limpar um conector preserva os logs dos demais e arquivos nao relacionados`() {
+        val dir = tempDir()
+        try {
+            val log = ConnectorDebugLog(dir)
+            log.recordEvent("selected", "test", "a")
+            log.recordEvent("other", "test", "b")
+            val unrelatedData = File(dir, "state.json").apply { writeText("preservado") }
+
+            log.clear("selected")
+
+            assertTrue(log.read("selected").isEmpty())
+            assertTrue(log.read("other").contains("summary=b"))
+            assertTrue(unrelatedData.exists())
+            assertTrue(unrelatedData.readText() == "preservado")
+        } finally {
+            dir.deleteRecursively()
+        }
+    }
 }
