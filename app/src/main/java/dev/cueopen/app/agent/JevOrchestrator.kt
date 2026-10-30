@@ -35,7 +35,12 @@ object JevOrchestrator {
         "wallet" to setOf("wallet_get_address", "wallet_get_balance", "wallet_list_tokens", "wallet_swap",
             "market_price", "market_candles", "market_liquidity", "market_discover", "market_token_info",
             "trade_set_rule", "trade_list", "trade_cancel", "trade_update_rule", "typesafe_jev_check"),
-        "device" to setOf("device_notifications", "device_notify", "device_screenshot", "device_overlay"),
+        "device" to setOf(
+            "device_notifications", "device_notify", "device_screenshot", "device_overlay",
+            "device_bluetooth", "device_bluetooth_pair", "device_calendar_read", "device_calendar_create",
+            "device_call_log", "device_contacts", "device_location", "device_sms_read", "device_sms_compose",
+            "device_dial", "device_microphone"
+        ),
         "connector_builder" to setOf("connector_spec", "connector_validate", "connector_test", "connector_propose"),
     )
 
@@ -48,7 +53,7 @@ object JevOrchestrator {
         "schedule" to listOf("monitor", "acompanh", "a cada", "agend", "todo dia", "toda hora", "de hora em hora", "continu", "periodic", "lembr", "aguard", "espera", "minutos", "vela"),
         "skills_admin" to listOf("crie uma skill", "criar skill", "nova skill", "salve como skill"),
         "wallet" to listOf("carteira", "wallet", "solana", "sol ", "token", "swap", "saldo", "comprar", "vender", "day trade", "daytrade", "trade", "cripto", "crypto", "memecoin", "stop loss", "take profit", "liquidez", "pump", "jupiter", "usdc"),
-        "device" to listOf("notifica", "print da tela", "captura de tela", "screenshot", "balao", "overlay", "celular", "aparelho"),
+        "device" to listOf("notifica", "print da tela", "captura de tela", "screenshot", "balao", "overlay", "celular", "aparelho", "bluetooth", "calendario", "ligaçao", "ligacao", "chamada", "contato", "localizaçao", "localizacao", "sms", "microfone"),
         "connector_builder" to listOf("conector", "connector"),
     )
 

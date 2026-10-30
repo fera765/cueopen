@@ -43,8 +43,16 @@ class Store(context: Context) {
         // Tarefas que estavam rodando quando o app morreu viram "interrompidas"
         s.copy(
             skills = s.skills + missing,
+            // Migra uma única vez o consentimento de background dos agentes já autônomos;
+            // depois disso, a remoção da capability pelo usuário nunca é revertida no próximo load.
+            agents = s.agents.map { agent ->
+                val migrated = dev.cueopen.app.device.DeviceCapPolicy.migrateLegacyBackgroundConsent(
+                    agent.deviceCaps, agent.autonomous, s.settings.deviceBackgroundConsentMigrated)
+                if (migrated == agent.deviceCaps) agent else agent.copy(deviceCaps = migrated)
+            },
             settings = s.settings.let { st ->
                 st.copy(
+                    deviceBackgroundConsentMigrated = true,
                     maxSteps = if (st.maxSteps <= 120) 1000 else st.maxSteps,
                     model = if (st.model == "anthropic/claude-sonnet-4.5") "deepseek/deepseek-v4-flash" else st.model,
                     fastModel = if (st.fastModel == "google/gemini-2.5-flash") "deepseek/deepseek-v4-flash" else st.fastModel,

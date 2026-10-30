@@ -3,6 +3,7 @@ package dev.cueopen.app.agent
 import dev.cueopen.app.data.QuestionOption
 import dev.cueopen.app.data.QuestionSpec
 import dev.cueopen.app.data.SecureField
+import dev.cueopen.app.data.ChatItem
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -70,6 +71,26 @@ object AskTools {
             val a = answers.getOrNull(i).orEmpty().filter { it.isNotBlank() }
             append("\n").append(i + 1).append(". ").append(q.header.ifBlank { q.question }).append(": ")
             append(if (a.isEmpty()) "(pulou — decida você e diga o que assumiu)" else a.joinToString(", "))
+        }
+    }
+
+    /** Remove da timeline bolhas antigas que apenas repetem a resposta já ligada ao card. */
+    fun visibleTimelineItems(items: List<ChatItem>): List<ChatItem> = items.filterIndexed { index, item ->
+        if (item is ChatItem.Plan) return@filterIndexed false
+        if (item !is ChatItem.User) return@filterIndexed true
+        val card = items.getOrNull(index - 1)
+        !when (card) {
+            is ChatItem.Question -> when (card.state) {
+                "answered" -> item.text == answersMessage(card.questions, card.answers)
+                "dismissed" -> item.text == DISMISSED_MESSAGE
+                else -> false
+            }
+            is ChatItem.SecureForm -> when (card.state) {
+                "submitted" -> item.text == secureSubmittedMessage(card.submitted)
+                "cancelled" -> item.text == SECURE_CANCELLED
+                else -> false
+            }
+            else -> false
         }
     }
 

@@ -313,6 +313,8 @@ data class Settings(
     /** Orçamento de contexto (tokens estimados) antes de compactar. */
     val contextBudget: Int = 24_000,
     val keepRecentMessages: Int = 10,
+    /** Migração única do consentimento de background dos agentes autônomos preexistentes. */
+    val deviceBackgroundConsentMigrated: Boolean = false,
 )
 
 @Serializable

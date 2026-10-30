@@ -47,6 +47,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.navigation.NavController
 import dev.cueopen.app.CueApp
 import dev.cueopen.app.agent.Activity
+import dev.cueopen.app.agent.AskTools
 import dev.cueopen.app.data.ChatItem
 import dev.cueopen.app.data.Session
 import dev.cueopen.app.data.SessionStatus
@@ -99,7 +100,7 @@ fun ChatScreen(nav: NavController, sessionId: String) {
         if (list.isScrollInProgress) follow = atBottom   // gesto do usuário decide
         else if (atBottom) follow = true
     }
-    val visibleItems = remember(session.items) { session.items.filter { it !is ChatItem.Plan } }
+    val visibleItems = remember(session.items) { AskTools.visibleTimelineItems(session.items) }
     val lastItem = session.items.lastOrNull()
     // Evita hashCode() no objeto inteiro (que pode conter milhares de caracteres) em cada atualização.
     val lastItemKey = when (lastItem) {

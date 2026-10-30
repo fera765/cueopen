@@ -2,6 +2,10 @@ package dev.cueopen.app.agent
 
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
+import dev.cueopen.app.data.ChatItem
+import dev.cueopen.app.data.QuestionSpec
+import dev.cueopen.app.data.QuestionOption
+import dev.cueopen.app.data.SecureField
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -61,6 +65,21 @@ class AskAndSecretsTest {
         val msg = AskTools.answersMessage(qs, listOf(listOf("A", "minha ideia"), emptyList()))
         assertTrue(msg, msg.contains("Estilo: A, minha ideia"))
         assertTrue(msg, msg.contains("pulou"))
+    }
+
+    @Test fun answeredQuestionCardHidesItsLegacyUserBubble() {
+        val q = QuestionSpec("Qual tipo de operação?", options = listOf(QuestionOption("Automática"), QuestionOption("Manual")))
+        val card = ChatItem.Question(questions = listOf(q), answers = listOf(listOf("Automática")), state = "answered")
+        val bubble = ChatItem.User(text = AskTools.answersMessage(card.questions, card.answers))
+        val items = AskTools.visibleTimelineItems(listOf(card, bubble))
+        assertEquals(listOf(card), items)
+    }
+
+    @Test fun submittedSecureCardHidesItsLegacyUserBubble() {
+        val card = ChatItem.SecureForm(title = "Acesso", fields = listOf(SecureField("email", "E-mail")), state = "submitted", submitted = listOf("email"))
+        val bubble = ChatItem.User(text = AskTools.secureSubmittedMessage(card.submitted))
+        val items = AskTools.visibleTimelineItems(listOf(card, bubble))
+        assertEquals(listOf(card), items)
     }
 
     // -------------------------------------------------- ask_secure

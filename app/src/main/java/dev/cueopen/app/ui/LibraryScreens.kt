@@ -2,6 +2,9 @@ package dev.cueopen.app.ui
 
 import android.app.DatePickerDialog
 import android.app.TimePickerDialog
+import android.content.pm.PackageManager
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -132,6 +135,8 @@ fun AgentEditScreen(nav: NavController, id: String) {
                 baseUrl = app.store.settings.baseUrl, apiKey = app.store.settings.apiKey)
             SectionLabel("Autonomia")
             ToggleRow("Pode trabalhar de forma autônoma", "Quando ligado, o próprio agente decide, pela conversa, se e de quanto em quanto tempo deve acordar para seguir uma tarefa contínua. Sem um pedido assim, ele fica dormindo.", a.autonomous) { a = a.copy(autonomous = it) }
+            if (a.autonomous && dev.cueopen.app.device.DeviceCaps.BACKGROUND !in a.deviceCaps)
+                Text("Para executar ciclos com o app fechado, habilite também ‘Executar em segundo plano’ em Permissões do dispositivo abaixo. O Android pode impor limites e não há garantia de execução contínua.", fontSize = 12.sp, color = c.warn)
             if (a.autonomous) {
                 Text("Não precisa configurar intervalo: diga no chat o que acompanhar (ex.: \"a cada 20 min verifique o mercado\") e ele se agenda sozinho. Deixe o orçamento de tokens por dia como limite de segurança.", fontSize = 12.sp, color = c.ink3)
                 Text("Orçamento diário de tokens", fontSize = 13.sp, color = c.ink2)
@@ -638,6 +643,13 @@ fun DevicePermissionsCard(a: dev.cueopen.app.data.AgentProfile, onChange: (dev.c
     val ctx = LocalContext.current
     var open by remember { mutableStateOf(a.deviceCaps.isNotEmpty()) }
     var tick by remember { mutableIntStateOf(0) }
+    val permissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { tick++ }
+    fun requestCap(id: String) {
+        val missing = dev.cueopen.app.device.DeviceCaps.runtimePermissions(ctx, id)
+            .filter { ctx.checkSelfPermission(it) != PackageManager.PERMISSION_GRANTED }
+        if (missing.isNotEmpty()) permissionLauncher.launch(missing.toTypedArray())
+        else dev.cueopen.app.device.DeviceCaps.request(ctx, id)
+    }
     val lifecycle = androidx.lifecycle.compose.LocalLifecycleOwner.current
     androidx.compose.runtime.DisposableEffect(lifecycle) {
         val obs = androidx.lifecycle.LifecycleEventObserver { _, e -> if (e == androidx.lifecycle.Lifecycle.Event.ON_RESUME) tick++ }
@@ -663,17 +675,17 @@ fun DevicePermissionsCard(a: dev.cueopen.app.data.AgentProfile, onChange: (dev.c
                     Column(Modifier.weight(1f)) {
                         Text(cap.title, fontWeight = FontWeight.Medium)
                         Text(cap.desc, fontSize = 12.sp, color = c.ink2)
-                        if (on && !granted) Text("Toque para conceder no Android →", fontSize = 11.sp, color = c.warn,
-                            modifier = Modifier.clickable { dev.cueopen.app.device.DeviceCaps.request(ctx, cap.id) })
-                        else if (on && granted) Text("Concedida", fontSize = 11.sp, color = c.ok)
+                        if (on) Text(dev.cueopen.app.device.DeviceCaps.status(ctx, cap.id), fontSize = 11.sp,
+                            color = if (granted) c.ok else c.warn,
+                            modifier = Modifier.clickable { requestCap(cap.id) })
                     }
                     Switch(on, { v ->
                         onChange(a.copy(deviceCaps = if (v) a.deviceCaps + cap.id else a.deviceCaps - cap.id))
-                        if (v && !granted) dev.cueopen.app.device.DeviceCaps.request(ctx, cap.id)
+                        if (v) requestCap(cap.id)
                     }, colors = SwitchDefaults.colors(checkedTrackColor = c.ink, checkedThumbColor = c.bg))
                 }
             }
-            Text("As permissões são concedidas por você nas telas do Android. O agente só usa o que estiver ligado aqui e concedido.",
+            Text("O agente só usa uma capacidade se ela estiver ligada neste perfil e concedida pelo Android. Desligar aqui bloqueia este agente, mas não revoga o acesso global do app; para isso, revogue-o também nas Configurações do Android. Ligações, SMS e eventos ficam em rascunho para sua confirmação; ciclos em background dependem dos limites do sistema.",
                 fontSize = 11.sp, color = c.ink3, modifier = Modifier.padding(14.dp))
         }
     }
