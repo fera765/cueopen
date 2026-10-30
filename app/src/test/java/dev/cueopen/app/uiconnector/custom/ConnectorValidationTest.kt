@@ -113,7 +113,7 @@ class ConnectorValidationTest {
     }
 
     private fun vslJson(): String = """{
-      "id":"vsl_test","name":"Gerador VSL","description":"Gera roteiro sob contrato", "version":"1.0",
+      "id":"vsltest","name":"Gerador VSL","description":"Gera roteiro sob contrato", "version":"1.0",
       "baseUrl":"https://api.example.com",
       "tools":[{
         "name":"gerar_vsl","description":"Gera roteiro de VSL","risky":true,

@@ -75,7 +75,7 @@ data class VslValidationResult(
 object VslOutputGuardrails {
     private val wordPattern = Regex("[\\p{L}\\p{N}]+(?:['’][\\p{L}\\p{N}]+)*")
     private val languageWords = mapOf(
-        "pt" to setOf("a", "ao", "as", "com", "da", "das", "de", "do", "dos", "e", "em", "esta", "este", "mais", "mas", "na", "nas", "no", "nos", "o", "os", "para", "por", "que", "se", "seu", "sua", "um", "uma", "você"),
+        "pt" to setOf("ao", "as", "com", "da", "das", "de", "do", "dos", "e", "em", "esta", "este", "mais", "mas", "na", "nas", "no", "nos", "o", "os", "para", "por", "que", "se", "seu", "sua", "um", "uma", "você"),
         "en" to setOf("a", "an", "and", "are", "as", "be", "for", "from", "in", "is", "it", "of", "on", "or", "that", "the", "this", "to", "was", "we", "with", "you", "your"),
         "es" to setOf("a", "al", "con", "como", "de", "del", "el", "en", "es", "esta", "la", "las", "lo", "los", "mas", "para", "por", "que", "se", "su", "un", "una", "y"),
         "fr" to setOf("au", "avec", "ce", "ces", "dans", "de", "des", "du", "elle", "et", "est", "la", "le", "les", "mais", "ou", "par", "pour", "que", "sur", "un", "une", "vous"),

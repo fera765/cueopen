@@ -1281,8 +1281,8 @@ class IqOptionConnector(private val kv: KvStore? = null) : UiConnector {
     private fun serverNowMs(): Long {
         val baseServer = serverEpochAtSyncMs
         val baseElapsed = serverElapsedAtSyncMs
-        val elapsed = android.os.SystemClock.elapsedRealtime()
-        return if (baseServer > 0L && baseElapsed > 0L && elapsed >= baseElapsed)
+        val elapsed = runCatching { android.os.SystemClock.elapsedRealtime() }.getOrNull()
+        return if (elapsed != null && baseServer > 0L && baseElapsed > 0L && elapsed >= baseElapsed)
             baseServer + (elapsed - baseElapsed)
         else System.currentTimeMillis()
     }

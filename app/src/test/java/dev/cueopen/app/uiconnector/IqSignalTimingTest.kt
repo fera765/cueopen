@@ -12,7 +12,8 @@ class IqSignalTimingTest {
     @Test fun `alvo fica pelo menos dois minutos a frente e alinha ao timeframe escolhido`() {
         val nowMs = alignedNowSec * 1_000L
         for (timeframe in listOf(60, 120, 300, 600)) {
-            assertEquals(alignedNowSec + 120L, IqSignalTiming.nextOpenAtLeastLead(nowMs, timeframeSeconds = timeframe))
+            val expected = Math.floorDiv(alignedNowSec + 120L + timeframe - 1L, timeframe.toLong()) * timeframe
+            assertEquals(expected, IqSignalTiming.nextOpenAtLeastLead(nowMs, timeframeSeconds = timeframe))
             val expectedAfter1ms = Math.floorDiv(alignedNowSec + 120L + 1L + timeframe - 1L, timeframe.toLong()) * timeframe
             assertEquals(expectedAfter1ms, IqSignalTiming.nextOpenAtLeastLead(nowMs + 1L, timeframeSeconds = timeframe))
             val target = IqSignalTiming.nextOpenAtLeastLead(nowMs + 1L, timeframeSeconds = timeframe)

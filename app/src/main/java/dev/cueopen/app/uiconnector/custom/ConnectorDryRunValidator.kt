@@ -17,7 +17,7 @@ object ConnectorDryRunValidator {
 
     private const val MOCK_TEXT = "Amostra local de resposta para validar o mapeamento do conector."
     private val genericItem = Json.parseToJsonElement(
-        """{"id":"dry-run-1","name":"Amostra de validação","title":"Amostra de validação","label":"Amostra","status":"ok","message":"Resposta mock local","text":"Amostra de validação","body":"Amostra de validação","value":1,"price":1,"url":"https://example.invalid/item","created_at":"2026-01-01"}""",
+        """{"id":"dry-run-1","name":"Amostra de validação","title":"Amostra de validação","label":"Amostra","status":"ok","message":"Resposta mock local","text":"Amostra de validação","body":"Amostra de validação","value":1,"price":1,"url":"https://example.invalid/item","link":"https://example.invalid/item","pubDate":"2026-01-01T00:00:00Z","created_at":"2026-01-01"}""",
     )
 
     suspend fun validate(
@@ -93,6 +93,7 @@ object ConnectorDryRunValidator {
                 report.appendLine("✓ login: fluxo de campos/extract/verify testado com valores sintéticos (nenhuma credencial real)")
             }
 
+            http.fixture = responseFixture(def, null, emptyMap())
             val blocks = conn.snapshot(settings)
             if (blocks.size < def.panels.size + def.actions.size) {
                 report.appendLine("✗ painéis: saída de teste incompleta (${blocks.size} bloco(s))")
