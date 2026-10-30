@@ -8,7 +8,6 @@ import android.net.Uri
 import android.provider.CalendarContract
 import android.provider.CallLog
 import android.provider.ContactsContract
-import android.provider.Telephony
 import android.Manifest
 import android.content.pm.PackageManager
 import android.os.Build
@@ -23,7 +22,6 @@ object DeviceActions {
     }
 
     private fun deniedMessage(id: String) = when (id) {
-        DeviceCaps.SMS -> "A leitura de SMS exige que este app seja o padrão de SMS e tenha a permissão READ_SMS concedida pelo Android."
         DeviceCaps.CALL_LOG -> "O acesso ao histórico de ligações não está concedido pelo Android ou é restrito pela função/política do dispositivo."
         else -> "A permissão Android para '${DeviceCaps.all.firstOrNull { it.id == id }?.title ?: id}' foi revogada ou ainda não foi concedida. Habilite-a no perfil deste agente e nas Configurações do Android."
     }
@@ -140,33 +138,6 @@ object DeviceActions {
         return devices.map { "${runCatching { it.name }.getOrNull().orEmpty().ifBlank { "Dispositivo" }} · ${it.address}" }
             .ifEmpty { listOf("Nenhum dispositivo pareado. Use device_bluetooth_pair para abrir as Configurações do Android.") }
             .joinToString("\n")
-    }
-
-    fun smsInbox(ctx: Context, limit: Int = 20): String {
-        requireGrant(ctx, DeviceCaps.SMS)
-        val projection = arrayOf(Telephony.Sms.ADDRESS, Telephony.Sms.BODY, Telephony.Sms.DATE)
-        val cursor = ctx.contentResolver.query(Telephony.Sms.Inbox.CONTENT_URI, projection, null, null, "${Telephony.Sms.DATE} DESC")
-            ?: return "O provedor de SMS não retornou dados."
-        val fmt = SimpleDateFormat("dd/MM HH:mm", Locale.getDefault())
-        return cursor.use { c ->
-            val address = c.getColumnIndexOrThrow(Telephony.Sms.ADDRESS)
-            val body = c.getColumnIndexOrThrow(Telephony.Sms.BODY)
-            val date = c.getColumnIndexOrThrow(Telephony.Sms.DATE)
-            val rows = mutableListOf<String>()
-            while (c.moveToNext() && rows.size < limit.coerceIn(1, 50)) {
-                rows += "${fmt.format(Date(c.getLong(date)))} · ${c.getString(address).orEmpty()} · ${c.getString(body).orEmpty().take(240)}"
-            }
-            rows.ifEmpty { listOf("Nenhum SMS encontrado na caixa de entrada.") }.joinToString("\n")
-        }
-    }
-
-    fun openSmsComposer(ctx: Context, phone: String, body: String): String {
-        val recipient = phone.trim().take(40)
-        require(recipient.isNotBlank()) { "Informe o número do destinatário." }
-        val intent = Intent(Intent.ACTION_SENDTO, Uri.fromParts("smsto", recipient, null))
-            .putExtra("sms_body", body.take(1000))
-        launch(ctx, intent)
-        return "Rascunho aberto no app de mensagens. Revise o destinatário e o texto e toque em Enviar; o Cue não enviou SMS."
     }
 
     fun openDialer(ctx: Context, phone: String): String {

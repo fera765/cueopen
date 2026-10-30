@@ -46,8 +46,9 @@ class Store(context: Context) {
             // Migra uma única vez o consentimento de background dos agentes já autônomos;
             // depois disso, a remoção da capability pelo usuário nunca é revertida no próximo load.
             agents = s.agents.map { agent ->
+                val activeCaps = dev.cueopen.app.device.DeviceCapPolicy.removeRetiredCapabilities(agent.deviceCaps)
                 val migrated = dev.cueopen.app.device.DeviceCapPolicy.migrateLegacyBackgroundConsent(
-                    agent.deviceCaps, agent.autonomous, s.settings.deviceBackgroundConsentMigrated)
+                    activeCaps, agent.autonomous, s.settings.deviceBackgroundConsentMigrated)
                 if (migrated == agent.deviceCaps) agent else agent.copy(deviceCaps = migrated)
             },
             settings = s.settings.let { st ->

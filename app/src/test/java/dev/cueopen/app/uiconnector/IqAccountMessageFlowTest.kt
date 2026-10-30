@@ -184,4 +184,21 @@ class IqAccountMessageFlowTest {
         assertNull(transport.flow.activeBalance())
         assertNull(transport.flow.orderBalance())
     }
+
+    @Test fun `selecao local usa somente carteira presente no perfil e persiste contra evento antigo`() {
+        val transport = FakeTransport()
+        transport.connect(60L)
+        transport.receive(initialProfile())
+
+        assertTrue(transport.flow.selectKnownBalanceLocally(202L, 60L))
+        assertEquals(202L, transport.flow.orderBalance()?.id)
+        assertFalse(transport.flow.selectKnownBalanceLocally(303L, 60L))
+        assertEquals(202L, transport.flow.orderBalance()?.id)
+
+        val staleDemo = transport.receive(
+            """{"name":"profile","msg":{"balance_id":101,"balances":[{"id":101,"type":4,"amount":10000,"currency":"USD"}]}}""",
+        )
+        assertFalse(staleDemo!!.accepted)
+        assertEquals(202L, transport.flow.orderBalance()?.id)
+    }
 }

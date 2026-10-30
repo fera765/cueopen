@@ -91,7 +91,8 @@ class IqOptionConnector(
             SettingSpec("max_forex_open", "Máx. de posições Forex abertas", "Limite de posições Forex abertas pelo agente.", SettingType.NUMBER, "3"),
             SettingSpec("max_leverage", "Alavancagem máxima", "Maior alavancagem que o agente pode usar em Forex.", SettingType.NUMBER, "10"),
             SettingSpec("max_stop_loss_pct", "Stop loss máximo (%)", "Stop loss obrigatório máximo em % do valor investido em Forex.", SettingType.NUMBER, "50"),
-            SettingSpec("forex_monitor_interval_sec", "Atualizar posições Forex a cada (s)", "Frequência configurável para consultar e atualizar as posições Forex no painel conectado (5–300 s; padrão 30). SL/TP são enviados à corretora na abertura.", SettingType.NUMBER, "30"),
+            SettingSpec("max_take_profit_pct", "Take profit máximo (%)", "Teto de take profit na abertura ou alteração de uma posição Forex.", SettingType.NUMBER, "500"),
+            SettingSpec("forex_monitor_interval_sec", "Atualizar posições Forex a cada (s)", "Frequência configurável para consultar e atualizar posições Forex (5–300 s; padrão 30). SL/TP são enviados na abertura; adjust_forex_stops solicita alteração depois.", SettingType.NUMBER, "30"),
         ),
         tools = listOf(
             ToolSpec("open_assets", "Lista todos os ativos abertos agora: opções Turbo/binárias (inclui OTC) e Forex.", listOf(
@@ -119,6 +120,11 @@ class IqOptionConnector(
             ), risky = true, requiresSignal = true),
             ToolSpec("close_position", "Solicita o fechamento de uma posição Forex aberta, informando seu id. Não fecha opções binárias.", listOf(
                 ParamSpec("id", "Id da posição Forex aberta", "integer"),
+            ), risky = true),
+            ToolSpec("adjust_forex_stops", "Solicita a alteração do stop loss e take profit percentuais de uma posição Forex aberta pelo id. Só reporta aceitação após ACK tpsl-changed 2000; protocolo comunitário não oficial.", listOf(
+                ParamSpec("id", "Id da posição Forex aberta", "integer"),
+                ParamSpec("stop_loss_pct", "Novo stop loss (%) dentro do limite configurado", "number"),
+                ParamSpec("take_profit_pct", "Novo take profit (%) dentro do limite configurado", "number"),
             ), risky = true),
             ToolSpec("positions", "Lista opções acompanhadas por esta sessão e posições Forex abertas com o P/L atual informado pela corretora."),
             ToolSpec("get_trade_result", "Consulta o estado ou resultado final de uma opção acompanhada por esta sessão. O histórico final de posições Forex fechadas não é confirmado pelo protocolo disponível.", listOf(
@@ -494,7 +500,7 @@ class IqOptionConnector(
 
     private suspend fun request(reqId: String, payload: String, vararg names: String, timeoutMs: Long = 12_000): JsonObject {
         ensureConnected()
-        val w = accountMessageFlow.registerWaiter(reqId, names.toSet())
+        val w = accountMessageFlow.registerWaiter(reqId.takeIf { it.isNotBlank() }, names.toSet())
         val started = System.nanoTime()
         return try {
             if (ws?.send(payload) != true) {
@@ -650,9 +656,8 @@ class IqOptionConnector(
 
     private suspend fun openForexReserved(args: Map<String, String>, settings: ConnectorSettings): String {
         ensureConnected()
-        if (!settings.bool("allow_margin_agent")) return "RECUSADO: o usuário não liberou o agente para operar Forex nas configurações do conector."
-        val acc = accountMessageFlow.orderBalance() ?: return "RECUSADO: nenhuma carteira ativa foi confirmada pelo servidor; confirme a conta antes de operar."
-        if (acc.isReal && !settings.bool("allow_real_agent")) return "RECUSADO: a conta ativa é REAL e o agente não foi liberado para ela."
+        val acc = accountMessageFlow.orderBalance() ?: return "RECUSADO: nenhuma carteira selecionada consta no perfil autenticado; sincronize a conta antes de operar."
+        IqForexAccessPolicy.denialReason(acc.isReal, settings.bool("allow_margin_agent"), settings.bool("allow_real_agent"))?.let { return it }
         val side = args["side"].orEmpty().lowercase()
         if (side != "buy" && side != "sell") return "side deve ser buy ou sell."
         val amount = args["amount"]?.replace(',', '.')?.toDoubleOrNull() ?: 0.0
@@ -665,8 +670,9 @@ class IqOptionConnector(
         val maxLev = settings.num("max_leverage", 10.0).toInt().coerceAtLeast(1)
         if (lev < 1 || lev > maxLev) return "RECUSADO: alavancagem deve ser de 1 a $maxLev."
         val maxSl = settings.num("max_stop_loss_pct", 50.0)
-        if (sl <= 0 || sl > maxSl) return "RECUSADO: stop loss obrigatório, entre 0 e $maxSl%."
-        if (tp <= 0 || !tp.isFinite()) return "RECUSADO: take profit obrigatório (> 0%)."
+        if (!sl.isFinite() || sl <= 0 || sl > maxSl) return "RECUSADO: stop loss obrigatório, entre 0 e $maxSl%."
+        val maxTp = settings.num("max_take_profit_pct", 500.0)
+        if (tp <= 0 || !tp.isFinite() || tp > maxTp) return "RECUSADO: take profit obrigatório, entre 0 e $maxTp%."
         val maxOpen = settings.num("max_forex_open", 3.0).toInt().coerceAtLeast(1)
         val positions = marginPositions(force = true)
         if (positions.size >= maxOpen) return "RECUSADO: já existem ${positions.size} posições Forex abertas (máximo $maxOpen)."
@@ -681,8 +687,13 @@ class IqOptionConnector(
         return "Ordem Forex ENVIADA na conta ${acc.label}: ${a.ticker} ${side.uppercase()} ${String.format(Locale.US, "%.2f", amount)} ×$lev · SL $sl% · TP $tp% (id $orderId). Consulte positions para o P/L atual."
     }
 
-    private suspend fun closeForex(idRaw: String?): String {
+    private suspend fun closeForex(idRaw: String?, settings: ConnectorSettings): String =
+        accountOrderCoordinator.runReserved { closeForexReserved(idRaw, settings) }
+
+    private suspend fun closeForexReserved(idRaw: String?, settings: ConnectorSettings): String {
         ensureConnected()
+        val acc = accountMessageFlow.orderBalance() ?: return "RECUSADO: nenhuma carteira selecionada consta no perfil autenticado; sincronize a conta antes de operar."
+        IqForexAccessPolicy.denialReason(acc.isReal, settings.bool("allow_margin_agent"), settings.bool("allow_real_agent"))?.let { return it }
         val positionId = idRaw?.toLongOrNull()?.takeIf { it > 0L } ?: return "id inválido."
         val open = marginPositions(force = true)
         if (open.none { it.id == positionId }) return "RECUSADO: a posição Forex $positionId não aparece como aberta na conta ativa; nenhum comando de fechamento foi enviado."
@@ -690,6 +701,34 @@ class IqOptionConnector(
         cachedForexPositions = null
         return if (ack.accepted) "Fechamento da posição Forex $positionId solicitado à IQ Option${ack.status?.let { " (status $it)" } ?: ""}. O resultado financeiro final não é confirmado por este protocolo; consulte positions para a situação atual."
         else "A IQ Option recusou fechar a posição Forex $positionId (status ${ack.status ?: "desconhecido"})."
+    }
+
+    private suspend fun adjustForexStops(args: Map<String, String>, settings: ConnectorSettings): String =
+        accountOrderCoordinator.runReserved { adjustForexStopsReserved(args, settings) }
+
+    private suspend fun adjustForexStopsReserved(args: Map<String, String>, settings: ConnectorSettings): String {
+        ensureConnected()
+        val acc = accountMessageFlow.orderBalance() ?: return "RECUSADO: nenhuma carteira selecionada consta no perfil autenticado; sincronize a conta antes de operar."
+        IqForexAccessPolicy.denialReason(acc.isReal, settings.bool("allow_margin_agent"), settings.bool("allow_real_agent"))?.let { return it }
+        val positionId = args["id"]?.toLongOrNull()?.takeIf { it > 0L } ?: return "id inválido."
+        val stopLossPct = args["stop_loss_pct"]?.replace(',', '.')?.toDoubleOrNull() ?: 0.0
+        val takeProfitPct = args["take_profit_pct"]?.replace(',', '.')?.toDoubleOrNull() ?: 0.0
+        val maxSl = settings.num("max_stop_loss_pct", 50.0)
+        if (!stopLossPct.isFinite() || stopLossPct <= 0.0 || stopLossPct > maxSl)
+            return "RECUSADO: stop loss deve estar entre 0 e $maxSl%."
+        val maxTp = settings.num("max_take_profit_pct", 500.0)
+        if (!takeProfitPct.isFinite() || takeProfitPct <= 0.0 || takeProfitPct > maxTp)
+            return "RECUSADO: take profit deve estar entre 0 e $maxTp%."
+        if (marginPositions(force = true).none { it.id == positionId })
+            return "RECUSADO: a posição Forex $positionId não aparece aberta na carteira ativa; nenhum ajuste foi enviado."
+        val ack = manualExecution.adjustForexStops(positionId, stopLossPct, takeProfitPct)
+        cachedForexPositions = null
+        return if (ack.accepted)
+            "A IQ Option confirmou a solicitação de ajuste da posição Forex $positionId (status ${ack.status}). Revise a posição na plataforma; o protocolo não confirma o P/L final."
+        else if (ack.status == null)
+            "A alteração da posição Forex $positionId não foi confirmada pela IQ Option; consulte positions antes de tentar novamente."
+        else
+            "A IQ Option recusou alterar a posição Forex $positionId (status ${ack.status})."
     }
 
     override fun refreshMs(): Long = when {
@@ -707,50 +746,27 @@ class IqOptionConnector(
 
     private suspend fun switchAccountReserved(target: String): String {
         ensureConnected()
-        val previousActiveId = activeBalanceSelection.activeId()
+        val current = accountMessageFlow.orderBalance()
+            ?: return "RECUSADO: o perfil autenticado não confirmou uma carteira; sincronize a conta antes de selecionar outra."
         val wantReal = when (target.lowercase()) {
             "real" -> true
             "demo", "practice" -> false
             else -> throw IllegalArgumentException("Conta desconhecida. Use real ou practice.")
         }
         val b = balances.values.filter { if (wantReal) it.isReal else it.isPractice }.minByOrNull { it.id }
-            ?: error("Esta conta não tem uma carteira ${if (wantReal) "REAL" else "DEMO"} disponível.")
-        if (activeBalanceSelection.activeId() == b.id) return "A conta ${b.label} já está ativa (${money(b)})."
-        val switchGeneration = generation.get()
-        val waiter = accountMessageFlow.beginSwitch(b.id, switchGeneration)
+            ?: return "Esta conta não tem uma carteira ${if (wantReal) "REAL" else "DEMO"} disponível no perfil atual."
+        if (current.id == b.id)
+            return "A carteira ${b.label} já está selecionada nesta sessão; as consultas e operações usam explicitamente a carteira do perfil."
+        val selectionGeneration = generation.get()
+        if (!accountMessageFlow.selectKnownBalanceLocally(b.id, selectionGeneration))
+            return "RECUSADO: a carteira solicitada não consta no perfil autenticado desta sessão."
+        cachedForexPositions = null
+        cachedForexPositionsAt = 0L
         _stateChanges.tryEmit(Unit)
         val targetType = if (b.isReal) "REAL" else "DEMO"
-        debug.recordEvent("iqoption", "account-switch", "requested target=$targetType")
-        var confirmed = false
-        var failureMessage = "A carteira ${b.label} (ID ${b.id}) não foi confirmada pelo servidor. A conta atual é desconhecida e nenhuma ordem será liberada."
-        try {
-            if (ws?.send(IqProtocol.changeBalanceMessage(b.id)) != true) throw IOException("não foi possível enviar o pedido de troca")
-            debug.recordEvent("iqoption", "websocket-send", "account change requested; payload omitted", IqProtocol.WS_URL)
-            val response = withTimeout(8_000) { waiter.deferred.await() }
-            val confirmedId = IqProtocol.confirmedActiveBalanceId(response)
-            if (confirmedId != b.id || !activeBalanceSelection.observeServerConfirmation(confirmedId, switchGeneration))
-                throw IllegalStateException("resposta não confirma o balance_id solicitado")
-            confirmed = true
-            if (previousActiveId != b.id) {
-                resetMarketCircuit()
-                refreshAssetsInBackground()
-            }
-            _stateChanges.tryEmit(Unit)
-            debug.recordEvent("iqoption", "account-switch", "server confirmed target=$targetType")
-            return "Conta ${b.label} confirmada pelo servidor (${money(balances[b.id] ?: b)})."
-        } catch (t: Throwable) {
-            if (t is kotlinx.coroutines.CancellationException && t !is TimeoutCancellationException) throw t
-            failureMessage = if (t is TimeoutCancellationException)
-                "Tempo esgotado: a IQ Option não confirmou a carteira ${b.label} (ID ${b.id}) em 8 segundos. A conta atual é desconhecida; sincronize explicitamente antes de operar."
-            else "Falha ao confirmar a carteira ${b.label} (ID ${b.id}): ${friendly(t)} A conta atual é desconhecida; novas ordens permanecem bloqueadas."
-            debug.recordFailure("iqoption", "account-switch", t, IqProtocol.WS_URL, "WEBSOCKET")
-            _stateChanges.tryEmit(Unit)
-            return "RECUSADO: $failureMessage"
-        } finally {
-            accountMessageFlow.removeWaiter(waiter)
-            accountMessageFlow.finishSwitch(b.id, confirmed, failureMessage)
-            _stateChanges.tryEmit(Unit)
-        }
+        debug.recordEvent("iqoption", "account-switch", "locally selected target=$targetType; requests route by profile balance id")
+        _stateChanges.tryEmit(Unit)
+        return "Carteira ${b.label} selecionada no app. Consultas e operações enviarão explicitamente a carteira presente no perfil. Isso não altera nem confirma a carteira padrão no servidor; a permissão separada para operar REAL continua obrigatória."
     }
 
     private suspend fun syncAccount(): String = accountOrderCoordinator.runReserved {
@@ -854,10 +870,10 @@ class IqOptionConnector(
         if (side != "call" && side != "put") return "direction deve ser call ou put."
         if (!amount.isFinite() || amount <= 0.0) return "amount deve ser finito e maior que zero."
         if (minutes !in 1..60) return "minutes deve estar entre 1 e 60."
-        val account = accountMessageFlow.orderBalance() ?: return "RECUSADO: nenhuma carteira ativa foi confirmada pelo servidor; confirme a conta antes de operar."
+        val account = accountMessageFlow.orderBalance() ?: return "RECUSADO: nenhuma carteira selecionada consta no perfil autenticado; sincronize a conta antes de operar."
         if (byAgent && settings != null) {
             if (account.isReal && !settings.bool("allow_real_agent"))
-                return "RECUSADO: a conta ativa é REAL e o usuário não liberou o agente para operar nela. Troque para DEMO no conector ou libere a conta REAL nas configurações."
+                return "RECUSADO: a carteira selecionada é REAL e o usuário não liberou o agente para operar nela. Selecione DEMO no conector ou libere a carteira REAL nas configurações."
             val maxAmount = settings.num("max_amount", 1.0)
             if (amount > maxAmount) return "RECUSADO: valor $amount excede o máximo por opção ($maxAmount)."
             val maxOpen = settings.num("max_open", 3.0).toInt().coerceAtLeast(1)
@@ -1076,7 +1092,8 @@ class IqOptionConnector(
             args["minutes"]?.toIntOrNull() ?: 1, settings, byAgent = true,
         )
         "open_forex" -> openForex(args, settings)
-        "close_position" -> closeForex(args["id"])
+        "close_position" -> closeForex(args["id"], settings)
+        "adjust_forex_stops" -> adjustForexStops(args, settings)
         "positions" -> {
             ensureConnected()
             val forex = marginPositions(force = true)

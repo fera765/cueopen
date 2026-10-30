@@ -32,18 +32,19 @@ class JevOrchestratorTest {
         assertFalse(p.keepTool("uic_eduzz_vendas", connOf, mcpOf))
     }
 
-    @Test fun contactAddressBookBluetoothAndSmsRequestsLoadDeviceTools() {
+    @Test fun contactAddressBookBluetoothAndCallsLoadDeviceTools() {
         listOf(
             "liste meus contatos" to "device_contacts",
             "procure na minha agenda telefônica" to "device_contacts",
             "qual telefone da Ana?" to "device_contacts",
             "mostre dispositivos pareados" to "device_bluetooth",
-            "ler SMS" to "device_sms_read",
+            "fazer uma chamada para a Ana" to "device_dial",
         ).forEach { (q, tool) ->
             val p = JevOrchestrator.plan(input(q))
             assertTrue("query=$q", p.groups.contains("device"))
             assertTrue("query=$q", p.keepTool(tool, connOf, mcpOf))
         }
+        assertFalse(JevOrchestrator.plan(input("ler SMS")).groups.contains("device"))
     }
 
     @Test fun shortTriggersNeedWholeWord() {

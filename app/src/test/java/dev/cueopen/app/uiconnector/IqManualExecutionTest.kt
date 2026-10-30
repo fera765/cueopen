@@ -67,4 +67,28 @@ class IqManualExecutionTest {
         assertEquals("position-closed", wire.sent.single().names.last())
         assertTrue(wire.sent.single().timeout > 0)
     }
+
+    @Test fun `alteracao Forex espera tpsl-changed e so aceita status de sucesso`() = runBlocking {
+        val wire = FakeWire().apply { answers += obj("""{"name":"tpsl-changed","status":2000,"msg":{"position_id":88}}""") }
+        val execution = IqManualExecution({ "unused" }, wire)
+        assertEquals(IqCloseAck(true, 2000), execution.adjustForexStops(88, 20.0, 30.0))
+        assertEquals("", wire.sent.single().id)
+        assertEquals(listOf("tpsl-changed"), wire.sent.single().names)
+        val body = obj(wire.sent.single().payload)["msg"]!!.jsonObject["body"]!!.jsonObject
+        assertEquals(88L, body["position_id"]!!.jsonPrimitive.content.toLong())
+        assertEquals("percent", body["stop_lose_kind"]!!.jsonPrimitive.content)
+        assertEquals("percent", body["take_profit_kind"]!!.jsonPrimitive.content)
+    }
+
+    @Test fun `alteracao Forex sem status e recusada`() = runBlocking {
+        val wire = FakeWire().apply { answers += obj("""{"name":"tpsl-changed","msg":{}}""") }
+        val execution = IqManualExecution({ "unused" }, wire)
+        assertEquals(IqCloseAck(false, null), execution.adjustForexStops(88, 20.0, 30.0))
+    }
+
+    @Test fun `alteracao Forex com status diferente de 2000 nao e sucesso`() = runBlocking {
+        val wire = FakeWire().apply { answers += obj("""{"name":"tpsl-changed","status":2010,"msg":{}}""") }
+        val execution = IqManualExecution({ "unused" }, wire)
+        assertEquals(IqCloseAck(false, 2010), execution.adjustForexStops(88, 20.0, 30.0))
+    }
 }

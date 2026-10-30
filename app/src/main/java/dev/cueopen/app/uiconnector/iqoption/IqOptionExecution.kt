@@ -68,4 +68,15 @@ class IqManualExecution(
         val status = (response["status"] as? JsonPrimitive)?.contentOrNull?.toIntOrNull()
         return IqCloseAck(status != null && status in 2000..2999, status)
     }
+
+    suspend fun adjustForexStops(positionId: Long, stopLossPct: Double, takeProfitPct: Double): IqCloseAck {
+        require(positionId > 0L) { "positionId deve ser positivo." }
+        require(stopLossPct.isFinite() && stopLossPct > 0.0) { "stopLossPct deve ser finito e positivo." }
+        require(takeProfitPct.isFinite() && takeProfitPct > 0.0) { "takeProfitPct deve ser finito e positivo." }
+        // A biblioteca comunitária envia change-tpsl sem request_id e aguarda tpsl-changed.
+        val response = request.request("", IqProtocol.changeForexStopsMessage(positionId, stopLossPct, takeProfitPct),
+            listOf("tpsl-changed"), 12_000L)
+        val status = (response["status"] as? JsonPrimitive)?.contentOrNull?.toIntOrNull()
+        return IqCloseAck(status == 2000, status)
+    }
 }

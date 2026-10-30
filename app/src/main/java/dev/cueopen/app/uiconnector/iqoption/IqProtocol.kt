@@ -103,11 +103,6 @@ object IqProtocol {
     // ------------------------------------------------------------------ mensagens de saída
     fun ssidMessage(ssid: String): String = buildJsonObject { put("name", "ssid"); put("msg", ssid) }.toString()
 
-    fun changeBalanceMessage(balanceId: Long): String = buildJsonObject {
-        put("name", "api_profile_changebalance")
-        putJsonObject("msg") { put("balance_id", balanceId) }
-    }.toString()
-
     private fun sendMessage(reqId: String, name: String, version: String, body: JsonObject): String = buildJsonObject {
         put("name", "sendMessage")
         put("request_id", reqId)
@@ -187,6 +182,27 @@ object IqProtocol {
         })
 
     fun closePositionMessage(reqId: String, positionId: Long): String = sendMessage(reqId, "close-position", "1.0", buildJsonObject { put("position_id", positionId) })
+
+    /** Payload `change-tpsl` da biblioteca comunitária; a API não documenta esse comando oficialmente. */
+    fun changeForexStopsMessage(positionId: Long, stopLossPct: Double, takeProfitPct: Double): String = buildJsonObject {
+        put("name", "sendMessage")
+        putJsonObject("msg") {
+            put("name", "change-tpsl")
+            put("version", "2.0")
+            putJsonObject("body") {
+                put("position_id", positionId)
+                put("stop_lose_kind", "percent")
+                put("stop_lose_value", stopLossPct)
+                put("take_profit_kind", "percent")
+                put("take_profit_value", takeProfitPct)
+                put("use_trail_stop", false)
+                putJsonObject("extra") {
+                    put("stop_lose_kind", "percent")
+                    put("take_profit_kind", "percent")
+                }
+            }
+        }
+    }.toString()
 
     fun getPositionsMessage(reqId: String, balanceId: Long): String = sendMessage(reqId, "get-positions", "3.0", buildJsonObject {
         put("instrument_types", JsonArray(listOf("forex").map { JsonPrimitive(it) }))

@@ -15,6 +15,8 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -100,6 +102,8 @@ fun SettingsScreen(nav: NavController) {
                 dev.cueopen.app.wallet.MarketApiConfig.geckoApiKey = geckoKey.ifBlank { null }
             }, "Chave Demo CoinGecko (opcional, grátis)", password = true)
             Text("O mercado funciona sem chave (com cache e limites automáticos). Se você bater em limite de requisições com frequência, crie uma chave Demo gratuita em coingecko.com e cole aqui para ter quota dedicada.", fontSize = 12.sp, color = Cue.c.ink2)
+            SectionLabel("Assistente do Android")
+            AssistantDefaultRoleLink(nav.context)
             SectionLabel("Aparência")
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 listOf(ThemeMode.SYSTEM to "Sistema", ThemeMode.LIGHT to "Claro", ThemeMode.DARK to "Escuro").forEach { (m, l) ->
@@ -196,6 +200,32 @@ fun SettingsScreen(nav: NavController) {
         text = { Text("Remove o histórico de todas as tarefas. Arquivos do workspace continuam em /root/workspace.") },
         confirmButton = { TextButton({ app.store.update { it.copy(sessions = emptyList()) }; confirmClear = false }) { Text("Apagar", color = c.err) } },
         dismissButton = { TextButton({ confirmClear = false }) { Text("Cancelar") } })
+}
+
+@Composable
+private fun AssistantDefaultRoleLink(context: android.content.Context) {
+    var refresh by remember { mutableIntStateOf(0) }
+    val active = remember(refresh) { dev.cueopen.app.assistant.AndroidAssistantRole.isDefaultAssistant(context) }
+    val lifecycle = androidx.lifecycle.compose.LocalLifecycleOwner.current
+    androidx.compose.runtime.DisposableEffect(lifecycle) {
+        val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
+            if (event == androidx.lifecycle.Lifecycle.Event.ON_RESUME) refresh++
+        }
+        lifecycle.lifecycle.addObserver(observer)
+        onDispose { lifecycle.lifecycle.removeObserver(observer) }
+    }
+    val roleLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { refresh++ }
+    SettingsLink(
+        icon = Icons.Rounded.RecordVoiceOver,
+        title = if (active) "Fluwy é o assistente padrão" else "Definir Fluwy como assistente",
+        sub = if (active)
+            "Use o gesto de assistente do Android. O contexto só segue para um rascunho quando você tocar em Continuar."
+        else
+            "O Android abrirá a seleção do assistente. Após escolher Fluwy, use o gesto do sistema para abrir a interface original sobre apps compatíveis.",
+        tint = Cue.c.accent,
+    ) {
+        dev.cueopen.app.assistant.AndroidAssistantRole.requestIntent(context)?.let(roleLauncher::launch)
+    }
 }
 
 @Composable

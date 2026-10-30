@@ -1050,10 +1050,8 @@ class AgentRunner(
             val promptDeviceTools = if (deviceGroupInContext) allDeviceTools else emptySet()
             dev.cueopen.app.device.DeviceCapPolicy.agentGuidance(promptDeviceTools).forEach { appendLine("6c. $it") }
             if (deviceGroupInContext) {
-                val missingGrants = requestedCaps.filter { it != dev.cueopen.app.device.DeviceCaps.SMS && !dev.cueopen.app.device.DeviceCaps.granted(ctx, it) }
+                val missingGrants = requestedCaps.filter { !dev.cueopen.app.device.DeviceCaps.granted(ctx, it) }
                 if (missingGrants.isNotEmpty()) appendLine("6c. Capacidades ligadas no perfil, mas sem autorização Android vigente: " + missingGrants.joinToString(", ") { cap -> dev.cueopen.app.device.DeviceCaps.all.firstOrNull { it.id == cap }?.title ?: cap } + ". Informe a permissão necessária; não use shell, browser, notificações ou outro caminho para contorná-la.")
-                if (dev.cueopen.app.device.DeviceCaps.SMS in requestedCaps && !dev.cueopen.app.device.DeviceCaps.hasSmsRole(ctx))
-                    appendLine("6c. A leitura da caixa de entrada SMS não está disponível neste app, que não é elegível a app padrão de SMS. Não solicite ROLE_SMS nem use notificações ou outra via lateral. device_sms_compose, se estiver no schema, apenas abre um rascunho para revisão do usuário.")
             }
             appendLine("6c. IQ OPTION: use apenas as ferramentas manuais expostas pelo conector para login, ativos abertos, candles, abrir opção/Forex, fechar Forex e consultar posições/resultados. Não há scanner, estratégia nem execução automática nesse conector; não invente ferramentas removidas nem transforme candles em uma ordem automática.")
             appendLine("7. MODO CONTÍNUO: se o usuário pedir para monitorar, acompanhar, repetir ou rodar por horas/dias, NÃO finalize. Faça a verificação, registre em notes_write e chame `sleep` (minutos até a próxima verificação). Repita até o usuário pausar.")
@@ -1346,7 +1344,7 @@ class AgentRunner(
         val grantedCaps = caps.filter { dev.cueopen.app.device.DeviceCaps.granted(ctx, it) }
         val deviceTools = dev.cueopen.app.device.DeviceCapPolicy.availableTools(caps, grantedCaps)
         if ("device_notifications" in deviceTools)
-            add(tool("device_notifications", "Lê notificações recentes autorizadas; o conteúdo do app padrão de SMS é excluído e não pode ser usado para ler a caixa de entrada.", buildJsonObject {
+            add(tool("device_notifications", "Lê notificações recentes autorizadas pelo usuário.", buildJsonObject {
                 put("filter", str("Filtrar por app ou texto (opcional)")); put("limit", int("Máximo (padrão 30)"))
             }))
         if ("device_notify" in deviceTools)
@@ -1374,12 +1372,6 @@ class AgentRunner(
             add(tool("device_call_log", "Lê o histórico recente de chamadas, se o Android/política do dispositivo permitir.", buildJsonObject { put("limit", int("Máximo de registros (1–50, padrão 20)")) }))
         if ("device_location" in deviceTools)
             add(tool("device_location", "Retorna apenas a última localização conhecida; não inicia rastreamento contínuo.", buildJsonObject {}))
-        if ("device_sms_read" in deviceTools)
-            add(tool("device_sms_read", "Lê SMS recentes somente se este app for o padrão de SMS e o Android conceder READ_SMS.", buildJsonObject { put("limit", int("Máximo de mensagens (1–50, padrão 20)")) }))
-        if ("device_sms_compose" in deviceTools)
-            add(tool("device_sms_compose", "Abre um rascunho no app de mensagens. Nunca envia: o usuário revisa e toca em Enviar.", buildJsonObject {
-                put("phone", str("Número do destinatário")); put("body", str("Texto sugerido"))
-            }, listOf("phone", "body")))
         if ("device_dial" in deviceTools)
             add(tool("device_dial", "Abre o discador do Android; o usuário revisa e toca em Ligar. Nunca inicia chamada diretamente.", buildJsonObject { put("phone", str("Número a discar")) }, listOf("phone")))
         if ("device_microphone" in deviceTools)
@@ -1826,7 +1818,6 @@ class AgentRunner(
             "device_contacts" -> "Pesquisando contatos" to Activity.Kind.THINKING
             "device_location" -> "Consultando última localização" to Activity.Kind.THINKING
             "device_bluetooth", "device_bluetooth_pair" -> "Acessando Bluetooth" to Activity.Kind.THINKING
-            "device_sms_read", "device_sms_compose" -> "Abrindo mensagens" to Activity.Kind.THINKING
             "device_dial" -> "Abrindo discador" to Activity.Kind.THINKING
             "device_microphone" -> "Abrindo reconhecimento de voz" to Activity.Kind.THINKING
             "device_screenshot" -> "Capturando tela" to Activity.Kind.THINKING
@@ -2352,8 +2343,6 @@ class AgentRunner(
                 "device_location" -> dev.cueopen.app.device.DeviceActions.location(ctx)
                 "device_bluetooth" -> dev.cueopen.app.device.DeviceActions.bluetoothDevices(ctx)
                 "device_bluetooth_pair" -> dev.cueopen.app.device.DeviceActions.openBluetoothSettings(ctx)
-                "device_sms_read" -> dev.cueopen.app.device.DeviceActions.smsInbox(ctx, i("limit") ?: 20)
-                "device_sms_compose" -> dev.cueopen.app.device.DeviceActions.openSmsComposer(ctx, s("phone"), s("body"))
                 "device_dial" -> dev.cueopen.app.device.DeviceActions.openDialer(ctx, s("phone"))
                 "device_microphone" -> dev.cueopen.app.device.DeviceActions.microphone(ctx)
                 "device_notify" -> { notifyRaw(s("title").ifBlank { "CueOpen" }, plainText(s("text"))); "Notificação enviada." }

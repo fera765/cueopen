@@ -8,8 +8,6 @@ import android.app.AppOpsManager
 import android.net.Uri
 import android.os.Build
 import android.provider.Settings
-import android.provider.Telephony
-import android.app.role.RoleManager
 import androidx.compose.runtime.mutableStateListOf
 import dev.cueopen.app.data.now
 import kotlinx.serialization.Serializable
@@ -18,7 +16,6 @@ import kotlinx.serialization.Serializable
 interface AndroidCapabilityState {
     fun permissionGranted(permission: String): Boolean
     fun appOpAllowed(operation: String): Boolean
-    fun roleHeld(role: String): Boolean
     fun specialAccessGranted(capability: String): Boolean
 }
 
@@ -30,13 +27,6 @@ private class RealAndroidCapabilityState(private val ctx: Context) : AndroidCapa
         val appOps = ctx.getSystemService(AppOpsManager::class.java) ?: return false
         val mode = appOps.checkOpNoThrow(operation, android.os.Process.myUid(), ctx.packageName)
         mode != AppOpsManager.MODE_IGNORED && mode != AppOpsManager.MODE_ERRORED
-    }.getOrDefault(false)
-
-    override fun roleHeld(role: String): Boolean = runCatching {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            val manager = ctx.getSystemService(RoleManager::class.java)
-            manager?.isRoleAvailable(role) == true && manager.isRoleHeld(role)
-        } else role == RoleManager.ROLE_SMS && Telephony.Sms.getDefaultSmsPackage(ctx) == ctx.packageName
     }.getOrDefault(false)
 
     override fun specialAccessGranted(capability: String): Boolean = when (capability) {
@@ -60,7 +50,6 @@ object DeviceCaps {
     const val CALL_LOG = DeviceCapPolicy.CALL_LOG
     const val CONTACTS = DeviceCapPolicy.CONTACTS
     const val LOCATION = DeviceCapPolicy.LOCATION
-    const val SMS = DeviceCapPolicy.SMS
     const val MICROPHONE = DeviceCapPolicy.MICROPHONE
     const val PHONE_CALLS = DeviceCapPolicy.PHONE_CALLS
     const val NOTIF_READ = DeviceCapPolicy.PHONE_NOTIFICATIONS
@@ -75,7 +64,6 @@ object DeviceCaps {
         Cap(CALL_LOG, "Histórico de ligações", "Ler registros recentes de chamadas. O Android pode restringir esta permissão por função/política."),
         Cap(CONTACTS, "Contatos", "Pesquisar nomes e telefones quando o agente pedir. Não copiamos a agenda para o armazenamento do app."),
         Cap(LOCATION, "Localização", "Consultar a última localização conhecida quando solicitada; não fica monitorando em segundo plano."),
-        Cap(SMS, "Mensagens / SMS", "A leitura da caixa de entrada não está disponível neste app, que não é elegível a app padrão de SMS. Enviar abre um rascunho para você revisar e confirmar."),
         Cap(MICROPHONE, "Microfone", "Entrada de voz somente após abrir a interface de reconhecimento do Android; sem gravação silenciosa ou contínua."),
         Cap(PHONE_CALLS, "Fazer ligações", "Abre o discador do Android com o número. Você revisa e toca em Ligar; o agente não inicia chamadas sozinho."),
         Cap(NOTIF_READ, "Notificações do telefone", "Ler notificações recentes requer habilitar o Acesso a notificações nas Configurações do Android."),
@@ -96,7 +84,6 @@ object DeviceCaps {
         android.Manifest.permission.READ_CONTACTS -> "android:read_contacts"
         android.Manifest.permission.ACCESS_COARSE_LOCATION -> "android:coarse_location"
         android.Manifest.permission.ACCESS_FINE_LOCATION -> "android:fine_location"
-        android.Manifest.permission.READ_SMS -> "android:read_sms"
         android.Manifest.permission.RECORD_AUDIO -> "android:record_audio"
         android.Manifest.permission.BLUETOOTH_CONNECT -> "android:bluetooth_connect"
         android.Manifest.permission.POST_NOTIFICATIONS -> "android:post_notification"
@@ -113,15 +100,10 @@ object DeviceCaps {
         CALL_LOG -> listOf(android.Manifest.permission.READ_CALL_LOG)
         CONTACTS -> listOf(android.Manifest.permission.READ_CONTACTS)
         LOCATION -> listOf(android.Manifest.permission.ACCESS_COARSE_LOCATION, android.Manifest.permission.ACCESS_FINE_LOCATION)
-        SMS -> if (hasSmsRole(ctx)) listOf(android.Manifest.permission.READ_SMS) else emptyList()
         MICROPHONE -> listOf(android.Manifest.permission.RECORD_AUDIO)
         NOTIF_POST -> if (Build.VERSION.SDK_INT >= 33) listOf(android.Manifest.permission.POST_NOTIFICATIONS) else emptyList()
         else -> emptyList()
     }
-
-    fun hasSmsRole(ctx: Context): Boolean = hasSmsRole(androidState(ctx))
-
-    fun hasSmsRole(state: AndroidCapabilityState): Boolean = state.roleHeld(RoleManager.ROLE_SMS)
 
     /** Revalida permissões do sistema em tempo real; não confia apenas no consentimento persistido do agente. */
     fun granted(ctx: Context, id: String): Boolean = granted(androidState(ctx), id)
@@ -135,7 +117,6 @@ object DeviceCaps {
         CONTACTS -> hasPermission(state, android.Manifest.permission.READ_CONTACTS, appOpFor(android.Manifest.permission.READ_CONTACTS))
         LOCATION -> (hasPermission(state, android.Manifest.permission.ACCESS_COARSE_LOCATION, appOpFor(android.Manifest.permission.ACCESS_COARSE_LOCATION)) ||
             hasPermission(state, android.Manifest.permission.ACCESS_FINE_LOCATION, appOpFor(android.Manifest.permission.ACCESS_FINE_LOCATION)))
-        SMS -> hasSmsRole(state) && hasPermission(state, android.Manifest.permission.READ_SMS, appOpFor(android.Manifest.permission.READ_SMS))
         MICROPHONE -> hasPermission(state, android.Manifest.permission.RECORD_AUDIO, appOpFor(android.Manifest.permission.RECORD_AUDIO))
         PHONE_CALLS, BACKGROUND -> true // São consentimentos por agente, não permissões perigosas do Android.
         NOTIF_READ -> state.specialAccessGranted(NOTIF_READ)
@@ -146,11 +127,9 @@ object DeviceCaps {
     }
 
     fun status(ctx: Context, id: String): String = when {
-        id == SMS && !hasSmsRole(ctx) -> "Leitura da caixa de entrada indisponível: este app não é elegível a padrão de SMS. Rascunhos continuam disponíveis para sua revisão."
         id == BLUETOOTH && usesNearbyRuntimePermission() && !granted(ctx, id) -> "Android 12+: conceda Dispositivos próximos (BLUETOOTH_CONNECT) na janela do Android."
         granted(ctx, id) && id == BACKGROUND -> "Autorizada para este agente. Toque para revisar otimização da bateria; o Android ainda pode interromper ciclos."
         granted(ctx, id) && id == PHONE_CALLS -> "Autorizada. Cada chamada abre o discador para sua confirmação."
-        granted(ctx, id) && id == SMS -> "Autorizada. O envio continua manual no app de mensagens."
         granted(ctx, id) -> "Concedida no Android"
         runtimePermissions(ctx, id).isNotEmpty() -> "Toque para conceder na janela do Android →"
         id == BLUETOOTH -> "Permissão de Bluetooth indisponível; verifique a versão do Android."
@@ -170,9 +149,6 @@ object DeviceCaps {
             OVERLAY -> Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:${ctx.packageName}"))
             SCREEN -> Intent(ctx, ScreenCapture.RequestActivity::class.java)
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            // Este app não declara os componentes necessários para assumir ROLE_SMS.
-            // A leitura da caixa de entrada permanece indisponível; não mostramos o role picker.
-            SMS -> return
             BACKGROUND -> if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)
                 else Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:${ctx.packageName}"))
             else -> {

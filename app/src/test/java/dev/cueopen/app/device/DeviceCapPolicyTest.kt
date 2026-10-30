@@ -15,14 +15,11 @@ class DeviceCapPolicyTest {
         assertFalse("device_call_log" in tools)
     }
 
-    @Test fun revokedCapabilityIsRemovedEvenWhenAgentOptedIn() {
-        val tools = DeviceCapPolicy.availableTools(
-            agentCapabilities = setOf(DeviceCapPolicy.SMS, DeviceCapPolicy.PHONE_CALLS),
-            systemGrants = setOf(DeviceCapPolicy.PHONE_CALLS),
-        )
-        assertEquals(setOf("device_dial", "device_sms_compose"), tools)
-        assertFalse("device_sms_read" in tools)
-        assertTrue(DeviceCapPolicy.requiredCapability("device_sms_read") == DeviceCapPolicy.SMS)
+    @Test fun retiredSmsCapabilityIsRemovedFromExistingProfiles() {
+        val oldProfile = listOf("sms", DeviceCapPolicy.PHONE_CALLS)
+        assertEquals(listOf(DeviceCapPolicy.PHONE_CALLS), DeviceCapPolicy.removeRetiredCapabilities(oldProfile))
+        assertEquals(setOf("device_dial"), DeviceCapPolicy.availableTools(oldProfile, emptySet()))
+        assertTrue(DeviceCapPolicy.allTools.none { it.startsWith("device_sms_") })
     }
 
     @Test fun visibleSystemHandoffsNeedAgentOptInButNotReadPermissions() {
@@ -30,17 +27,14 @@ class DeviceCapPolicyTest {
             setOf(DeviceCapPolicy.BLUETOOTH), emptySet()))
         assertEquals(setOf("device_calendar_create"), DeviceCapPolicy.availableTools(
             setOf(DeviceCapPolicy.CALENDAR), emptySet()))
-        assertEquals(setOf("device_sms_compose"), DeviceCapPolicy.availableTools(
-            setOf(DeviceCapPolicy.SMS), emptySet()))
     }
 
     @Test fun sensitiveReadsStillRequireBothAgentOptInAndAndroidGrant() {
         val tools = DeviceCapPolicy.availableTools(
-            setOf(DeviceCapPolicy.CONTACTS, DeviceCapPolicy.SMS, DeviceCapPolicy.BLUETOOTH),
-            setOf(DeviceCapPolicy.CONTACTS, DeviceCapPolicy.SMS, DeviceCapPolicy.BLUETOOTH),
+            setOf(DeviceCapPolicy.CONTACTS, DeviceCapPolicy.BLUETOOTH),
+            setOf(DeviceCapPolicy.CONTACTS, DeviceCapPolicy.BLUETOOTH),
         )
         assertTrue("device_contacts" in tools)
-        assertTrue("device_sms_read" in tools)
         assertTrue("device_bluetooth" in tools)
         assertFalse("device_contacts" in DeviceCapPolicy.availableTools(emptySet(), setOf(DeviceCapPolicy.CONTACTS)))
         assertFalse("device_contacts" in DeviceCapPolicy.availableTools(setOf(DeviceCapPolicy.CONTACTS), emptySet()))
@@ -52,7 +46,7 @@ class DeviceCapPolicyTest {
         assertTrue(DeviceCapPolicy.bluetoothConnectRuntimePermissionRequired(31))
     }
 
-    @Test fun agentGuidanceNamesContactsAndForbidsBulkDisclosureAndSmsSideChannels() {
+    @Test fun agentGuidanceNamesContactsAndForbidsBulkDisclosure() {
         val guidance = DeviceCapPolicy.agentGuidance(setOf("device_contacts", "device_notifications"))
             .joinToString(" ")
         assertTrue(guidance.contains("device_contacts"))
@@ -61,9 +55,8 @@ class DeviceCapPolicyTest {
         assertTrue(guidance.contains("contornar"))
     }
 
-    @Test fun callsAndSmsOnlyOpenUserConfirmedSystemFlows() {
+    @Test fun callsOnlyOpenUserConfirmedSystemFlows() {
         assertTrue(DeviceCapPolicy.requiresUserHandoff("device_dial"))
-        assertTrue(DeviceCapPolicy.requiresUserHandoff("device_sms_compose"))
         assertTrue(DeviceCapPolicy.requiresUserHandoff("device_calendar_create"))
         assertFalse(DeviceCapPolicy.requiresUserHandoff("device_sms_read"))
     }

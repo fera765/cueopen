@@ -27,7 +27,8 @@ class SpecValidatorTest {
         assertEquals(setOf(
             "allow_real_agent", "max_amount", "max_open", "daily_stop_loss", "daily_take_profit",
             "max_consec_losses", "cooldown_min", "require_jev", "allow_margin_agent",
-            "max_margin_amount", "max_forex_open", "max_leverage", "max_stop_loss_pct", "forex_monitor_interval_sec",
+            "max_margin_amount", "max_forex_open", "max_leverage", "max_stop_loss_pct", "max_take_profit_pct",
+            "forex_monitor_interval_sec",
         ), settings.keys)
         assertFalse(settings.keys.any { it.contains("strategy") || it.contains("mhi") || it.contains("masaniello") || it.contains("analysis") })
     }

@@ -9,8 +9,8 @@ import java.util.concurrent.CopyOnWriteArrayList
 
 /**
  * Account-message state and waiter routing shared by the live connector and deterministic fake-
- * transport tests. A wallet becomes active only from an explicit profile/balance ID on the current
- * socket generation; unrelated request replies and timeouts cannot confirm or roll it back.
+ * transport tests. Login is confirmed by the current profile; local account selection is restricted
+ * to a balance ID already present in that profile. Unrelated replies cannot confirm or roll it back.
  */
 internal class IqAccountMessageFlow {
     internal data class Waiter(
@@ -40,9 +40,15 @@ internal class IqAccountMessageFlow {
 
     fun activeBalance(): IqProtocol.Balance? = selection.activeId()?.let { balances[it] }
 
-    /** Orders are eligible only after a known active wallet is explicitly confirmed. */
+    /** Operations are eligible only for a known selected wallet in the authenticated profile. */
     fun orderBalance(): IqProtocol.Balance? =
         activeBalance()?.takeIf { authenticated && !selection.switchPending() && !selection.switchFailed() }
+
+    /** Select only a wallet known in this authenticated profile; the request caller routes by ID. */
+    fun selectKnownBalanceLocally(balanceId: Long, eventGeneration: Long): Boolean {
+        if (!authenticated || eventGeneration != selection.currentGeneration() || !balances.containsKey(balanceId)) return false
+        return selection.selectKnownBalanceLocally(balanceId, eventGeneration)
+    }
 
     fun beginConnection(generation: Long): Waiter {
         balances.clear()

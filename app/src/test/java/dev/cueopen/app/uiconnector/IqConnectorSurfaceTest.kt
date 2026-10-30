@@ -11,7 +11,7 @@ class IqConnectorSurfaceTest {
     private val connector = IqOptionConnector()
 
     @Test fun `schema contem somente consulta e trading manual`() {
-        assertEquals(listOf("open_assets", "get_candles", "open_option", "open_forex", "close_position", "positions", "get_trade_result"), connector.spec.tools.map { it.name })
+        assertEquals(listOf("open_assets", "get_candles", "open_option", "open_forex", "close_position", "adjust_forex_stops", "positions", "get_trade_result"), connector.spec.tools.map { it.name })
         assertTrue(SpecValidator.validate(connector.spec).isEmpty())
         val names = connector.spec.settings.map { it.id }
         assertFalse(names.any { it.contains("strategy") || it.contains("mhi") || it.contains("masaniello") })

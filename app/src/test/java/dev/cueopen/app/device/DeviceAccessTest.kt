@@ -1,7 +1,6 @@
 package dev.cueopen.app.device
 
 import android.Manifest
-import android.app.role.RoleManager
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -10,12 +9,10 @@ class DeviceAccessTest {
     private class FakeState(
         val permissions: MutableSet<String> = mutableSetOf(),
         val appOps: MutableSet<String> = mutableSetOf(),
-        val roles: MutableSet<String> = mutableSetOf(),
         val special: MutableSet<String> = mutableSetOf(),
     ) : AndroidCapabilityState {
         override fun permissionGranted(permission: String) = permission in permissions
         override fun appOpAllowed(operation: String) = operation in appOps
-        override fun roleHeld(role: String) = role in roles
         override fun specialAccessGranted(capability: String) = capability in special
     }
 
@@ -35,22 +32,9 @@ class DeviceAccessTest {
     }
 
     @Test
-    fun smsRequiresRolePermissionAndAppOpAndRevocationIsObserved() {
-        val state = FakeState(
-            permissions = mutableSetOf(Manifest.permission.READ_SMS),
-            appOps = mutableSetOf("android:read_sms"),
-            roles = mutableSetOf(RoleManager.ROLE_SMS),
-        )
-        assertTrue(DeviceCaps.granted(state, DeviceCaps.SMS))
-
-        state.roles.clear()
-        assertFalse(DeviceCaps.granted(state, DeviceCaps.SMS))
-        state.roles += RoleManager.ROLE_SMS
-        state.permissions.clear()
-        assertFalse(DeviceCaps.granted(state, DeviceCaps.SMS))
-        state.permissions += Manifest.permission.READ_SMS
-        state.appOps.clear()
-        assertFalse(DeviceCaps.granted(state, DeviceCaps.SMS))
+    fun retiredSmsCapabilityIsNotExposedOrGranted() {
+        assertFalse(DeviceCaps.all.any { it.id == "sms" })
+        assertFalse(DeviceCaps.granted(FakeState(), "sms"))
     }
 
     @Test

@@ -14,7 +14,6 @@
     <uses-permission android:name="android.permission.READ_CONTACTS" />
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
-    <uses-permission android:name="android.permission.READ_SMS" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
@@ -52,6 +51,30 @@
                 <data android:mimeType="*/*" />
             </intent-filter>
         </activity>
+
+        <service
+            android:name=".assistant.FluwyVoiceInteractionService"
+            android:exported="true"
+            android:label="@string/fluwy_assistant_label"
+            android:permission="android.permission.BIND_VOICE_INTERACTION">
+            <intent-filter>
+                <action android:name="android.service.voice.VoiceInteractionService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.voice_interaction"
+                android:resource="@xml/fluwy_voice_interaction" />
+        </service>
+
+        <service
+            android:name=".assistant.FluwyVoiceInteractionSessionService"
+            android:exported="true"
+            android:label="@string/fluwy_assistant_label"
+            android:permission="android.permission.BIND_VOICE_INTERACTION"
+            android:process=":assistant">
+            <intent-filter>
+                <action android:name="android.service.voice.VoiceInteractionSessionService" />
+            </intent-filter>
+        </service>
 
         <service
             android:name=".sandbox.SandboxService"

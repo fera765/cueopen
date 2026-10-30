@@ -1,8 +1,8 @@
 package dev.cueopen.app.uiconnector.iqoption
 
 /**
- * State reducer for the active broker wallet. A different wallet can replace the current one only
- * during initial confirmation of a new socket generation or when it exactly matches a pending switch.
+ * State reducer for the app-selected wallet. Server events can confirm a wallet; a local selection
+ * may select only a balance already present in the current authenticated profile.
  */
 class IqActiveBalanceSelection {
     private var generation: Long = 0L
@@ -38,6 +38,17 @@ class IqActiveBalanceSelection {
         failedTargetId = null
         failedMessage = null
         awaitingInitialConfirmation = false
+    }
+
+    /** Select a profile-known wallet locally; order/query callers must still pass its balance ID. */
+    @Synchronized fun selectKnownBalanceLocally(targetId: Long, eventGeneration: Long): Boolean {
+        if (targetId <= 0L || eventGeneration != generation || confirmedId == null || awaitingInitialConfirmation) return false
+        confirmedId = targetId
+        pendingId = null
+        failedTargetId = null
+        failedMessage = null
+        awaitingInitialConfirmation = false
+        return true
     }
 
     /**

@@ -10,7 +10,6 @@ object DeviceCapPolicy {
     const val CALL_LOG = "call_log"
     const val CONTACTS = "contacts"
     const val LOCATION = "location"
-    const val SMS = "sms"
     const val MICROPHONE = "microphone"
     const val PHONE_CALLS = "phone_calls"
     const val PHONE_NOTIFICATIONS = "notif_read"
@@ -25,7 +24,6 @@ object DeviceCapPolicy {
         CALL_LOG to setOf("device_call_log"),
         CONTACTS to setOf("device_contacts"),
         LOCATION to setOf("device_location"),
-        SMS to setOf("device_sms_read", "device_sms_compose"),
         MICROPHONE to setOf("device_microphone"),
         PHONE_CALLS to setOf("device_dial"),
         PHONE_NOTIFICATIONS to setOf("device_notifications"),
@@ -38,7 +36,7 @@ object DeviceCapPolicy {
     /** Operações que leem dados protegidos ou exigem autorização atual do Android. */
     private val systemGatedTools = setOf(
         "device_bluetooth", "device_calendar_read", "device_call_log", "device_contacts",
-        "device_location", "device_sms_read", "device_microphone", "device_notifications",
+        "device_location", "device_microphone", "device_notifications",
         "device_notify", "device_screenshot", "device_overlay",
     )
 
@@ -60,6 +58,10 @@ object DeviceCapPolicy {
 
     fun requiresSystemGrant(tool: String): Boolean = tool in systemGatedTools
 
+    /** Remove IDs de capacidades que versões anteriores persistiram, sem reativá-las no perfil. */
+    fun removeRetiredCapabilities(agentCapabilities: Collection<String>): List<String> =
+        agentCapabilities.filterNot { it == "sms" }
+
     /** Bluetooth CONNECT é permissão runtime no Android 12+, independente do targetSdk legado do app. */
     fun bluetoothConnectRuntimePermissionRequired(sdkInt: Int): Boolean = sdkInt >= 31
 
@@ -70,9 +72,7 @@ object DeviceCapPolicy {
         return buildList {
             add("Ferramentas Android disponíveis neste agente: ${tools.sorted().joinToString(", ")}. Use a ferramenta adequada quando o pedido corresponder; nunca improvise acesso a uma capacidade ausente.")
             if ("device_contacts" in tools) add("Contatos: use device_contacts para localizar uma pessoa por nome ou número quando o usuário pedir. A busca é específica e limitada; se pedirem a agenda inteira, pergunte qual pessoa ou subconjunto. Retorne somente os dados necessários; não faça exportação/listagem em massa nem divulgue contatos sem relação com o pedido.")
-            if ("device_notifications" in tools) add("Notificações: nunca use device_notifications para ler SMS nem contornar as regras de acesso à caixa de entrada; notificações do app padrão de SMS são ocultadas.")
-            if ("device_sms_read" in tools) add("SMS: device_sms_read só pode ser usado quando este app for o padrão de SMS e o Android conceder READ_SMS. Nunca leia mensagens por notificações, arquivos ou outra via alternativa.")
-            if ("device_sms_compose" in tools) add("SMS: device_sms_compose abre apenas um rascunho no app de mensagens; o usuário revisa e toca em Enviar. Nunca envie SMS diretamente.")
+            if ("device_notifications" in tools) add("Notificações: use device_notifications apenas para notificações permitidas pela política de privacidade do app; não tente contornar restrições de acesso a conteúdo.")
             if ("device_bluetooth" in tools) add("Bluetooth: device_bluetooth lista somente dispositivos já pareados e não inicia varredura.")
             if ("device_bluetooth_pair" in tools) add("Bluetooth: device_bluetooth_pair apenas abre as Configurações; pareamento e alterações ficam sob controle do usuário.")
         }
@@ -89,6 +89,6 @@ object DeviceCapPolicy {
 
     /** Estas ferramentas somente abrem uma interface visível do sistema; não executam a ação final. */
     fun requiresUserHandoff(tool: String): Boolean = tool in setOf(
-        "device_dial", "device_sms_compose", "device_calendar_create", "device_bluetooth_pair", "device_microphone"
+        "device_dial", "device_calendar_create", "device_bluetooth_pair", "device_microphone"
     )
 }

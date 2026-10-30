@@ -679,7 +679,7 @@ fun DevicePermissionsCard(a: dev.cueopen.app.data.AgentProfile, onChange: (dev.c
                         Text(cap.desc, fontSize = 12.sp, color = c.ink2)
                         if (on) Text(dev.cueopen.app.device.DeviceCaps.status(ctx, cap.id), fontSize = 11.sp,
                             color = if (granted) c.ok else c.warn,
-                            modifier = if (cap.id == dev.cueopen.app.device.DeviceCaps.SMS || granted) Modifier
+                            modifier = if (granted) Modifier
                                 else Modifier.clickable { requestCap(cap.id) })
                     }
                     Switch(on, { v ->
@@ -688,7 +688,7 @@ fun DevicePermissionsCard(a: dev.cueopen.app.data.AgentProfile, onChange: (dev.c
                     }, colors = SwitchDefaults.colors(checkedTrackColor = c.ink, checkedThumbColor = c.bg))
                 }
             }
-            Text("O agente só usa uma capacidade se ela estiver ligada neste perfil e concedida pelo Android. Desligar aqui bloqueia este agente, mas não revoga o acesso global do app; para isso, revogue-o também nas Configurações do Android. Ligações, SMS e eventos ficam em rascunho para sua confirmação; ciclos em background dependem dos limites do sistema.",
+            Text("O agente só usa uma capacidade se ela estiver ligada neste perfil e concedida pelo Android. Desligar aqui bloqueia este agente, mas não revoga o acesso global do app; para isso, revogue-o também nas Configurações do Android. Ligações e eventos exigem confirmação no Android; ciclos em background dependem dos limites do sistema.",
                 fontSize = 11.sp, color = c.ink3, modifier = Modifier.padding(14.dp))
         }
     }

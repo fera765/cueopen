@@ -164,12 +164,9 @@ class IqProtocolTest {
     }
 
     // ------------------------------------------------------------------ saída
-    @Test fun `mensagem ssid e troca de conta`() {
+    @Test fun `mensagem ssid`() {
         val s = obj(IqProtocol.ssidMessage("S1"))
         assertEquals("ssid", s["name"]!!.jsonPrimitive.content); assertEquals("S1", s["msg"]!!.jsonPrimitive.content)
-        val c = obj(IqProtocol.changeBalanceMessage(77))
-        assertEquals("api_profile_changebalance", c["name"]!!.jsonPrimitive.content)
-        assertEquals(77L, c["msg"]!!.jsonObject["balance_id"]!!.jsonPrimitive.long)
     }
 
     @Test fun `mensagem de ordem carrega a conta e a direcao`() {
@@ -223,6 +220,22 @@ class IqProtocolTest {
         assertEquals("[\"forex\"]", positions["body"]!!.jsonObject["instrument_types"].toString())
         val order = obj(IqProtocol.placeForexOrderMessage("ord", 44, "EURUSD", "buy", 1.0, 5, 20.0, 30.0))["msg"]!!.jsonObject
         assertEquals("forex", order["body"]!!.jsonObject["instrument_type"]!!.jsonPrimitive.content)
+    }
+
+    @Test fun `change tpsl usa o payload comunitario e identifica position_id`() {
+        val outer = obj(IqProtocol.changeForexStopsMessage(1234L, 15.0, 25.0))
+        assertEquals("sendMessage", outer["name"]!!.jsonPrimitive.content)
+        assertNull(outer["request_id"])
+        val command = outer["msg"]!!.jsonObject
+        assertEquals("change-tpsl", command["name"]!!.jsonPrimitive.content)
+        assertEquals("2.0", command["version"]!!.jsonPrimitive.content)
+        val body = command["body"]!!.jsonObject
+        assertEquals(1234L, body["position_id"]!!.jsonPrimitive.long)
+        assertEquals("percent", body["stop_lose_kind"]!!.jsonPrimitive.content)
+        assertEquals(15.0, body["stop_lose_value"]!!.jsonPrimitive.content.toDouble(), 0.0)
+        assertEquals("percent", body["take_profit_kind"]!!.jsonPrimitive.content)
+        assertEquals(25.0, body["take_profit_value"]!!.jsonPrimitive.content.toDouble(), 0.0)
+        assertEquals("false", body["use_trail_stop"]!!.jsonPrimitive.content)
     }
 
     @Test fun `resolucao de ativo ignora caixa e separadores`() {
