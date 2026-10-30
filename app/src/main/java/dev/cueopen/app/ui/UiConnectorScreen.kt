@@ -89,7 +89,7 @@ fun UiConnectorsSection(nav: NavController) {
         }
         report?.let { Text(it, fontSize = 12.sp, color = c.ink2) }
         Text(
-            "Conectores com interface própria: login, painéis ao vivo e ferramentas para o agente. Credenciais ficam cifradas no aparelho e nunca chegam à IA.",
+            "Conectores com interface própria: login, painéis ao vivo e ferramentas para o agente. Credenciais ficam cifradas no aparelho; o Proxy configura a rede do app e não vira ferramenta do agente.",
             fontSize = 13.sp, color = c.ink2,
         )
         hub.connectors.forEach { uc ->
@@ -120,6 +120,29 @@ fun UiConnectorsSection(nav: NavController) {
                 }
                 Icon(Icons.Rounded.ChevronRight, null, tint = c.ink3)
             }
+        }
+        // Proxy é uma configuração compartilhada do app, não uma ferramenta do agente.
+        // Mostre-o no mesmo catálogo visual e reutilize a tela de perfis já existente.
+        Row(
+            Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).background(c.surface)
+                .border(1.dp, c.line, RoundedCornerShape(16.dp))
+                .clickable { nav.navigate("proxy") }.padding(14.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Box(Modifier.size(42.dp).clip(RoundedCornerShape(12.dp)).background(c.accent), contentAlignment = Alignment.Center) {
+                Icon(Icons.Rounded.SettingsEthernet, null, tint = Color.White, modifier = Modifier.size(23.dp))
+            }
+            Spacer(Modifier.width(12.dp))
+            Column(Modifier.weight(1f)) {
+                Text("Proxy", fontWeight = FontWeight.SemiBold, fontSize = 16.sp)
+                Text("Perfis independentes para Browser, Terminal e Agent/API.", fontSize = 12.sp, color = c.ink2, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 4.dp)) {
+                    Box(Modifier.size(7.dp).clip(CircleShape).background(c.accent))
+                    Spacer(Modifier.width(6.dp))
+                    Text("Configuração de rede", fontSize = 12.sp, color = c.ink2)
+                }
+            }
+            Icon(Icons.Rounded.ChevronRight, null, tint = c.ink3)
         }
         OutlinedButton(
             onClick = { nav.navigate("uiconnector/edit/new") },

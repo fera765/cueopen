@@ -7,6 +7,13 @@ plugins {
     id("org.jetbrains.kotlin.plugin.serialization")
 }
 
+// Keystore de release deve ficar fora do repositório; a chave versionada antiga não é selecionada.
+val cueopenSigningPath = System.getenv("CUEOPEN_KEYSTORE_PATH")?.takeIf { it.isNotBlank() }
+val cueopenSigningStore = cueopenSigningPath?.let { rootProject.file(it) }
+if (cueopenSigningPath != null && cueopenSigningStore?.isFile != true) {
+    throw GradleException("CUEOPEN_KEYSTORE_PATH não aponta para uma keystore existente.")
+}
+
 android {
     namespace = "dev.cueopen.app"
     compileSdk = 35
@@ -17,20 +24,18 @@ android {
         // do sandbox a partir de filesDir. Os .so do proot também vêm em jniLibs.
         targetSdk = 28
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
-        versionCode = 49
-        versionName = "4.15.0"
+        versionCode = 50
+        versionName = "4.15.1"
         ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64") }
     }
     signingConfigs {
-        // Chave de assinatura estável opcional: lida de variáveis de ambiente no CI (sem credenciais
-        // commitadas). Quando presentes, garante assinatura fixa para atualizar o APK sem desinstalar.
+        // Chave estável lida de um caminho externo e credenciais locais; nunca use a chave versionada antiga.
         create("cueopen") {
-            val ks = rootProject.file("app/cueopen-release.jks")
-            if (ks.exists()) {
-                storeFile = ks
-                storePassword = System.getenv("CUEOPEN_STORE_PASSWORD") ?: "cueopen2026"
-                keyAlias = System.getenv("CUEOPEN_KEY_ALIAS") ?: "cueopen"
-                keyPassword = System.getenv("CUEOPEN_KEY_PASSWORD") ?: "cueopen2026"
+            if (cueopenSigningStore != null) {
+                storeFile = cueopenSigningStore
+                storePassword = System.getenv("CUEOPEN_STORE_PASSWORD") ?: error("Defina CUEOPEN_STORE_PASSWORD para usar a keystore externa.")
+                keyAlias = System.getenv("CUEOPEN_KEY_ALIAS") ?: error("Defina CUEOPEN_KEY_ALIAS para usar a keystore externa.")
+                keyPassword = System.getenv("CUEOPEN_KEY_PASSWORD") ?: error("Defina CUEOPEN_KEY_PASSWORD para usar a keystore externa.")
             }
         }
     }
@@ -40,9 +45,9 @@ android {
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
-            // Chave fixa do app (assinatura estável para atualizar sem desinstalar); cai para debug se faltar.
-            signingConfig = if (rootProject.file("app/cueopen-release.jks").exists())
-                signingConfigs.getByName("cueopen") else signingConfigs.getByName("debug")
+            // Recusa qualquer release sem a chave externa aprovada; a antiga keystore versionada é ignorada.
+            if (cueopenSigningStore == null) throw GradleException("Defina CUEOPEN_KEYSTORE_PATH para assinar o release com a chave aprovada.")
+            signingConfig = signingConfigs.getByName("cueopen")
         }
     }
     packaging { jniLibs { useLegacyPackaging = true } } // extrai .so para nativeLibraryDir

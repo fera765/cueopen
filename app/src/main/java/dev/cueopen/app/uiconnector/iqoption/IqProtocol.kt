@@ -271,12 +271,12 @@ object IqProtocol {
         return Balance(id, type, o["amount"].dbl() ?: 0.0, o["currency"].str() ?: fallbackCurrency)
     }
 
-    /** `profile`: lista de contas + conta ativa. */
+    /** `profile`: lista de contas + conta ativa. Algumas respostas de troca omitem a lista, mas ainda declaram balance_id. */
     fun parseProfile(msg: JsonObject): Profile? {
         val cur = msg["currency"].str() ?: ""
         val list = msg["balances"].arr()?.mapNotNull { (it as? JsonObject)?.let { b -> parseBalance(b, cur) } }.orEmpty()
-        if (list.isEmpty()) return null
         val active = msg["balance_id"].lng()
+        if (list.isEmpty() && active == null) return null
         return Profile(list, active)
     }
 

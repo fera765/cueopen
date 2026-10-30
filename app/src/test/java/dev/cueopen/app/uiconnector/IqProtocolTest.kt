@@ -2,6 +2,7 @@ package dev.cueopen.app.uiconnector
 
 import dev.cueopen.app.uiconnector.iqoption.IqProtocol
 import dev.cueopen.app.uiconnector.iqoption.IqProtocol.LoginOutcome
+import dev.cueopen.app.uiconnector.iqoption.IqActiveBalanceSelection
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -72,6 +73,26 @@ class IqProtocolTest {
         assertTrue(p.balances.first { it.id == 222L }.isReal)
         assertEquals(10000.5, p.balances.first { it.id == 111L }.amount, 0.0)
         assertEquals("BRL", p.balances.first { it.id == 222L }.currency)
+    }
+
+    @Test fun `ack profile parcial do broker confirma troca para REAL usando saldo previamente conhecido`() {
+        val initial = obj("""{"name":"profile","msg":{"balance_id":111,"balances":[
+            {"id":111,"type":4,"amount":10000,"currency":"USD"},
+            {"id":222,"type":1,"amount":8,"currency":"BRL"}]}}""")
+        val knownBalances = IqProtocol.parseProfile(initial["msg"]!!.jsonObject)!!.balances.associateBy { it.id }
+        val selection = IqActiveBalanceSelection()
+        assertTrue(selection.observeServerConfirmation(111L))
+        selection.beginSwitch(222L)
+
+        // Simula o ACK do broker após o usuário confirmar REAL: só chega balance_id, sem balances.
+        val partial = obj("""{"name":"profile","msg":{"balance_id":222}}""")
+        val parsed = IqProtocol.parseProfile(partial["msg"]!!.jsonObject)!!
+        assertTrue(parsed.balances.isEmpty())
+        assertTrue(selection.observeServerConfirmation(IqProtocol.confirmedActiveBalanceId(partial)))
+        assertEquals(222L, selection.activeId()?.let { knownBalances[it]?.id })
+        selection.finishSwitch(222L, confirmed = true)
+        assertEquals(222L, selection.activeId())
+        assertEquals("REAL", selection.activeId()?.let { knownBalances[it]?.label })
     }
 
     @Test fun `profile sem contas e ignorado`() = assertNull(IqProtocol.parseProfile(obj("""{"balances":[]}""")))
