@@ -51,7 +51,9 @@ import dev.cueopen.app.ui.theme.Cue
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.MainScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import java.io.File
 
@@ -353,6 +355,14 @@ private fun DevToolsPanel(browser: dev.cueopen.app.browser.BrowserHost, modifier
     }
 }
 
+private data class FileStamp(val path: String, val isDirectory: Boolean, val modifiedAt: Long, val length: Long)
+private data class FilesSnapshot(val files: List<File>, val stamps: List<FileStamp>)
+
+private fun readFilesSnapshot(dir: File): FilesSnapshot = runCatching {
+    val files = (dir.listFiles()?.toList() ?: emptyList()).sortedWith(compareBy({ !it.isDirectory }, { it.name.lowercase() }))
+    FilesSnapshot(files, files.map { FileStamp(it.absolutePath, it.isDirectory, it.lastModified(), it.length()) })
+}.getOrElse { FilesSnapshot(emptyList(), emptyList()) }
+
 /** Gerenciador de arquivos + editor de texto do workspace. */
 @Composable
 fun FilesPane(root: File, guestRoot: String) {
@@ -377,9 +387,15 @@ fun FilesPane(root: File, guestRoot: String) {
             dirHistory.isNotEmpty() -> dir = dirHistory.removeAt(dirHistory.lastIndex)
         }
     }
-    var tick by remember { mutableIntStateOf(0) }
-    LaunchedEffect(Unit) { while (true) { kotlinx.coroutines.delay(2000); tick++ } }
-    val files = remember(dir, tick) { (dir.listFiles()?.toList() ?: emptyList()).sortedWith(compareBy({ !it.isDirectory }, { it.name.lowercase() })) }
+    var listing by remember(root) { mutableStateOf(FilesSnapshot(emptyList(), emptyList())) }
+    LaunchedEffect(dir) {
+        while (true) {
+            val snapshot = withContext(Dispatchers.IO) { readFilesSnapshot(dir) }
+            if (snapshot.stamps != listing.stamps) listing = snapshot
+            delay(2_500)
+        }
+    }
+    val files = listing.files
     val e = editing
     if (e != null) { FileEditor(e, onClose = { editing = null }); return }
     val v = viewing

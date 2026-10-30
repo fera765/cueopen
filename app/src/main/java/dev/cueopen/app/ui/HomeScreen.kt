@@ -156,7 +156,7 @@ fun HomeScreen(nav: NavController, initialDraft: String? = null, initialAgent: S
         drawerState = drawer,
         drawerContent = {
             ModalDrawerSheet(drawerContainerColor = c.bg, modifier = Modifier.width(310.dp)) {
-                SessionDrawer(nav, drawerSnapshot.sessions, st.agents, drawerSnapshot.connectedConnectorCount, onClose = { scope.launch { drawer.close() } }, onNew = {
+                SessionDrawer(nav, drawerSnapshot.sessions, st.agents, drawerSnapshot.connectedConnectorCount, drawer.isOpen, onClose = { scope.launch { drawer.close() } }, onNew = {
                     draft = ""; scope.launch { drawer.close() }
                 })
             }
@@ -177,7 +177,8 @@ fun HomeScreen(nav: NavController, initialDraft: String? = null, initialAgent: S
         }) { pad ->
             Column(Modifier.fillMaxSize().padding(pad).imePadding()) {
                 Column(Modifier.weight(1f).padding(horizontal = 20.dp), verticalArrangement = Arrangement.Center) {
-                    AgentFace(Color(agent?.color ?: 0xFFFF6B3D), agent?.face ?: "wink", 56.dp)
+                    if (agent == null) RotatingAgentFace(56.dp, intervalMillis = 4_800L)
+                    else AnimatedAgentFace(Color(agent.color), agent.face, 56.dp)
                     Spacer(Modifier.height(16.dp))
                     val hello = st.userName.ifBlank { null }?.let { "Olá, $it" } ?: "Olá"
                     Text(hello, style = MaterialTheme.typography.headlineLarge, color = c.ink3)
@@ -584,7 +585,7 @@ fun RoundIcon(icon: ImageVector, desc: String, onClick: () -> Unit) {
 }
 
 @Composable
-private fun SessionDrawer(nav: NavController, sessions: List<Session>, agents: List<AgentProfile>, connectedConnectorCount: Int, onClose: () -> Unit, onNew: () -> Unit) {
+private fun SessionDrawer(nav: NavController, sessions: List<Session>, agents: List<AgentProfile>, connectedConnectorCount: Int, drawerOpen: Boolean, onClose: () -> Unit, onNew: () -> Unit) {
     val c = Cue.c
     var query by remember { mutableStateOf("") }
     // Sessões de subagentes são detalhes internos da tarefa pai, nunca chats independentes na navegação.
@@ -597,7 +598,7 @@ private fun SessionDrawer(nav: NavController, sessions: List<Session>, agents: L
     fun go(r: String) { onClose(); nav.navigate(r) }
     Column(Modifier.fillMaxSize().statusBarsPadding().padding(12.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            AgentFace(Color(0xFFFF6B3D), "wink", 32.dp); Spacer(Modifier.width(10.dp))
+            RotatingAgentFace(32.dp, intervalMillis = 5_200L, enabled = drawerOpen); Spacer(Modifier.width(10.dp))
             Text("Fluwy Bot", style = MaterialTheme.typography.titleLarge)
         }
         Spacer(Modifier.height(12.dp))

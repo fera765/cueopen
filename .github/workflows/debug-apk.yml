@@ -39,15 +39,22 @@ jobs:
       - name: Run JVM unit tests and assemble debug APK
         run: gradle testDebugUnitTest assembleDebug --stacktrace
 
-      - name: Verify APK and calculate checksum
+      - name: Verify package, label, debug signature, and checksum
         shell: bash
         run: |
           set -euo pipefail
           apk="app/build/outputs/apk/debug/app-debug.apk"
           test -s "$apk"
+          sdk="${ANDROID_HOME:-${ANDROID_SDK_ROOT:?Android SDK path is not set}}"
+          tools="$sdk/build-tools/35.0.0"
+          "$tools/apksigner" verify --verbose "$apk"
+          badging="$("$tools/aapt" dump badging "$apk")"
+          printf '%s\n' "$badging" | grep -F "package: name='com.fluwy.bot'"
+          printf '%s\n' "$badging" | grep -F "application-label:'Fluwy Bot'"
           mkdir -p out
           cp "$apk" out/Fluwy-Bot-debug.apk
           unzip -t out/Fluwy-Bot-debug.apk >/dev/null
+          "$tools/apksigner" verify --print-certs out/Fluwy-Bot-debug.apk | tee out/SIGNING-CERTIFICATE.txt
           sha256sum out/Fluwy-Bot-debug.apk > out/SHA256SUMS.txt
           ls -lh out/
 

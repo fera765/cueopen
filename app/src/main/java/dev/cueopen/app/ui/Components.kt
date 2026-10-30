@@ -75,6 +75,104 @@ fun AgentFace(color: Color, face: String = "blob", size: Dp = 40.dp, modifier: M
                 addOval(androidx.compose.ui.geometry.Rect(Offset(w*.5f, h*.34f), androidx.compose.ui.geometry.Size(w*.44f, h*.44f)))
                 addOval(androidx.compose.ui.geometry.Rect(Offset(w*.28f, h*.16f), androidx.compose.ui.geometry.Size(w*.44f, h*.5f)))
             }
+            "star" -> avatarStarPath(w, h, 5, .44f, .20f)
+            "diamond" -> avatarPolygon(w, h, listOf(.5f to .06f, .92f to .5f, .5f to .94f, .08f to .5f))
+            "heart" -> p {
+                moveTo(w*.5f, h*.9f); cubicTo(w*.4f, h*.81f, w*.1f, h*.57f, w*.1f, h*.35f)
+                cubicTo(w*.1f, h*.13f, w*.39f, h*.06f, w*.5f, h*.29f)
+                cubicTo(w*.61f, h*.06f, w*.9f, h*.13f, w*.9f, h*.35f)
+                cubicTo(w*.9f, h*.57f, w*.6f, h*.81f, w*.5f, h*.9f); close()
+            }
+            "flower" -> p {
+                addOval(androidx.compose.ui.geometry.Rect(Offset(w*.38f, h*.04f), androidx.compose.ui.geometry.Size(w*.24f, h*.45f)))
+                addOval(androidx.compose.ui.geometry.Rect(Offset(w*.38f, h*.51f), androidx.compose.ui.geometry.Size(w*.24f, h*.45f)))
+                addOval(androidx.compose.ui.geometry.Rect(Offset(w*.04f, h*.38f), androidx.compose.ui.geometry.Size(w*.45f, h*.24f)))
+                addOval(androidx.compose.ui.geometry.Rect(Offset(w*.51f, h*.38f), androidx.compose.ui.geometry.Size(w*.45f, h*.24f)))
+                addOval(androidx.compose.ui.geometry.Rect(Offset(w*.13f, h*.13f), androidx.compose.ui.geometry.Size(w*.38f, h*.38f)))
+                addOval(androidx.compose.ui.geometry.Rect(Offset(w*.49f, h*.49f), androidx.compose.ui.geometry.Size(w*.38f, h*.38f)))
+            }
+            "moon" -> p {
+                moveTo(w*.76f, h*.13f); cubicTo(w*.43f, h*.03f, w*.14f, h*.28f, w*.18f, h*.56f)
+                cubicTo(w*.22f, h*.83f, w*.49f, h*.96f, w*.76f, h*.83f)
+                cubicTo(w*.57f, h*.8f, w*.43f, h*.62f, w*.43f, h*.47f)
+                cubicTo(w*.43f, h*.3f, w*.56f, h*.16f, w*.76f, h*.13f); close()
+            }
+            "shield" -> p {
+                moveTo(w*.5f, h*.08f); lineTo(w*.9f, h*.25f); lineTo(w*.83f, h*.62f)
+                cubicTo(w*.79f, h*.78f, w*.62f, h*.89f, w*.5f, h*.94f)
+                cubicTo(w*.38f, h*.89f, w*.21f, h*.78f, w*.17f, h*.62f); lineTo(w*.1f, h*.25f); close()
+            }
+            "gear" -> avatarStarPath(w, h, 12, .44f, .35f)
+            "sun" -> avatarStarPath(w, h, 12, .46f, .32f)
+            "cat" -> p {
+                moveTo(w*.13f, h*.41f); lineTo(w*.16f, h*.13f); lineTo(w*.39f, h*.28f)
+                cubicTo(w*.47f, h*.25f, w*.53f, h*.25f, w*.61f, h*.28f); lineTo(w*.84f, h*.13f); lineTo(w*.87f, h*.41f)
+                cubicTo(w*.94f, h*.71f, w*.75f, h*.9f, w*.5f, h*.9f); cubicTo(w*.25f, h*.9f, w*.06f, h*.71f, w*.13f, h*.41f); close()
+            }
+            "robot" -> p {
+                addRoundRect(androidx.compose.ui.geometry.RoundRect(w*.16f, h*.2f, w*.84f, h*.84f, androidx.compose.ui.geometry.CornerRadius(w*.16f, w*.16f)))
+                addRoundRect(androidx.compose.ui.geometry.RoundRect(w*.04f, h*.4f, w*.17f, h*.65f, androidx.compose.ui.geometry.CornerRadius(w*.05f, w*.05f)))
+                addRoundRect(androidx.compose.ui.geometry.RoundRect(w*.83f, h*.4f, w*.96f, h*.65f, androidx.compose.ui.geometry.CornerRadius(w*.05f, w*.05f)))
+                moveTo(w*.5f, h*.2f); lineTo(w*.5f, h*.08f); lineTo(w*.5f, h*.2f)
+            }
+            "ghost" -> p {
+                moveTo(w*.15f, h*.88f); lineTo(w*.15f, h*.44f); cubicTo(w*.15f, h*.07f, w*.85f, h*.07f, w*.85f, h*.44f)
+                lineTo(w*.85f, h*.88f); cubicTo(w*.76f, h*.78f, w*.68f, h*.78f, w*.59f, h*.88f)
+                cubicTo(w*.5f, h*.78f, w*.42f, h*.78f, w*.33f, h*.88f); cubicTo(w*.25f, h*.79f, w*.2f, h*.8f, w*.15f, h*.88f); close()
+            }
+            "leaf" -> p {
+                moveTo(w*.5f, h*.08f); cubicTo(w*.92f, h*.22f, w*.91f, h*.69f, w*.5f, h*.92f)
+                cubicTo(w*.09f, h*.69f, w*.08f, h*.22f, w*.5f, h*.08f); close()
+            }
+            "rocket" -> p {
+                moveTo(w*.5f, h*.06f); cubicTo(w*.78f, h*.27f, w*.78f, h*.6f, w*.7f, h*.73f)
+                lineTo(w*.3f, h*.73f); cubicTo(w*.22f, h*.6f, w*.22f, h*.27f, w*.5f, h*.06f); close()
+                moveTo(w*.3f, h*.56f); lineTo(w*.1f, h*.83f); lineTo(w*.37f, h*.76f); close()
+                moveTo(w*.7f, h*.56f); lineTo(w*.9f, h*.83f); lineTo(w*.63f, h*.76f); close()
+            }
+            "butterfly" -> p {
+                addOval(androidx.compose.ui.geometry.Rect(Offset(w*.08f, h*.16f), androidx.compose.ui.geometry.Size(w*.43f, h*.4f)))
+                addOval(androidx.compose.ui.geometry.Rect(Offset(w*.49f, h*.16f), androidx.compose.ui.geometry.Size(w*.43f, h*.4f)))
+                addOval(androidx.compose.ui.geometry.Rect(Offset(w*.15f, h*.5f), androidx.compose.ui.geometry.Size(w*.36f, h*.34f)))
+                addOval(androidx.compose.ui.geometry.Rect(Offset(w*.49f, h*.5f), androidx.compose.ui.geometry.Size(w*.36f, h*.34f)))
+                addRoundRect(androidx.compose.ui.geometry.RoundRect(w*.46f, h*.24f, w*.54f, h*.86f, androidx.compose.ui.geometry.CornerRadius(w*.04f, w*.04f)))
+            }
+            "crown" -> avatarPolygon(w, h, listOf(.12f to .24f, .31f to .43f, .5f to .12f, .69f to .43f, .88f to .24f, .82f to .83f, .18f to .83f))
+            "comet" -> p {
+                moveTo(w*.16f, h*.78f); cubicTo(w*.24f, h*.55f, w*.39f, h*.43f, w*.58f, h*.28f)
+                addOval(androidx.compose.ui.geometry.Rect(Offset(w*.35f, h*.12f), androidx.compose.ui.geometry.Size(w*.53f, h*.53f)))
+            }
+            "spiral" -> p {
+                moveTo(w*.5f, h*.08f); cubicTo(w*.82f, h*.08f, w*.92f, h*.31f, w*.85f, h*.54f)
+                cubicTo(w*.78f, h*.8f, w*.56f, h*.94f, w*.35f, h*.84f)
+                cubicTo(w*.15f, h*.75f, w*.13f, h*.48f, w*.3f, h*.35f)
+                cubicTo(w*.45f, h*.23f, w*.66f, h*.33f, w*.64f, h*.5f)
+                cubicTo(w*.63f, h*.63f, w*.47f, h*.68f, w*.42f, h*.58f)
+                cubicTo(w*.38f, h*.49f, w*.48f, h*.42f, w*.53f, h*.48f)
+                cubicTo(w*.51f, h*.54f, w*.46f, h*.54f, w*.5f, h*.55f)
+                cubicTo(w*.68f, h*.53f, w*.75f, h*.3f, w*.62f, h*.2f)
+                cubicTo(w*.5f, h*.11f, w*.32f, h*.18f, w*.28f, h*.29f)
+                cubicTo(w*.21f, h*.22f, w*.34f, h*.08f, w*.5f, h*.08f); close()
+            }
+            "turtle" -> p {
+                addOval(androidx.compose.ui.geometry.Rect(Offset(w*.22f, h*.24f), androidx.compose.ui.geometry.Size(w*.56f, h*.54f)))
+                addOval(androidx.compose.ui.geometry.Rect(Offset(w*.73f, h*.39f), androidx.compose.ui.geometry.Size(w*.23f, h*.24f)))
+                addOval(androidx.compose.ui.geometry.Rect(Offset(w*.08f, h*.27f), androidx.compose.ui.geometry.Size(w*.2f, h*.22f)))
+                addOval(androidx.compose.ui.geometry.Rect(Offset(w*.08f, h*.62f), androidx.compose.ui.geometry.Size(w*.2f, h*.22f)))
+                addOval(androidx.compose.ui.geometry.Rect(Offset(w*.67f, h*.69f), androidx.compose.ui.geometry.Size(w*.2f, h*.2f)))
+            }
+            "octagon" -> avatarRegularPolygon(w, h, 8, .43f)
+            "spark" -> avatarStarPath(w, h, 4, .46f, .12f)
+            "bear" -> p {
+                addOval(androidx.compose.ui.geometry.Rect(Offset(w*.09f, h*.08f), androidx.compose.ui.geometry.Size(w*.3f, h*.3f)))
+                addOval(androidx.compose.ui.geometry.Rect(Offset(w*.61f, h*.08f), androidx.compose.ui.geometry.Size(w*.3f, h*.3f)))
+                addOval(androidx.compose.ui.geometry.Rect(Offset(w*.12f, h*.22f), androidx.compose.ui.geometry.Size(w*.76f, h*.7f)))
+            }
+            "owl" -> p {
+                moveTo(w*.12f, h*.35f); lineTo(w*.27f, h*.12f); lineTo(w*.42f, h*.3f)
+                cubicTo(w*.48f, h*.27f, w*.52f, h*.27f, w*.58f, h*.3f); lineTo(w*.73f, h*.12f); lineTo(w*.88f, h*.35f)
+                cubicTo(w*.95f, h*.78f, w*.72f, h*.92f, w*.5f, h*.92f); cubicTo(w*.28f, h*.92f, w*.05f, h*.78f, w*.12f, h*.35f); close()
+            }
             else -> p { // blob
                 moveTo(w*.5f, h*.08f)
                 cubicTo(w*.82f, h*.08f, w*.94f, h*.3f, w*.94f, h*.52f)
@@ -207,7 +305,11 @@ fun skillIcon(name: String): ImageVector = when (name) {
 }
 
 val agentColors = listOf(0xFFFF6B3D, 0xFF4D8DFF, 0xFF2FBF71, 0xFFFFC53D, 0xFFB57BFF, 0xFFFF5C8A, 0xFF2EC4C4, 0xFF9C978E)
-val agentFaces = listOf("blob", "hex", "square", "circle", "triangle", "pill", "drop", "cloud")
+val agentFaces = listOf(
+    "blob", "hex", "square", "circle", "triangle", "pill", "drop", "cloud", "star", "diamond",
+    "heart", "flower", "moon", "shield", "gear", "sun", "cat", "robot", "ghost", "leaf",
+    "rocket", "butterfly", "crown", "comet", "spiral", "turtle", "octagon", "spark", "bear", "owl",
+)
 
 @Composable
 fun Divider() = HorizontalDivider(color = Cue.c.line, thickness = 1.dp)

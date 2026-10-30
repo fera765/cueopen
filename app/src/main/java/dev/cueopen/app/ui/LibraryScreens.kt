@@ -110,16 +110,18 @@ fun AgentEditScreen(nav: NavController, id: String) {
         }
     }) { pad ->
         Column(Modifier.padding(pad).verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) { AgentFace(Color(a.color), a.face, 96.dp) }
+            Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) { AnimatedAgentFace(Color(a.color), a.face, 96.dp) }
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center) {
                 agentColors.forEach { col ->
                     Box(Modifier.padding(4.dp).size(28.dp).clip(CircleShape).background(Color(col))
                         .border(if (a.color == col) 3.dp else 0.dp, c.ink, CircleShape).clickable { a = a.copy(color = col) })
                 }
             }
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center) {
+            val selectedFace = when (a.face) { "wink" -> "blob"; "smile" -> "square"; "side" -> "pill"; "dot" -> "circle"; else -> a.face }
+            FlowRow(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center, verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 agentFaces.forEach { f ->
-                    Box(Modifier.padding(4.dp).clip(RoundedCornerShape(12.dp)).border(if (a.face == f) 2.dp else 1.dp, if (a.face == f) c.ink else c.line, RoundedCornerShape(12.dp))
+                    val selected = selectedFace == f
+                    Box(Modifier.padding(4.dp).clip(RoundedCornerShape(12.dp)).border(if (selected) 2.dp else 1.dp, if (selected) c.ink else c.line, RoundedCornerShape(12.dp))
                         .clickable { a = a.copy(face = f) }.padding(6.dp)) { AgentFace(Color(a.color), f, 32.dp) }
                 }
             }

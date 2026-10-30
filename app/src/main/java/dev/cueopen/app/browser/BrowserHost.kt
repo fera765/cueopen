@@ -10,9 +10,14 @@ import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONArray
@@ -42,12 +47,45 @@ class BrowserHost(private val appCtx: Context) {
     private val _console = MutableStateFlow<List<ConsoleEntry>>(emptyList())
     val console: StateFlow<List<ConsoleEntry>> = _console
     private val netSeq = java.util.concurrent.atomic.AtomicLong()
+    private val netScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    private val pendingNet = ArrayList<NetEntry>()
+    private var netFlushJob: Job? = null
     private var defaultUa: String = ""
 
-    fun clearNet() { _net.value = emptyList(); _console.value = emptyList() }
+    @Synchronized fun clearNet() {
+        pendingNet.clear()
+        netFlushJob?.cancel()
+        netFlushJob = null
+        _net.value = emptyList()
+        _console.value = emptyList()
+    }
 
-    @Synchronized private fun addNet(e: NetEntry) { _net.value = (_net.value + e).takeLast(500) }
+    @Synchronized private fun addNet(e: NetEntry) {
+        pendingNet.add(e)
+        if (pendingNet.size > 500) pendingNet.removeAt(0)
+        if (netFlushJob?.isActive != true) {
+            netFlushJob = netScope.launch {
+                delay(100)
+                flushNet(fromScheduledJob = true)
+            }
+        }
+    }
+
+    @Synchronized private fun flushNet(fromScheduledJob: Boolean = false) {
+        if (!fromScheduledJob) netFlushJob?.cancel()
+        if (pendingNet.isNotEmpty()) {
+            _net.value = (_net.value + pendingNet).takeLast(500)
+            pendingNet.clear()
+        }
+        netFlushJob = null
+    }
+
     @Synchronized private fun patchNet(url: String, fn: (NetEntry) -> NetEntry) {
+        val pendingIndex = pendingNet.indexOfLast { it.url == url }
+        if (pendingIndex >= 0) {
+            pendingNet[pendingIndex] = fn(pendingNet[pendingIndex])
+            return
+        }
         val l = _net.value; val i = l.indexOfLast { it.url == url }
         if (i >= 0) _net.value = l.toMutableList().also { it[i] = fn(it[i]) }
     }
@@ -290,6 +328,7 @@ class BrowserHost(private val appCtx: Context) {
     }
 
     private suspend fun mergeCapturedNetwork() {
+        flushNet()
         val raw = runCatching { eval("JSON.stringify((window.__cueNet||[]).slice(-200))") }.getOrNull() ?: return
         runCatching {
             val arr = JSONArray(raw)
