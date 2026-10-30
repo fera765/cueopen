@@ -4,8 +4,13 @@ import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.AccessibilityServiceInfo
 import android.accessibilityservice.GestureDescription
 import android.content.Intent
+import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.graphics.Color
+import android.graphics.Paint
 import android.graphics.Path
 import android.graphics.Rect
+import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -13,8 +18,14 @@ import android.os.SystemClock
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import android.view.accessibility.AccessibilityWindowInfo
+import android.view.Display
 import java.util.ArrayDeque
+import java.util.concurrent.Executor
 import java.util.UUID
+import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.suspendCancellableCoroutine
 
 /**
  * Serviço opt-in do Android. Só examina a árvore dos controles visíveis quando uma ferramenta
@@ -43,7 +54,12 @@ class FluwyAccessibilityService : AccessibilityService() {
     )
 
     private data class Visit(val node: AccessibilityNodeInfo, val path: List<Int>)
-    private data class LocatedTarget(val node: AccessibilityNodeInfo, val windowBounds: Rect)
+    private data class LocatedTarget(
+        val node: AccessibilityNodeInfo,
+        val windowBounds: Rect,
+        val root: AccessibilityNodeInfo,
+        val windowId: Int,
+    )
 
     private val snapshots = AccessibilitySnapshotStore<Snapshot>()
 
@@ -51,6 +67,7 @@ class FluwyAccessibilityService : AccessibilityService() {
         super.onServiceConnected()
         serviceInfo = serviceInfo.apply {
             eventTypes = AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED or
+                AccessibilityEvent.TYPE_WINDOWS_CHANGED or
                 AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED or
                 AccessibilityEvent.TYPE_VIEW_SCROLLED or
                 AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED or
@@ -64,11 +81,16 @@ class FluwyAccessibilityService : AccessibilityService() {
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
-        // Eventos de conteúdo/foco podem ser ruído ou animações. locate() sempre relê a janela e
-        // compara caminho, visibilidade e fingerprint antes da ação. Só uma troca de janela invalida tudo.
+        // Conteúdo/foco gera eventos benignos frequentes. Em uma transição, retenha snapshots da
+        // janela que realmente está ativa; locate() revalida árvore, alvo e fingerprint antes de agir.
         if (event?.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED ||
             event?.eventType == AccessibilityEvent.TYPE_WINDOWS_CHANGED) {
-            snapshots.clear()
+            val current = runCatching { activeWindow() }.getOrNull() ?: return
+            snapshots.removeWhere { saved ->
+                !AccessibilitySnapshotPolicy.keepAfterWindowEvent(
+                    saved.packageName, saved.windowId, current.packageName, current.id,
+                )
+            }
         }
     }
 
@@ -95,7 +117,7 @@ class FluwyAccessibilityService : AccessibilityService() {
     internal fun readScreen(sessionId: String): String {
         requireAuthorized(sessionId)
         val window = activeWindow()
-        val snapshotId = UUID.randomUUID().toString().take(10)
+        val snapshotId = UUID.randomUUID().toString()
         val targets = linkedMapOf<Int, Target>()
         val lines = mutableListOf<String>()
         val queue = ArrayDeque<Visit>()
@@ -141,12 +163,175 @@ class FluwyAccessibilityService : AccessibilityService() {
             windowId = window.id,
             targets = targets,
         ))
-        val header = "Tela acessível no app ${window.packageName}. snapshot_id=$snapshotId. IDs temporários (máx. ${SNAPSHOT_TTL_MS / 1000}s); releia após cada ação ou mudança observável."
+        val header = "Tela acessível no app ${window.packageName}. snapshot_id=$snapshotId. IDs temporários (máx. ${SNAPSHOT_TTL_MS / 1000}s); execute uma ação por vez e releia após cada mudança."
         val body = if (lines.isEmpty()) "Nenhum controle/texto acessível foi encontrado nesta tela." else lines.joinToString("\n")
         return (header + "\n" + body).take(MAX_SCREEN_OUTPUT_CHARS)
     }
 
-    internal fun click(sessionId: String, snapshotId: String, elementId: Int): String {
+    /** Captura em memória só o recorte do elemento solicitado; nunca grava a imagem em disco/chat. */
+    @android.annotation.SuppressLint("NewApi")
+    internal suspend fun captureImageForInspection(sessionId: String, snapshotId: String, elementId: Int): ByteArray {
+        requireAuthorized(sessionId)
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R ||
+            !AccessibilitySnapshotPolicy.supportsDisplayScreenshot(Build.VERSION.SDK_INT)) {
+            error("A captura visual por acessibilidade exige Android 11 (API 30) ou superior.")
+        }
+        val target = locate(sessionId, snapshotId, elementId)
+        val rawBounds = Rect().also(target.node::getBoundsInScreen)
+        if (rawBounds.isEmpty) error("O elemento pedido não tem limites visuais disponíveis.")
+        val windowManager = getSystemService(android.view.WindowManager::class.java)
+            ?: error("O Android não disponibilizou o serviço de janelas para a captura.")
+        val displaySize = android.graphics.Point().also { point ->
+            @Suppress("DEPRECATION")
+            val display = windowManager.defaultDisplay
+            display.getRealSize(point)
+        }
+        if (displaySize.x <= 0 || displaySize.y <= 0) error("O tamanho do display não está disponível.")
+        val screenBounds = Rect(0, 0, displaySize.x, displaySize.y)
+        val targetOnScreen = Rect(rawBounds)
+        if (!targetOnScreen.intersect(screenBounds) || targetOnScreen.isEmpty) {
+            error("O elemento relevante está fora do display atual.")
+        }
+        if (targetOnScreen.width().toLong() * targetOnScreen.height() >=
+            displaySize.x.toLong() * displaySize.y * MAX_TARGET_SCREEN_RATIO) {
+            error("O elemento cobre quase todo o display; a captura ampla foi recusada para evitar conteúdo alheio.")
+        }
+        val paddingX = (targetOnScreen.width() * CROP_PADDING_RATIO).toInt().coerceAtMost(MAX_CROP_PADDING_PX)
+        val paddingY = (targetOnScreen.height() * CROP_PADDING_RATIO).toInt().coerceAtMost(MAX_CROP_PADDING_PX)
+        val cropOnScreen = Rect(targetOnScreen).apply { inset(-paddingX, -paddingY) }
+        if (!cropOnScreen.intersect(screenBounds) || cropOnScreen.isEmpty) {
+            error("Não foi possível delimitar o recorte visual solicitado.")
+        }
+        if (hasOverlappingOtherWindow(cropOnScreen, target.windowId)) {
+            error("Uma janela/overlay do sistema cobre o elemento; captura recusada para não incluir notificações ou telas alheias.")
+        }
+
+        val result = takeDisplayScreenshot()
+        try {
+            val active = runCatching { activeWindow() }.getOrNull()
+            val saved = snapshots[sessionId]
+            if (active == null || saved == null || active.packageName != saved.packageName ||
+                (saved.windowId >= 0 && active.id >= 0 && active.id != saved.windowId) ||
+                hasOverlappingOtherWindow(cropOnScreen, saved.windowId)) {
+                error("A janela mudou ou recebeu uma sobreposição durante a captura; a imagem foi descartada.")
+            }
+
+            val hardwareBitmap = Bitmap.wrapHardwareBuffer(result.hardwareBuffer, result.colorSpace)
+                ?: error("O Android não conseguiu abrir o buffer da captura.")
+            try {
+                val bitmap = hardwareBitmap.copy(Bitmap.Config.ARGB_8888, true)
+                    ?: error("O Android não conseguiu preparar o recorte visual.")
+                try {
+                    return encodeTargetCrop(bitmap, cropOnScreen, displaySize, target.root)
+                } finally {
+                    bitmap.recycle()
+                }
+            } finally {
+                hardwareBitmap.recycle()
+            }
+        } finally {
+            runCatching { result.hardwareBuffer.close() }
+            snapshots.remove(sessionId)
+        }
+    }
+
+    @androidx.annotation.RequiresApi(30)
+    private suspend fun takeDisplayScreenshot(): AccessibilityService.ScreenshotResult = suspendCancellableCoroutine { continuation ->
+        try {
+            takeScreenshot(Display.DEFAULT_DISPLAY, Executor { command -> mainHandler.post(command) },
+                object : AccessibilityService.TakeScreenshotCallback {
+                    override fun onSuccess(screenshot: AccessibilityService.ScreenshotResult) {
+                        if (continuation.isActive) continuation.resume(screenshot)
+                        else screenshot.hardwareBuffer.close()
+                    }
+
+                    override fun onFailure(errorCode: Int) {
+                        if (continuation.isActive) continuation.resumeWithException(
+                            IllegalStateException(screenshotFailure(errorCode)),
+                        )
+                    }
+                })
+        } catch (t: Throwable) {
+            if (continuation.isActive) continuation.resumeWithException(t)
+        }
+    }
+
+    private fun screenshotFailure(errorCode: Int): String = when (errorCode) {
+        ERROR_TAKE_SCREENSHOT_SECURE_WINDOW -> "O Android bloqueou a captura porque há conteúdo marcado como seguro."
+        ERROR_TAKE_SCREENSHOT_NO_ACCESSIBILITY_ACCESS -> "O serviço de acessibilidade não tem autorização de captura ativa."
+        ERROR_TAKE_SCREENSHOT_INTERVAL_TIME_SHORT -> "O Android limitou a frequência de screenshots; não vou repetir automaticamente."
+        ERROR_TAKE_SCREENSHOT_INVALID_DISPLAY -> "O display solicitado não está disponível."
+        ERROR_TAKE_SCREENSHOT_INTERNAL_ERROR -> "O Android não conseguiu capturar o display (erro interno)."
+        else -> "O Android recusou a captura visual (código $errorCode)."
+    }
+
+    private fun hasOverlappingOtherWindow(region: Rect, targetWindowId: Int): Boolean = runCatching {
+        windows.orEmpty().any { window ->
+            if (targetWindowId >= 0 && window.id == targetWindowId) return@any false
+            val bounds = Rect()
+            window.getBoundsInScreen(bounds)
+            bounds.intersect(region) && !bounds.isEmpty
+        }
+    }.getOrDefault(true)
+
+    private fun encodeTargetCrop(bitmap: Bitmap, cropOnScreen: Rect, displaySize: android.graphics.Point, root: AccessibilityNodeInfo): ByteArray {
+        val scaleX = bitmap.width.toFloat() / displaySize.x
+        val scaleY = bitmap.height.toFloat() / displaySize.y
+        val crop = Rect(
+            (cropOnScreen.left * scaleX).toInt(), (cropOnScreen.top * scaleY).toInt(),
+            (cropOnScreen.right * scaleX).toInt(), (cropOnScreen.bottom * scaleY).toInt(),
+        ).apply { intersect(0, 0, bitmap.width, bitmap.height) }
+        if (crop.width() < MIN_CAPTURE_SIZE_PX || crop.height() < MIN_CAPTURE_SIZE_PX) {
+            error("O recorte visual é pequeno demais para uma análise confiável.")
+        }
+
+        val canvas = Canvas(bitmap)
+        val mask = Paint().apply { color = Color.BLACK; style = Paint.Style.FILL }
+        val passwords = ArrayDeque<AccessibilityNodeInfo>()
+        passwords.addLast(root)
+        var checked = 0
+        while (passwords.isNotEmpty() && checked++ < MAX_VISITED_NODES) {
+            val node = passwords.removeFirst()
+            if (node.isVisibleToUser && node.isPassword) {
+                val bounds = Rect().also(node::getBoundsInScreen)
+                val masked = Rect(
+                    (bounds.left * scaleX).toInt(), (bounds.top * scaleY).toInt(),
+                    (bounds.right * scaleX).toInt(), (bounds.bottom * scaleY).toInt(),
+                )
+                if (masked.intersect(crop) && !masked.isEmpty) canvas.drawRect(masked, mask)
+            }
+            for (index in 0 until node.childCount.coerceAtMost(MAX_CHILDREN_PER_NODE)) {
+                runCatching { node.getChild(index) }.getOrNull()?.let(passwords::addLast)
+            }
+        }
+
+        val cropped = Bitmap.createBitmap(bitmap, crop.left, crop.top, crop.width(), crop.height())
+        try {
+            val scale = minOf(1f, MAX_CAPTURE_EDGE_PX.toFloat() / maxOf(cropped.width, cropped.height))
+            val output = if (scale < 1f) Bitmap.createScaledBitmap(
+                cropped, (cropped.width * scale).toInt().coerceAtLeast(1),
+                (cropped.height * scale).toInt().coerceAtLeast(1), true,
+            ) else cropped
+            try {
+                val bytes = java.io.ByteArrayOutputStream().use { stream ->
+                    if (!output.compress(Bitmap.CompressFormat.JPEG, JPEG_QUALITY, stream)) {
+                        error("Não foi possível preparar a imagem para análise.")
+                    }
+                    stream.toByteArray()
+                }
+                if (bytes.isEmpty() || bytes.size > MAX_CAPTURE_BYTES) {
+                    error("O recorte visual excedeu o limite de tamanho; não foi enviado ao modelo.")
+                }
+                return bytes
+            } finally {
+                if (output !== cropped) output.recycle()
+            }
+        } finally {
+            cropped.recycle()
+        }
+    }
+
+    internal suspend fun click(sessionId: String, snapshotId: String, elementId: Int): String {
         requireAuthorized(sessionId)
         val located = locate(sessionId, snapshotId, elementId)
         var node: AccessibilityNodeInfo? = located.node
@@ -154,20 +339,22 @@ class FluwyAccessibilityService : AccessibilityService() {
             val current = node ?: return@repeat
             if (current.isClickable && current.performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
                 snapshots.remove(sessionId)
+                delay(ACTION_SETTLE_MS)
                 return "Toque executado no elemento $elementId. Releia a tela antes da próxima ação."
             }
             node = current.parent
         }
 
         val bounds = Rect().also(located.node::getBoundsInScreen)
-        if (dispatchTap(bounds, located.windowBounds)) {
+        if (dispatchTap(sessionId, bounds, located.windowBounds)) {
             snapshots.remove(sessionId)
+            delay(ACTION_SETTLE_MS)
             return "Toque por gesto enviado ao elemento $elementId. Releia a tela antes da próxima ação."
         }
         error("O elemento $elementId não aceitou toque; releia a tela ou peça ao usuário para concluir manualmente.")
     }
 
-    internal fun typeText(sessionId: String, snapshotId: String, elementId: Int, text: String, hasSecureSecret: Boolean): String {
+    internal suspend fun typeText(sessionId: String, snapshotId: String, elementId: Int, text: String, hasSecureSecret: Boolean): String {
         requireAuthorized(sessionId)
         val node = locate(sessionId, snapshotId, elementId).node
         if (!AccessibilityInputPolicy.mayTypeIntoField(node.isPassword, hasSecureSecret)) {
@@ -185,10 +372,11 @@ class FluwyAccessibilityService : AccessibilityService() {
             error("O app não permite preencher este campo por acessibilidade; não foi usado clipboard nem screenshot.")
         }
         snapshots.remove(sessionId)
+        delay(TYPE_SETTLE_MS)
         return "Texto definido no campo (${safeText.length} caracteres; conteúdo omitido). Releia a tela para conferir o estado."
     }
 
-    internal fun scroll(sessionId: String, snapshotId: String, elementId: Int, direction: String): String {
+    internal suspend fun scroll(sessionId: String, snapshotId: String, elementId: Int, direction: String): String {
         requireAuthorized(sessionId)
         val forward = when (direction.lowercase()) {
             "down", "baixo" -> true
@@ -202,23 +390,26 @@ class FluwyAccessibilityService : AccessibilityService() {
             val action = if (forward) AccessibilityNodeInfo.ACTION_SCROLL_FORWARD else AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD
             if (current.isScrollable && current.performAction(action)) {
                 snapshots.remove(sessionId)
+                delay(SCROLL_SETTLE_MS)
                 return if (forward) "Rolagem para baixo solicitada." else "Rolagem para cima solicitada."
             }
             node = current.parent
         }
 
         val bounds = Rect().also(located.node::getBoundsInScreen)
-        if (dispatchScroll(bounds, located.windowBounds, forward)) {
+        if (dispatchScroll(sessionId, bounds, located.windowBounds, forward)) {
             snapshots.remove(sessionId)
+            delay(SCROLL_SETTLE_MS)
             return if (forward) "Gesto de rolagem para baixo enviado." else "Gesto de rolagem para cima enviado."
         }
         error("O elemento $elementId não permite rolagem por acessibilidade; releia a tela ou peça ao usuário para concluir manualmente.")
     }
 
-    internal fun back(sessionId: String): String {
+    internal suspend fun back(sessionId: String): String {
         requireAuthorized(sessionId)
         if (!performGlobalAction(GLOBAL_ACTION_BACK)) error("O Android recusou a ação Voltar.")
         snapshots.remove(sessionId)
+        delay(ACTION_SETTLE_MS)
         return "Ação Voltar enviada. Releia a tela antes de continuar."
     }
 
@@ -245,7 +436,9 @@ class FluwyAccessibilityService : AccessibilityService() {
         if (saved.ownerSessionId != sessionId) {
             error("Snapshot pertence a outra tarefa; execute device_accessibility_read_screen nesta tarefa antes da ação.")
         }
-        if (saved.id != snapshotId || SystemClock.elapsedRealtime() - saved.createdAt > SNAPSHOT_TTL_MS) {
+        if (saved.id != snapshotId || AccessibilitySnapshotPolicy.isExpired(
+                saved.createdAt, SystemClock.elapsedRealtime(), SNAPSHOT_TTL_MS,
+            )) {
             snapshots.remove(sessionId)
             error("snapshot_id expirado ou diferente da tela atual; execute read_screen novamente.")
         }
@@ -263,19 +456,19 @@ class FluwyAccessibilityService : AccessibilityService() {
             snapshots.remove(sessionId)
             error("O controle mudou desde a leitura; execute read_screen novamente.")
         }
-        return LocatedTarget(node, window.bounds)
+        return LocatedTarget(node, window.bounds, window.root, window.id)
     }
 
-    private fun dispatchTap(rawBounds: Rect, windowBounds: Rect): Boolean {
+    private suspend fun dispatchTap(sessionId: String, rawBounds: Rect, windowBounds: Rect): Boolean {
         val bounds = intersectVisible(rawBounds, windowBounds) ?: return false
         val path = Path().apply { moveTo(bounds.exactCenterX(), bounds.exactCenterY()) }
         val gesture = GestureDescription.Builder()
             .addStroke(GestureDescription.StrokeDescription(path, 0L, 80L))
             .build()
-        return dispatchGesture(gesture, null, mainHandler)
+        return dispatchGestureAndWait(sessionId, gesture)
     }
 
-    private fun dispatchScroll(rawBounds: Rect, windowBounds: Rect, forward: Boolean): Boolean {
+    private suspend fun dispatchScroll(sessionId: String, rawBounds: Rect, windowBounds: Rect, forward: Boolean): Boolean {
         val bounds = intersectVisible(rawBounds, windowBounds) ?: return false
         if (bounds.height() < MIN_GESTURE_SIZE_PX || bounds.width() < MIN_GESTURE_SIZE_PX) return false
         val x = bounds.exactCenterX()
@@ -285,8 +478,30 @@ class FluwyAccessibilityService : AccessibilityService() {
         val gesture = GestureDescription.Builder()
             .addStroke(GestureDescription.StrokeDescription(path, 0L, 350L))
             .build()
-        return dispatchGesture(gesture, null, mainHandler)
+        return dispatchGestureAndWait(sessionId, gesture)
     }
+
+    private suspend fun dispatchGestureAndWait(sessionId: String, gesture: GestureDescription): Boolean =
+        suspendCancellableCoroutine { continuation ->
+            var submitted = false
+            val accepted = dispatchGesture(gesture, object : GestureResultCallback() {
+                override fun onCompleted(gestureDescription: GestureDescription) {
+                    if (continuation.isActive) continuation.resume(true)
+                }
+
+                override fun onCancelled(gestureDescription: GestureDescription) {
+                    snapshots.remove(sessionId)
+                    if (continuation.isActive) continuation.resumeWithException(
+                        IllegalStateException("O Android cancelou o gesto; nenhuma próxima ação será tentada com o snapshot atual. Leia a tela novamente."),
+                    )
+                }
+            }, mainHandler)
+            submitted = accepted
+            if (!accepted && continuation.isActive) continuation.resume(false)
+            continuation.invokeOnCancellation {
+                if (submitted) snapshots.remove(sessionId)
+            }
+        }
 
     private fun intersectVisible(rawBounds: Rect, windowBounds: Rect): Rect? {
         val visible = Rect(rawBounds)
@@ -322,6 +537,16 @@ class FluwyAccessibilityService : AccessibilityService() {
         const val MAX_TYPED_TEXT_CHARS = 2_000
         const val SNAPSHOT_TTL_MS = 30_000L
         const val MIN_GESTURE_SIZE_PX = 24
+        const val MAX_TARGET_SCREEN_RATIO = 0.98
+        const val CROP_PADDING_RATIO = 0.08
+        const val MAX_CROP_PADDING_PX = 96
+        const val MIN_CAPTURE_SIZE_PX = 48
+        const val MAX_CAPTURE_EDGE_PX = 1_024
+        const val MAX_CAPTURE_BYTES = 1_000_000
+        const val JPEG_QUALITY = 78
+        const val ACTION_SETTLE_MS = 350L
+        const val TYPE_SETTLE_MS = 250L
+        const val SCROLL_SETTLE_MS = 450L
         val mainHandler = Handler(Looper.getMainLooper())
     }
 }

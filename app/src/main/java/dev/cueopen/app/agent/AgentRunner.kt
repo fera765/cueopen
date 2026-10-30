@@ -56,6 +56,17 @@ import java.util.HashMap
 import java.util.Locale
 
 private val iqOptionTradeWakeTag = Regex("""\[\[IQOPTION_TRADES:([0-9,]+)]]$""")
+private val accessibilitySnapshotBoundTools = setOf(
+    "device_accessibility_click", "device_accessibility_type",
+    "device_accessibility_scroll", "device_accessibility_inspect_image",
+)
+
+private fun isStaleAccessibilitySnapshotFailure(toolName: String, detail: String): Boolean =
+    toolName in accessibilitySnapshotBoundTools && listOf(
+    "Snapshot ausente ou invalidado", "snapshot_id expirado", "snapshot_id ausente",
+    "A janela mudou desde a leitura", "A árvore de controles mudou",
+    "O controle mudou desde a leitura", "element_id desconhecido neste snapshot",
+    ).any { phrase -> detail.contains(phrase) }
 
 /** O que o "computador" do agente está fazendo agora (mostrado no card ao vivo do chat). */
 data class Activity(val kind: Kind = Kind.IDLE, val detail: String = "") {
@@ -212,6 +223,10 @@ class AgentRunner(
     private val ctxMgr = ContextManager(store, sandbox, llm)
 
     private suspend fun loop(sessionId: String, maxStepsOverride: Int? = null, tokenBudgetOverride: Long? = null) {
+        store.session(sessionId)?.let { existing ->
+            if (AccessibilityToolHistory.sanitizePersistedSession(existing) != existing)
+                store.editSession(sessionId) { AccessibilityToolHistory.sanitizePersistedSession(it) }
+        }
         val maxSteps = (maxStepsOverride ?: store.settings.maxSteps).coerceIn(1, store.settings.maxSteps.coerceAtLeast(1))
         val startingTokens = store.session(sessionId)?.let { it.tokensIn + it.tokensOut } ?: 0L
         var steps = 0
@@ -226,6 +241,9 @@ class AgentRunner(
         val toolSigWindow = ArrayDeque<String>()
         val resultSigWindow = ArrayDeque<String>()
         val invalidAccessibilitySnapshots = dev.cueopen.app.device.InvalidAccessibilitySnapshotGuard()
+        val visualInspectionUsed = mutableSetOf<String>()
+        val accessibilityReadScreenCompleted = mutableSetOf<String>()
+        val transientAccessibilityOutputs = linkedMapOf<String, String>()
         var toolLoopNudges = 0
         var cleanRounds = 0
         val controlTools = setOf("tools_load", "sleep", "set_schedule", "ask_user", "ask_question", "ask_secure", "finish", "complete_step", "notes_write", "notes_read")
@@ -254,7 +272,8 @@ class AgentRunner(
             val allTools = tools(agent, allowMultiAgent = tokenBudgetOverride == null, builder = s.connectorBuilder)
             val (jplan, stepTools) = jevPlan(sessionId, s, allTools)
             val sys = LlmMessage("system", systemPrompt(sessionId, agent, s, jplan, allowDeviceTools = tokenBudgetOverride == null))
-            var history = ctxMgr.microCompact(s.llm, sessionId)
+            val activeHistory = s.llm.map { AccessibilityToolHistory.forActiveModel(it, transientAccessibilityOutputs) }
+            var history = ctxMgr.microCompact(activeHistory, sessionId)
             if (history.firstOrNull()?.role != "user") history = listOf(LlmMessage("user", "[Contexto anterior compactado no resumo da sessão. Continue de onde parou.]")) + history
             // Resiliência: tenta a chamada; em erro, reenvia (backoff) e só desiste após 3 falhas.
             val replyTokenLimit = tokenBudgetOverride?.let { budget ->
@@ -374,30 +393,77 @@ class AgentRunner(
             val tradeCallCache = HashMap<String, ToolResult>()
             val resultHashes = HashMap<String, Int>()
             val resultLong = HashSet<String>()
+            val staleSnapshotRecoveryCache = HashMap<String?, String>()
             for (call in reply.toolCalls) {
-                val accessibilitySnapshotId = if (call.name == "device_accessibility_click") runCatching {
+                val accessibilitySnapshotId = if (call.name in accessibilitySnapshotBoundTools) runCatching {
                     json.parseToJsonElement(call.argsJson).jsonObject["snapshot_id"]?.jsonPrimitive?.contentOrNull
                 }.getOrNull() else null
-                if (invalidAccessibilitySnapshots.shouldBlock(accessibilitySnapshotId)) {
-                    store.addItemUnique(sessionId, ChatItem.Error(text = "O snapshot de acessibilidade já foi recusado; não repeti o toque. Leia a tela novamente e use somente o snapshot_id e element_id novos antes de tentar outra vez."))
-                    store.editSession(sessionId) { it.copy(status = SessionStatus.WAITING_USER) }
-                    return
+                val blockedSnapshotReuse = call.name in accessibilitySnapshotBoundTools &&
+                    invalidAccessibilitySnapshots.shouldBlock(accessibilitySnapshotId)
+                val blockedSnapshotRead = if (blockedSnapshotReuse) {
+                    staleSnapshotRecoveryCache[accessibilitySnapshotId] ?: try {
+                        dev.cueopen.app.device.DeviceAccessibilityActions.readScreen(sessionId)
+                    } catch (c: kotlinx.coroutines.CancellationException) {
+                        throw c
+                    } catch (t: Throwable) {
+                        "A releitura automática falhou: ${t.message?.take(180) ?: t.javaClass.simpleName}."
+                    }
+                } else null
+                if (blockedSnapshotReuse) {
+                    accessibilitySnapshotId?.let { staleSnapshotRecoveryCache[it] = blockedSnapshotRead.orEmpty() }
                 }
                 // Auto-recuperação: uma exceção em qualquer ferramenta vira um erro acionável devolvido
                 // ao modelo (nunca derruba o loop do agente).
                 val tradeResultTool = call.name == "uic_iqoption_open_option" || call.name == "uic_iqoption_get_trade_result"
                 val cacheKey = call.name + "|" + normArgs(call.argsJson)
                 val cachedTradeResult = if (tradeResultTool) tradeCallCache[cacheKey] else null
-                val rawResult = try {
-                    cachedTradeResult ?: runTool(sessionId, call, allowDeviceTools = tokenBudgetOverride == null)
+                val rawResult = if (blockedSnapshotReuse) {
+                    ToolResult("ERRO: Snapshot ausente ou invalidado; nenhuma ação foi executada com o ID já recusado. Use somente IDs da releitura atual:\n${blockedSnapshotRead.orEmpty()}")
+                } else try {
+                    cachedTradeResult ?: runTool(
+                        sessionId, call, allowDeviceTools = tokenBudgetOverride == null,
+                        model = modelId, visualInspectionUsed = visualInspectionUsed,
+                        accessibilityReadScreenCompleted = accessibilityReadScreenCompleted,
+                    )
                 } catch (c: kotlinx.coroutines.CancellationException) {
                     throw c
                 } catch (t: Throwable) {
-                    runCatching { dev.cueopen.app.diag.ErrorLog.log(errorSource(call.name), "${t.javaClass.simpleName}: ${t.message.orEmpty()}", sessionId, call.name) }
-                    ToolResult(output = "ERRO ao executar a ferramenta \"${call.name}\": ${t.message?.take(300) ?: t.javaClass.simpleName}. Diagnostique a causa, ajuste os argumentos/abordagem e tente de outra forma; não repita a mesma chamada. Se estiver bloqueado, chame finish explicando.")
+                    val safeFailure = if (call.name.startsWith("device_accessibility_"))
+                        "Falha de ferramenta Android; conteúdo de tela omitido por privacidade."
+                    else "${t.javaClass.simpleName}: ${t.message.orEmpty()}"
+                    runCatching { dev.cueopen.app.diag.ErrorLog.log(errorSource(call.name), safeFailure, sessionId, call.name) }
+                    val detail = t.message?.take(300) ?: t.javaClass.simpleName
+                    val staleFailure = isStaleAccessibilitySnapshotFailure(call.name, detail)
+                    val refreshedScreen = if (staleFailure) try {
+                        dev.cueopen.app.device.DeviceAccessibilityActions.readScreen(sessionId)
+                    } catch (c: kotlinx.coroutines.CancellationException) {
+                        throw c
+                    } catch (refreshError: Throwable) {
+                        "A releitura automática também falhou: ${refreshError.message?.take(180) ?: refreshError.javaClass.simpleName}."
+                    } else ""
+                    val output = if (staleFailure) {
+                        "ERRO: $detail. Nenhuma ação foi executada. Li a tela automaticamente; descarte todos os IDs antigos e reidentifique o alvo usando esta leitura nova:\n$refreshedScreen"
+                    } else {
+                        "ERRO ao executar a ferramenta \"${call.name}\": $detail. Diagnostique a causa, ajuste os argumentos/abordagem e tente de outra forma; não repita a mesma chamada. Se estiver bloqueado, chame finish explicando."
+                    }
+                    ToolResult(output = output)
                 }
-                if (call.name == "device_accessibility_click")
+                if (call.name in accessibilitySnapshotBoundTools ||
+                    call.name == "device_accessibility_open_app" || call.name == "device_accessibility_back") {
+                    accessibilityReadScreenCompleted.remove(sessionId)
+                }
+                if (call.name == "device_accessibility_read_screen" &&
+                    rawResult.output.startsWith("Tela acessível", ignoreCase = true)) {
+                    accessibilityReadScreenCompleted.add(sessionId)
+                } else if (isStaleAccessibilitySnapshotFailure(call.name, rawResult.output) &&
+                    rawResult.output.contains("snapshot_id=")) {
+                    accessibilityReadScreenCompleted.add(sessionId)
+                }
+                if (call.name in accessibilitySnapshotBoundTools)
                     invalidAccessibilitySnapshots.recordFailure(accessibilitySnapshotId, rawResult.output)
+                if (!blockedSnapshotReuse && accessibilitySnapshotId != null &&
+                    isStaleAccessibilitySnapshotFailure(call.name, rawResult.output))
+                    staleSnapshotRecoveryCache[accessibilitySnapshotId] = rawResult.output
                 if (tradeResultTool && cachedTradeResult == null) tradeCallCache[cacheKey] = rawResult
                 val consumedWait = if (tradeResultTool) IqTradeWaitDirective.consume(rawResult.output) else null
                 val outputText = consumedWait?.output ?: rawResult.output
@@ -416,12 +482,22 @@ class AgentRunner(
                 if (result.output.length > 200) resultLong.add(call.id)
                 // a especificação do SDK (connector_spec) vai inteira: cortá-la fazia o agente ler a sobra por arquivo em loop
                 // nenhum valor do formulário seguro volta para o modelo, mesmo que uma ferramenta o ecoe
+                val accessibilityOutput = call.name.startsWith("device_accessibility_")
                 val ctxOut = ctxMgr.storeToolOutput(
                     sessionId, call.id, SecretVault.redact(sessionId, result.output),
                     limit = if (call.name == "connector_spec") 60_000 else 8_000,
-                    persistLongOutput = !call.name.startsWith("device_accessibility_"))
+                    persistLongOutput = !accessibilityOutput)
+                if (accessibilityOutput) {
+                    transientAccessibilityOutputs.remove(call.id)
+                    transientAccessibilityOutputs[call.id] = ctxOut
+                    while (transientAccessibilityOutputs.size > 6) {
+                        val oldest = transientAccessibilityOutputs.keys.firstOrNull() ?: break
+                        transientAccessibilityOutputs.remove(oldest)
+                    }
+                }
+                val durableToolOutput = AccessibilityToolHistory.durableResult(call.name, ctxOut)
                 store.editSession(sessionId) {
-                    it.copy(llm = it.llm + LlmMessage("tool", ctxOut, toolCallId = call.id, name = call.name))
+                    it.copy(llm = it.llm + LlmMessage("tool", durableToolOutput, toolCallId = call.id, name = call.name))
                 }
                 if (result.stop != null) stopLoop = result.stop
                 if (result.sleepSeconds != null) {
@@ -1367,7 +1443,7 @@ class AgentRunner(
                 put("title", str("Título")); put("text", str("Mensagem"))
             }, listOf("text")))
         if ("device_screenshot" in deviceTools)
-            add(tool("device_screenshot", "Captura a tela atual do aparelho e mostra no chat.", buildJsonObject {}))
+            add(tool("device_screenshot", "Captura a tela inteira somente quando o usuário pedir explicitamente um screenshot/print. Para ler a imagem de um post pedido, nunca use captura ampla: primeiro leia a árvore de acessibilidade e, se necessário, use device_accessibility_inspect_image no recorte do post.", buildJsonObject {}))
         if ("device_overlay" in deviceTools)
             add(tool("device_overlay", "Mostra um balão flutuante sobre os outros apps.", buildJsonObject { put("text", str("Texto")) }, listOf("text")))
         if ("device_bluetooth" in deviceTools)
@@ -1397,6 +1473,11 @@ class AgentRunner(
             }, listOf("app")))
         if ("device_accessibility_read_screen" in deviceTools)
             add(tool("device_accessibility_read_screen", "Lê somente a árvore de texto/controles visíveis da janela atual; não captura screenshot. Senhas são ocultadas. IDs temporários expiram ou invalidam após mudanças.", buildJsonObject {}))
+        if ("device_accessibility_inspect_image" in deviceTools)
+            add(tool("device_accessibility_inspect_image", "Fallback visual de uso único: somente quando o usuário pediu ler/analisar um post de app social e a leitura acessível não revelou o conteúdo da imagem. Captura e envia ao modelo apenas o recorte do elemento atual, após revalidar snapshot e janela; nunca salva screenshot no histórico. Requer Android 11+ e modelo com visão.", buildJsonObject {
+                put("snapshot_id", str("ID retornado pela leitura de tela atual"))
+                put("element_id", int("ID do elemento do post/imagem na leitura atual"))
+            }, listOf("snapshot_id", "element_id")))
         if ("device_accessibility_click" in deviceTools)
             add(tool("device_accessibility_click", "Toca um controle visível do snapshot atual. Releia a tela após a ação. Se receber erro de snapshot ausente/invalidado, não repita esse click: chame device_accessibility_read_screen e use somente IDs novos.", buildJsonObject {
                 put("snapshot_id", str("ID retornado por device_accessibility_read_screen"))
@@ -1650,7 +1731,14 @@ class AgentRunner(
                     }
     }
 
-    private suspend fun runTool(sessionId: String, call: ToolCall, allowDeviceTools: Boolean): ToolResult {
+    private suspend fun runTool(
+        sessionId: String,
+        call: ToolCall,
+        allowDeviceTools: Boolean,
+        model: String,
+        visualInspectionUsed: MutableSet<String>,
+        accessibilityReadScreenCompleted: MutableSet<String>,
+    ): ToolResult {
         val parsed = runCatching { json.parseToJsonElement(call.argsJson).jsonObject }
         if (parsed.isFailure && call.argsJson.isNotBlank() && call.argsJson != "{}") {
             store.addItem(sessionId, ChatItem.Step(tool = call.name, title = "Argumentos cortados", args = call.name, result = call.argsJson.takeLast(300), status = StepStatus.ERROR))
@@ -1863,6 +1951,7 @@ class AgentRunner(
             "device_screenshot" -> "Capturando tela" to Activity.Kind.THINKING
             "device_accessibility_open_app" -> "Abrindo aplicativo" to Activity.Kind.THINKING
             "device_accessibility_read_screen" -> "Lendo controles visíveis" to Activity.Kind.THINKING
+            "device_accessibility_inspect_image" -> "Analisando recorte visual" to Activity.Kind.THINKING
             "device_accessibility_click" -> "Tocando no aplicativo" to Activity.Kind.THINKING
             "device_accessibility_type" -> "Preenchendo campo" to Activity.Kind.THINKING
             "device_accessibility_scroll" -> "Rolando aplicativo" to Activity.Kind.THINKING
@@ -1884,6 +1973,7 @@ class AgentRunner(
             "device_accessibility_open_app" -> s("app").take(60)
             "device_accessibility_click", "device_accessibility_scroll" -> "element ${i("element_id")?.toString() ?: "?"}"
             "device_accessibility_type" -> "element ${i("element_id")?.toString() ?: "?"} · texto oculto"
+            "device_accessibility_inspect_image" -> "element ${i("element_id")?.toString() ?: "?"} · recorte efêmero"
             "create_skill" -> s("name")
             else -> ""
         }
@@ -2392,6 +2482,43 @@ class AgentRunner(
                 "device_microphone" -> dev.cueopen.app.device.DeviceActions.microphone(ctx)
                 "device_accessibility_open_app" -> dev.cueopen.app.device.DeviceAccessibilityActions.openApp(ctx, sessionId, s("app"))
                 "device_accessibility_read_screen" -> dev.cueopen.app.device.DeviceAccessibilityActions.readScreen(sessionId)
+                "device_accessibility_inspect_image" -> {
+                    val request = store.session(sessionId)?.items?.lastOrNull { it is ChatItem.User } as? ChatItem.User
+                    when {
+                        request == null || !dev.cueopen.app.device.AccessibilityVisualInspectionPolicy
+                            .explicitlyRequestsPostOrImage(request.text) ->
+                            "RECUSADO: captura visual só é permitida como fallback de um pedido explícito para ler/analisar um post de app social."
+                        !dev.cueopen.app.device.AccessibilityVisualInspectionPolicy.canInspectImage(
+                            request.text,
+                            currentScreenWasRead = sessionId in accessibilityReadScreenCompleted,
+                            inspectionAlreadyUsed = sessionId in visualInspectionUsed,
+                        ) -> if (sessionId in visualInspectionUsed)
+                            "RECUSADO: já fiz a única inspeção visual desta tarefa; use o resultado recebido e não capture outras telas/posts."
+                        else "RECUSADO: primeiro leia a tela acessível atual e verifique o texto/descrição da imagem; só então use este fallback se a árvore não revelar o conteúdo."
+                        else -> {
+                            visualInspectionUsed.add(sessionId)
+                            val jpeg = try {
+                                dev.cueopen.app.device.DeviceAccessibilityActions.inspectImage(
+                                    sessionId, s("snapshot_id"), i("element_id") ?: -1,
+                                )
+                            } catch (t: Throwable) {
+                                if (isStaleAccessibilitySnapshotFailure("device_accessibility_inspect_image", t.message.orEmpty()))
+                                    visualInspectionUsed.remove(sessionId)
+                                throw t
+                            }
+                            val prompt = "Analise apenas o recorte do elemento do post já solicitado pelo usuário. " +
+                                "Descreva o conteúdo visual relevante e qualquer texto legível; diferencie o que é visível do que não dá para afirmar. " +
+                                "Responda em português e não faça inferências sobre pessoas, identidade ou contexto além do recorte. " +
+                                "Pedido do usuário: ${request.text.take(1200)}"
+                            val visual = try {
+                                llm.inspectImage(prompt, jpeg, model = model, conversationId = sessionId)
+                            } finally {
+                                jpeg.fill(0)
+                            }
+                            "Análise visual temporária do recorte solicitado (imagem não salva no histórico): $visual"
+                        }
+                    }
+                }
                 "device_accessibility_click" -> dev.cueopen.app.device.DeviceAccessibilityActions.click(
                     sessionId, s("snapshot_id"), i("element_id") ?: -1)
                 "device_accessibility_type" -> {
@@ -2407,9 +2534,22 @@ class AgentRunner(
                 "device_notify" -> { notifyRaw(s("title").ifBlank { "CueOpen" }, plainText(s("text"))); "Notificação enviada." }
                 "device_overlay" -> { dev.cueopen.app.device.Overlay.show(ctx, s("text")); "Balão exibido." }
                 "device_screenshot" -> {
-                    val f = java.io.File(sandbox.workspaceFor(sessionId), "screenshot_${System.currentTimeMillis()}.png")
-                    if (dev.cueopen.app.device.ScreenCapture.capture(ctx, f)) { store.addItem(sessionId, ChatItem.Media(path = f.absolutePath, caption = "Captura de tela")); "Captura salva e exibida: ${f.name}" }
-                    else "Não foi possível capturar (permissão de captura não concedida)."
+                    val request = store.session(sessionId)?.items?.lastOrNull { it is ChatItem.User } as? ChatItem.User
+                    when {
+                        request != null && dev.cueopen.app.device.AccessibilityVisualInspectionPolicy
+                            .explicitlyRequestsPostOrImage(request.text) ->
+                            "RECUSADO: não vou capturar a tela inteira para ler um post. Use a árvore acessível e, somente se ela não revelar a imagem, device_accessibility_inspect_image no recorte atual."
+                        request == null || !dev.cueopen.app.device.DeviceScreenshotPolicy
+                            .explicitlyRequestsFullScreenCapture(request.text) ->
+                            "RECUSADO: screenshot da tela inteira requer pedido explícito do usuário; não use como inspeção automática."
+                        else -> {
+                            val f = java.io.File(sandbox.workspaceFor(sessionId), "screenshot_${System.currentTimeMillis()}.png")
+                            if (dev.cueopen.app.device.ScreenCapture.capture(ctx, f)) {
+                                store.addItem(sessionId, ChatItem.Media(path = f.absolutePath, caption = "Captura de tela"))
+                                "Captura salva e exibida: ${f.name}"
+                            } else "Não foi possível capturar (permissão de captura não concedida)."
+                        }
+                    }
                 }
                 "browser_network" -> browserFor(sessionId).networkSummary(s("filter"))
                 "browser_console" -> browserFor(sessionId).consoleSummary()
@@ -2452,10 +2592,24 @@ class AgentRunner(
             store.replaceItem(sessionId, step.copy(result = "Execução interrompida.", status = StepStatus.ERROR))
             throw c
         } catch (t: Throwable) {
-            executions.fail(executionId, t.message.orEmpty())
-            runCatching { dev.cueopen.app.diag.ErrorLog.log(errorSource(call.name), "${t.javaClass.simpleName}: ${t.message.orEmpty()}", sessionId, call.name) }
-            store.replaceItem(sessionId, step.copy(result = t.message.orEmpty(), status = StepStatus.ERROR))
-            return ToolResult("Erro: ${t.message}")
+            val detail = t.message.orEmpty()
+            val accessibilityTool = call.name.startsWith("device_accessibility_")
+            val staleSnapshot = isStaleAccessibilitySnapshotFailure(call.name, detail)
+            val freshScreen = if (staleSnapshot) try {
+                dev.cueopen.app.device.DeviceAccessibilityActions.readScreen(sessionId)
+            } catch (c: kotlinx.coroutines.CancellationException) {
+                throw c
+            } catch (refreshError: Throwable) {
+                "A releitura automática falhou: ${refreshError.message?.take(180) ?: refreshError.javaClass.simpleName}."
+            } else ""
+            val toolOutput = if (staleSnapshot) {
+                "ERRO: $detail. Nenhuma ação foi executada. Atualizei a tela automaticamente; descarte os IDs antigos e reidentifique o alvo com estes dados transitórios:\n$freshScreen"
+            } else "Erro: ${detail.take(300)}"
+            val safeDetail = if (accessibilityTool) "Falha Android; conteúdo de tela omitido por privacidade." else detail
+            executions.fail(executionId, safeDetail)
+            runCatching { dev.cueopen.app.diag.ErrorLog.log(errorSource(call.name), safeDetail, sessionId, call.name) }
+            store.replaceItem(sessionId, step.copy(result = safeDetail, status = StepStatus.ERROR))
+            return ToolResult(toolOutput)
         }
         val out = SecretVault.redact(sessionId, out0)
         val commandFailed = Regex("""\[exit ([1-9]\d*)\]""").containsMatchIn(out)
@@ -2463,15 +2617,19 @@ class AgentRunner(
         // Marcadores de falha específicos de ferramentas (não começam com ERRO:) também viram log.
         val markerError = Regex("""(MARKET_ERROR|WALLET_RPC_ERROR|GUARDRAIL|No such file|not found|não encontrad|Recusado|Acesso negado)""")
             .containsMatchIn(out.take(400))
-        if (isError) {
-            executions.fail(executionId, out)
-        } else {
-            executions.finish(executionId, out)
-        }
+        val accessibilityTool = call.name.startsWith("device_accessibility_")
+        val safeExecutionOutput = if (accessibilityTool)
+            "Resultado Android transitório omitido dos diagnósticos; nenhum conteúdo de tela foi salvo."
+        else out
+        if (isError) executions.fail(executionId, safeExecutionOutput) else executions.finish(executionId, safeExecutionOutput)
         if (isError || markerError) {
-            runCatching { dev.cueopen.app.diag.ErrorLog.log(errorSource(call.name), out.take(1000), sessionId, call.name) }
+            val safeLog = if (accessibilityTool) "Falha de ferramenta Android; conteúdo de tela omitido por privacidade." else out.take(1000)
+            runCatching { dev.cueopen.app.diag.ErrorLog.log(errorSource(call.name), safeLog, sessionId, call.name) }
         }
-        store.replaceItem(sessionId, step.copy(result = out.take(4000), status = if (commandFailed || out.startsWith("ERROR:") || out.startsWith("TIMEOUT:") || out.startsWith("ERRO:")) StepStatus.ERROR else StepStatus.OK))
+        val safeStepOutput = if (accessibilityTool)
+            "Resultado de acessibilidade omitido do histórico por privacidade; conteúdo disponível apenas durante a tarefa ativa."
+        else out.take(4000)
+        store.replaceItem(sessionId, step.copy(result = safeStepOutput, status = if (commandFailed || out.startsWith("ERROR:") || out.startsWith("TIMEOUT:") || out.startsWith("ERRO:")) StepStatus.ERROR else StepStatus.OK))
         return ToolResult(out)
     }
 

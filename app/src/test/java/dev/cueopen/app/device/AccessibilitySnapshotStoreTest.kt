@@ -38,4 +38,23 @@ class AccessibilitySnapshotStoreTest {
         assertNull(snapshots["session-a"])
         assertNull(snapshots["session-b"])
     }
+
+    @Test
+    fun windowEventOnlyInvalidatesSnapshotsFromOtherWindows() {
+        data class WindowSnapshot(val packageName: String, val windowId: Int)
+        val snapshots = AccessibilitySnapshotStore<WindowSnapshot>()
+        snapshots.put("same-window", WindowSnapshot("com.example", 7))
+        snapshots.put("other-window", WindowSnapshot("com.example", 8))
+        snapshots.put("other-app", WindowSnapshot("com.other", 7))
+
+        snapshots.removeWhere { snapshot ->
+            !AccessibilitySnapshotPolicy.keepAfterWindowEvent(
+                snapshot.packageName, snapshot.windowId, "com.example", 7,
+            )
+        }
+
+        assertEquals(WindowSnapshot("com.example", 7), snapshots["same-window"])
+        assertNull(snapshots["other-window"])
+        assertNull(snapshots["other-app"])
+    }
 }

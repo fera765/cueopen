@@ -36,6 +36,7 @@ object DeviceCapPolicy {
             "device_accessibility_open_app", "device_accessibility_read_screen",
             "device_accessibility_click", "device_accessibility_type",
             "device_accessibility_scroll", "device_accessibility_back",
+            "device_accessibility_inspect_image",
         ),
     )
 
@@ -47,6 +48,7 @@ object DeviceCapPolicy {
         "device_accessibility_open_app", "device_accessibility_read_screen",
         "device_accessibility_click", "device_accessibility_type",
         "device_accessibility_scroll", "device_accessibility_back",
+        "device_accessibility_inspect_image",
     )
 
     val allTools: Set<String> = toolsByCapability.values.flatten().toSet()
@@ -85,7 +87,7 @@ object DeviceCapPolicy {
             if ("device_bluetooth" in tools) add("Bluetooth: device_bluetooth lista somente dispositivos já pareados e não inicia varredura.")
             if ("device_bluetooth_pair" in tools) add("Bluetooth: device_bluetooth_pair apenas abre as Configurações; pareamento e alterações ficam sob controle do usuário.")
             if ("device_accessibility_read_screen" in tools) add(
-                "Acessibilidade: só use para uma tarefa explicitamente pedida. Abra o app, leia a árvore visível, use o snapshot_id e element_id atuais, e releia após cada mudança; controles podem mudar ou não estar acessíveis. Não capture screenshots como fallback. Campos de senha aparecem ocultos; nunca peça nem exponha credenciais, use ask_secure e marcadores {{secret:nome}} quando necessário. Só envie mensagens/publicações quando o usuário pediu claramente esse destino e conteúdo, respeitando a confirmação exigida pela ação."
+                "Fluxo Android: quando o usuário nomear um app e pedir para ler/inspecionar um post, abra o app pedido, leia a árvore acessível e identifique o post principal visível (texto, descrição/alt e contexto do elemento); não pergunte se o app/post estiver claro. Se houver ambiguidade real sobre app, post ou alvo, pergunte antes de agir. Use somente snapshot_id/element_id da leitura atual, uma ação por vez, e releia após cada mudança. Se qualquer ação retornar snapshot ausente/expirado/obsoleto, nenhuma ação ocorreu: descarte TODOS os IDs antigos, leia a tela novamente e reidentifique o alvo; nunca repita a chamada antiga. Só se o usuário pediu o post e a árvore acessível não revelou a imagem, use device_accessibility_inspect_image uma vez no elemento relevante; envia somente um recorte efêmero ao modelo, não salva imagem, e recusa sobreposição/notificação, janela segura, API <30 ou falta de visão do modelo. Se o fallback não estiver disponível, explique e use o texto acessível. Senhas são ocultadas; use ask_secure para credenciais. Nunca curta, comente, siga, publique, compre ou envie mensagem sem pedido explícito; respeite confirmações necessárias."
             )
         }
     }

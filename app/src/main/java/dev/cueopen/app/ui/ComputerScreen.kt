@@ -132,7 +132,9 @@ fun TerminalView(key: String, cwd: String, modifier: Modifier = Modifier) {
         }
         return
     }
-    DisposableEffect(session) { onDispose { viewRef?.let { session.detach(it) } } }
+    // Use the stable String key, not Session: Compose may inline a synthetic Session.$stable field
+    // that can be absent in an incremental/multidex build when the inner class was compiled earlier.
+    DisposableEffect(key) { onDispose { viewRef?.let { session.detach(it) } } }
 
     Column(modifier.background(Color(0xFF0F1115))) {
         AndroidView(modifier = Modifier.weight(1f).fillMaxWidth().padding(start = 6.dp, top = 4.dp), factory = { ctx ->

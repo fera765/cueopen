@@ -81,7 +81,7 @@ object DeviceCaps {
         Cap(NOTIF_POST, "Enviar notificações", "Permitir que o agente mostre avisos na barra de status."),
         Cap(OVERLAY, "Sobrepor à tela", "Mostrar um balão flutuante; exige autorização especial nas Configurações."),
         Cap(SCREEN, "Capturar a tela", "Captura pontual após a confirmação do diálogo de projeção do Android."),
-        Cap(ACCESSIBILITY, "Navegar em outros apps", "Permite ler controles/textos visíveis e abrir, tocar, rolar e preencher campos em outros apps. O Android dá o serviço ao app inteiro; somente agentes com esta opção poderão solicitar ações. O conteúdo lido vai ao modelo configurado e pode aparecer no histórico local. Não captura screenshots."),
+        Cap(ACCESSIBILITY, "Navegar em outros apps", "Permite ler controles/textos visíveis e abrir, tocar, rolar e preencher campos em outros apps. O Android dá o serviço ao app inteiro; somente agentes com esta opção poderão solicitar ações. A árvore da tela é contexto transitório enviado ao modelo configurado, mas não é salva no histórico local. Somente se você pedir para ler/analisar um post e a árvore acessível não bastar, um único recorte temporário do elemento pode ser enviado a um modelo com visão; a captura e a árvore bruta não são salvas no histórico local."),
     )
 
     private fun hasPermission(state: AndroidCapabilityState, permission: String, appOp: String? = null): Boolean =

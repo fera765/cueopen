@@ -12,8 +12,9 @@ import java.io.File
 /**
  * Arquitetura de contexto do CueOpen (inspirada no gerenciamento de sessões longas do Claude Code):
  *
- * Camada 1 — Micro-compactação: saídas de ferramentas antigas viram um marcador curto; o conteúdo
- *   completo fica salvo em disco (/root/.cue/out/<id>.txt) e pode ser relido sob demanda.
+ * Camada 1 — Micro-compactação: saídas comuns de ferramentas antigas viram um marcador curto; o conteúdo
+ *   completo fica salvo em disco (/root/.cue/out/<id>.txt) e pode ser relido sob demanda. Saídas Android
+ *   de acessibilidade são exceção: existem só na memória do loop ativo e são omitidas do histórico/arquivos.
  * Camada 2 — Compactação estrutural: quando o histórico passa do orçamento, a parte antiga é
  *   resumida pelo modelo rápido num resumo estruturado (intenção, decisões, arquivos, erros,
  *   pendências, estado atual). A cauda recente fica literal, sem quebrar pares tool_call/tool.
@@ -34,7 +35,7 @@ class ContextManager(private val store: Store, private val sandbox: Sandbox, pri
     }
 
     // ---------- Camada 1 ----------
-    /** Salva a saída completa da ferramenta e devolve a versão que entra no contexto. */
+    /** Salva saídas comuns e devolve a versão de contexto; acessibilidade usa persistLongOutput=false. */
     fun storeToolOutput(sessionId: String, callId: String, output: String, limit: Int = 8_000, persistLongOutput: Boolean = true): String {
         if (output.length <= limit) return output
         if (!persistLongOutput) {

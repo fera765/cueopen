@@ -9,13 +9,22 @@ internal class InvalidAccessibilitySnapshotGuard {
         val stale = listOf(
             "Snapshot ausente ou invalidado",
             "snapshot_id expirado",
+            "snapshot_id ausente",
             "A janela mudou desde a leitura",
             "A árvore de controles mudou",
             "O controle mudou desde a leitura",
-        ).any(output::contains)
-        if (stale) invalidIds += snapshotId
+            "element_id desconhecido neste snapshot",
+        ).any { phrase -> output.contains(phrase) }
+        if (stale) {
+            if (invalidIds.size >= MAX_INVALID_IDS) invalidIds.remove(invalidIds.first())
+            invalidIds += snapshotId
+        }
     }
 
     fun shouldBlock(snapshotId: String?): Boolean =
         !snapshotId.isNullOrBlank() && snapshotId in invalidIds
+
+    private companion object {
+        const val MAX_INVALID_IDS = 128
+    }
 }

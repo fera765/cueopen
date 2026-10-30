@@ -14,6 +14,13 @@ internal class AccessibilitySnapshotStore<T> {
         bySession.remove(sessionId)
     }
 
+    fun removeWhere(predicate: (T) -> Boolean) {
+        val iterator = bySession.iterator()
+        while (iterator.hasNext()) {
+            if (predicate(iterator.next().value)) iterator.remove()
+        }
+    }
+
     fun clear() {
         bySession.clear()
     }

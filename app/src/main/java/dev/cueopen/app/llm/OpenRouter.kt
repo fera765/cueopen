@@ -210,6 +210,80 @@ class OpenRouter(private val settings: () -> Settings) {
         LlmReply(content, calls, rawToolCalls, Usage(num(u, "prompt_tokens"), num(u, "completion_tokens"), cachedTok), truncated = finish == "length")
     }
 
+    /** Envia um único recorte visual, sem histórico, ferramentas ou persistência no armazenamento local. */
+    suspend fun inspectImage(
+        prompt: String,
+        jpeg: ByteArray,
+        model: String? = null,
+        conversationId: String? = null,
+    ): String = withContext(Dispatchers.IO) {
+        try {
+            if (jpeg.isEmpty() || jpeg.size > MAX_TRANSIENT_IMAGE_BYTES) {
+                throw IOException("O recorte visual está vazio ou excede o limite de envio.")
+            }
+            require(prompt.isNotBlank()) { "Informe o que deve ser observado no recorte visual." }
+            val s = settings()
+            val mdl = model ?: s.model
+            require(mdl.isNotBlank()) { "Escolha um modelo nas Configurações." }
+            val openRouter = isOpenRouter(s.baseUrl)
+            val sessionHeader = OpenCodeProtocol.sessionHeader(s.baseUrl, conversationId)
+            val userContent = buildJsonArray {
+                add(buildJsonObject { put("type", "text"); put("text", prompt) })
+                add(buildJsonObject {
+                    put("type", "image_url")
+                    put("image_url", buildJsonObject {
+                        put("url", "data:image/jpeg;base64,${java.util.Base64.getEncoder().encodeToString(jpeg)}")
+                    })
+                })
+            }
+            val body = buildJsonObject {
+                put("model", mdl)
+                put("max_tokens", 1200)
+                put("temperature", 0.1)
+                put("messages", buildJsonArray {
+                    add(buildJsonObject {
+                        put("role", "user")
+                        put("content", userContent)
+                    })
+                })
+            }
+            val request = Request.Builder()
+                .url(endpoint(s.baseUrl, "chat/completions"))
+                .apply {
+                    if (s.apiKey.isNotBlank()) header("Authorization", "Bearer ${s.apiKey}")
+                    if (openRouter) header("HTTP-Referer", "https://github.com/cueopen").header("X-Title", "CueOpen")
+                    sessionHeader?.let { header("x-opencode-session", it) }
+                    OpenCodeProtocol.userAgent(s.baseUrl)?.let { header("User-Agent", it) }
+                }
+                .post(body.toString().toRequestBody("application/json".toMediaType()))
+                .build()
+            http().newCall(request).execute().use { response ->
+                val text = response.body?.string().orEmpty()
+                if (!response.isSuccessful) {
+                    val detail = runCatching {
+                        json.parseToJsonElement(text).jsonObject["error"]?.jsonObject
+                            ?.get("message")?.jsonPrimitive?.content
+                    }.getOrNull() ?: text.take(180)
+                    throw IOException("O modelo selecionado recusou entrada de imagem ou a solicitação visual falhou (HTTP ${response.code}): $detail")
+                }
+                val root = json.parseToJsonElement(text).jsonObject
+                val message = root["choices"]?.jsonArray?.firstOrNull()?.jsonObject?.get("message")?.jsonObject
+                    ?: throw IOException("O provedor não retornou uma análise visual utilizável.")
+                val answer = when (val content = message["content"]) {
+                    is kotlinx.serialization.json.JsonPrimitive -> content.contentOrNull.orEmpty()
+                    is JsonArray -> content.mapNotNull { part ->
+                        runCatching { part.jsonObject["text"]?.jsonPrimitive?.contentOrNull }.getOrNull()
+                    }.joinToString("\n")
+                    else -> ""
+                }.trim()
+                answer.takeIf(String::isNotBlank)
+                    ?: throw IOException("O modelo não retornou texto ao analisar a imagem.")
+            }
+        } finally {
+            jpeg.fill(0)
+        }
+    }
+
     /** Chamada nativa System One para Jev: não passa pelo endpoint de geração de texto. */
     suspend fun systemOne(model: String, body: JsonObject, conversationId: String? = null): String = withContext(Dispatchers.IO) {
         val s = settings()
@@ -249,6 +323,10 @@ class OpenRouter(private val settings: () -> Settings) {
         toolCallsJson?.let { put("tool_calls", json.parseToJsonElement(it)) }
         toolCallId?.let { put("tool_call_id", it) }
         name?.let { put("name", it) }
+    }
+
+    private companion object {
+        const val MAX_TRANSIENT_IMAGE_BYTES = 1_000_000
     }
 }
 

@@ -24,4 +24,24 @@ class InvalidAccessibilitySnapshotGuardTest {
 
         assertFalse(guard.shouldBlock("current-snapshot"))
     }
+
+    @Test
+    fun staleSnapshotErrorsFromClickTypeScrollOrImageInspectionBlockOnlyTheOldId() {
+        val staleErrors = listOf(
+            "Snapshot ausente ou invalidado; nenhuma ação foi executada.",
+            "snapshot_id expirado ou diferente da tela atual.",
+            "A janela mudou desde a leitura.",
+            "A árvore de controles mudou.",
+            "O controle mudou desde a leitura.",
+            "element_id desconhecido neste snapshot.",
+        )
+
+        staleErrors.forEachIndexed { index, error ->
+            val guard = InvalidAccessibilitySnapshotGuard()
+            val staleId = "old-$index"
+            guard.recordFailure(staleId, "ERRO: $error")
+            assertTrue("Expected stale ID to be blocked for $error", guard.shouldBlock(staleId))
+            assertFalse(guard.shouldBlock("fresh-$index"))
+        }
+    }
 }

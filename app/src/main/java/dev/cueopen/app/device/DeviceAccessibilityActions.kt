@@ -55,6 +55,15 @@ object DeviceAccessibilityActions {
         it.readScreen(sessionId)
     }
 
+    suspend fun inspectImage(sessionId: String, snapshotId: String, elementId: Int): ByteArray {
+        if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.R) {
+            error("A captura visual por acessibilidade exige Android 11 (API 30) ou superior.")
+        }
+        return AccessibilityAutomationBridge.execute(sessionId, IMAGE_CAPTURE_TIMEOUT_MS) {
+            it.captureImageForInspection(sessionId, snapshotId, elementId)
+        }
+    }
+
     suspend fun click(sessionId: String, snapshotId: String, elementId: Int): String =
         AccessibilityAutomationBridge.execute(sessionId) { it.click(sessionId, snapshotId, elementId) }
 
@@ -99,6 +108,7 @@ object DeviceAccessibilityActions {
     private const val MAX_APP_QUERY_CHARS = 120
     private const val MAX_AMBIGUOUS_APPS = 5
     private const val APP_OPEN_SETTLE_MS = 650L
+    private const val IMAGE_CAPTURE_TIMEOUT_MS = 20_000L
 }
 
 /** One-at-a-time bridge: validates the current session's Agent again on the Android main thread. */
@@ -114,12 +124,16 @@ internal object AccessibilityAutomationBridge {
         if (connectedService.value === service) connectedService.value = null
     }
 
-    suspend fun <T> execute(sessionId: String, action: (FluwyAccessibilityService) -> T): T {
+    suspend fun <T> execute(
+        sessionId: String,
+        timeoutMs: Long = ACTION_TIMEOUT_MS,
+        action: suspend (FluwyAccessibilityService) -> T,
+    ): T {
         val service = connectedService.value ?: withTimeoutOrNull(SERVICE_WAIT_TIMEOUT_MS) {
             connectedService.filterNotNull().first()
         } ?: error("Acessibilidade ainda não está conectada. Verifique Configurações do Android e tente novamente.")
 
-        return withTimeout(ACTION_TIMEOUT_MS) {
+        return withTimeout(timeoutMs) {
             actionMutex.withLock {
                 withContext(Dispatchers.Main.immediate) {
                     if (connectedService.value !== service) error("O serviço de acessibilidade foi desconectado.")

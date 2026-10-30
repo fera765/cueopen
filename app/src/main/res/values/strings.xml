@@ -1,5 +1,5 @@
 <resources>
     <string name="app_name">Fluwy Bot</string>
     <string name="fluwy_accessibility_service_label">Fluwy Bot — navegação por acessibilidade</string>
-    <string name="fluwy_accessibility_service_description">Permite que agentes autorizados por perfil leiam texto e controles visíveis e interajam com outros aplicativos durante tarefas solicitadas. O conteúdo lido pode ser enviado ao modelo configurado e aparecer no histórico local. Campos de senha são ocultados. Não captura screenshots. Revogue em Configurações do Android &gt; Acessibilidade.</string>
+    <string name="fluwy_accessibility_service_description">Permite que agentes autorizados por perfil leiam texto e controles visíveis e interajam com outros aplicativos durante tarefas solicitadas. A árvore de tela é contexto transitório enviado ao modelo configurado, mas não é salva no histórico local. Somente quando você pedir para ler/analisar um post e a árvore acessível não revelar sua imagem, um único recorte do elemento pode ser enviado temporariamente a um modelo com visão (Android 11+); a captura e a árvore bruta não são salvas no histórico. Campos de senha são ocultados. Revogue em Configurações do Android &gt; Acessibilidade.</string>
 </resources>
