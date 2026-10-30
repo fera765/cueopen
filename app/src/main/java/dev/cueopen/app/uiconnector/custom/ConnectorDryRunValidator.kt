@@ -8,6 +8,7 @@ import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.contentOrNull
 import java.io.File
 
 /** Pipeline de pré-instalação estritamente offline. Não usa OkHttp, BrowserHost ou execução de shell. */

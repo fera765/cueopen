@@ -20,6 +20,19 @@ class AndroidHostBridge(
     private val sessionId: String = "__uic__${def.id}",
 ) : HostBridge {
 
+    companion object {
+        /** Nombre reservado para limpiar entornos de validación creados por versiones anteriores. */
+        private fun legacyValidationSession(id: String) = "__uic__${id}__v"
+
+        /** Elimina un entorno descartable legado; no crea ni ejecuta conectores. */
+        fun deleteValidation(id: String) {
+            val sid = legacyValidationSession(id)
+            runCatching { CueApp.instance.terminals.close(sid) }
+            runCatching { CueApp.instance.closeBrowser(sid) }
+            runCatching { CueApp.instance.sandbox.deleteEnvironment(sid) }
+        }
+    }
+
     override fun granted(capability: String): Boolean = capability in def.capabilities && isGranted(capability)
 
     private val app get() = CueApp.instance

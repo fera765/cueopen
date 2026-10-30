@@ -258,7 +258,7 @@ class IqOptionConnector(private val kv: KvStore? = null) : UiConnector {
         val root = request(requestId,
             IqProtocol.openOptionMessage(requestId, order.balanceId, order.activeId, order.direction,
                 order.expirationSeconds, order.amount, order.turbo),
-            "option", "option-rejected", timeoutMs = order.timeoutMs.coerceIn(500, 15_000))
+            "option", "option-rejected", timeoutMs = order.timeoutMs.coerceIn(500L, 15_000L))
         IqProtocol.parseOptionAck(root)
     }
 
