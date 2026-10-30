@@ -206,6 +206,8 @@ fun SettingsScreen(nav: NavController) {
 private fun AssistantDefaultRoleLink(context: android.content.Context) {
     var refresh by remember { mutableIntStateOf(0) }
     val active = remember(refresh) { dev.cueopen.app.assistant.AndroidAssistantRole.isDefaultAssistant(context) }
+    val roleRequestAvailable = remember(refresh) { dev.cueopen.app.assistant.AndroidAssistantRole.isRoleRequestAvailable(context) }
+    var showSetupHelp by remember { mutableStateOf(false) }
     val lifecycle = androidx.lifecycle.compose.LocalLifecycleOwner.current
     androidx.compose.runtime.DisposableEffect(lifecycle) {
         val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
@@ -220,12 +222,35 @@ private fun AssistantDefaultRoleLink(context: android.content.Context) {
         title = if (active) "Fluwy é o assistente padrão" else "Definir Fluwy como assistente",
         sub = if (active)
             "Use o gesto de assistente do Android. O contexto só segue para um rascunho quando você tocar em Continuar."
+        else if (roleRequestAvailable)
+            "O Android abrirá a seleção do assistente. Após escolher Fluwy, use o gesto do sistema para abrir a interface original sobre apps compatíveis."
         else
-            "O Android abrirá a seleção do assistente. Após escolher Fluwy, use o gesto do sistema para abrir a interface original sobre apps compatíveis.",
+            "Toque para abrir as opções do sistema. Se necessário, escolha Apps padrão > Assistente digital; a disponibilidade depende do Android/fabricante.",
         tint = Cue.c.accent,
     ) {
-        dev.cueopen.app.assistant.AndroidAssistantRole.requestIntent(context)?.let(roleLauncher::launch)
+        var launched = false
+        dev.cueopen.app.assistant.AndroidAssistantRole.requestIntents(context).forEach { intent ->
+            if (!launched) {
+                launched = runCatching { roleLauncher.launch(intent); true }.getOrDefault(false)
+            }
+        }
+        if (!launched) showSetupHelp = true
     }
+    if (showSetupHelp) AlertDialog(
+        onDismissRequest = { showSetupHelp = false },
+        title = { Text("Como ativar o assistente") },
+        text = { Text("Este Android não disponibilizou a seleção direta. Nas Configurações, tente Apps > Apps padrão > Assistente digital. A seleção só é aplicada quando você confirma no sistema; alguns fabricantes podem não oferecer esse recurso para apps de terceiros.") },
+        confirmButton = {
+            TextButton(onClick = {
+                showSetupHelp = false
+                dev.cueopen.app.assistant.AndroidAssistantRole.generalSettingsIntent(context)?.let { intent ->
+                    val started = runCatching { roleLauncher.launch(intent); true }.getOrDefault(false)
+                    if (!started) showSetupHelp = true
+                } ?: run { showSetupHelp = true }
+            }) { Text("Abrir Configurações") }
+        },
+        dismissButton = { TextButton(onClick = { showSetupHelp = false }) { Text("Fechar") } },
+    )
 }
 
 @Composable

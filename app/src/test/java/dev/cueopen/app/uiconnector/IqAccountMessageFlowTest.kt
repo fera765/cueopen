@@ -26,6 +26,9 @@ class IqAccountMessageFlowTest {
         fun request(id: String, name: String): IqAccountMessageFlow.Waiter =
             flow.registerWaiter(id, setOf(name))
 
+        fun requestUncorrelated(name: String): IqAccountMessageFlow.Waiter =
+            flow.registerWaiter(null, setOf(name))
+
         fun receive(raw: String, sourceGeneration: Long = generation): IqAccountMessageFlow.AccountUpdate? =
             flow.onMessage(IqProtocol.parseObject(raw)!!, sourceGeneration)
 
@@ -59,6 +62,18 @@ class IqAccountMessageFlowTest {
         assertEquals(101L, transport.flow.activeBalance()?.id)
         assertEquals(101L, transport.flow.orderBalance()?.id)
         assertTrue(transport.flow.authenticated)
+    }
+
+    @Test fun `resposta instruments com request id vazio e roteada pelo nome do evento`() {
+        val transport = FakeTransport()
+        transport.connect(2L)
+        val instrumentsWaiter = transport.requestUncorrelated("instruments")
+
+        transport.receive(
+            """{"name":"instruments","request_id":"","msg":{"instruments":[{"id":"EURUSD","active_id":1}]}}""",
+        )
+
+        assertTrue(instrumentsWaiter.deferred.isCompleted)
     }
 
     @Test fun `profile parcial com balance_id exato confirma troca e evento DEMO atrasado nao reverte`() {

@@ -554,8 +554,9 @@ class IqOptionConnector(
             if (contextAtStart != marketCircuit.contextGeneration() || marketCircuit.isOpen(type, nowElapsed)) {
                 emptyList()
             } else try {
-                val id = reqId()
-                val root = request(id, IqProtocol.forexInstrumentsMessage(id), "instruments", timeoutMs = 6_000)
+                // O wrapper comunitário envia get-instruments com request_id vazio e recebe
+                // a resposta pelo nome "instruments"; não correlacionar com um ID inventado.
+                val root = request("", IqProtocol.forexInstrumentsMessage(), "instruments", timeoutMs = 15_000)
                 val list = IqProtocol.parseForexInstruments(root["msg"] as? JsonObject ?: JsonObject(emptyMap()), serverNowSec())
                 if (contextAtStart != marketCircuit.contextGeneration()) emptyList()
                 else {

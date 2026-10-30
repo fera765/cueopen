@@ -213,8 +213,11 @@ class IqProtocolTest {
     }
 
     @Test fun `consultas e ordens do conector estao limitadas a Forex`() {
-        val instruments = obj(IqProtocol.forexInstrumentsMessage("fx"))["msg"]!!.jsonObject
+        val instrumentsOuter = obj(IqProtocol.forexInstrumentsMessage())
+        assertEquals("", instrumentsOuter["request_id"]!!.jsonPrimitive.content)
+        val instruments = instrumentsOuter["msg"]!!.jsonObject
         assertEquals("get-instruments", instruments["name"]!!.jsonPrimitive.content)
+        assertEquals("4.0", instruments["version"]!!.jsonPrimitive.content)
         assertEquals("forex", instruments["body"]!!.jsonObject["type"]!!.jsonPrimitive.content)
         val positions = obj(IqProtocol.getPositionsMessage("pos", 44))["msg"]!!.jsonObject
         assertEquals("[\"forex\"]", positions["body"]!!.jsonObject["instrument_types"].toString())

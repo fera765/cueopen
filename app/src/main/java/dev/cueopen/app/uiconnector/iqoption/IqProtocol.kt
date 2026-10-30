@@ -138,8 +138,8 @@ object IqProtocol {
         })
 
 
-    /** Instrumentos Forex. */
-    fun forexInstrumentsMessage(reqId: String): String = sendMessage(reqId, "get-instruments", "4.0", buildJsonObject { put("type", "forex") })
+    /** Instrumentos Forex; a biblioteca comunitária envia request_id vazio neste canal. */
+    fun forexInstrumentsMessage(): String = sendMessage("", "get-instruments", "4.0", buildJsonObject { put("type", "forex") })
 
     /** Assina as cotações (velas de 1 s) de um ativo — usadas para o resultado AO VIVO das operações. */
     fun subscribeQuotesMessage(activeId: Int): String = buildJsonObject {
