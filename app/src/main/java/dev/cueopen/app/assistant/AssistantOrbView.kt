@@ -32,6 +32,7 @@ class AssistantOrbView(context: Context) : View(context) {
     private var rms = 0f
     private var smoothedRms = 0f
     private var frame = 0
+    private var listening = false
 
     init {
         contentDescription = "Orb animado do assistente; toque para ouvir novamente"
@@ -40,6 +41,11 @@ class AssistantOrbView(context: Context) : View(context) {
 
     fun setRms(value: Float) {
         rms = value.coerceIn(0f, 1f)
+        postInvalidateOnAnimation()
+    }
+
+    fun setListening(value: Boolean) {
+        listening = value
         postInvalidateOnAnimation()
     }
 
@@ -76,6 +82,11 @@ class AssistantOrbView(context: Context) : View(context) {
         drawRibbon(canvas, cx, cy, outer, time, 0.012f, 3.2f, 0xEFFF9B43.toInt(), 2.2f)
         drawRibbon(canvas, cx, cy, outer, time + 1.9f, 0.018f, 4.1f, 0xBFFF6B1A.toInt(), 1.4f)
         drawRibbon(canvas, cx, cy, outer * 0.76f, time - 0.8f, 0.028f, 3.0f, 0x55FFB04A, 0.9f)
+
+        // Anel de estado: mais vivo enquanto o microfone está aberto e capturando.
+        ringPaint.color = if (listening) 0xEFFF9A45.toInt() else 0x66FF8A2A
+        ringPaint.strokeWidth = if (listening) 1.7f else 1.0f
+        canvas.drawCircle(cx, cy, outer * 1.12f, ringPaint)
 
         // Halo central suave: mantém o centro aberto e deixa o app subjacente visível.
         glow.shader = RadialGradient(cx, cy, outer * 0.72f,

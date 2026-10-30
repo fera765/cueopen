@@ -22,4 +22,15 @@ class AssistantRecognitionGateTest {
         assertTrue(gate.resolve())
         assertFalse(gate.resolve())
     }
+
+    @Test
+    fun `nova tentativa de escuta recebe um gate independente`() {
+        val firstAttempt = AssistantRecognitionGate()
+        assertTrue(firstAttempt.resolve())
+        assertFalse(firstAttempt.resolve())
+
+        val nextAttempt = AssistantRecognitionGate()
+        assertTrue(nextAttempt.resolve())
+        assertFalse(nextAttempt.resolve())
+    }
 }

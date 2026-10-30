@@ -30,13 +30,21 @@ import java.util.UUID
 class FluwyAssistantSession(baseContext: Context) : VoiceInteractionSession(baseContext) {
     private val appContext = baseContext.applicationContext
     private val mainHandler = Handler(Looper.getMainLooper())
+    private val speechTurn = AssistantSpeechTurn()
+    private val recognitionLoop = AssistantRecognitionLoop()
     private var orb: AssistantOrbView? = null
     private var screenshotPreview: ImageView? = null
     private var speechRecognizer: SpeechRecognizer? = null
+    private var activeRecognitionGate: AssistantRecognitionGate? = null
     private var listening = false
-    private var commandSubmitted = false
+    private var providerEndedSpeech = false
+    private var sessionVisible = false
+    private var restartRunnable: Runnable? = null
+    private var terminalCallbackWatchdog: Runnable? = null
+    private var consecutiveRecognitionErrors = 0
     private var liveTranscript = ""
     private var lastVoiceActivityAt = 0L
+    private var sessionShownAtWallClock = 0L
     private var lastRenderedStateAt = 0L
 
     private val refreshState = object : Runnable {
@@ -46,12 +54,43 @@ class FluwyAssistantSession(baseContext: Context) : VoiceInteractionSession(base
         }
     }
 
+    private val turnSilenceCheck = object : Runnable {
+        override fun run() {
+            val now = SystemClock.elapsedRealtime()
+            if (speechTurn.shouldRequestStopListening(now) && !providerEndedSpeech) {
+                val recognizer = speechRecognizer
+                val gate = activeRecognitionGate
+                if (recognizer != null && gate != null) {
+                    listening = false
+                    providerEndedSpeech = true
+                    orb?.setListening(false)
+                    orb?.contentDescription = "Pausa de 2 segundos detectada; aguardando a transcrição final para enviar."
+                    runCatching { recognizer.stopListening() }
+                        .onSuccess {
+                            if (isCurrentAttempt(recognizer, gate)) scheduleTerminalCallbackWatchdog(recognizer, gate)
+                        }
+                        .onFailure { handleRecognitionError(recognizer, gate, SpeechRecognizer.ERROR_CLIENT) }
+                }
+            }
+
+            val completedTurn = speechTurn.finishIfSilent(now)
+            if (completedTurn != null && AssistantListeningPolicy.shouldDispatchFinal(completedTurn)) {
+                dispatchUtterance(completedTurn)
+                orb?.contentDescription = "Mensagem enviada. A escuta continua ativa para a próxima fala."
+            }
+            scheduleTurnSilenceCheck()
+        }
+    }
+
     /** Um comando já despachado continua na fila do app mesmo após o overlay ser fechado. */
     private val closeAfterInactivity = object : Runnable {
         override fun run() {
             val idleFor = SystemClock.elapsedRealtime() - lastVoiceActivityAt
-            val hasUnfinalizedSpeech = !commandSubmitted && liveTranscript.isNotBlank()
-            if (idleFor >= INACTIVITY_CLOSE_TIMEOUT_MS && !hasUnfinalizedSpeech) {
+            val state = AssistantOverlayStateStore.read(appContext)
+            val assistantIsProcessing = state.startedAt >= sessionShownAtWallClock &&
+                state.phase in setOf("queued", "working")
+            val hasUnfinalizedSpeech = speechTurn.hasPendingSpeech || liveTranscript.isNotBlank()
+            if (AssistantListeningPolicy.shouldCloseForInactivity(idleFor, hasUnfinalizedSpeech, assistantIsProcessing)) {
                 finish()
             } else {
                 mainHandler.postDelayed(this, INACTIVITY_CHECK_INTERVAL_MS)
@@ -86,11 +125,11 @@ class FluwyAssistantSession(baseContext: Context) : VoiceInteractionSession(base
         }
         orb = AssistantOrbView(appContext).apply {
             layoutParams = FrameLayout.LayoutParams(dp(310), dp(310), Gravity.CENTER)
-            contentDescription = "Assistente de voz. Toque no círculo para tentar ouvir."
+            contentDescription = "Assistente de voz. Escuta contínua ativa; uma pausa de 2 segundos envia a mensagem. A fala pode usar internet e bateria."
             setOnClickListener {
                 if (ContextCompat.checkSelfPermission(appContext, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
                     requestMicrophonePermission()
-                } else if (!commandSubmitted && speechRecognizer == null) {
+                } else if (speechRecognizer == null && restartRunnable == null) {
                     startListening()
                 }
             }
@@ -117,12 +156,14 @@ class FluwyAssistantSession(baseContext: Context) : VoiceInteractionSession(base
 
     override fun onShow(args: Bundle?, showFlags: Int) {
         super.onShow(args, showFlags)
+        sessionVisible = true
+        sessionShownAtWallClock = System.currentTimeMillis()
         mainHandler.removeCallbacks(refreshState)
         mainHandler.post(refreshState)
         lastVoiceActivityAt = SystemClock.elapsedRealtime()
         mainHandler.removeCallbacks(closeAfterInactivity)
         mainHandler.postDelayed(closeAfterInactivity, INACTIVITY_CHECK_INTERVAL_MS)
-        if (!listening && speechRecognizer == null && !commandSubmitted) startListening()
+        if (speechRecognizer == null && restartRunnable == null) startListening()
     }
 
     override fun onHandleScreenshot(screenshot: android.graphics.Bitmap?) {
@@ -130,94 +171,110 @@ class FluwyAssistantSession(baseContext: Context) : VoiceInteractionSession(base
     }
 
     override fun onHide() {
+        sessionVisible = false
         mainHandler.removeCallbacks(refreshState)
         mainHandler.removeCallbacks(closeAfterInactivity)
+        mainHandler.removeCallbacks(turnSilenceCheck)
+        cancelScheduledRestart()
         stopListening()
         super.onHide()
     }
 
     override fun onDestroy() {
+        sessionVisible = false
         mainHandler.removeCallbacks(refreshState)
         mainHandler.removeCallbacks(closeAfterInactivity)
+        mainHandler.removeCallbacks(turnSilenceCheck)
+        cancelScheduledRestart()
         stopListening()
         super.onDestroy()
     }
 
     private fun startListening() {
-        if (listening || speechRecognizer != null || commandSubmitted) return
+        if (!sessionVisible || speechRecognizer != null || restartRunnable != null || recognitionLoop.isActive) return
         if (ContextCompat.checkSelfPermission(appContext, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            orb?.setListening(false)
             orb?.contentDescription = "Permissão do microfone necessária. Toque no círculo para abrir o app e autorizá-la."
             return
         }
         if (!SpeechRecognizer.isRecognitionAvailable(appContext)) {
+            orb?.setListening(false)
             orb?.contentDescription = "Reconhecimento de fala indisponível nas configurações do Android."
             return
         }
         val recognizer = runCatching { SpeechRecognizer.createSpeechRecognizer(appContext) }.getOrElse {
-            orb?.contentDescription = "Não foi possível iniciar o microfone. Toque no círculo para tentar novamente."
+            orb?.contentDescription = "Não foi possível iniciar o microfone. Tentarei novamente com uma pausa curta."
+            consecutiveRecognitionErrors += 1
+            scheduleRecognitionRestart(nextRecognitionRetryDelay())
             return
         }
         val finalResultGate = AssistantRecognitionGate()
+        if (!recognitionLoop.beginAttempt()) {
+            runCatching { recognizer.destroy() }
+            return
+        }
         speechRecognizer = recognizer
+        activeRecognitionGate = finalResultGate
         liveTranscript = ""
-        orb?.contentDescription = "Aguardando o microfone."
+        providerEndedSpeech = false
+        orb?.contentDescription = "Conectando ao serviço de reconhecimento de fala do Android."
 
         recognizer.setRecognitionListener(object : RecognitionListener {
             override fun onReadyForSpeech(params: Bundle?) {
+                if (!isCurrentAttempt(recognizer, finalResultGate)) return
                 listening = true
-                orb?.contentDescription = "Estou ouvindo. Fale e faça uma pausa para enviar automaticamente."
+                orb?.setListening(true)
+                orb?.contentDescription = "Estou ouvindo. Fale; após 2 segundos sem fala, envio a mensagem."
             }
 
             override fun onBeginningOfSpeech() {
+                if (!isCurrentAttempt(recognizer, finalResultGate)) return
                 listening = true
-                noteVoiceActivity()
-                orb?.contentDescription = "Ouvindo sua fala."
+                providerEndedSpeech = false
+                noteSpeechActivity()
+                orb?.setListening(true)
+                orb?.contentDescription = "Ouvindo e transcrevendo sua fala ao vivo."
             }
 
             override fun onRmsChanged(rmsdB: Float) {
+                if (!isCurrentAttempt(recognizer, finalResultGate)) return
                 val amplitude = ((rmsdB + 2.5f) / 13.5f).coerceIn(0f, 1f)
                 orb?.setRms(amplitude)
-                if (amplitude >= VOICE_ACTIVITY_THRESHOLD) noteVoiceActivity()
+                if (!providerEndedSpeech && amplitude >= VOICE_ACTIVITY_THRESHOLD) noteSpeechActivity()
             }
 
             override fun onBufferReceived(buffer: ByteArray?) = Unit
 
             override fun onEndOfSpeech() {
+                if (!isCurrentAttempt(recognizer, finalResultGate)) return
+                // Este callback indica apenas o fim de áudio do provedor; o texto final vem depois.
                 listening = false
-                noteVoiceActivity()
+                providerEndedSpeech = true
+                recognitionLoop.onEndOfSpeech()
+                speechTurn.onProviderEndOfSpeech()
                 orb?.setRms(0f)
-                orb?.contentDescription = "Fala encerrada. Aguardando a transcrição final para enviar."
+                orb?.setListening(false)
+                orb?.contentDescription = "Pausa detectada. Aguardando onResults para concluir e enviar a mensagem."
+                scheduleTerminalCallbackWatchdog(recognizer, finalResultGate)
             }
 
             override fun onError(error: Int) {
-                if (!finalResultGate.resolve()) return
-                if (speechRecognizer === recognizer) speechRecognizer = null
-                listening = false
-                liveTranscript = ""
-                orb?.setRms(0f)
-                orb?.contentDescription = speechError(error)
-                recognizer.destroy()
+                handleRecognitionError(recognizer, finalResultGate, error)
             }
 
             override fun onResults(results: Bundle?) {
-                if (!finalResultGate.resolve()) return
-                if (speechRecognizer === recognizer) speechRecognizer = null
-                listening = false
                 val text = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
                     ?.firstOrNull()?.trim()?.take(MAX_TRANSCRIPT_LENGTH).orEmpty()
-                liveTranscript = ""
-                finishRecognition(text)
-                recognizer.destroy()
+                handleRecognitionResults(recognizer, finalResultGate, text)
             }
 
             override fun onPartialResults(partialResults: Bundle?) {
-                if (finalResultGate.isResolved || commandSubmitted) return
+                if (!isCurrentAttempt(recognizer, finalResultGate) || providerEndedSpeech) return
                 val partial = partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
                     ?.firstOrNull()?.trim()?.take(MAX_TRANSCRIPT_LENGTH).orEmpty()
                 if (partial.isNotBlank()) {
                     liveTranscript = partial
-                    noteVoiceActivity()
-                    orb?.contentDescription = "Transcrevendo sua fala. Aguarde a pausa para envio automático."
+                    orb?.contentDescription = "Transcrevendo ao vivo: ${partial.take(120)}. A pausa de 2 segundos envia a mensagem."
                 }
             }
 
@@ -229,32 +286,75 @@ class FluwyAssistantSession(baseContext: Context) : VoiceInteractionSession(base
             putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
             putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
             putExtra(RecognizerIntent.EXTRA_CALLING_PACKAGE, appContext.packageName)
-            // Finaliza a fala após uma pausa curta; o envio só acontece em onResults (resultado final).
-            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, END_OF_SPEECH_SILENCE_MS)
-            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, POSSIBLE_END_OF_SPEECH_SILENCE_MS)
+            // O buffer do app aplica o mesmo limiar; estes extras orientam o provedor a encerrar após 2 s.
+            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, AssistantListeningPolicy.TURN_END_SILENCE_MS)
+            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, AssistantListeningPolicy.TURN_END_SILENCE_MS)
         }
-        runCatching { recognizer.startListening(request) }.onFailure {
-            if (speechRecognizer === recognizer) speechRecognizer = null
-            listening = false
-            orb?.contentDescription = "Não foi possível iniciar o reconhecedor. Toque no círculo para tentar novamente."
-            recognizer.destroy()
-        }
+        runCatching { recognizer.startListening(request) }
+            .onFailure { handleRecognitionError(recognizer, finalResultGate, SpeechRecognizer.ERROR_CLIENT) }
     }
 
-    private fun finishRecognition(text: String) {
-        orb?.setRms(0f)
-        if (text.isBlank()) {
-            orb?.contentDescription = "Não ouvi uma frase completa. Toque no círculo para tentar novamente."
+    private fun handleRecognitionResults(recognizer: SpeechRecognizer, gate: AssistantRecognitionGate, text: String) {
+        if (!gate.resolve()) return
+        if (speechRecognizer !== recognizer || activeRecognitionGate !== gate) {
+            runCatching { recognizer.destroy() }
             return
         }
-        if (commandSubmitted) return
-        commandSubmitted = true
+        if (!recognitionLoop.onTerminalCallback()) return
+        releaseCurrentRecognizer(recognizer, gate, cancel = false)
+        if (text.isNotBlank()) {
+            consecutiveRecognitionErrors = 0
+            speechTurn.onFinalResult(text, SystemClock.elapsedRealtime())
+        } else {
+            speechTurn.onRecognitionError()
+            consecutiveRecognitionErrors += 1
+        }
+        liveTranscript = ""
+        providerEndedSpeech = false
+        orb?.setRms(0f)
+        orb?.setListening(false)
+        orb?.contentDescription = if (text.isNotBlank()) {
+            "Transcrição final recebida. A escuta será reiniciada; uma pausa de 2 segundos envia a mensagem."
+        } else {
+            "A transcrição final veio vazia. Vou reiniciar a escuta automaticamente."
+        }
+        scheduleTurnSilenceCheck()
+        val delay = if (text.isNotBlank()) RESTART_AFTER_RESULT_MS else nextRecognitionRetryDelay()
+        scheduleRecognitionRestart(delay)
+    }
+
+    private fun handleRecognitionError(recognizer: SpeechRecognizer, gate: AssistantRecognitionGate, error: Int) {
+        if (!gate.resolve()) return
+        if (speechRecognizer !== recognizer || activeRecognitionGate !== gate) {
+            runCatching { recognizer.destroy() }
+            return
+        }
+        if (!recognitionLoop.onTerminalCallback()) return
+        releaseCurrentRecognizer(recognizer, gate, cancel = false)
+        speechTurn.onRecognitionError()
+        liveTranscript = ""
+        providerEndedSpeech = false
+        orb?.setRms(0f)
+        orb?.setListening(false)
+        scheduleTurnSilenceCheck()
+
+        if (error == SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS) {
+            orb?.contentDescription = "O Android negou o acesso ao microfone. Toque no círculo para autorizá-lo."
+            return
+        }
+
+        consecutiveRecognitionErrors += 1
+        orb?.contentDescription = "${speechError(error)} A escuta será retomada automaticamente."
+        scheduleRecognitionRestart(nextRecognitionRetryDelay())
+    }
+
+    private fun dispatchUtterance(text: String) {
+        if (!AssistantListeningPolicy.shouldDispatchFinal(text)) return
         val intent = Intent(appContext, AssistantCommandReceiver::class.java).apply {
             action = AssistantRoutingPolicy.ACTION_SUBMIT_COMMAND
             putExtra(AssistantRoutingPolicy.EXTRA_REQUEST_ID, UUID.randomUUID().toString())
-            putExtra(AssistantRoutingPolicy.EXTRA_TRANSCRIPT, text)
+            putExtra(AssistantRoutingPolicy.EXTRA_TRANSCRIPT, text.take(MAX_TRANSCRIPT_LENGTH))
         }
-        orb?.contentDescription = "Comando enviado ao chat ativo. A tarefa continuará mesmo quando o overlay fechar."
 
         if (AssistantRoutingPolicy.explicitlyRequestsScreenshot(text)) {
             // A captura explícita segue pelo fluxo de consentimento MediaProjection já existente.
@@ -265,17 +365,87 @@ class FluwyAssistantSession(baseContext: Context) : VoiceInteractionSession(base
         }
     }
 
-    private fun noteVoiceActivity() {
-        lastVoiceActivityAt = SystemClock.elapsedRealtime()
+    private fun noteSpeechActivity() {
+        val now = SystemClock.elapsedRealtime()
+        lastVoiceActivityAt = now
+        speechTurn.noteSpeechActivity(now)
+        scheduleTurnSilenceCheck()
+    }
+
+    private fun scheduleTurnSilenceCheck() {
+        mainHandler.removeCallbacks(turnSilenceCheck)
+        val delay = speechTurn.nextSilenceCheckDelayMs(SystemClock.elapsedRealtime()) ?: return
+        mainHandler.postDelayed(turnSilenceCheck, delay)
+    }
+
+    private fun scheduleRecognitionRestart(delayMs: Long) {
+        if (!sessionVisible || speechRecognizer != null || restartRunnable != null) return
+        val restart = Runnable {
+            restartRunnable = null
+            if (sessionVisible && speechRecognizer == null) startListening()
+        }
+        restartRunnable = restart
+        mainHandler.postDelayed(restart, delayMs.coerceAtLeast(0L))
+    }
+
+    private fun scheduleTerminalCallbackWatchdog(recognizer: SpeechRecognizer, gate: AssistantRecognitionGate) {
+        cancelTerminalCallbackWatchdog()
+        val watchdog = Runnable {
+            terminalCallbackWatchdog = null
+            if (isCurrentAttempt(recognizer, gate)) {
+                handleRecognitionError(recognizer, gate, SpeechRecognizer.ERROR_CLIENT)
+            }
+        }
+        terminalCallbackWatchdog = watchdog
+        mainHandler.postDelayed(watchdog, TERMINAL_CALLBACK_TIMEOUT_MS)
+    }
+
+    private fun cancelTerminalCallbackWatchdog() {
+        terminalCallbackWatchdog?.let(mainHandler::removeCallbacks)
+        terminalCallbackWatchdog = null
+    }
+
+    private fun cancelScheduledRestart() {
+        restartRunnable?.let(mainHandler::removeCallbacks)
+        restartRunnable = null
+    }
+
+    private fun nextRecognitionRetryDelay(): Long =
+        AssistantListeningPolicy.restartDelayMs(consecutiveRecognitionErrors.coerceAtLeast(1))
+
+    private fun isCurrentAttempt(recognizer: SpeechRecognizer, gate: AssistantRecognitionGate): Boolean =
+        speechRecognizer === recognizer && activeRecognitionGate === gate && !gate.isResolved
+
+    private fun releaseCurrentRecognizer(recognizer: SpeechRecognizer, gate: AssistantRecognitionGate, cancel: Boolean) {
+        cancelTerminalCallbackWatchdog()
+        if (speechRecognizer === recognizer) speechRecognizer = null
+        if (activeRecognitionGate === gate) activeRecognitionGate = null
+        listening = false
+        runCatching { if (cancel) recognizer.cancel() }
+        runCatching { recognizer.destroy() }
+        orb?.setRms(0f)
+        orb?.setListening(false)
     }
 
     private fun stopListening() {
-        val recognizer = speechRecognizer ?: return
+        cancelScheduledRestart()
+        cancelTerminalCallbackWatchdog()
+        mainHandler.removeCallbacks(turnSilenceCheck)
+        activeRecognitionGate?.resolve()
+        recognitionLoop.cancel()
+        val recognizer = speechRecognizer
         speechRecognizer = null
+        activeRecognitionGate = null
         listening = false
-        runCatching { recognizer.cancel() }
-        runCatching { recognizer.destroy() }
+        providerEndedSpeech = false
+        liveTranscript = ""
+        speechTurn.reset()
+        if (recognizer != null) {
+            runCatching { recognizer.cancel() }
+            runCatching { recognizer.destroy() }
+        }
         orb?.setRms(0f)
+        orb?.setListening(false)
     }
 
     private fun requestMicrophonePermission() {
@@ -308,22 +478,22 @@ class FluwyAssistantSession(baseContext: Context) : VoiceInteractionSession(base
     }
 
     private fun speechError(code: Int): String = when (code) {
-        SpeechRecognizer.ERROR_AUDIO -> "O microfone do Android não ficou disponível. Toque no círculo para tentar novamente."
-        SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> "O Android negou o acesso ao microfone. Toque no círculo para autorizá-lo."
-        SpeechRecognizer.ERROR_NETWORK, SpeechRecognizer.ERROR_NETWORK_TIMEOUT -> "O reconhecimento não conseguiu conectar. Toque no círculo para tentar novamente."
-        SpeechRecognizer.ERROR_NO_MATCH, SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> "Não ouvi uma frase completa. Toque no círculo para tentar novamente."
-        SpeechRecognizer.ERROR_RECOGNIZER_BUSY -> "O reconhecedor já está ocupado. Toque no círculo para tentar novamente."
-        else -> "O reconhecimento foi interrompido. Toque no círculo para tentar novamente."
+        SpeechRecognizer.ERROR_AUDIO -> "O microfone do Android ficou indisponível."
+        SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> "O Android negou o acesso ao microfone."
+        SpeechRecognizer.ERROR_NETWORK, SpeechRecognizer.ERROR_NETWORK_TIMEOUT -> "O serviço de reconhecimento perdeu a conexão."
+        SpeechRecognizer.ERROR_NO_MATCH, SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> "Não recebi uma transcrição final nesta tentativa."
+        SpeechRecognizer.ERROR_RECOGNIZER_BUSY -> "O reconhecedor estava ocupado."
+        SpeechRecognizer.ERROR_TOO_MANY_REQUESTS -> "O serviço limitou temporariamente as solicitações."
+        else -> "O reconhecimento foi interrompido."
     }
 
     private companion object {
-        const val BACKGROUND_DIM_AMOUNT = 0.58f
-        const val END_OF_SPEECH_SILENCE_MS = 1_200L
-        const val POSSIBLE_END_OF_SPEECH_SILENCE_MS = 900L
-        const val INACTIVITY_CLOSE_TIMEOUT_MS = 60_000L
+        const val BACKGROUND_DIM_AMOUNT = 0.78f
         const val INACTIVITY_CHECK_INTERVAL_MS = 5_000L
         const val STATE_REFRESH_INTERVAL_MS = 450L
         const val SCREENSHOT_DISPATCH_DELAY_MS = 450L
+        const val RESTART_AFTER_RESULT_MS = 250L
+        const val TERMINAL_CALLBACK_TIMEOUT_MS = 10_000L
         const val MAX_TRANSCRIPT_LENGTH = 4_000
         const val VOICE_ACTIVITY_THRESHOLD = 0.12f
     }
