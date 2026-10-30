@@ -18,8 +18,14 @@ internal enum class AssistantSetupRoute {
 
 /** Ordem determinística de destinos; o consentimento final permanece sempre nas mãos do sistema/usuário. */
 internal object AndroidAssistantSetupPolicy {
-    fun routes(sdkInt: Int, assistantRoleAvailable: Boolean): List<AssistantSetupRoute> = buildList {
-        if (sdkInt >= Build.VERSION_CODES.Q && assistantRoleAvailable) add(AssistantSetupRoute.ROLE_CHOOSER)
+    fun routes(
+        sdkInt: Int,
+        assistantRoleAvailable: Boolean,
+        assistantRoleHeld: Boolean = false,
+    ): List<AssistantSetupRoute> = buildList {
+        if (sdkInt >= Build.VERSION_CODES.Q && assistantRoleAvailable && !assistantRoleHeld) {
+            add(AssistantSetupRoute.ROLE_CHOOSER)
+        }
         add(AssistantSetupRoute.VOICE_INPUT_SETTINGS)
         add(AssistantSetupRoute.DEFAULT_APPS_SETTINGS)
     }
@@ -33,6 +39,14 @@ object AndroidAssistantRole {
             ComponentName(context, FluwyVoiceInteractionService::class.java),
         )
     }.getOrDefault(false)
+
+    /** Role holder and active voice service are distinct states; Android can grant one before activation. */
+    fun isRoleHeld(context: Context): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return false
+        return runCatching {
+            context.getSystemService(RoleManager::class.java)?.isRoleHeld(ROLE_ASSISTANT) == true
+        }.getOrDefault(false)
+    }
 
     fun isRoleRequestAvailable(context: Context): Boolean {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return false
@@ -50,8 +64,9 @@ object AndroidAssistantRole {
         val roleAvailable = runCatching {
             manager?.isRoleAvailable(ROLE_ASSISTANT) == true
         }.getOrDefault(false)
+        val roleHeld = isRoleHeld(context)
 
-        return AndroidAssistantSetupPolicy.routes(Build.VERSION.SDK_INT, roleAvailable).mapNotNull { route ->
+        return AndroidAssistantSetupPolicy.routes(Build.VERSION.SDK_INT, roleAvailable, roleHeld).mapNotNull { route ->
             when (route) {
                 AssistantSetupRoute.ROLE_CHOOSER -> runCatching {
                     manager?.createRequestRoleIntent(ROLE_ASSISTANT)

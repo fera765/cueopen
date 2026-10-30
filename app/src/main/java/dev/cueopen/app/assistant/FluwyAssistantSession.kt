@@ -82,7 +82,7 @@ class FluwyAssistantSession(baseContext: Context) : VoiceInteractionSession(base
         ))
         panel.addView(gap(14))
 
-        statusLabel = text("Aguardando contexto do Android…", 13f, 0xFFFFC2AE.toInt(), true).apply {
+        statusLabel = text("Sessão aberta; aguardando contexto do Android…", 13f, 0xFFFFC2AE.toInt(), true).apply {
             setPadding(dp(12), dp(11), dp(12), dp(11))
             background = rounded(0xFF29211E.toInt())
         }

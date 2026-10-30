@@ -72,6 +72,9 @@ class CueApp : Application() {
             runCatching { dev.cueopen.app.diag.ErrorLog.log("crash", "${t.name}: ${e.stackTraceToString()}") }
             prev?.uncaughtException(t, e)
         }
+        // The voice session runs in :assistant. WorkManager's Startup provider is in the
+        // default process, so do not start app-wide workers/agents/proxy in the session process.
+        if (!isMainAppProcess()) return
         store = Store(this)
         proxyStore = ProxyStore(this)
         connectorDebugLog
@@ -93,7 +96,17 @@ class CueApp : Application() {
         dev.cueopen.app.uiconnector.iqoption.IqLegacySignalCleanup.cancelAndClear(this)
     }
 
-    /** Resolve o perfil selecionado para HTTP/WebSocket; um perfil inválido falha fechado, sem bypass direto. */
+    private fun isMainAppProcess(): Boolean {
+        val processName = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.P) {
+            Application.getProcessName()
+        } else {
+            getSystemService(android.app.ActivityManager::class.java)?.runningAppProcesses
+                ?.firstOrNull { it.pid == android.os.Process.myPid() }?.processName
+        }
+        return MainProcessPolicy.isMainProcess(applicationInfo.processName, processName)
+    }
+
+    /** Resolve the profile selected for HTTP/WebSocket; an invalid profile fails closed, without bypass. */
     fun proxyHttpClient(scope: ProxyScope, base: OkHttpClient): OkHttpClient {
         val selectedId = when (scope) {
             ProxyScope.BROWSER -> store.settings.browserProxyId

@@ -206,8 +206,10 @@ fun SettingsScreen(nav: NavController) {
 private fun AssistantDefaultRoleLink(context: android.content.Context) {
     var refresh by remember { mutableIntStateOf(0) }
     val active = remember(refresh) { dev.cueopen.app.assistant.AndroidAssistantRole.isDefaultAssistant(context) }
+    val roleHeld = remember(refresh) { dev.cueopen.app.assistant.AndroidAssistantRole.isRoleHeld(context) }
     val roleRequestAvailable = remember(refresh) { dev.cueopen.app.assistant.AndroidAssistantRole.isRoleRequestAvailable(context) }
     var showSetupHelp by remember { mutableStateOf(false) }
+    var setupFeedback by remember { mutableStateOf<String?>(null) }
     val lifecycle = androidx.lifecycle.compose.LocalLifecycleOwner.current
     androidx.compose.runtime.DisposableEffect(lifecycle) {
         val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
@@ -216,25 +218,57 @@ private fun AssistantDefaultRoleLink(context: android.content.Context) {
         lifecycle.lifecycle.addObserver(observer)
         onDispose { lifecycle.lifecycle.removeObserver(observer) }
     }
-    val roleLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { refresh++ }
+    val roleLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+        refresh++
+        val nowActive = dev.cueopen.app.assistant.AndroidAssistantRole.isDefaultAssistant(context)
+        val nowRoleHeld = dev.cueopen.app.assistant.AndroidAssistantRole.isRoleHeld(context)
+        setupFeedback = when {
+            nowActive -> "O Android confirmou Fluwy como assistente ativo."
+            nowRoleHeld -> "Fluwy foi selecionado, mas o serviço ainda não confirmou atividade. Se a invocação falhar, consulte Configurações > Logs de erros."
+            result.resultCode == android.app.Activity.RESULT_CANCELED -> "A seleção foi cancelada ou não confirmada pelo Android."
+            result.resultCode == android.app.Activity.RESULT_OK -> "O Android retornou sucesso, mas Fluwy ainda não aparece como serviço ativo. Confira o estado e os logs."
+            else -> "O seletor do Android foi fechado sem confirmar Fluwy como assistente ativo."
+        }
+    }
     SettingsLink(
         icon = Icons.Rounded.RecordVoiceOver,
-        title = if (active) "Fluwy é o assistente padrão" else "Definir Fluwy como assistente",
+        title = when {
+            active -> "Fluwy é o assistente ativo"
+            roleHeld -> "Fluwy está selecionado, mas inativo"
+            else -> "Definir Fluwy como assistente"
+        },
         sub = if (active)
-            "Use o gesto de assistente do Android. O contexto só segue para um rascunho quando você tocar em Continuar."
+            "Use o gesto do Android. Se a sessão não abrir, consulte Configurações > Logs de erros. O conteúdo só segue para um rascunho quando você tocar em Continuar."
+        else if (roleHeld)
+            "O papel foi concedido, mas o VoiceInteractionService ainda não está ativo. Toque para reabrir as opções do sistema e conferir."
         else if (roleRequestAvailable)
             "O Android abrirá a seleção do assistente. Após escolher Fluwy, use o gesto do sistema para abrir a interface original sobre apps compatíveis."
         else
             "Toque para abrir as opções do sistema. Se necessário, escolha Apps padrão > Assistente digital; a disponibilidade depende do Android/fabricante.",
         tint = Cue.c.accent,
     ) {
+        setupFeedback = null
         var launched = false
-        dev.cueopen.app.assistant.AndroidAssistantRole.requestIntents(context).forEach { intent ->
-            if (!launched) {
-                launched = runCatching { roleLauncher.launch(intent); true }.getOrDefault(false)
+        for (intent in dev.cueopen.app.assistant.AndroidAssistantRole.requestIntents(context)) {
+            val launch = runCatching { roleLauncher.launch(intent) }
+            if (launch.isSuccess) {
+                launched = true
+                break
+            }
+            runCatching {
+                dev.cueopen.app.diag.ErrorLog.log(
+                    "assistant",
+                    "Falha ao abrir opções de assistente (${launch.exceptionOrNull()?.javaClass?.simpleName ?: "erro desconhecido"}).",
+                )
             }
         }
-        if (!launched) showSetupHelp = true
+        if (!launched) {
+            setupFeedback = "Não foi possível abrir o seletor de assistente neste dispositivo."
+            showSetupHelp = true
+        }
+    }
+    setupFeedback?.let {
+        Text(it, Modifier.fillMaxWidth().padding(start = 14.dp, end = 14.dp, top = 8.dp), fontSize = 12.sp, color = Cue.c.ink2)
     }
     if (showSetupHelp) AlertDialog(
         onDismissRequest = { showSetupHelp = false },

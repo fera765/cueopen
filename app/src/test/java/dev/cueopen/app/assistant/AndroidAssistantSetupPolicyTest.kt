@@ -22,6 +22,17 @@ class AndroidAssistantSetupPolicyTest {
         )
     }
 
+    @Test fun `papel ja concedido abre configuracoes em vez de pedir concessao novamente`() {
+        assertEquals(
+            listOf(AssistantSetupRoute.VOICE_INPUT_SETTINGS, AssistantSetupRoute.DEFAULT_APPS_SETTINGS),
+            AndroidAssistantSetupPolicy.routes(
+                sdkInt = 35,
+                assistantRoleAvailable = true,
+                assistantRoleHeld = true,
+            ),
+        )
+    }
+
     @Test fun `Android anterior ao RoleManager nunca tenta pedir o papel`() {
         assertEquals(
             listOf(AssistantSetupRoute.VOICE_INPUT_SETTINGS, AssistantSetupRoute.DEFAULT_APPS_SETTINGS),
