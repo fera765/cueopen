@@ -1225,10 +1225,10 @@ class AgentRunner(
         }, listOf("path")))
         add(tool("file_list", "Lista arquivos de um diretório.", buildJsonObject { put("path", str("Diretório (padrão: workspace)")) }))
         if (web) {
-            add(tool("browser_navigate", "Abre uma URL (ou termos de busca) no browser.", buildJsonObject { put("url", str("URL ou busca")) }, listOf("url")))
+            add(tool("browser_navigate", "Abre uma URL (ou termos de busca) no browser. Erro HTTP 4xx/5xx na página principal é falha: não use o conteúdo nem repita a mesma URL; localize um endereço válido.", buildJsonObject { put("url", str("URL ou busca")) }, listOf("url")))
             add(tool("browser_snapshot", "Gera snapshot semântico da página atual com headings, conteúdo, links e controles nomeados; refs/índices expiram após navegação.", buildJsonObject { put("max_chars", int("Limite de caracteres (padrão 9000)")) }))
             add(tool("browser_read", "Compatibilidade: lê o snapshot e o texto da página atual.", buildJsonObject {}))
-            add(tool("browser_click", "Clica no elemento [índice] de browser_read.", buildJsonObject { put("index", int("Índice")) }, listOf("index")))
+            add(tool("browser_click", "Clica no elemento [índice] de browser_read. Os índices expiram quando o DOM muda: leia a página imediatamente antes do clique; se o elemento não existir, releia e use um índice novo, sem repetir o antigo.", buildJsonObject { put("index", int("Índice")) }, listOf("index")))
             add(tool("browser_type", "Digita num campo [índice]; submit=true envia.", buildJsonObject {
                 put("index", int("Índice")); put("text", str("Texto")); put("submit", bool("Enviar formulário"))
             }, listOf("index", "text")))
@@ -2318,16 +2318,7 @@ class AgentRunner(
                     } else {
                     // tudo roda DENTRO do terminal da tarefa (visível ao vivo no Computador)
                     val r = terminals.get(sessionId, cwd).runAgentCommand(command, (i("timeout") ?: 180).toLong(), b("background"))
-                    run {
-                        buildString {
-                            val body = ShellOutput.compact(r.output).takeLast(10_000)
-                            // Deixa explícito quando o comando terminou sem imprimir nada, para a LLM
-                            // não interpretar "sem saída" como falha de execução e repetir o comando.
-                            append(if (body.isBlank()) "(sem saída)" else body)
-                            if (r.timedOut) append("\n[timeout]")
-                            append("\n[exit ${r.exitCode}]")
-                        }
-                    }
+                    ShellOutput.formatExecutionResult(r.output, r.exitCode, r.timedOut)
                     }
                 }
                 "file_write" -> {

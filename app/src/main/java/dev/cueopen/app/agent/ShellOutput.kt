@@ -1,5 +1,7 @@
 package dev.cueopen.app.agent
 
+import java.io.File
+
 /**
  * Limpa a saída do terminal ANTES de ela ir para o modelo/log (Kotlin puro — testável na JVM):
  *  - barras de progresso com `\r` (curl, pip, wget, yt-dlp) viram só o último estado da linha;
@@ -32,6 +34,29 @@ object ShellOutput {
             i = j
         }
         return out.joinToString("\n")
+    }
+
+    /** Reads captured stdout/stderr without disguising a missing capture file as a silent command. */
+    fun readCapturedFile(file: File): String {
+        if (!file.isFile) return "Erro: o arquivo de captura de stdout/stderr não foi criado ou ficou inacessível no sandbox."
+        return runCatching { file.readText().takeLast(12_000) }
+            .getOrElse { "Erro ao ler a captura de stdout/stderr: ${it.message ?: "falha de leitura"}" }
+    }
+
+    /** Formats output together with an unambiguous process result for the agent. */
+    fun formatExecutionResult(raw: String, exitCode: Int, timedOut: Boolean): String {
+        val body = compact(raw).takeLast(10_000)
+        return buildString {
+            if (body.isBlank()) {
+                append(when {
+                    timedOut -> "(stdout/stderr vazios antes do timeout)"
+                    exitCode != 0 -> "(falha sem mensagem: stdout/stderr capturados vazios)"
+                    else -> "(comando concluído sem saída stdout/stderr)"
+                })
+            } else append(body)
+            if (timedOut) append("\n[timeout]")
+            append("\n[exit $exitCode]")
+        }
     }
 
     /** "Formato" da linha: sem números e sem o último segmento de caminho — agrupa linhas repetitivas. */

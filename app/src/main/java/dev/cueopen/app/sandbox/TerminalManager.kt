@@ -1,5 +1,6 @@
 package dev.cueopen.app.sandbox
 
+import dev.cueopen.app.agent.ShellOutput
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
@@ -216,8 +217,7 @@ class TerminalManager(private val ctx: Context, private val sandbox: Sandbox) {
                     // brevemente a visibilidade do arquivo antes de ler (evita leitura prematura vazia).
                     var waited = 0
                     while (!outputFile.isFile && waited < 500) { delay(40); waited += 40 }
-                    runCatching { outputFile.takeIf { it.isFile }?.readText()?.takeLast(12_000).orEmpty() }
-                        .getOrElse { "Erro ao ler a saída capturada: ${it.message}" }
+                    ShellOutput.readCapturedFile(outputFile)
                 }
                 File(dir, "run_$id.sh").delete()
                 outputFile.delete()

@@ -137,6 +137,7 @@ class BrowserHost(private val appCtx: Context) {
     // precisa vir DEPOIS de _ui (ordem de inicialização das propriedades)
     init { runCatching { watchNetwork() } }
     private var pageDone: CompletableDeferred<String>? = null
+    private var navigationStatus = BrowserNavigationStatus()
     private var _view: WebView? = null
     private var _agentView: WebView? = null
     @SuppressLint("SetJavaScriptEnabled")
@@ -266,7 +267,7 @@ class BrowserHost(private val appCtx: Context) {
             override fun onPageStarted(view: WebView, url: String, favicon: Bitmap?) { sync(view, loading = true) }
             override fun onPageFinished(view: WebView, url: String) {
                 sync(view, loading = false)
-                pageDone?.complete("OK")
+                pageDone?.complete(navigationStatus.pageFinished())
                 collectTimings(view)
                 installSnapshotInstrumentation(view)
                 installNetworkInstrumentation(view)
@@ -280,6 +281,10 @@ class BrowserHost(private val appCtx: Context) {
             }
             override fun onReceivedHttpError(view: WebView, request: WebResourceRequest, errorResponse: android.webkit.WebResourceResponse) {
                 patchNet(request.url.toString()) { it.copy(status = errorResponse.statusCode) }
+                navigationStatus.recordHttpError(request.isForMainFrame, errorResponse.statusCode)?.let { failure ->
+                    sync(view, loading = false)
+                    pageDone?.complete(failure)
+                }
             }
             override fun onReceivedError(view: WebView, request: WebResourceRequest, error: android.webkit.WebResourceError) {
                 patchNet(request.url.toString()) { it.copy(error = error.description?.toString()) }
@@ -459,6 +464,7 @@ class BrowserHost(private val appCtx: Context) {
                 url.contains(".") && !url.contains(" ") -> "https://$url"
                 else -> "https://www.google.com/search?q=" + java.net.URLEncoder.encode(url, "UTF-8")
             }
+            navigationStatus = BrowserNavigationStatus()
             pageDone = CompletableDeferred()
             _ui.value = _ui.value.copy(loading = true, progress = 0)
             agentView().also { ensureSized(it) }.loadUrl(normalized)
@@ -469,8 +475,10 @@ class BrowserHost(private val appCtx: Context) {
 
     /** Aguarda o callback real do WebView e verifica o DOM; falha e timeout não viram sucesso silencioso. */
     private suspend fun awaitLoad(target: String = _ui.value.url): String {
+        val status = navigationStatus
         val deferred = pageDone ?: return "ERROR: não foi possível acompanhar o carregamento desta navegação."
-        val result = withTimeoutOrNull(45_000) { deferred.await() } ?: run {
+        val completed = withTimeoutOrNull(45_000) { deferred.await() }
+        val result = completed?.let(status::preserveHttpError) ?: status.httpError() ?: run {
             _ui.value = _ui.value.copy(loading = false)
             // Sites de documentação/SPA às vezes nunca disparam o fim do carregamento (scripts de
             // analytics pendurados), mas o texto já está na tela: devolve o que existe em vez de falhar.
@@ -487,6 +495,7 @@ class BrowserHost(private val appCtx: Context) {
             kotlinx.coroutines.delay(250)
         }
         kotlinx.coroutines.delay(500)
+        status.httpError()?.let { return it }
         return if (ready == "complete") "OK: página carregada ($target)"
         else "OK: carregamento principal concluído; DOM=${ready.ifBlank { "indisponível" }} ($target)"
     }
@@ -497,8 +506,8 @@ class BrowserHost(private val appCtx: Context) {
         _ui.value = _ui.value.copy(loading = false)
     }
 
-    suspend fun back() { onMain { pageDone = CompletableDeferred(); agentView().goBack() }; awaitLoad(_ui.value.url) }
-    suspend fun reload() { onMain { pageDone = CompletableDeferred(); agentView().reload() }; awaitLoad(_ui.value.url) }
+    suspend fun back() { onMain { navigationStatus = BrowserNavigationStatus(); pageDone = CompletableDeferred(); agentView().goBack() }; awaitLoad(_ui.value.url) }
+    suspend fun reload() { onMain { navigationStatus = BrowserNavigationStatus(); pageDone = CompletableDeferred(); agentView().reload() }; awaitLoad(_ui.value.url) }
 
     /** Snapshot semântico da página, próximo ao formato Playwright: landmarks, headings, texto e controles nomeados. */
     suspend fun read(maxChars: Int = 9000): String {
@@ -545,7 +554,7 @@ class BrowserHost(private val appCtx: Context) {
     }
 
     suspend fun click(index: Int): String {
-        val r = eval("""(function(){var e=document.querySelector('[data-cue="$index"]');if(!e)return 'elemento $index não encontrado — chame browser_read de novo';e.scrollIntoView({block:'center'});e.click();return 'ok: clicou em '+(e.innerText||e.value||e.tagName).slice(0,60);})()""")
+        val r = eval("""(function(){var e=document.querySelector('[data-cue="$index"]');if(!e)return 'elemento $index não encontrado: referência obsoleta; execute browser_read novamente, escolha um índice novo e não repita este';e.scrollIntoView({block:'center'});e.click();return 'ok: clicou em '+(e.innerText||e.value||e.tagName).slice(0,60);})()""")
         awaitLoadIfNavigating()
         return r
     }
