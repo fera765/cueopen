@@ -16,28 +16,12 @@ import dev.cueopen.app.uiconnector.UiBlock
 import dev.cueopen.app.uiconnector.UiConnector
 import dev.cueopen.app.uiconnector.UiConnectorSpec
 import kotlinx.coroutines.CompletableDeferred
-import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
-import dev.cueopen.app.uiconnector.custom.TechnicalSuite
-import dev.cueopen.app.uiconnector.iqoption.PriceActionAnalyzer
-import dev.cueopen.app.uiconnector.iqoption.PriceActionExecutionGate
-import dev.cueopen.app.uiconnector.iqoption.PriceActionPipeline
-import dev.cueopen.app.uiconnector.iqoption.PriceBar
-import dev.cueopen.app.uiconnector.iqoption.PriceMarketDataSource
-import dev.cueopen.app.uiconnector.iqoption.PriceSeries
-import dev.cueopen.app.uiconnector.iqoption.TwoCandleSignal
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.async
-import kotlinx.coroutines.awaitAll
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.TimeoutCancellationException
-import kotlinx.coroutines.currentCoroutineContext
-import kotlinx.coroutines.isActive
 import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.Semaphore
-import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
@@ -65,19 +49,19 @@ import java.util.concurrent.atomic.AtomicLong
 /**
  * Conector IQ Option (primeiro UI Connector do SDK).
  *
- * Login com e-mail/senha → ssid → WebSocket. Mostra saldo, alterna conta DEMO/REAL, lista ativos
- * abertos, busca velas e abre operações. Segurança:
+ * Login com e-mail/senha → ssid → WebSocket. Lista ativos e candles, abre opções e Forex, fecha Forex
+ * e acompanha resultados retornados pelo servidor. Segurança:
  *  - a senha/ssid vivem só aqui (e no cofre cifrado do hub); nunca entram no contexto do LLM;
  *  - o agente só opera na conta REAL se o usuário liberar explicitamente nas configurações;
  *  - o agente respeita valor máximo por operação e máximo de operações abertas;
- *  - "operações em execução" mostra o que foi aberto por este app e é fechado por eventos reais do servidor.
+ *  - resultados de opções são recebidos do servidor; Forex exibe o P/L atual informado pela corretora.
  */
 class IqOptionConnector(private val kv: KvStore? = null) : UiConnector {
 
     override val spec = UiConnectorSpec(
         id = "iqoption",
         name = "IQ Option",
-        description = "Opções binárias/turbo: saldo, conta Demo/Real, ativos abertos, velas e operações.",
+        description = "Login, ativos abertos, candles, operações Turbo/binárias e posições Forex.",
         version = "1.0.0",
         loginFields = listOf(
             LoginField("email", "E-mail", FieldType.EMAIL, hint = "seu@email.com"),
@@ -86,136 +70,53 @@ class IqOptionConnector(private val kv: KvStore? = null) : UiConnector {
         settings = listOf(
             SettingSpec(
                 "allow_real_agent", "Agente pode operar na conta REAL",
-                "Desligado: o agente só opera na conta DEMO. Ligado: ele pode abrir operações com dinheiro real, sempre dentro dos limites abaixo.",
+                "Desligado por padrão. Ligado: o agente pode abrir operações com dinheiro real, sempre dentro dos limites abaixo.",
                 SettingType.SWITCH, "false", risky = true,
             ),
-            SettingSpec("max_amount", "Valor máximo por operação (agente)", "Teto do valor de cada operação aberta pelo agente, na moeda da conta. Ignorado com o Masaniello ativo.", SettingType.NUMBER, "1"),
-            SettingSpec("max_open", "Máx. de operações abertas (agente)", "O agente não abre novas operações acima deste número. Com o Masaniello ativo é sempre 1.", SettingType.NUMBER, "3"),
-            SettingSpec("strategy_asset", "Ativo das estratégias na tela", "Ticker para mostrar as estratégias MHI (assertividade e próximos sinais) nesta tela, ex.: EURUSD-OTC. Vazio = não mostrar.", SettingType.TEXT, ""),
-            SettingSpec(
-                "short_max_minutes", "Duração máxima de operação CURTA (min)",
-                "Até este tempo a operação é curta: o agente pode comprar (call) e vender (put). Acima disso é LONGA: só compra (call).",
-                SettingType.NUMBER, "5",
-            ),
-            SettingSpec("require_jev", "Exigir validação TypeSafe Jev",
-                "Desligado (padrão): não consulta o Jev. Ligado: toda ordem exige aprovação Jev. A análise Price Action e as salvaguardas internas de risco continuam obrigatórias nos dois modos.",
-                SettingType.SWITCH, "false", risky = true),
-            SettingSpec("mm_enabled", "Ativar Masaniello (sobrescreve o valor de entrada)",
-                "Ligado: o Masaniello assume o VALOR de todas as entradas do agente (ignora o valor pedido e o 'Valor máximo por operação') e o MODO de operar (uma operação por vez, ignora 'Máx. de operações abertas'). " +
-                "O risco passa a ser limitado pela banca do ciclo: um ciclo nunca perde mais que ela. Desligado: valem o valor e os limites normais.",
-                SettingType.SWITCH, "false", risky = true),
-            SettingSpec("mm_bank", "Masaniello: banca do ciclo", "Valor máximo que um ciclo pode perder. Ao acertar K de N, o ciclo fecha no lucro-alvo.", SettingType.NUMBER, "10"),
-            SettingSpec("mm_trades", "Masaniello: operações por ciclo (N)", "Quantidade de operações do ciclo.", SettingType.NUMBER, "10"),
-            SettingSpec("mm_wins", "Masaniello: acertos esperados (K)", "Acertos necessários dentro das N. Use uma taxa abaixo da sua taxa real de acerto (ex.: 5 de 10).", SettingType.NUMBER, "5"),
-            SettingSpec("payout_pct", "Payout médio (%)", "Retorno da corretora em caso de acerto (ex.: 85). Usado no Masaniello e no backtest.", SettingType.NUMBER, "85"),
-            SettingSpec("daily_stop_loss", "Stop loss diário", "Perda no dia (moeda da conta) que pausa o agente até amanhã. 0 = sem limite.", SettingType.NUMBER, "10"),
-            SettingSpec("daily_take_profit", "Meta diária (stop gain)", "Lucro no dia que encerra as operações do agente até amanhã. 0 = sem meta.", SettingType.NUMBER, "10"),
-            SettingSpec("max_consec_losses", "Perdas seguidas para pausar", "Após N perdas seguidas o agente pausa pelo tempo abaixo.", SettingType.NUMBER, "3"),
-            SettingSpec("cooldown_min", "Pausa após perdas seguidas (min)", "Tempo de pausa depois de atingir as perdas seguidas.", SettingType.NUMBER, "30"),
-            SettingSpec("require_confluence", "Filtro legado: confluência técnica",
-                "Compatibilidade: quando ligado, acrescenta a antiga confirmação TechnicalSuite depois do gate Price Action. Mantém o padrão anterior ligado; desligue para usar somente o novo gate Price Action.", SettingType.SWITCH, "true"),
-            SettingSpec("confluence_strong", "Filtro legado: exigir sinal técnico forte",
-                "Só se aplica quando 'Filtro legado: confluência técnica' está ligado. Preserva o significado antigo desta preferência; não é o strict Price Action.", SettingType.SWITCH, "false"),
-            SettingSpec("price_action_strict", "Exigir setup Price Action forte",
-                "Ligado: exige rompimento ou continuação estrutural forte no novo gate. Heurística não validada; pode reduzir ou eliminar sinais.", SettingType.SWITCH, "false"),
-            SettingSpec("signal_timeframe_seconds", "Timeframe do sinal automático (segundos)",
-                "Escolha um único período: 60=M1, 120=M2, 300=M5 ou 600=M10. O candle-alvo, o par dos dois candles anteriores e o Price Action usam este período; não é exigida concordância com outros timeframes. Padrão: M1.", SettingType.NUMBER, "60"),
-            SettingSpec(
-                "max_entry_delay_sec", "Janela de entrada no início da vela (s)",
-                "O agente só abre operação nos primeiros N segundos da vela-alvo do timeframe configurado. Fora disso a ordem é recusada. 0 desliga somente a janela da compra manual; o fluxo automático mantém limite de segurança.",
-                SettingType.NUMBER, "10",
-            ),
-            SettingSpec(
-                "entry_against_candle", "Entrada contra o candle (recomendado)",
-                "Ligado: antes de cada entrada automática o app confere o candle-alvo no timeframe configurado. CALL só entra com o preço ABAIXO da abertura; PUT só ACIMA da abertura.",
-                SettingType.SWITCH, "true",
-            ),
-            SettingSpec(
-                "allow_margin_agent", "Agente pode operar Forex/CFD/Cripto (margem)",
-                "Desligado: o agente só opera opções. Ligado: ele pode abrir posições alavancadas em Forex, CFD e cripto, sempre com stop loss e take profit.",
-                SettingType.SWITCH, "false", risky = true,
-            ),
-            SettingSpec("max_margin_amount", "Valor máximo por posição de margem (agente)", "Teto do valor investido em cada posição Forex/CFD/cripto aberta pelo agente.", SettingType.NUMBER, "1"),
-            SettingSpec("max_leverage", "Alavancagem máxima (agente)", "Maior alavancagem que o agente pode usar em Forex/CFD/cripto.", SettingType.NUMBER, "10"),
-            SettingSpec("max_stop_loss_pct", "Stop loss máximo (%)", "Perda máxima permitida por posição de margem, em % do valor investido.", SettingType.NUMBER, "50"),
+            SettingSpec("max_amount", "Valor máximo por opção", "Teto por operação Turbo/binária aberta pelo agente, na moeda da conta.", SettingType.NUMBER, "1"),
+            SettingSpec("max_open", "Máx. de opções abertas", "Número máximo de opções ainda em execução abertas pelo agente.", SettingType.NUMBER, "3"),
+            SettingSpec("daily_stop_loss", "Stop loss diário", "Perda diária nas opções acompanhadas que bloqueia novas operações até amanhã. 0 = sem limite.", SettingType.NUMBER, "10"),
+            SettingSpec("daily_take_profit", "Meta diária", "Lucro diário nas opções acompanhadas que bloqueia novas operações até amanhã. 0 = sem limite.", SettingType.NUMBER, "10"),
+            SettingSpec("max_consec_losses", "Perdas seguidas para pausar", "Após N perdas seguidas em opções, o agente pausa pelo tempo abaixo.", SettingType.NUMBER, "3"),
+            SettingSpec("cooldown_min", "Pausa após perdas seguidas (min)", "Tempo de pausa depois de atingir o limite de perdas seguidas.", SettingType.NUMBER, "30"),
+            SettingSpec("require_jev", "Exigir aprovação TypeSafe Jev", "Ligado: cada abertura exige aprovação prévia do gate genérico de ordens. Desligado: permanecem ativos os limites de conta e risco deste conector.", SettingType.SWITCH, "false", risky = true),
+            SettingSpec("allow_margin_agent", "Agente pode operar Forex", "Desligado por padrão. Ligado: permite abrir Forex com stop loss e take profit obrigatórios.", SettingType.SWITCH, "false", risky = true),
+            SettingSpec("max_margin_amount", "Valor máximo por posição Forex", "Teto do valor investido por posição Forex aberta pelo agente.", SettingType.NUMBER, "1"),
+            SettingSpec("max_forex_open", "Máx. de posições Forex abertas", "Limite de posições Forex abertas pelo agente.", SettingType.NUMBER, "3"),
+            SettingSpec("max_leverage", "Alavancagem máxima", "Maior alavancagem que o agente pode usar em Forex.", SettingType.NUMBER, "10"),
+            SettingSpec("max_stop_loss_pct", "Stop loss máximo (%)", "Stop loss obrigatório máximo em % do valor investido em Forex.", SettingType.NUMBER, "50"),
         ),
         tools = listOf(
-            ToolSpec("balance", "Saldo das contas DEMO e REAL e qual está ativa."),
-            ToolSpec("set_account", "Troca a conta ativa (demo ou real). A conta real só é aceita se o usuário liberou o agente para ela.",
-                listOf(ParamSpec("account", "demo ou real", allowed = listOf("demo", "real"))), risky = true),
-            ToolSpec("open_assets", "Lista TODOS os ativos abertos agora, por tipo: turbo e binária (inclui OTC), digital, forex, CFD (ações, índices, commodities) e cripto.",
-                listOf(ParamSpec("filter", "Filtro opcional de texto (ex.: EUR)", required = false),
-                    ParamSpec("kind", "Tipo: all, options (turbo+binária), digital, forex, cfd, crypto. Padrão all.", required = false,
-                        allowed = listOf("all", "options", "turbo", "binary", "digital", "forex", "cfd", "crypto")))),
-            ToolSpec("get_candles", "Velas OHLC reais de um ativo (abertura, máxima, mínima, fechamento, volume).", listOf(
-                ParamSpec("asset", "Ticker do ativo, ex.: EURUSD"),
-                ParamSpec("timeframe", "Tamanho da vela em segundos (60=M1, 120=M2, 300=M5, 600=M10) ou 1m/2m/5m/10m. Padrão 60.", required = false),
-                ParamSpec("count", "Quantidade de velas (1–200). Padrão 30.", "integer", required = false),
+            ToolSpec("open_assets", "Lista todos os ativos abertos agora: opções Turbo/binárias (inclui OTC) e Forex.", listOf(
+                ParamSpec("filter", "Filtro opcional pelo ticker (ex.: EUR)", required = false),
+                ParamSpec("kind", "Tipo: all, options, turbo, binary ou forex. Padrão all.", required = false, allowed = listOf("all", "options", "turbo", "binary", "forex")),
             )),
-            ToolSpec("catalog", "Cataloga um horário: olha a vela daquele minuto (ex.: 14:40) nos últimos N dias e mostra a cor de cada dia (verde=subiu/CALL, vermelho=caiu/PUT) e a tendência dominante. Use para decidir a direção de uma entrada por repetição de padrão no mesmo horário.", listOf(
-                ParamSpec("asset", "Ticker do ativo, ex.: EURUSD-OTC"),
-                ParamSpec("time", "Horário HH:MM (hora local). Padrão: a próxima vela.", required = false),
-                ParamSpec("days", "Quantos dias olhar para trás (1–20). Padrão 5.", "integer", required = false),
-                ParamSpec("timeframe", "Tamanho da vela (60=M1, 120=M2, 300=M5, 600=M10; também 1m/2m/5m/10m). Padrão 60.", required = false),
+            ToolSpec("get_candles", "Busca candles OHLCV reais de um ativo aberto, sem análise ou recomendação de direção.", listOf(
+                ParamSpec("asset", "Ticker do ativo (ex.: EURUSD ou EURUSD-OTC)"),
+                ParamSpec("timeframe", "Período em segundos (60=M1, 120=M2, 300=M5, 600=M10) ou 1m/2m/5m/10m. Padrão 60.", required = false),
+                ParamSpec("count", "Quantidade de candles (1–200). Padrão 30.", "integer", required = false),
             )),
-            ToolSpec("strategies", "Relatório legado e informativo de MHI; não é usado pelo fluxo automático e não deve decidir entradas. O scanner automático usa somente o timeframe selecionado na configuração do conector.", listOf(
-                ParamSpec("asset", "Ticker do ativo, ex.: EURUSD-OTC"),
-            )),
-            ToolSpec("mm_status", "Gerenciamento e regras: ciclo Masaniello (acertos/operações restantes, banca, próxima entrada, lucro-alvo), resultado do dia, perdas seguidas e se o agente está pausado."),
-            ToolSpec("price_analysis", "Análise determinística de Price Action em velas fechadas: estrutura de topos/fundos, suporte/resistência aproximados, rompimento/rejeição, força do candle e decisão CALL, PUT ou NÃO OPERAR. Aceita M1/M2/M5/M10. Critérios heurísticos não validados; não representam probabilidade de acerto.", listOf(
-                ParamSpec("asset", "Ticker do ativo"),
-                ParamSpec("timeframe", "Timeframe em segundos ou 1m/2m/5m/10m. Padrão 60.", required = false),
-                ParamSpec("count", "Velas fechadas (30–200). Padrão 120.", "integer", required = false),
-                ParamSpec("strict", "true = só rompimento ou continuação forte", "boolean", required = false),
-            )),
-            ToolSpec("backtest", "Replay determinístico da engine Price Action: decide em candles fechados e simula a vela seguinte. Mostra estatísticas históricas, sem prometer acurácia; não modela execução, latência, payout real nem o filtro legado TechnicalSuite (se ligado em require_confluence).", listOf(
-                ParamSpec("asset", "Ticker do ativo"),
-                ParamSpec("timeframe", "Tempo gráfico (60=M1, 120=M2, 300=M5, 600=M10). Padrão 60.", required = false),
-                ParamSpec("count", "Velas (300–1000). Padrão 600.", "integer", required = false),
-                ParamSpec("strong", "true = só sinais fortes", "boolean", required = false),
-            )),
-            ToolSpec("scan_and_arm", "Agenda em background, no relógio do servidor, uma varredura de TODOS os ativos turbo/binários abertos em T−2 min usando o timeframe configurado (M1/M2/M5/M10). Em cada ativo aplica candles fechados, Price Action e os filtros técnicos/riscos já configurados; não exige consenso entre timeframes. Escolhe um único candidato e persiste o sinal. O serviço independente do agente tenta revalidar no máximo em T−50, T−25 e T−10; em T confirma novamente o par fechado, candle-alvo, cotação e risco. Cada tentativa de revalidação termina antes da abertura; falha, atraso ou dado ausente significa nenhuma ordem. MHI não participa.", listOf(
-                ParamSpec("minutes", "Expiração da operação em minutos (1–60). Padrão 1.", "integer", required = false),
-                ParamSpec("amount", "Valor da operação (ignorado se o Masaniello estiver ligado).", "number", required = false),
-            ), risky = true),
-            ToolSpec("arm_signal", "Ferramenta legada de armamento manual, desativada para o agente: qualquer entrada automática precisa passar por scan_and_arm, que analisa em T−2 e seleciona um único ativo entre os abertos.", listOf(
-                ParamSpec("asset", "Ticker do ativo validado, ex.: EURUSD-OTC"),
-                ParamSpec("direction", "call (compra) ou put (venda)", allowed = listOf("call", "put")),
-                ParamSpec("minutes", "Expiração em minutos (1–60). Padrão 1.", "integer", required = false),
-                ParamSpec("amount", "Valor da operação (ignorado se o Masaniello estiver ligado).", "number", required = false),
-            ), risky = true),
-            ToolSpec("armed_list", "Lista os sinais armados aguardando o gatilho de preço e quais já dispararam/expiraram."),
-            ToolSpec("disarm", "Cancela sinais armados. Informe o ativo para cancelar um, ou 'all' para cancelar todos.", listOf(ParamSpec("asset", "Ticker ou 'all'"))),
-            ToolSpec("candle_clock", "Relógio da vela pelo horário do SERVIDOR da IQ Option: quando a vela atual abriu, quantos segundos faltam, epoch server_now_epoch_ms para passar ao sleep, se a janela está aberta e quantos segundos dormir para acordar 10 s antes da próxima abertura. Use SEMPRE antes de esperar/entrar.", listOf(
-                ParamSpec("timeframe", "Tempo gráfico em segundos (60=M1, 120=M2, 300=M5, 600=M10; também 1m/2m/5m/10m). Padrão 60.", required = false),
-            )),
-            ToolSpec("indicators", "Análise técnica completa (padrão TradingView) sobre velas REAIS do ativo: mais de 30 indicadores (médias, RSI, MACD, Estocástico, ADX, Bollinger, Ichimoku, Supertrend, PSAR…) com sinal de compra/venda e o resumo. Calculado no aparelho, em milissegundos.", listOf(
-                ParamSpec("asset", "Ticker do ativo, ex.: EURUSD-OTC"),
-                ParamSpec("timeframe", "Tamanho da vela (60=M1, 120=M2, 300=M5, 600=M10; também 1m/2m/5m/10m). Padrão 60.", required = false),
-                ParamSpec("count", "Quantidade de velas (50–1000). Padrão 300.", "integer", required = false),
-            )),
-            ToolSpec("buy", "Ordem direta na conta ativa (call = compra/sobe, put = venda/desce). Para o fluxo automático do agente, use scan_and_arm: ele analisa no T−2 e agenda a entrada para o timeframe configurado. A direção pedida em buy precisa coincidir com Price Action; caso contrário, é recusada. " +
-                "A validação TypeSafe Jev só é exigida quando 'require_jev' estiver ligado. " +
-                "Curta (até o limite do usuário): call e put. Longa: somente call. " +
-                "Entrada contra a abertura do candle: call só abaixo, put só acima (senão RECUSADO; espere e tente de novo). " +
-                "REGRAS DURAS: com o Masaniello ligado o VALOR é definido pelo gerenciamento (o amount informado é ignorado) e é uma operação por vez; " +
-                "stop loss/meta diária, pausa após perdas seguidas e filtros de preço são impostos pelo app. O filtro legado require_confluence mantém o veto TechnicalSuite antigo; confluence_strong conserva sua semântica antiga; price_action_strict controla apenas a força do novo gate. Regras são heurísticas não validadas; consulte mm_status e price_analysis.", listOf(
-                ParamSpec("asset", "Ticker do ativo, ex.: EURUSD"),
-                ParamSpec("direction", "call (compra/sobe) ou put (venda/desce)", allowed = listOf("call", "put")),
+            ToolSpec("open_option", "Abre imediatamente uma operação CALL/PUT Turbo ou binária no ativo aberto. Não analisa nem escolhe ativos. Resultado final é consultado em get_trade_result; não há fechamento antecipado binário exposto.", listOf(
+                ParamSpec("asset", "Ticker Turbo/binário aberto"),
+                ParamSpec("direction", "call (alta) ou put (baixa)", allowed = listOf("call", "put")),
                 ParamSpec("amount", "Valor da operação na moeda da conta", "number"),
-                ParamSpec("minutes", "Expiração em minutos (1–60). Padrão 1.", "integer", required = false),
+                ParamSpec("minutes", "Expiração em minutos (1–60). Até 5 min é Turbo.", "integer", required = false),
             ), risky = true, requiresSignal = true),
-            ToolSpec("open_position", "Abre uma posição alavancada a mercado em FOREX, CFD ou CRIPTO (buy = compra, sell = venda), com stop loss e take profit obrigatórios em %. " +
-                "Só funciona se o usuário liberou margem para o agente. EXIGE validação prévia com typesafe_jev_check (venue=iqoption, id=ativo, direction=buy|sell).", listOf(
-                ParamSpec("asset", "Ativo de margem (ex.: EURUSD, XAUUSD, AAPL, BTCUSD) — veja open_assets kind=forex/cfd/crypto"),
-                ParamSpec("side", "buy (compra) ou sell (venda)", allowed = listOf("buy", "sell")),
+            ToolSpec("open_forex", "Abre uma posição Forex a mercado com stop loss e take profit obrigatórios. Só atua em Forex, não CFD nem cripto.", listOf(
+                ParamSpec("asset", "Ticker Forex aberto (ex.: EURUSD)"),
+                ParamSpec("side", "buy ou sell", allowed = listOf("buy", "sell")),
                 ParamSpec("amount", "Valor investido (margem) na moeda da conta", "number"),
-                ParamSpec("leverage", "Alavancagem (ex.: 10). Limitada pelo usuário.", "integer"),
-                ParamSpec("stop_loss_pct", "Stop loss em % do valor investido (ex.: 20)", "number"),
-                ParamSpec("take_profit_pct", "Take profit em % do valor investido (ex.: 30)", "number"),
+                ParamSpec("leverage", "Alavancagem de 1 até o limite configurado", "integer"),
+                ParamSpec("stop_loss_pct", "Stop loss obrigatório em % do valor investido", "number"),
+                ParamSpec("take_profit_pct", "Take profit obrigatório em % do valor investido", "number"),
             ), risky = true, requiresSignal = true),
-            ToolSpec("close_position", "Fecha uma posição de margem (Forex/CFD/cripto) pelo id.", listOf(ParamSpec("id", "Id da posição", "integer")), risky = true),
-            ToolSpec("positions", "Operações em execução com resultado AO VIVO (ganhando/perdendo agora), as últimas fechadas e as posições de Forex/CFD/cripto."),
+            ToolSpec("close_position", "Solicita o fechamento de uma posição Forex aberta, informando seu id. Não fecha opções binárias.", listOf(
+                ParamSpec("id", "Id da posição Forex aberta", "integer"),
+            ), risky = true),
+            ToolSpec("positions", "Lista opções acompanhadas por esta sessão e posições Forex abertas com o P/L atual informado pela corretora."),
+            ToolSpec("get_trade_result", "Consulta o estado ou resultado final de uma opção acompanhada por esta sessão. O histórico final de posições Forex fechadas não é confirmado pelo protocolo disponível.", listOf(
+                ParamSpec("id", "Id da opção retornado na abertura", "integer"),
+            )),
         ),
     )
 
@@ -227,14 +128,14 @@ class IqOptionConnector(private val kv: KvStore? = null) : UiConnector {
         val expSec: Long, val demo: Boolean, val currency: String,
         val result: String? = null, val profit: Double? = null,
         val activeId: Int = 0, val entry: Double? = null,
-        val byAgent: Boolean = false, val mm: Boolean = false, val odds: Double = 1.85, val settled: Boolean = false,
+        val byAgent: Boolean = false, val settled: Boolean = false,
     )
 
     private val client = OkHttpClient.Builder()
         .connectTimeout(15, TimeUnit.SECONDS).readTimeout(30, TimeUnit.SECONDS).pingInterval(20, TimeUnit.SECONDS).build()
     private val mutex = Mutex()
     private val connectionRetryBackoff = ConnectorRetryBackoff()
-    /** Reserva comum mantida até ACK para buy normal, arm, margem e troca de conta. */
+    /** Reserva comum mantida até ACK para novas ordens e troca de conta. */
     private val accountOrderCoordinator = IqOptionOrderCoordinator()
     private val counter = AtomicLong(1)
     private val generation = AtomicLong(0)
@@ -244,9 +145,7 @@ class IqOptionConnector(private val kv: KvStore? = null) : UiConnector {
     @Volatile private var marketAccountId: Long? = null
     private val tracked = ConcurrentHashMap<Long, Tracked>()
     private val quotes = ConcurrentHashMap<Int, Double>()
-    private val quoteReceivedAtElapsedMs = ConcurrentHashMap<Int, Long>()
     private val subscribed = java.util.Collections.newSetFromMap(ConcurrentHashMap<Int, Boolean>())
-    private val marginIds = java.util.Collections.newSetFromMap(ConcurrentHashMap<Long, Boolean>())
     @Volatile private var allAssets: List<IqProtocol.Asset> = emptyList()
     @Volatile private var allAssetsAt = 0L
     private val marketCircuit = IqMarketCircuitBreaker()
@@ -254,37 +153,13 @@ class IqOptionConnector(private val kv: KvStore? = null) : UiConnector {
     /** Tarefas de fundo (carregar ativos) — a tela nunca espera por elas. */
     private val bg = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     @Volatile private var loadingAll = false
-    /** A análise recebe uma interface de mercado; somente este adaptador conhece IQ Option e WebSocket. */
-    private val priceActionPipeline = PriceActionPipeline(PriceMarketDataSource { asset, timeframe, limit ->
-        loadClosedCandles(asset, timeframe, limit)
-    })
-    /** Adaptador de execução específico da IQ Option; a decisão/risk policy recebem apenas o resultado do portão. */
-    private val optionExecutionPort = IqOptionExecutionPort { order ->
-        val requestId = reqId()
-        val root = request(requestId,
-            IqProtocol.openOptionMessage(requestId, order.balanceId, order.activeId, order.direction,
-                order.expirationSeconds, order.amount, order.turbo),
-            "option", "option-rejected", timeoutMs = order.timeoutMs.coerceIn(500, 15_000).toLong())
-        IqProtocol.parseOptionAck(root)
-    }
-
-    private val signalStore: IqSignalStore by lazy { kv?.let(::IqSignalLedger) ?: InMemoryIqSignalStore() }
-    private val signalDispatcher: IqOptionSignalDispatcher by lazy {
-        IqOptionSignalDispatcher(
-            store = signalStore,
-            clock = IqDispatchClock { if (serverClockFresh()) serverNowMs() else null },
-            alarms = object : IqDispatchAlarmPort {
-                override fun canScheduleExact(): Boolean = runCatching { IqSignalAlarms.canScheduleExact(dev.cueopen.app.CueApp.instance) }.getOrDefault(false)
-                override fun schedule(signal: IqArmedSignal, atServerEpochMs: Long): Boolean =
-                    runCatching { IqSignalAlarms.schedule(dev.cueopen.app.CueApp.instance, signal, atServerEpochMs) }.getOrDefault(false)
-                override fun cancel(signal: IqArmedSignal) = runCatching { IqSignalAlarms.cancel(dev.cueopen.app.CueApp.instance, signal.id) }.getOrDefault(Unit)
-            },
-            port = object : IqSignalDispatchPort {
-                override suspend fun revalidate(signal: IqArmedSignal): IqSignalValidationResult = revalidatePersistedSignal(signal)
-                override suspend fun submit(signal: IqArmedSignal): IqSubmissionResult = submitPersistedSignal(signal)
-            },
-        )
-    }
+    /** Execução manual isolada por uma porta de pedidos mockável em testes JVM. */
+    private val manualExecution = IqManualExecution(
+        nextRequestId = ::reqId,
+        request = IqManualRequestPort { requestId, payload, expectedNames, timeoutMs ->
+            request(requestId, payload, *expectedNames.toTypedArray(), timeoutMs = timeoutMs)
+        },
+    )
 
     /** Atualiza a lista completa de ativos em segundo plano (sem travar a tela). */
     private fun refreshAssetsInBackground() {
@@ -300,7 +175,6 @@ class IqOptionConnector(private val kv: KvStore? = null) : UiConnector {
     @Volatile private var creds: Map<String, String>? = null
     @Volatile private var serverEpochAtSyncMs = 0L
     @Volatile private var serverElapsedAtSyncMs = 0L
-    @Volatile private var serverSyncElapsedMs = 0L
     @Volatile private var assets: List<IqProtocol.Asset> = emptyList()
     @Volatile private var assetsAt = 0L
 
@@ -309,19 +183,12 @@ class IqOptionConnector(private val kv: KvStore? = null) : UiConnector {
     override fun secrets(): List<String> = listOfNotNull(ssid, creds?.get("password"), creds?.get("email"))
 
     private fun serverNowSec(): Long = serverNowMs() / 1000
-    private fun serverClockFresh(maxAgeMs: Long = 30_000L): Boolean {
-        val syncedAt = serverSyncElapsedMs
-        val elapsed = runCatching { android.os.SystemClock.elapsedRealtime() }.getOrNull() ?: return false
+    private fun serverNowMs(): Long {
+        val elapsed = android.os.SystemClock.elapsedRealtime()
+        val syncedAt = serverElapsedAtSyncMs
         val age = elapsed - syncedAt
-        return syncedAt > 0L && age in 0..maxAgeMs
-    }
-
-    private suspend fun awaitFreshServerClock(): Boolean {
-        repeat(30) {
-            if (serverClockFresh()) return true
-            delay(100)
-        }
-        return serverClockFresh()
+        return if (serverEpochAtSyncMs > 0L && syncedAt > 0L && age in 0..30_000L) serverEpochAtSyncMs + age
+        else System.currentTimeMillis()
     }
     private fun reqId() = "cue-" + counter.getAndIncrement()
     private fun err(detail: String) = runCatching { ErrorLog.log("uiconnector", "iqoption: $detail", null, "iqoption") }
@@ -412,7 +279,6 @@ class IqOptionConnector(private val kv: KvStore? = null) : UiConnector {
         ws = null
         serverEpochAtSyncMs = 0L
         serverElapsedAtSyncMs = 0L
-        serverSyncElapsedMs = 0L
         activeBalanceSelection.invalidate()
         val failure = IOException("Conexão com a IQ Option perdida: $reason")
         waiters.forEach { it.deferred.completeExceptionally(failure) }
@@ -427,14 +293,12 @@ class IqOptionConnector(private val kv: KvStore? = null) : UiConnector {
         subscribed.clear()
         serverEpochAtSyncMs = 0L
         serverElapsedAtSyncMs = 0L
-        serverSyncElapsedMs = 0L
         activeBalanceSelection.invalidate()
     }
 
     override suspend fun logout() = accountOrderCoordinator.runReserved { logoutReserved() }
 
     private suspend fun logoutReserved() {
-        signalDispatcher.signals().filter { it.state in IqArmedSignal.ACTIVE_STATES }.forEach { signalDispatcher.cancel(it.id) }
         resetMarketCircuit()
         connectionRetryBackoff.reset("iqoption")
         closeSocket()
@@ -443,18 +307,15 @@ class IqOptionConnector(private val kv: KvStore? = null) : UiConnector {
         balances.clear()
         marketAccountId = null
         tracked.clear()
-        armed.clear()
-        scanJobs.values.forEach { it.cancel() }; scanJobs.clear(); pendingScans.clear()
-        quotes.clear(); quoteReceivedAtElapsedMs.clear()
-        serverEpochAtSyncMs = 0L; serverElapsedAtSyncMs = 0L; serverSyncElapsedMs = 0L
-        marginIds.clear()
+        quotes.clear()
+        serverEpochAtSyncMs = 0L; serverElapsedAtSyncMs = 0L
         assets = emptyList()
         allAssets = emptyList()
         activeBalanceSelection.invalidate()
     }
 
-    private suspend fun ensureConnected(requireFreshServerClock: Boolean = false) {
-        fun ready(): Boolean = authenticated && ws != null && (!requireFreshServerClock || serverClockFresh())
+    private suspend fun ensureConnected() {
+        fun ready(): Boolean = authenticated && ws != null
         if (ready()) return
         val c = creds ?: error("Sessão da IQ Option não iniciada. Faça login no conector.")
         mutex.withLock {
@@ -471,8 +332,6 @@ class IqOptionConnector(private val kv: KvStore? = null) : UiConnector {
             }
             try {
                 connectLocked(c["email"].orEmpty(), c["password"].orEmpty())
-                if (requireFreshServerClock && !awaitFreshServerClock())
-                    error("Relógio da IQ Option não sincronizou após a reconexão.")
                 connectionRetryBackoff.reset("iqoption")
             } catch (t: Throwable) {
                 if (t is kotlinx.coroutines.CancellationException) throw t
@@ -480,24 +339,11 @@ class IqOptionConnector(private val kv: KvStore? = null) : UiConnector {
                 throw t
             }
         }
-        // reconectou: restaura cotações de operações em aberto e gatilhos de vela ainda ativos
+        // reconectou: restaura somente cotações de operações em aberto
         tracked.values.filter { it.result == null && it.activeId != 0 }.forEach { subscribeQuotes(it.activeId) }
-        armed.filter { it.status == "armado" || it.status.startsWith("revalidando") || it.status.startsWith("revalidado") }
-            .map { it.activeId }.distinct().forEach { subscribeQuotes(it) }
     }
 
     /** Credenciais presentes não provam que o socket está vivo; exige sessão autenticada e timeSync recente. */
-    suspend fun prepareSignalDispatch(): Result<Unit> = try {
-        if (authenticated && ws != null && !serverClockFresh()) awaitFreshServerClock()
-        ensureConnected(requireFreshServerClock = true)
-        if (!serverClockFresh()) error("Relógio da IQ Option ausente/stale após preparar a sessão.")
-        Result.success(Unit)
-    } catch (cancel: kotlinx.coroutines.CancellationException) {
-        throw cancel
-    } catch (t: Throwable) {
-        Result.failure(t)
-    }
-
     private fun subscribeQuotes(activeId: Int) {
         if (activeId == 0 || !subscribed.add(activeId)) return
         if (ws?.send(IqProtocol.subscribeQuotesMessage(activeId)) != true) subscribed.remove(activeId)
@@ -506,12 +352,10 @@ class IqOptionConnector(private val kv: KvStore? = null) : UiConnector {
     /** Larga a assinatura de cotações quando não há mais operação aberta naquele ativo. */
     private fun pruneQuotes() {
         val needed = tracked.values.filter { it.result == null && it.expSec + 120 > serverNowSec() }.map { it.activeId }.toMutableSet()
-        needed += armed.filter { it.status == "armado" || it.status.startsWith("revalidando") || it.status.startsWith("revalidado") }
-            .map { it.activeId }
         subscribed.filter { it !in needed }.forEach { id ->
             subscribed.remove(id)
             runCatching { ws?.send(IqProtocol.unsubscribeQuotesMessage(id)) }
-            quotes.remove(id); quoteReceivedAtElapsedMs.remove(id)
+            quotes.remove(id)
         }
     }
 
@@ -528,7 +372,6 @@ class IqOptionConnector(private val kv: KvStore? = null) : UiConnector {
                     val elapsed = android.os.SystemClock.elapsedRealtime()
                     serverEpochAtSyncMs = serverMs
                     serverElapsedAtSyncMs = elapsed
-                    serverSyncElapsedMs = elapsed
                 }
             }
             "profile" -> {
@@ -570,7 +413,6 @@ class IqOptionConnector(private val kv: KvStore? = null) : UiConnector {
                 val q = if (msg != null) IqProtocol.parseQuote(msg) else null
                 if (q != null) {
                     quotes[q.activeId] = q.price
-                    quoteReceivedAtElapsedMs[q.activeId] = android.os.SystemClock.elapsedRealtime()
                     // operação sem preço de entrada confirmado: usa a 1ª cotação após a abertura
                     tracked.values.filter { it.activeId == q.activeId && it.entry == null && it.result == null }
                         .forEach { tracked[it.id] = it.copy(entry = q.price) }
@@ -634,7 +476,7 @@ class IqOptionConnector(private val kv: KvStore? = null) : UiConnector {
         return list
     }
 
-    /** Todos os mercados: opções (turbo/binária, inclui OTC) + digital + forex + CFD + cripto. Cada fonte é opcional. */
+    /** Carrega opções Turbo/binárias e os instrumentos Forex disponíveis. */
     private suspend fun loadAllAssets(force: Boolean = false): List<IqProtocol.Asset> {
         if (!force && allAssets.isNotEmpty()) {
             if (System.currentTimeMillis() - allAssetsAt > 5 * 60_000) refreshAssetsInBackground()
@@ -643,47 +485,34 @@ class IqOptionConnector(private val kv: KvStore? = null) : UiConnector {
         val contextAtStart = marketCircuit.contextGeneration()
         val out = ArrayList(loadAssets(force))
         if (contextAtStart != marketCircuit.contextGeneration()) return allAssets
-        val now = serverNowSec()
-        // Um circuito e mutex por categoria: falha isolada, uma tentativa por vez e nenhuma conclusão
-        // antiga de outro login/troca de conta pode reabrir ou limpar o circuito atual.
-        val extra = runCatching {
-            bg.async {
-                listOf("digital", "forex", "cfd", "crypto").map { type ->
-                    async {
-                        val probeLock = marketProbeLocks.computeIfAbsent(type) { Mutex() }
-                        probeLock.withLock {
-                            val nowElapsed = android.os.SystemClock.elapsedRealtime()
-                            if (contextAtStart != marketCircuit.contextGeneration() || marketCircuit.isOpen(type, nowElapsed))
-                                return@withLock emptyList<IqProtocol.Asset>()
-                            try {
-                                val id = reqId()
-                                val list = if (type == "digital") {
-                                    val root = request(id, IqProtocol.underlyingListMessage(id), "underlying-list", timeoutMs = 6_000)
-                                    IqProtocol.parseUnderlying(root["msg"] as? JsonObject ?: JsonObject(emptyMap()), now)
-                                } else {
-                                    val root = request(id, IqProtocol.instrumentsMessage(id, type), "instruments", timeoutMs = 6_000)
-                                    IqProtocol.parseInstruments(root["msg"] as? JsonObject ?: JsonObject(emptyMap()), type, now)
-                                }
-                                if (contextAtStart != marketCircuit.contextGeneration()) return@withLock emptyList<IqProtocol.Asset>()
-                                marketCircuit.recordResponse(type, android.os.SystemClock.elapsedRealtime(), list.size)?.let { decision ->
-                                    if (decision.shouldLog) reportMarketFailure(type, decision.state.reason, decision.state.retryAtElapsedMs)
-                                }
-                                list
-                            } catch (c: kotlinx.coroutines.CancellationException) {
-                                emptyList() // cancelamento não conta como falha nem altera o TTL
-                            } catch (t: Throwable) {
-                                if (contextAtStart == marketCircuit.contextGeneration()) {
-                                    val decision = marketCircuit.recordFailure(type, android.os.SystemClock.elapsedRealtime(), marketFailureReason(t))
-                                    if (decision.shouldLog) reportMarketFailure(type, decision.state.reason, decision.state.retryAtElapsedMs)
-                                }
-                                emptyList()
-                            }
-                        }
+        val type = "forex"
+        val probeLock = marketProbeLocks.computeIfAbsent(type) { Mutex() }
+        val forex = probeLock.withLock {
+            val nowElapsed = android.os.SystemClock.elapsedRealtime()
+            if (contextAtStart != marketCircuit.contextGeneration() || marketCircuit.isOpen(type, nowElapsed)) {
+                emptyList()
+            } else try {
+                val id = reqId()
+                val root = request(id, IqProtocol.forexInstrumentsMessage(id), "instruments", timeoutMs = 6_000)
+                val list = IqProtocol.parseForexInstruments(root["msg"] as? JsonObject ?: JsonObject(emptyMap()), serverNowSec())
+                if (contextAtStart != marketCircuit.contextGeneration()) emptyList()
+                else {
+                    marketCircuit.recordResponse(type, android.os.SystemClock.elapsedRealtime(), list.size)?.let { decision ->
+                        if (decision.shouldLog) reportMarketFailure(type, decision.state.reason, decision.state.retryAtElapsedMs)
                     }
-                }.awaitAll().flatten()
-            }.await()
-        }.getOrDefault(emptyList())
-        out += extra
+                    list
+                }
+            } catch (c: kotlinx.coroutines.CancellationException) {
+                throw c
+            } catch (t: Throwable) {
+                if (contextAtStart == marketCircuit.contextGeneration()) {
+                    val decision = marketCircuit.recordFailure(type, android.os.SystemClock.elapsedRealtime(), marketFailureReason(t))
+                    if (decision.shouldLog) reportMarketFailure(type, decision.state.reason, decision.state.retryAtElapsedMs)
+                }
+                emptyList()
+            }
+        }
+        out += forex
         allAssets = out
         allAssetsAt = System.currentTimeMillis()
         return out
@@ -706,17 +535,15 @@ class IqOptionConnector(private val kv: KvStore? = null) : UiConnector {
         assetsAt = 0L
         allAssets = emptyList()
         allAssetsAt = 0L
+        cachedForexPositions = null
+        cachedForexPositionsAt = 0L
     }
 
     private fun marketRetryHint(): String {
         val now = android.os.SystemClock.elapsedRealtime()
-        val active = marketCircuit.activeStatuses(now)
-        if (active.isEmpty()) return ""
-        val details = active.entries.sortedBy { it.key }.joinToString("; ") { (category, state) ->
-            val left = ((state.retryAtElapsedMs - now).coerceAtLeast(0L) + 999L) / 1_000L
-            "$category não verificado; nova tentativa em ${countdown(left)} (suporte não confirmado)"
-        }
-        return "\nMercados extras: $details."
+        val state = marketCircuit.activeStatuses(now)["forex"] ?: return ""
+        val left = ((state.retryAtElapsedMs - now).coerceAtLeast(0L) + 999L) / 1_000L
+        return "\nForex não verificado; nova tentativa em ${countdown(left)} (suporte não confirmado)."
     }
 
     /** Sugestões de tickers abertos parecidos, para o agente acertar na próxima chamada. */
@@ -725,7 +552,7 @@ class IqOptionConnector(private val kv: KvStore? = null) : UiConnector {
         return if (list.isEmpty()) " Use open_assets para ver os tickers abertos." else " Parecidos abertos agora: ${list.joinToString()}. (Ou use open_assets.)"
     }
 
-    private fun kindLabel(k: String) = when (k) { "turbo" -> "Turbo"; "binary" -> "Binária"; "digital" -> "Digital"; "forex" -> "Forex"; "cfd" -> "CFD"; "crypto" -> "Cripto"; else -> k }
+    private fun kindLabel(k: String) = when (k) { "turbo" -> "Turbo"; "binary" -> "Binária"; "forex" -> "Forex"; else -> k }
 
     private fun countdown(sec: Long) = "${sec / 60}:${String.format(Locale.US, "%02d", sec % 60)}"
 
@@ -740,20 +567,29 @@ class IqOptionConnector(private val kv: KvStore? = null) : UiConnector {
 
     private fun fmtPx(v: Double?) = v?.let { java.math.BigDecimal(it).setScale(6, java.math.RoundingMode.HALF_UP).stripTrailingZeros().toPlainString() } ?: "—"
 
-    // ------------------------------------------------------------------ margem (Forex / CFD / cripto)
-    private suspend fun marginPositions(): List<IqProtocol.MarginPos> {
+    // ------------------------------------------------------------------ posições Forex
+    @Volatile private var cachedForexPositions: List<IqProtocol.MarginPos>? = null
+    @Volatile private var cachedForexPositionsAt = 0L
+
+    private suspend fun marginPositions(force: Boolean = false): List<IqProtocol.MarginPos> {
+        val now = System.currentTimeMillis()
+        cachedForexPositions?.takeIf { !force && now - cachedForexPositionsAt < 2_000L }?.let { return it }
         val acc = activeBalance() ?: return emptyList()
         val id = reqId()
         val root = request(id, IqProtocol.getPositionsMessage(id, acc.id), "positions", timeoutMs = 12_000)
-        return IqProtocol.parsePositions(root["msg"] as? JsonObject ?: JsonObject(emptyMap()))
+        val rows = IqProtocol.parsePositions(root["msg"] as? JsonObject ?: JsonObject(emptyMap())
+        ).filter { it.type.equals("forex", ignoreCase = true) }
+        cachedForexPositions = rows
+        cachedForexPositionsAt = now
+        return rows
     }
 
-    private suspend fun openMargin(args: Map<String, String>, settings: ConnectorSettings): String =
-        accountOrderCoordinator.runReserved { openMarginReserved(args, settings) }
+    private suspend fun openForex(args: Map<String, String>, settings: ConnectorSettings): String =
+        accountOrderCoordinator.runReserved { openForexReserved(args, settings) }
 
-    private suspend fun openMarginReserved(args: Map<String, String>, settings: ConnectorSettings): String {
+    private suspend fun openForexReserved(args: Map<String, String>, settings: ConnectorSettings): String {
         ensureConnected()
-        if (!settings.bool("allow_margin_agent")) return "RECUSADO: o usuário não liberou o agente para operar Forex/CFD/cripto (configurações do conector IQ Option)."
+        if (!settings.bool("allow_margin_agent")) return "RECUSADO: o usuário não liberou o agente para operar Forex nas configurações do conector."
         val acc = activeBalance() ?: return "RECUSADO: nenhuma carteira ativa foi confirmada pelo servidor; confirme a conta antes de operar."
         if (acc.isReal && !settings.bool("allow_real_agent")) return "RECUSADO: a conta ativa é REAL e o agente não foi liberado para ela."
         val side = args["side"].orEmpty().lowercase()
@@ -762,35 +598,37 @@ class IqOptionConnector(private val kv: KvStore? = null) : UiConnector {
         val lev = args["leverage"]?.toDoubleOrNull()?.toInt() ?: 0
         val sl = args["stop_loss_pct"]?.replace(',', '.')?.toDoubleOrNull() ?: 0.0
         val tp = args["take_profit_pct"]?.replace(',', '.')?.toDoubleOrNull() ?: 0.0
-        if (amount <= 0) return "amount deve ser maior que zero."
+        if (!amount.isFinite() || amount <= 0.0) return "amount deve ser finito e maior que zero."
         val maxAmount = settings.num("max_margin_amount", 1.0)
-        if (amount > maxAmount) return "RECUSADO: valor $amount excede o máximo por posição ($maxAmount)."
+        if (amount > maxAmount) return "RECUSADO: valor $amount excede o máximo por posição Forex ($maxAmount)."
         val maxLev = settings.num("max_leverage", 10.0).toInt().coerceAtLeast(1)
         if (lev < 1 || lev > maxLev) return "RECUSADO: alavancagem deve ser de 1 a $maxLev."
         val maxSl = settings.num("max_stop_loss_pct", 50.0)
         if (sl <= 0 || sl > maxSl) return "RECUSADO: stop loss obrigatório, entre 0 e $maxSl%."
-        if (tp <= 0) return "RECUSADO: take profit obrigatório (> 0%)."
-        val q = args["asset"].orEmpty()
+        if (tp <= 0 || !tp.isFinite()) return "RECUSADO: take profit obrigatório (> 0%)."
+        val maxOpen = settings.num("max_forex_open", 3.0).toInt().coerceAtLeast(1)
+        val positions = marginPositions(force = true)
+        if (positions.size >= maxOpen) return "RECUSADO: já existem ${positions.size} posições Forex abertas (máximo $maxOpen)."
+        val query = args["asset"].orEmpty()
         fun norm(x: String) = x.uppercase().replace("/", "").replace(" ", "").replace("_", "")
-        val a = loadAllAssets().filter { it.instrumentId.isNotEmpty() }.let { l -> l.firstOrNull { norm(it.ticker) == norm(q) || norm(it.instrumentId) == norm(q) } }
-            ?: return "Ativo de margem '$q' não encontrado. Use open_assets kind=forex/cfd/crypto."
-        if (!a.open) return "O ativo ${a.ticker} está fechado agora."
-        val id = reqId()
-        val root = request(id, IqProtocol.placeMarginOrderMessage(id, acc.id, a.kind, a.instrumentId, side, amount, lev, sl, tp),
-            "order-placed-temp", "result", timeoutMs = 15_000)
-        val ack = IqProtocol.parseOrderAck(root)
-        val oid = ack.optionId ?: run { err("margem recusada: ${ack.error}"); return "RECUSADA pela IQ Option: ${ack.error}" }
-        marginIds += oid
-        return "Ordem de ${kindLabel(a.kind)} ENVIADA na conta ${acc.label}: ${a.ticker} ${side.uppercase()} ${String.format(Locale.US, "%.2f", amount)} ×$lev · SL $sl% · TP $tp% (ordem $oid). Acompanhe em positions."
+        val a = loadAllAssets().firstOrNull { it.kind == "forex" && it.instrumentId.isNotEmpty() && (norm(it.ticker) == norm(query) || norm(it.instrumentId) == norm(query)) }
+            ?: return "Ativo Forex '$query' não encontrado. Use open_assets."
+        if (!a.open) return "O ativo Forex ${a.ticker} está fechado agora."
+        val ack = manualExecution.openForex(IqForexOrder(acc.id, a.instrumentId, side, amount, lev, sl, tp))
+        val orderId = ack.optionId ?: run { err("ordem Forex recusada: ${ack.error}"); return "RECUSADA pela IQ Option: ${ack.error}" }
+        cachedForexPositions = null
+        return "Ordem Forex ENVIADA na conta ${acc.label}: ${a.ticker} ${side.uppercase()} ${String.format(Locale.US, "%.2f", amount)} ×$lev · SL $sl% · TP $tp% (id $orderId). Consulte positions para o P/L atual."
     }
 
-    private suspend fun closeMargin(idRaw: String?): String {
+    private suspend fun closeForex(idRaw: String?): String {
         ensureConnected()
-        val pid = idRaw?.toDoubleOrNull()?.toLong() ?: return "id inválido."
-        val id = reqId()
-        val root = request(id, IqProtocol.closePositionMessage(id, pid), "result", "position-closed", timeoutMs = 12_000)
-        val status = (root["status"] as? JsonPrimitive)?.contentOrNull?.toIntOrNull()
-        return if (status == null || status in 2000..2999) "Fechamento da posição $pid solicitado." else "A IQ Option recusou fechar a posição $pid (status $status)."
+        val positionId = idRaw?.toLongOrNull()?.takeIf { it > 0L } ?: return "id inválido."
+        val open = marginPositions(force = true)
+        if (open.none { it.id == positionId }) return "RECUSADO: a posição Forex $positionId não aparece como aberta na conta ativa; nenhum comando de fechamento foi enviado."
+        val ack = manualExecution.closeForex(positionId)
+        cachedForexPositions = null
+        return if (ack.accepted) "Fechamento da posição Forex $positionId solicitado à IQ Option${ack.status?.let { " (status $it)" } ?: ""}. O resultado financeiro final não é confirmado por este protocolo; consulte positions para a situação atual."
+        else "A IQ Option recusou fechar a posição Forex $positionId (status ${ack.status ?: "desconhecido"})."
     }
 
     override fun refreshMs(): Long = if (tracked.values.any { it.result == null }) 1_000 else 4_000
@@ -836,845 +674,109 @@ class IqOptionConnector(private val kv: KvStore? = null) : UiConnector {
     }
 
     private suspend fun candlesText(asset: String, tf: String?, count: Int?): String {
-        val a = IqProtocol.resolveAsset(loadAssets(), asset) ?: return "Ativo '$asset' não encontrado." + similar(asset)
+        val all = loadAllAssets()
+        val a = IqProtocol.resolveAsset(all, asset) ?: return "Ativo '$asset' não encontrado." + similar(asset)
+        if (a.id <= 0) return "A IQ Option não forneceu um active_id válido para ${a.ticker}; candles indisponíveis por este protocolo."
         val size = IqProtocol.timeframeSeconds(tf ?: "60")
-            ?: return "timeframe inválido. Use 60=M1, 120=M2, 300=M5 ou 600=M10 (segundos), por exemplo 1m/2m/5m/10m."
+            ?: return "timeframe inválido. Use segundos (60=M1, 120=M2, 300=M5, 600=M10) ou 1m/2m/5m/10m."
         val n = (count ?: 30).coerceIn(1, 200)
         val id = reqId()
         val root = request(id, IqProtocol.getCandlesMessage(id, a.id, size, n, serverNowSec()), "candles", timeoutMs = 20_000)
         val list = IqProtocol.parseCandles(root["msg"] as? JsonObject ?: JsonObject(emptyMap())).sortedBy { it.from }
-        if (list.isEmpty()) return "A IQ Option não devolveu velas para ${a.ticker} (${size}s)."
+        if (list.isEmpty()) return "A IQ Option não devolveu candles para ${a.ticker} (${size}s)."
         val fmt = SimpleDateFormat("dd/MM HH:mm", Locale.US).apply { timeZone = TimeZone.getTimeZone("UTC") }
         return buildString {
-            appendLine("Velas ${a.ticker} · ${size}s · ${list.size} (horário UTC) — open high low close volume")
-            list.forEach { c ->
-                appendLine("${fmt.format(Date(c.from * 1000))} ${c.open} ${c.max} ${c.min} ${c.close} ${c.volume.toLong()}")
-            }
-            val first = list.first().close; val last = list.last().close
-            if (first != 0.0) appendLine(String.format(Locale.US, "Variação no período: %.4f%% (fechamento %s → %s)", (last - first) / first * 100, first, last))
-            val nowSec = serverNowMs() / 1000; val open = nowSec / size * size
-            append("Agora (servidor UTC): ${fmt.format(Date(nowSec * 1000))}:${String.format(Locale.US, "%02d", nowSec % 60)} · vela atual aberta há ${nowSec - open}s · próxima em ${open + size - nowSec}s (use candle_clock para o tempo exato de espera)")
+            appendLine("Candles ${a.ticker} · ${size}s · ${list.size} · horário UTC · open high low close volume")
+            list.forEach { c -> appendLine("${fmt.format(Date(c.from * 1000))} ${c.open} ${c.max} ${c.min} ${c.close} ${c.volume}") }
         }.trim()
     }
 
-    // ------------------------------------------------------------------ gerenciamento (Masaniello) e regras duras
+
+    // ------------------------------------------------------------------ proteção diária de operações binárias
     private fun today(): String = SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date())
 
     private fun loadRisk(): RiskState {
-        val r = IqRules.decodeRisk(kv?.get("iq_risk")) ?: RiskState()
-        return if (r.day == today()) r else RiskState(day = today(), consecLosses = r.consecLosses, pausedUntil = r.pausedUntil)
+        val saved = IqTradeRisk.decode(kv?.get("iq_risk")) ?: RiskState()
+        return if (saved.day == today()) saved else RiskState(day = today(), consecLosses = saved.consecLosses, pausedUntil = saved.pausedUntil)
     }
-    private fun saveRisk(r: RiskState) { kv?.put("iq_risk", IqRules.encodeRisk(r)) ; memRisk = r }
+    private fun saveRisk(state: RiskState) { kv?.put("iq_risk", IqTradeRisk.encode(state)); memRisk = state }
     @Volatile private var memRisk: RiskState? = null
     private fun risk(): RiskState = if (kv != null) loadRisk() else (memRisk?.takeIf { it.day == today() } ?: RiskState(day = today()))
 
-    @Volatile private var memMm: MmState? = null
-    private fun mmFresh(settings: ConnectorSettings?): MmState {
-        val n = (settings?.num("mm_trades", 10.0) ?: 10.0).toInt().coerceIn(2, 50)
-        val k = (settings?.num("mm_wins", 5.0) ?: 5.0).toInt().coerceIn(1, n)
-        val b = (settings?.num("mm_bank", 10.0) ?: 10.0).coerceAtLeast(1.0)
-        return MmState(n, k, b, b)
-    }
-    private fun mmState(settings: ConnectorSettings?): MmState {
-        val saved = if (kv != null) IqRules.decodeMm(kv.get("iq_mm")) else memMm
-        val fresh = mmFresh(settings)
-        // configurações mudaram e o ciclo ainda não começou → adota os novos N/K/banca
-        if (saved == null || (saved.wins + saved.losses == 0 && (saved.n != fresh.n || saved.k != fresh.k || saved.startBank != fresh.startBank)))
-            return fresh.copy(cycle = saved?.cycle ?: 1, cyclesWon = saved?.cyclesWon ?: 0, cyclesLost = saved?.cyclesLost ?: 0).also { saveMm(it) }
-        return saved
-    }
-    private fun saveMm(m: MmState) { kv?.put("iq_mm", IqRules.encodeMm(m)); memMm = m }
-    private fun odds(settings: ConnectorSettings?) = 1 + (settings?.num("payout_pct", 85.0) ?: 85.0).coerceIn(10.0, 100.0) / 100.0
-
-    /** Resultado real de uma operação do agente → atualiza o dia, a sequência de perdas e o ciclo Masaniello. */
-    private fun settle(t: Tracked) = synchronized(this) {
-        val pnl = IqRules.netPnl(t.result, t.amount, t.profit)
-        val res = resultLabel(t.result)
-        var r = risk()
-        r = r.copy(dayPnl = r.dayPnl + pnl, dayTrades = r.dayTrades + 1, dayWins = r.dayWins + if (res == "WIN") 1 else 0,
-            consecLosses = when (res) { "LOSS" -> r.consecLosses + 1; "WIN" -> 0; else -> r.consecLosses })
-        saveRisk(r)
-        if (t.mm) {
-            var m = (if (kv != null) IqRules.decodeMm(kv.get("iq_mm")) else memMm) ?: return@synchronized
-            m = when (res) {
-                "WIN" -> m.copy(n = m.n - 1, k = m.k - 1, bank = m.bank + pnl, wins = m.wins + 1, lastResult = "WIN")
-                "LOSS" -> m.copy(n = m.n - 1, bank = m.bank + pnl, losses = m.losses + 1, lastResult = "LOSS")
-                else -> m.copy(lastResult = "EMPATE")
-            }
-            if (m.k <= 0) m = MmState(m.startBank.let { _ -> m.n + m.wins + m.losses }, m.wins, m.startBank, m.startBank, m.cycle + 1, cyclesWon = m.cyclesWon + 1, cyclesLost = m.cyclesLost, lastResult = "CICLO GANHO (+${String.format(Locale.US, "%.2f", m.bank - m.startBank)})")
-            else if (m.k > m.n || m.bank <= 0.01) m = MmState(m.n + m.wins + m.losses, m.k + m.wins, m.startBank, m.startBank, m.cycle + 1, cyclesWon = m.cyclesWon, cyclesLost = m.cyclesLost + 1, lastResult = "CICLO ENCERRADO (${String.format(Locale.US, "%.2f", m.bank - m.startBank)})")
-            saveMm(m)
-        }
+    private fun settle(trade: Tracked) = synchronized(this) {
+        val pnl = IqTradeRisk.netPnl(trade.result, trade.amount, trade.profit)
+        val result = resultLabel(trade.result)
+        val old = risk()
+        val updated = old.copy(
+            dayPnl = old.dayPnl + pnl,
+            dayTrades = old.dayTrades + 1,
+            dayWins = old.dayWins + if (result == "WIN") 1 else 0,
+            consecLosses = when (result) { "LOSS" -> old.consecLosses + 1; "WIN" -> 0; else -> old.consecLosses },
+        )
+        saveRisk(updated)
     }
 
-    /** Regras duras antes de qualquer operação do agente. null = liberado. */
+    /** Salvaguardas diárias para novas opções abertas pelo agente. */
     private fun riskCheck(settings: ConnectorSettings?): String? {
-        val r = risk()
-        val now = System.currentTimeMillis()
-        val sl = settings?.num("daily_stop_loss", 10.0) ?: 10.0
-        val tp = settings?.num("daily_take_profit", 10.0) ?: 10.0
-        val maxL = (settings?.num("max_consec_losses", 3.0) ?: 3.0).toInt()
-        val cooldown = ((settings?.num("cooldown_min", 30.0) ?: 30.0) * 60_000).toLong()
-        val decision = IqRiskPolicy.evaluate(r, now, IqRiskLimits(sl, tp, maxL, cooldown))
-        if (decision.updatedState != r) saveRisk(decision.updatedState)
+        val state = risk()
+        val limits = IqRiskLimits(
+            dailyStopLoss = settings?.num("daily_stop_loss", 10.0) ?: 10.0,
+            dailyTakeProfit = settings?.num("daily_take_profit", 10.0) ?: 10.0,
+            maxConsecutiveLosses = (settings?.num("max_consec_losses", 3.0) ?: 3.0).toInt(),
+            cooldownMillis = ((settings?.num("cooldown_min", 30.0) ?: 30.0) * 60_000).toLong(),
+        )
+        val decision = IqRiskPolicy.evaluate(state, System.currentTimeMillis(), limits)
+        if (decision.updatedState != state) saveRisk(decision.updatedState)
         val until = decision.pauseUntilMillis?.let { SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(it)) }
         return when (decision.block) {
-            IqRiskBlock.PAUSED -> "RECUSADO (regra de proteção): agente em pausa até $until após perdas seguidas. Não opere; aguarde."
-            IqRiskBlock.DAILY_STOP_LOSS -> "RECUSADO (stop loss diário): resultado do dia ${String.format(Locale.US, "%.2f", r.dayPnl)} atingiu o limite de −$sl. Operações do agente encerradas até amanhã."
-            IqRiskBlock.DAILY_TAKE_PROFIT -> "RECUSADO (meta diária atingida): +${String.format(Locale.US, "%.2f", r.dayPnl)} ≥ $tp. Operações do agente encerradas até amanhã — preserve o lucro."
-            IqRiskBlock.CONSECUTIVE_LOSSES -> "RECUSADO (regra de proteção): ${decision.consecutiveLossesAtBlock} perdas seguidas. Agente pausado até $until."
+            IqRiskBlock.PAUSED -> "RECUSADO (proteção): agente em pausa até $until após perdas seguidas."
+            IqRiskBlock.DAILY_STOP_LOSS -> "RECUSADO (stop loss diário): resultado ${String.format(Locale.US, "%.2f", state.dayPnl)} atingiu −${limits.dailyStopLoss}."
+            IqRiskBlock.DAILY_TAKE_PROFIT -> "RECUSADO (meta diária): +${String.format(Locale.US, "%.2f", state.dayPnl)} atingiu ${limits.dailyTakeProfit}."
+            IqRiskBlock.CONSECUTIVE_LOSSES -> "RECUSADO (proteção): ${decision.consecutiveLossesAtBlock} perdas seguidas; pausa até $until."
             null -> null
         }
     }
 
-    private fun mmText(settings: ConnectorSettings?): String {
-        val r = risk()
-        return buildString {
-            if (settings?.bool("mm_enabled") == true) {
-                val m = mmState(settings); val o = odds(settings)
-                val st = Masaniello.stake(m.bank, m.n, m.k, o)
-                appendLine("Masaniello — ciclo ${m.cycle}: faltam ${m.k} acerto(s) em ${m.n} operação(ões) · banca ${String.format(Locale.US, "%.2f", m.bank)} (início ${String.format(Locale.US, "%.2f", m.startBank)}) · " +
-                    "próxima entrada ${st?.let { String.format(Locale.US, "%.2f", it) } ?: "—"} · alvo do ciclo ${String.format(Locale.US, "%.2f", Masaniello.target(m.startBank, m.n + m.wins + m.losses, m.k + m.wins, o))} · ciclos ganhos/encerrados ${m.cyclesWon}/${m.cyclesLost}" +
-                    if (m.lastResult.isNotBlank()) " · último: ${m.lastResult}" else "")
-            } else appendLine("Masaniello desligado.")
-            append("Hoje: ${String.format(Locale.US, "%.2f", r.dayPnl)} em ${r.dayTrades} operação(ões) (${r.dayWins} acerto(s)) · perdas seguidas ${r.consecLosses}" +
-                (if (r.pausedUntil > System.currentTimeMillis()) " · PAUSADO até ${SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(r.pausedUntil))}" else "") +
-                " · stop ${settings?.num("daily_stop_loss", 10.0)} · meta ${settings?.num("daily_take_profit", 10.0)}")
-        }
-    }
-
-    /** Adaptador de transporte: normaliza e descarta explicitamente qualquer candle ainda em formação. */
-    private suspend fun loadClosedCandles(asset: String, timeframe: Int, limit: Int, timeoutMs: Long = 8_000L): PriceSeries {
-        val a = IqProtocol.resolveAsset(loadAssets(), asset)
-            ?: throw IllegalArgumentException("Ativo '$asset' não encontrado na IQ Option.")
-        val id = reqId()
-        val root = request(id, IqProtocol.getCandlesMessage(id, a.id, timeframe, limit.coerceIn(30, 200), serverNowSec()), "candles", timeoutMs = timeoutMs)
-        val closed = IqProtocol.parseCandles(root["msg"] as? JsonObject ?: JsonObject(emptyMap()))
-            .filter { it.from + timeframe <= serverNowSec() }
-            .sortedBy { it.from }
-            .takeLast(limit.coerceIn(30, 200))
-            .map { PriceBar(it.from, it.open, it.max, it.min, it.close, it.volume) }
-        return PriceSeries(a.ticker, timeframe, closed)
-    }
-
-    /** O agente só pode executar CALL/PUT quando a mesma análise pura confirma o lado solicitado. */
-    private suspend fun priceActionCheck(asset: String, dir: String, settings: ConnectorSettings?): String? {
-        val analysis = runCatching { priceActionPipeline.analyze(asset, 60, 150) }.getOrElse {
-            if (it is kotlinx.coroutines.CancellationException) throw it
-            return "RECUSADO (Price Action indisponível): ${it.message ?: "falha ao carregar candles fechados"}. Nenhuma ordem foi enviada."
-        }
-        val gate = PriceActionExecutionGate.authorize(analysis, dir, settings?.bool("price_action_strict") == true)
-        return if (gate.allowed) null else
-            "RECUSADO (Price Action): ${gate.reason} ${analysis.reasons.joinToString(" ")}"
-    }
-
-    /** Compatibilidade: a confluência técnica antiga só acrescenta um veto quando a chave salva está ligada. */
-    private fun legacyConfluenceCheck(series: PriceSeries, dir: String, settings: ConnectorSettings?): String? {
-        if (settings?.text("require_confluence")?.ifEmpty { "true" } == "false") return null
-        val list = series.bars
-        if (list.size < 60) return "RECUSADO (filtro legado): poucas velas fechadas para confluência (${list.size})."
-        val result = TechnicalSuite.analyze(TechnicalSuite.Candles(
-            list.map { it.timeSeconds.toDouble() }, list.map { it.open }, list.map { it.high },
-            list.map { it.low }, list.map { it.close }, list.map { it.volume },
-        ))
-        val expected = IqRules.direction(result.summary, settings?.bool("confluence_strong") == true)
-        return if (expected == dir) null else
-            "RECUSADO (filtro legado de confluência ${timeframeLabel(series.timeframeSeconds)}): '${result.summary}' (${result.buys} compra × ${result.sells} venda) não confirma ${dir.uppercase()}."
-    }
-
-    private suspend fun legacyConfluenceCheck(a: IqProtocol.Asset, dir: String, settings: ConnectorSettings?): String? {
-        if (settings?.text("require_confluence")?.ifEmpty { "true" } == "false") return null
-        val id = reqId()
-        val root = try {
-            request(id, IqProtocol.getCandlesMessage(id, a.id, 60, 150, serverNowSec()), "candles", timeoutMs = 8_000)
-        } catch (t: Throwable) {
-            if (t is kotlinx.coroutines.CancellationException) throw t
-            return "RECUSADO (filtro legado): não foi possível confirmar a confluência; nenhuma ordem foi enviada."
-        }
-        val list = IqProtocol.parseCandles(root["msg"] as? JsonObject ?: JsonObject(emptyMap()))
-            .filter { it.from + 60 <= serverNowSec() }.sortedBy { it.from }
-        if (list.size < 60) return "RECUSADO (filtro legado): poucas velas fechadas para confluência (${list.size})."
-        val result = TechnicalSuite.analyze(TechnicalSuite.Candles(
-            list.map { it.from.toDouble() }, list.map { it.open }, list.map { it.max },
-            list.map { it.min }, list.map { it.close }, list.map { it.volume },
-        ))
-        val expected = IqRules.direction(result.summary, settings?.bool("confluence_strong") == true)
-        return if (expected == dir) null else
-            "RECUSADO (filtro legado de confluência): '${result.summary}' (${result.buys} compra × ${result.sells} venda) não confirma ${dir.uppercase()}."
-    }
-
-    private suspend fun priceAnalysisText(asset: String, timeframe: String?, count: Int?, strict: Boolean): String {
-        val size = IqProtocol.timeframeSeconds(timeframe ?: "60") ?: return "timeframe inválido. Use 60=M1, 120=M2, 300=M5 ou 600=M10 (segundos), por exemplo 1m/2m/5m/10m."
-        val limit = (count ?: 120).coerceIn(30, 200)
-        val analysis = try {
-            priceActionPipeline.analyze(asset, size, limit)
-        } catch (t: Throwable) {
-            if (t is kotlinx.coroutines.CancellationException) throw t
-            return "Análise Price Action indisponível: ${t.message ?: t.javaClass.simpleName}. Nenhum sinal foi gerado."
-        }
-        val gate = PriceActionExecutionGate.authorize(analysis, analysis.decision.name, strict)
-        return buildString {
-            appendLine("Price Action · ${analysis.asset} · ${size}s · ${analysis.barsAnalyzed} candles fechados")
-            appendLine("DECISÃO: ${analysis.decision.name} · ${if (gate.allowed) "candidato pelos critérios de preço (risco e janela ainda não avaliados)" else "NÃO OPERAR neste filtro: ${gate.reason}"}")
-            appendLine("Estrutura: ${analysis.marketStructure.name.lowercase().replace('_', ' ')} · suporte ${analysis.support?.let(::fmtPx) ?: "—"} · resistência ${analysis.resistance?.let(::fmtPx) ?: "—"}")
-            appendLine("Corpo/range: ${analysis.bodyToRange?.let { String.format(Locale.US, "%.0f%%", it * 100) } ?: "—"} · localização do fechamento: ${analysis.closeLocation?.let { String.format(Locale.US, "%.0f%%", it * 100) } ?: "—"} · choque de volatilidade: ${if (analysis.volatilityShock) "sim" else "não"}")
-            analysis.reasons.forEach { appendLine("• $it") }
-            append("Hipóteses heurísticas ainda não validadas; não estimam probabilidade de acerto nem garantem resultado. Backtest é apenas replay histórico.")
-        }
-    }
-
-    private suspend fun backtestText(asset: String, tf: String?, count: Int?, strong: Boolean, settings: ConnectorSettings): String {
-        val a = IqProtocol.resolveAsset(loadAssets(), asset) ?: return "Ativo '$asset' não encontrado."
-        val size = IqProtocol.timeframeSeconds(tf ?: "60") ?: return "timeframe inválido. Use M1/M2/M5/M10 (60/120/300/600 s)."
-        val n = (count ?: 600).coerceIn(300, 1000)
-        val id = reqId()
-        val root = request(id, IqProtocol.getCandlesMessage(id, a.id, size, n, serverNowSec()), "candles", timeoutMs = 20_000)
-        val list = IqProtocol.parseCandles(root["msg"] as? JsonObject ?: JsonObject(emptyMap()))
-            .filter { it.from + size <= serverNowSec() }.sortedBy { it.from }
-        if (list.size < 200) return "Poucas velas para backtest (${list.size})."
-        val payout = odds(settings) - 1
-        val m = mmFresh(settings)
-        val b = withContext(Dispatchers.Default) {
-            IqRules.backtest(list.map { IqRules.Bar(it.open, it.max, it.min, it.close, it.volume) }, payout, strong, 120, m.n, m.k, m.bank, size)
-        }
-        val edge = b.winRate - b.breakEven
-        return buildString {
-            appendLine("Replay Price Action ${a.ticker} · ${size}s · ${list.size} velas fechadas · setups ${if (strong) "FORTES" else "padrão"} · payout hipotético ${String.format(Locale.US, "%.0f", payout * 100)}%")
-            appendLine("Método: decide até o candle fechado i; simula entrada na abertura e saída no fechamento de i+1. Sem latência, spread, rejeições ou liquidação real.")
-            appendLine("Operações ${b.trades} (call ${b.calls} / put ${b.puts}) · acertos ${b.wins} · erros ${b.losses} · empates ${b.ties} · resultados ignorados por candle seguinte inválido ${b.invalidResultCandles}")
-            appendLine("Taxa de acerto ${String.format(Locale.US, "%.1f", b.winRate * 100)}% · equilíbrio matemático pelo payout assumido ${String.format(Locale.US, "%.1f", b.breakEven * 100)}% · diferença descritiva ${String.format(Locale.US, "%+.1f", edge * 100)} p.p. · maior sequência de erros ${b.maxLossStreak}")
-            appendLine("Valor fixo 1: ${String.format(Locale.US, "%+.2f", b.flatPnl)} · Masaniello ${m.k}/${m.n} banca ${m.bank}: ${String.format(Locale.US, "%+.2f", b.mmFinal - m.bank)} (ciclos ganhos ${b.mmCyclesWon}, encerrados ${b.mmCyclesLost})")
-            append(if (b.trades < 30) "Amostra pequena: não conclua nada com menos de 30 operações. "
-                else "Resultado descritivo deste recorte, não evidência de vantagem nem previsão. ")
-            append("Heurísticas não validadas; o replay não autoriza uma ordem.")
-        }
-    }
-
-    // ------------------------------------------------------------------ gatilhos armados (T−2 / T−10 / início de T)
-    private data class Armed(
-        val asset: String, val activeId: Int, val dir: String, val minutes: Int, val amount: Double,
-        val targetOpen: Long, val timeframeSeconds: Int, val settings: ConnectorSettings, val armedAt: Long = System.currentTimeMillis(),
-        @Volatile var status: String = "armado",
-    )
-    private data class SignalCheck(
-        val allowed: Boolean,
-        val direction: String? = null,
-        val strong: Boolean = false,
-        val setupCount: Int = 0,
-        val reason: String,
-    )
-    private data class ScanCandidate(val asset: IqProtocol.Asset, val check: SignalCheck)
-
-    private val armed = java.util.concurrent.CopyOnWriteArrayList<Armed>()
-    private val scanJobs = ConcurrentHashMap<Long, kotlinx.coroutines.Job>()
-    private val pendingScans = ConcurrentHashMap<Long, String>()
-
-    private fun signalTimeframeSeconds(settings: ConnectorSettings): Int? {
-        val configured = settings.num("signal_timeframe_seconds", 60.0)
-        val seconds = configured.toInt()
-        return seconds.takeIf { configured.isFinite() && configured == seconds.toDouble() && it in TwoCandleSignal.SUPPORTED_TIMEFRAMES_SECONDS }
-    }
-
-    private fun timeframeLabel(timeframeSeconds: Int): String = "M${timeframeSeconds / 60}"
-
-    /** Alvo alinhado ao timeframe escolhido, com ao menos 120 s para análise. */
-    private fun nextCandleOpen(aheadSec: Int, timeframeSeconds: Int): Long =
-        IqSignalTiming.nextOpenAtLeastLead(serverNowMs(), aheadSec.toLong(), timeframeSeconds)
-
-    private fun analyzeSignal(series: PriceSeries, targetOpen: Long, cutoffSec: Long, timeframeSeconds: Int, settings: ConnectorSettings): SignalCheck {
-        val bars = series.bars.filter { it.timeSeconds + timeframeSeconds <= cutoffSec && it.timeSeconds + timeframeSeconds <= targetOpen }
-            .sortedBy { it.timeSeconds }
-        val expectedLast = IqSignalTiming.latestClosedCandleOpen(cutoffSec, timeframeSeconds.toLong())
-        if (bars.lastOrNull()?.timeSeconds != expectedLast)
-            return SignalCheck(false, reason = "candle ${timeframeLabel(timeframeSeconds)} mais recente ausente ou stale no corte $cutoffSec.")
-        val asOf = PriceSeries(series.asset, timeframeSeconds, bars)
-        val pair = TwoCandleSignal.analyze(bars, targetOpen, cutoffSec, timeframeSeconds)
-        if (!pair.allowed) return SignalCheck(false, reason = pair.reason)
-        val pa = PriceActionAnalyzer().analyze(asOf)
-        if (pa.decision == TradeDirection.NO_TRADE)
-            return SignalCheck(false, reason = "Price Action indica NÃO OPERAR: ${pa.reasons.joinToString(" ")}")
-        if (pa.decision != pair.direction)
-            return SignalCheck(false, reason = "Price Action (${pa.decision}) diverge da confirmação de dois candles (${pair.direction}).")
-        val dir = if (pa.decision == TradeDirection.CALL) "call" else "put"
-        val paGate = PriceActionExecutionGate.authorize(pa, dir, settings.bool("price_action_strict"))
-        if (!paGate.allowed) return SignalCheck(false, reason = paGate.reason)
-        legacyConfluenceCheck(asOf, dir, settings)?.let { return SignalCheck(false, reason = it) }
-        return SignalCheck(true, dir, pa.strongSetup, pa.setups.size, pair.reason)
-    }
-
-    private suspend fun scanCandidates(assetsToScan: List<IqProtocol.Asset>, targetOpen: Long, analysisAtSec: Long, timeframeSeconds: Int, settings: ConnectorSettings): List<ScanCandidate> =
-        kotlinx.coroutines.coroutineScope {
-            val semaphore = Semaphore(6)
-            assetsToScan.map { asset ->
-                async(Dispatchers.IO) {
-                    semaphore.withPermit {
-                        try {
-                            val series = priceActionPipeline.load(asset.ticker, timeframeSeconds, 150)
-                            val check = analyzeSignal(series, targetOpen, analysisAtSec, timeframeSeconds, settings)
-                            if (check.allowed) ScanCandidate(asset, check) else null
-                        } catch (t: Throwable) {
-                            if (t is kotlinx.coroutines.CancellationException) throw t
-                            null
-                        }
-                    }
-                }
-            }.awaitAll().filterNotNull()
-        }
-
-    private suspend fun scanAndArm(args: Map<String, String>, settings: ConnectorSettings): String {
-        ensureConnected()
-        if (!dev.cueopen.app.CueApp.instance.uiConnectors.enabled("iqoption"))
-            return "RECUSADO: o conector IQ Option está desativado; nenhuma varredura foi agendada."
-        if (!IqSignalAlarms.canScheduleExact(dev.cueopen.app.CueApp.instance))
-            return "RECUSADO: permissão de alarme exato ausente. Ative 'Alarmes e lembretes' para o Cue; sem isso nenhum sinal automático será armado."
-        if (!awaitFreshServerClock()) return "RECUSADO: relógio de servidor da IQ Option ausente/obsoleto; nenhuma varredura foi agendada."
-        if (settings.bool("require_jev"))
-            return "RECUSADO: 'Exigir validação TypeSafe Jev' está LIGADO; varredura/entrada automática não pode ignorar essa validação."
-        riskCheck(settings)?.let { return it }
-        val minutes = (args["minutes"]?.toDoubleOrNull()?.toInt() ?: 1).coerceIn(1, 60)
-        val amount = args["amount"]?.replace(',', '.')?.toDoubleOrNull() ?: settings.num("max_amount", 1.0)
-        if (!amount.isFinite() || amount <= 0.0) return "RECUSADO: amount deve ser finito e maior que zero."
-        val timeframeSeconds = signalTimeframeSeconds(settings)
-            ?: return "RECUSADO: signal_timeframe_seconds deve ser 60 (M1), 120 (M2), 300 (M5) ou 600 (M10)."
-        val target = nextCandleOpen(IqSignalTiming.ANALYSIS_LEAD_SECONDS.toInt(), timeframeSeconds)
-        val targetMs = target * 1000L
-        synchronized(scanJobs) {
-            if (scanJobs.containsKey(target) || signalDispatcher.signals().any { it.targetOpenSec == target && it.state !in IqArmedSignal.TERMINAL_STATES })
-                return "Já existe uma varredura ou sinal armado para ${hms(target)}. Consulte armed_list."
-            pendingScans[target] = "${timeframeLabel(timeframeSeconds)} agendada; análise em T−2 min"
-            val job = bg.launch(start = CoroutineStart.LAZY) {
-                try {
-                    val analysisAtMs = IqSignalTiming.analysisAtMs(target)
-                    while (serverNowMs() < analysisAtMs) delay((analysisAtMs - serverNowMs()).coerceIn(1L, 1_000L))
-                    if (serverNowMs() > analysisAtMs + 1_000L || !serverClockFresh()) {
-                        pendingScans[target] = "cancelada: relógio/temporização perdeu T−2"
-                        return@launch
-                    }
-                    pendingScans[target] = "analisando todos os ativos turbo/binários em T−2 no ${timeframeLabel(timeframeSeconds)}"
-                    val universe = withTimeout(10_000) { loadAssets(force = true) }
-                        .filter { it.open && it.kind in setOf("turbo", "binary") }
-                        .distinctBy { it.id }
-                    if (universe.isEmpty()) {
-                        pendingScans[target] = "sem ativos turbo/binários abertos"
-                        return@launch
-                    }
-                    val remainingScanBudget = (targetMs - IqSignalTiming.REVALIDATION_LEAD_SECONDS * 1_000L - serverNowMs() - 3_000L).coerceAtLeast(1L)
-                    val candidates = withTimeout(minOf(90_000L, remainingScanBudget)) {
-                        scanCandidates(universe, target, analysisAtMs / 1000, timeframeSeconds, settings)
-                    }
-                    if (serverNowMs() >= targetMs - IqSignalTiming.REVALIDATION_LEAD_SECONDS * 1_000L || !serverClockFresh()) {
-                        pendingScans[target] = "cancelada: varredura tardia ou relógio stale; nenhuma ordem"
-                        return@launch
-                    }
-                    val best = candidates.sortedWith(
-                        compareByDescending<ScanCandidate> { it.check.strong }
-                            .thenByDescending { it.check.setupCount }
-                            .thenBy { it.asset.ticker },
-                    ).firstOrNull()
-                    if (best == null) {
-                        pendingScans[target] = "sem candidato: o par fechado ${timeframeLabel(timeframeSeconds)} ou os filtros Price Action/TechnicalSuite não confirmaram um lado"
-                        return@launch
-                    }
-                    val record = IqArmedSignal(
-                        id = "iq-$target-${best.asset.id}", asset = best.asset.ticker, activeId = best.asset.id,
-                        direction = best.check.direction!!, amount = amount, minutes = minutes,
-                        targetOpenSec = target, timeframeSeconds = timeframeSeconds,
-                        entryWindowSeconds = settings.num("max_entry_delay_sec", 10.0).toInt().coerceAtLeast(3),
-                        armedAtMs = serverNowMs(),
-                    )
-                    val persisted = signalDispatcher.arm(record)
-                    armed.removeAll { it.targetOpen == target }
-                    if (persisted.id == record.id && persisted.state == IqArmedSignal.ARMED) {
-                        armed += Armed(persisted.asset, persisted.activeId, persisted.direction, persisted.minutes, persisted.amount,
-                            persisted.targetOpenSec, persisted.timeframeSeconds, settings, persisted.armedAtMs)
-                    }
-                    subscribeQuotes(persisted.activeId)
-                    pendingScans[target] = when {
-                        persisted.id != record.id -> "vela já possui ${persisted.asset} ${persisted.direction.uppercase()} (${persisted.state}); não rearmado"
-                        persisted.state == IqArmedSignal.ARMED -> "${persisted.asset} ${persisted.direction.uppercase()} persistido; dispatcher independente aguardando T−50/T−25/T−10"
-                        else -> "sinal expirado sem ordem: ${persisted.detail}"
-                    }
-                } catch (t: Throwable) {
-                    if (t is kotlinx.coroutines.CancellationException) throw t
-                    pendingScans[target] = "falhou sem ordem: ${t.message ?: t.javaClass.simpleName}"
-                } finally {
-                    scanJobs.remove(target)
-                    bg.launch { delay(300_000); pendingScans.remove(target) }
-                }
-            }
-            scanJobs[target] = job
-            job.start()
-        }
-        return "Varredura agendada: timeframe ${timeframeLabel(timeframeSeconds)}, candle-alvo às ${hms(target)}. Em T−2 min o conector analisa os ativos turbo/binários e persiste no máximo um sinal. Sem depender do agente, revalida no máximo em T−50, T−25 e T−10; em T confirma novamente os dois candles fechados mais recentes, o candle-alvo, a cotação e os gates de risco. Qualquer falha ou atraso além da janela resulta em nenhuma ordem. Outros timeframes não precisam concordar; MHI não é usado."
-    }
-
-    private suspend fun prevalidateArmed(t: Armed): String? {
-        if (!serverClockFresh()) return "relógio do servidor stale na revalidação pré-candle; nenhuma ordem"
-        val cutoff = minOf(serverNowSec(), t.targetOpen)
-        val series = try { priceActionPipeline.load(t.asset, t.timeframeSeconds, 150) } catch (e: Throwable) {
-            if (e is kotlinx.coroutines.CancellationException) throw e
-            return "candles indisponíveis na revalidação pré-candle: ${e.message ?: e.javaClass.simpleName}"
-        }
-        val check = analyzeSignal(series, t.targetOpen, cutoff, t.timeframeSeconds, t.settings)
-        if (!check.allowed) return "revalidação pré-candle recusada: ${check.reason}"
-        if (check.direction != t.dir) return "revalidação pré-candle mudou de direção (${check.direction} ≠ ${t.dir})"
-        return null
-    }
-
-    private fun currentDispatchSettings(): ConnectorSettings? {
-        val app = runCatching { dev.cueopen.app.CueApp.instance }.getOrNull() ?: return null
-        if (!app.uiConnectors.enabled("iqoption")) return null
-        return app.uiConnectors.settings(this)
-    }
-
-    private fun signalStrategyFingerprint(settings: ConnectorSettings): String = listOf(
-        signalTimeframeSeconds(settings)?.toString().orEmpty(),
-        settings.text("require_confluence").ifEmpty { "true" },
-        settings.bool("confluence_strong").toString(),
-        settings.bool("price_action_strict").toString(),
-    ).joinToString("|")
-
-    private suspend fun revalidatePersistedSignal(signal: IqArmedSignal): IqSignalValidationResult {
-        val settings = currentDispatchSettings()
-            ?: return IqSignalValidationResult(failure = "conector desativado ou configurações indisponíveis; nenhuma ordem")
-        if (settings.bool("require_jev")) return IqSignalValidationResult(failure = "validação TypeSafe Jev está ligada; dispatcher não pode ignorá-la")
-        if (signalTimeframeSeconds(settings) != signal.timeframeSeconds)
-            return IqSignalValidationResult(failure = "timeframe mudou desde o armamento; sinal invalidado")
-        riskCheck(settings)?.let { return IqSignalValidationResult(failure = "risco atual recusou: $it") }
-        ensureConnected()
-        if (!awaitFreshServerClock()) return IqSignalValidationResult(failure = "relógio do servidor ausente/stale na revalidação pré-candle; nenhuma ordem")
-        subscribeQuotes(signal.activeId)
-        val armedSignal = Armed(
-            asset = signal.asset, activeId = signal.activeId, dir = signal.direction,
-            minutes = signal.minutes, amount = signal.amount, targetOpen = signal.targetOpenSec,
-            timeframeSeconds = signal.timeframeSeconds, settings = settings, armedAt = signal.armedAtMs,
-        )
-        val failure = prevalidateArmed(armedSignal)
-        return if (failure != null) IqSignalValidationResult(failure = failure)
-        else IqSignalValidationResult(strategyFingerprint = signalStrategyFingerprint(settings))
-    }
-
-    private suspend fun submitPersistedSignal(signal: IqArmedSignal): IqSubmissionResult {
-        val settings = currentDispatchSettings()
-            ?: return IqSubmissionResult.Rejected("conector desativado/configurações indisponíveis; nenhuma ordem")
-        if (settings.bool("require_jev"))
-            return IqSubmissionResult.Rejected("validação TypeSafe Jev foi ativada após o armamento; nenhuma ordem")
-        if (signalTimeframeSeconds(settings) != signal.timeframeSeconds)
-            return IqSubmissionResult.Rejected("timeframe mudou desde o armamento; nenhuma ordem")
-        if (signal.prevalidatedFingerprint.isNullOrBlank() || signal.prevalidatedFingerprint != signalStrategyFingerprint(settings))
-            return IqSubmissionResult.Rejected("configuração de análise mudou após a revalidação; nenhuma ordem")
-        val prevalidatedAt = signal.prevalidatedAtMs
-            ?: return IqSubmissionResult.Rejected("revalidação pré-candle ausente; nenhuma ordem")
-        val result = buy(
-            asset = signal.asset, direction = signal.direction, amount = signal.amount, minutes = signal.minutes,
-            settings = settings, byAgent = true, targetOpenSec = signal.targetOpenSec,
-            prevalidatedAtMs = prevalidatedAt,
-        )
-        return if (result.startsWith("Ordem ABERTA")) IqSubmissionResult.Accepted(result)
-        else IqSubmissionResult.Rejected(result)
-    }
-
-    suspend fun dispatchSignalAlarm(signalId: String): IqDispatchOutcome = signalDispatcher.wake(signalId)
-
-    fun failSignalBeforeDispatch(signalId: String, reason: String) = signalDispatcher.failBeforeDispatch(signalId, reason)
-
-    fun deferSignalUntilRevalidation(signalId: String, nowEpochMs: Long, reason: String): Boolean =
-        signalDispatcher.deferUntilRevalidation(signalId, nowEpochMs, reason)
-
-    /** Apaga somente sinais terminais do ledger local; operações e ordens da corretora não são tocadas. */
-    fun clearTerminalSignalHistory(): Int = signalDispatcher.clearTerminalSignals()
-
-    private fun armedListText(): String {
-        val now = serverNowSec()
-        val lines = ArrayList<String>()
-        pendingScans.entries.sortedBy { it.key }.forEach { (target, status) ->
-            lines += "Varredura · vela ${hms(target)} (${if (target > now) "em ${target - now}s" else "ativa"}) · $status"
-        }
-        signalDispatcher.signals().sortedBy { it.targetOpenSec }.takeLast(30).forEach { signal ->
-            val status = when (signal.state) {
-                IqArmedSignal.ARMED -> signal.detail.ifBlank { "armado/persistido; aguardando revalidação T−50/T−25/T−10" }
-                IqArmedSignal.VALIDATED -> "revalidado; aguardando alarme T"
-                IqArmedSignal.SUBMITTING -> "envio iniciado/resultado incerto; não repetir automaticamente"
-                IqArmedSignal.EXECUTED -> "EXECUTADO: ${signal.detail}"
-                IqArmedSignal.CANCELLED -> "cancelado: ${signal.detail}"
-                IqArmedSignal.EXPIRED -> "expirado: ${signal.detail}"
-                IqArmedSignal.FAILED -> "falhou: ${signal.detail}"
-                IqArmedSignal.INVALIDATED -> "invalidado: ${signal.detail}"
-                else -> signal.detail
-            }
-            lines += "${signal.asset} ${signal.direction.uppercase()} · ${timeframeLabel(signal.timeframeSeconds)} · vela ${hms(signal.targetOpenSec)} (${if (signal.targetOpenSec > now) "em ${signal.targetOpenSec - now}s" else "ativa"}) · $status"
-        }
-        return if (lines.isEmpty()) "Nenhum sinal ou varredura armados." else "Sinais/varreduras armados:\n" + lines.joinToString("\n")
-    }
-
-    private fun disarm(asset: String): String {
-        val all = asset.equals("all", true) || asset.isBlank()
-        val selected = signalDispatcher.signals().filter {
-            all || it.asset.equals(asset.trim(), true) || it.asset.removeSuffix("-OTC").equals(asset.trim(), true)
-        }
-        var cancelled = 0
-        selected.filter { it.state in IqArmedSignal.ACTIVE_STATES }.forEach { if (signalDispatcher.cancel(it.id)) cancelled++ }
-        val sending = selected.count { it.state == IqArmedSignal.SUBMITTING || it.state == IqArmedSignal.EXECUTED }
-        if (all) {
-            armed.clear()
-            scanJobs.values.forEach { it.cancel() }
-            scanJobs.clear(); pendingScans.clear()
-        } else {
-            armed.removeAll { it.asset.equals(asset.trim(), true) || it.asset.removeSuffix("-OTC").equals(asset.trim(), true) }
-        }
-        val cancelledScans = if (all) "; varreduras pendentes canceladas" else "; varreduras multiativo pendentes não foram canceladas (use all)"
-        val protected = if (sending > 0) " ${sending} sinal(is) já submetido(s)/executado(s) não foi/foram cancelado(s)." else ""
-        return "Cancelado(s) $cancelled sinal(is) ainda não submetido(s).$protected$cancelledScans"
-    }
-
-    // ------------------------------------------------------------------ catalogador (mesmo horário nos últimos dias)
-    /** Epoch (s) do início da vela de [tf] que contém o HH:MM de hoje menos [daysBack] dias (hora local). */
-    private fun targetEpoch(hhmm: String?, tf: Int, daysBack: Int): Long {
-        val cal = java.util.Calendar.getInstance()
-        if (!hhmm.isNullOrBlank() && Regex("^\\d{1,2}:\\d{2}$").matches(hhmm.trim())) {
-            val (h, m) = hhmm.trim().split(":").map { it.toInt() }
-            cal.set(java.util.Calendar.HOUR_OF_DAY, h); cal.set(java.util.Calendar.MINUTE, m); cal.set(java.util.Calendar.SECOND, 0)
-        } else {
-            // próxima vela
-            val sec = (serverNowMs() / 1000 / tf + 1) * tf
-            cal.timeInMillis = sec * 1000
-        }
-        cal.add(java.util.Calendar.DAY_OF_YEAR, -daysBack)
-        val base = cal.timeInMillis / 1000
-        return base / tf * tf
-    }
-
-    private suspend fun catalogText(asset: String, time: String?, daysArg: Int?, tf: Int): String {
-        val a = IqProtocol.resolveAsset(loadAssets(), asset) ?: return "Ativo '$asset' não encontrado." + similar(asset)
-        val days = (daysArg ?: 5).coerceIn(1, 20)
-        val label = time?.takeIf { it.isNotBlank() } ?: SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(((serverNowMs() / 1000 / tf + 1) * tf) * 1000))
-        data class Day(val date: String, val color: Int, val open: Double, val close: Double)
-        val rows = ArrayList<Day>()
-        for (d in 1..days) {
-            val target = targetEpoch(time, tf, d)
-            val root = runCatching { request(reqId(), IqProtocol.getCandlesMessage(reqId(), a.id, tf, 3, target + tf), "candles", timeoutMs = 8_000) }.getOrNull() ?: continue
-            val cdl = IqProtocol.parseCandles(root["msg"] as? JsonObject ?: JsonObject(emptyMap())).firstOrNull { it.from == target }
-                ?: IqProtocol.parseCandles(root["msg"] as? JsonObject ?: JsonObject(emptyMap())).maxByOrNull { it.from } ?: continue
-            val color = if (cdl.close > cdl.open) 1 else if (cdl.close < cdl.open) -1 else 0
-            rows.add(Day(SimpleDateFormat("dd/MM", Locale.getDefault()).format(Date(target * 1000)), color, cdl.open, cdl.close))
-        }
-        if (rows.isEmpty()) return "Catálogo ${a.ticker} às $label: a IQ Option não devolveu as velas desse horário nos últimos $days dias."
-        val greens = rows.count { it.color == 1 }; val reds = rows.count { it.color == -1 }; val dojis = rows.count { it.color == 0 }
-        val dir = when { greens > reds -> "CALL (subiu mais vezes)"; reds > greens -> "PUT (caiu mais vezes)"; else -> "sem tendência clara" }
-        val streak = run { var c = 0; for (r in rows) { if (r.color == rows.first().color && r.color != 0) c++ else break }; c }
-        return buildString {
-            appendLine("Catálogo ${a.ticker} · vela das $label · últimos $days dias (vela de ${tf}s):")
-            rows.forEach { appendLine("${it.date}: ${if (it.color > 0) "▲ CALL" else if (it.color < 0) "▼ PUT" else "• doji"} (${fmtPx(it.open)}→${fmtPx(it.close)})") }
-            appendLine("Resumo: $greens verde(s) / $reds vermelho(s)${if (dojis > 0) " / $dojis doji" else ""} · tendência: $dir")
-            append("Sequência atual no topo da lista: $streak dia(s) na mesma cor. Padrão de repetição não garante o próximo resultado.")
-        }
-    }
-
-    // ------------------------------------------------------------------ estratégias MHI
-    private data class StratCache(val at: Long, val ticker: String, val stats: List<Mhi.Stats>, val candles: List<Mhi.M1>)
-    private val stratCache = ConcurrentHashMap<String, StratCache>()
-
-    private suspend fun strategies(asset: String): StratCache? {
-        val a = IqProtocol.resolveAsset(loadAssets(), asset) ?: return null
-        stratCache[a.ticker]?.takeIf { System.currentTimeMillis() - it.at < 50_000 }?.let { return it }
-        val id = reqId()
-        val root = request(id, IqProtocol.getCandlesMessage(id, a.id, 60, 1000, serverNowSec()), "candles", timeoutMs = 20_000)
-        val list = IqProtocol.parseCandles(root["msg"] as? JsonObject ?: JsonObject(emptyMap())).sortedBy { it.from }
-            .map { Mhi.M1(it.from, it.open, it.close) }
-        val now = serverNowSec()
-        val closed = list.filter { it.from + 60 <= now }
-        val stats = withContext(Dispatchers.Default) { Mhi.VARIANTS.map { Mhi.backtest(closed, it) } }
-        return StratCache(System.currentTimeMillis(), a.ticker, stats, list).also { stratCache[a.ticker] = it }
-    }
-
-    private fun pct(v: Double) = String.format(Locale.US, "%.0f%%", v * 100)
-
-    private suspend fun strategiesText(asset: String): String {
-        val sc = strategies(asset) ?: return "Ativo '$asset' não encontrado." + similar(asset)
-        val now = serverNowSec()
-        val up = Mhi.upcoming(sc.candles, now, (10)).associateBy { it.variant.name }
-        val best = sc.stats.filter { it.signals >= 20 }.maxByOrNull { it.rateG0 }
-        return buildString {
-            appendLine("Estratégias MHI — ${sc.ticker} · velas de 1 min reais (~${sc.candles.size} min) · servidor ${hms(now)}")
-            sc.stats.sortedByDescending { it.rateG0 }.forEach { st ->
-                val sig = up[st.variant.name]
-                appendLine("${st.variant.name}: G0 ${pct(st.rateG0)} · G1 ${pct(st.rateG1)} · G2 ${pct(st.rateG2)} (${st.signals} sinais)" +
-                    (sig?.let { " · PRÓXIMO: ${it.direction.uppercase()} às ${hms(it.entryAt)} (${if (it.entryAt > now) "em ${it.entryAt - now}s" else "AGORA"})" } ?: ""))
-            }
-            appendLine("Equilíbrio pelo payout: ${pct(1.0 / (1 + 0.85))} de acerto em G0 (com 85%).")
-            append(if (best == null) "Poucos sinais para comparar." else "Melhor agora: ${best.variant.name} com ${pct(best.rateG0)} em G0 (${best.signals} sinais). " +
-                "O app executa só a entrada principal (G0); gale não é automático. Resultado passado não garante o futuro.")
-        }
-    }
-
-    /** Contexto real de candles fechados, análise técnica e gerenciamento para o avaliador TypeSafe Jev. */
-    suspend fun jevContext(asset: String, direction: String): String = runCatching {
-        withTimeout(12_000) {
-            ensureConnected()
-            val a = IqProtocol.resolveAsset(loadAssets(), asset) ?: return@withTimeout "[$asset] ativo não encontrado na IQ Option."
-            val now = serverNowSec()
-            val m1 = loadClosedCandles(a.ticker, 60, 150).bars
-            val tech = if (m1.size >= 60) TechnicalSuite.analyze(TechnicalSuite.Candles(m1.map { it.timeSeconds.toDouble() }, m1.map { it.open },
-                m1.map { it.high }, m1.map { it.low }, m1.map { it.close }, m1.map { it.volume })) else null
-            val dir = direction.lowercase().let { if (it in setOf("buy", "compra", "call")) "call" else if (it in setOf("sell", "venda", "put")) "put" else it }
-            val pa = if (m1.size >= 30) PriceActionAnalyzer().analyze(PriceSeries(a.ticker, 60, m1)) else null
-            buildString {
-                appendLine("[${a.ticker} · direção pedida ${dir.uppercase()} · servidor ${hms(now)}]")
-                if (tech != null) appendLine("Resumo técnico (35 indicadores, M1): ${tech.summary} — ${tech.buys} compra × ${tech.sells} venda; médias ${tech.maBuys}/${tech.maSells}, osciladores ${tech.oscBuys}/${tech.oscSells}. " +
-                    tech.rows.filter { it.name.startsWith("RSI") || it.name.startsWith("MACD") || it.name.startsWith("ADX") || it.name.startsWith("Estoc") || it.name.startsWith("EMA(20)") || it.name.startsWith("Supertrend") }
-                        .joinToString("; ") { "${it.name}=${it.value?.let { v -> fmtPx(v) } ?: "—"} (${it.signal})" })
-                if (pa != null) appendLine("Price Action M1: ${pa.decision} · ${pa.reasons.joinToString("; ")}")
-                val last2 = m1.takeLast(2)
-                if (last2.size == 2) appendLine("Dois últimos candles M1 fechados: ${last2.joinToString(" → ") { if (it.close > it.open) "alta" else if (it.close < it.open) "baixa" else "doji" }}; use como dado, não como previsão isolada.")
-                val rk = risk()
-                append("Gerenciamento: hoje ${String.format(Locale.US, "%+.2f", rk.dayPnl)} em ${rk.dayTrades} operação(ões), perdas seguidas ${rk.consecLosses}.")
-            }
-        }
-    }.getOrElse { "[$asset] contexto da IQ Option indisponível: ${it.message ?: it.javaClass.simpleName}" }
-
-    private fun serverNowMs(): Long {
-        val baseServer = serverEpochAtSyncMs
-        val baseElapsed = serverElapsedAtSyncMs
-        val elapsed = runCatching { android.os.SystemClock.elapsedRealtime() }.getOrNull()
-        return if (elapsed != null && baseServer > 0L && baseElapsed > 0L && elapsed >= baseElapsed)
-            baseServer + (elapsed - baseElapsed)
-        else System.currentTimeMillis()
-    }
-
-    private fun hms(epochSec: Long): String = SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date(epochSec * 1000))
-
-    /** Situação da vela atual no relógio do servidor + quanto dormir para acordar antes da próxima. */
-    private fun clockText(tf: Int, settings: ConnectorSettings?): String {
-        val nowMs = serverNowMs()
-        val nowSec = nowMs / 1000
-        val open = nowSec / tf * tf
-        val next = open + tf
-        val elapsed = nowSec - open
-        val toNext = (next * 1000 - nowMs) / 1000.0
-        val window = (settings?.num("max_entry_delay_sec", 10.0) ?: 10.0).toInt()
-        val lead = IqSignalTiming.FINAL_ENTRY_LEAD_SECONDS.toInt()
-        val sleepSec = (toNext - lead).let { if (it < 0) it + tf else it }.toInt().coerceAtLeast(1)
-        val canEnter = window <= 0 || elapsed <= window
-        return buildString {
-            appendLine("Servidor: ${hms(nowSec)} · server_now_epoch_ms=$nowMs · next_open_epoch_ms=${next * 1_000L} · sync_fresh=${serverClockFresh()}")
-            appendLine("Timeframe ${timeframeLabel(tf)}: vela aberta às ${hms(open)} (há ${elapsed}s) · próxima abre às ${hms(next)} (em ${String.format(Locale.US, "%.1f", toNext)}s)")
-            appendLine(if (canEnter) "JANELA DE ENTRADA ABERTA: alvo ${timeframeLabel(tf)} dentro do limite de ${window}s após a abertura."
-                else "Fora da janela de entrada (${window}s): NÃO entre no meio da vela.")
-            append("Para pegar o início da próxima vela: sleep seconds=$sleepSec, lead_seconds=$lead e server_now_epoch_ms=$nowMs (acorda ~${lead}s antes de ${hms(if (toNext - lead < 0) next + tf else next)}); depois valide vela e cotação.")
-        }
-    }
-
-    /** Guardrail da janela de entrada no início da vela escolhida. null = ok. */
-    private fun entryWindowCheck(settings: ConnectorSettings?, targetOpenSec: Long? = null, timeframeSeconds: Int = 60): String? {
-        val window = (settings?.num("max_entry_delay_sec", 10.0) ?: 10.0).toInt()
-        val nowMs = serverNowMs(); val nowSec = nowMs / 1000
-        if (targetOpenSec != null) {
-            if (!serverClockFresh()) return "RECUSADO: relógio do servidor stale na abertura do candle-alvo."
-            val safeWindow = window.coerceAtLeast(3)
-            if (!IqSignalTiming.isWithinEntryWindow(nowMs, targetOpenSec, safeWindow.toLong()))
-                return if (nowMs < targetOpenSec * 1_000L)
-                    "RECUSADO: a vela-alvo ${timeframeLabel(timeframeSeconds)} ainda não abriu."
-                else "RECUSADO (fora da janela de entrada): T+${nowSec - targetOpenSec}s excede o limite ${safeWindow}s."
-            val actualOpen = Math.floorDiv(nowSec, timeframeSeconds.toLong()) * timeframeSeconds
-            if (actualOpen != targetOpenSec) return "RECUSADO: candle atual não corresponde ao alvo ${timeframeLabel(timeframeSeconds)} ${hms(targetOpenSec)}."
-            return null
-        }
-        if (window <= 0) return null
-        val elapsed = nowSec % 60
-        if (elapsed <= window) return null
-        val next = nowSec / 60 * 60 + 60
-        val toNext = (next * 1000 - nowMs) / 1000.0
-        val sleepSec = (toNext - 6).let { if (it < 0) it + 60 else it }.toInt().coerceAtLeast(1)
-        return "RECUSADO (fora da janela de entrada): a vela atual abriu há ${elapsed}s (limite ${window}s); entrar agora pegaria o meio da vela. " +
-            "A próxima vela abre às ${hms(next)} (em ${String.format(Locale.US, "%.0f", toNext)}s): chame sleep seconds=$sleepSec e entre nos primeiros segundos dela."
-    }
-
-    /**
-     * Filtro de entrada contra o candle de 1 min (depois da validação TypeSafe Jev, antes da ordem):
-     * CALL só com preço atual ABAIXO da abertura do candle; PUT só ACIMA. null = pode entrar; senão o motivo (RECUSADO…).
-     */
-    private suspend fun entryCheck(
-        a: IqProtocol.Asset,
-        dir: String,
-        targetOpenSec: Long? = null,
-        timeframeSeconds: Int = 60,
-        checkAgainst: Boolean = true,
-    ): String? {
-        if (targetOpenSec != null) {
-            if (!serverClockFresh()) return "RECUSADO: relógio do servidor stale para o candle-alvo."
-            val nowSec = serverNowSec()
-            if (nowSec < targetOpenSec || nowSec >= targetOpenSec + timeframeSeconds)
-                return "candle-alvo ainda indisponível ou já fechado; nenhuma ordem foi enviada."
-            subscribeQuotes(a.id)
-            val id = reqId()
-            val root = runCatching {
-                request(id, IqProtocol.getCandlesMessage(id, a.id, timeframeSeconds, 2, nowSec), "candles", timeoutMs = 3_000)
-            }.getOrNull() ?: return "candle-alvo ainda indisponível; tente novamente dentro da janela."
-            val candleMessage = root["msg"] as? JsonObject
-                ?: return "candle-alvo ainda indisponível; tente novamente dentro da janela."
-            val cdl = IqProtocol.parseCandles(candleMessage)
-                .firstOrNull { it.from == targetOpenSec }
-                ?: return "candle-alvo ainda indisponível; tente novamente dentro da janela."
-            if (!listOf(cdl.open, cdl.close, cdl.min, cdl.max).all { it.isFinite() } || cdl.max < maxOf(cdl.open, cdl.close) || cdl.min > minOf(cdl.open, cdl.close))
-                return "RECUSADO: OHLC inválido no candle-alvo."
-            val quote = quotes[a.id] ?: return "cotação atual indisponível; aguardando atualização do servidor."
-            val received = quoteReceivedAtElapsedMs[a.id] ?: return "cotação atual indisponível; aguardando atualização do servidor."
-            val quoteAge = android.os.SystemClock.elapsedRealtime() - received
-            if (quoteAge < 0L || quoteAge > 2_500L || !quote.isFinite() || quote <= 0.0)
-                return "cotação atual indisponível/stale; aguardando atualização do servidor."
-            if (!checkAgainst) return null
-            val open = cdl.open
-            return when {
-                dir == "call" && quote < open -> null
-                dir == "put" && quote > open -> null
-                dir == "call" -> "RECUSADO (entrada contra o candle): CALL exige cotação ABAIXO da abertura ${fmtPx(open)}, mas o preço atual está ${fmtPx(quote)}."
-                else -> "RECUSADO (entrada contra o candle): PUT exige cotação ACIMA da abertura ${fmtPx(open)}, mas o preço atual está ${fmtPx(quote)}."
-            }
-        }
-        val id = reqId()
-        val root = runCatching { request(id, IqProtocol.getCandlesMessage(id, a.id, 60, 1, serverNowSec()), "candles", timeoutMs = 5_000) }.getOrNull()
-            ?: return "RECUSADO: não consegui ler o candle atual de ${a.ticker} para conferir a entrada. Tente de novo."
-        val cdl = IqProtocol.parseCandles(root["msg"] as? JsonObject ?: JsonObject(emptyMap())).maxByOrNull { it.from }
-            ?: return "RECUSADO: candle atual de ${a.ticker} indisponível. Tente de novo."
-        val now = cdl.close // fechamento do candle em formação = preço atual no servidor
-        val open = cdl.open
-        fun px(v: Double) = fmtPx(v)
-        return when {
-            dir == "call" && now < open -> null
-            dir == "put" && now > open -> null
-            dir == "call" -> "RECUSADO (entrada contra o candle): CALL exige preço ABAIXO da abertura do candle de 1 min, mas está ${if (now == open) "igual à" else "acima da"} abertura (${px(now)} vs ${px(open)}). Aguarde o preço recuar abaixo de ${px(open)} e tente de novo em 2–3 s enquanto a janela de entrada estiver aberta; se ela fechar, use candle_clock e espere a próxima vela."
-            else -> "RECUSADO (entrada contra o candle): PUT exige preço ACIMA da abertura do candle de 1 min, mas está ${if (now == open) "igual à" else "abaixo da"} abertura (${px(now)} vs ${px(open)}). Aguarde o preço subir acima de ${px(open)} e tente de novo em 2–3 s enquanto a janela de entrada estiver aberta; se ela fechar, use candle_clock e espere a próxima vela."
-        }
-    }
-
-    /** Busca as velas reais e passa para a suíte de indicadores (que não busca nada sozinha). */
-    private suspend fun indicatorsText(asset: String, tf: String?, count: Int?): String {
-        val a = IqProtocol.resolveAsset(loadAssets(), asset) ?: return "Ativo '$asset' não encontrado." + similar(asset)
-        val size = IqProtocol.timeframeSeconds(tf ?: "60") ?: return "timeframe inválido. Use 60=M1, 120=M2, 300=M5 ou 600=M10 (segundos), por exemplo 1m/2m/5m/10m."
-        val n = (count ?: 300).coerceIn(50, 1000)
-        val id = reqId()
-        val root = request(id, IqProtocol.getCandlesMessage(id, a.id, size, n, serverNowSec()), "candles", timeoutMs = 20_000)
-        val list = IqProtocol.parseCandles(root["msg"] as? JsonObject ?: JsonObject(emptyMap())).sortedBy { it.from }
-        if (list.size < 30) return "Poucas velas para análise (${list.size}). Tente outro timeframe ou ativo."
-        val k = dev.cueopen.app.uiconnector.custom.TechnicalSuite.Candles(
-            list.map { it.from.toDouble() }, list.map { it.open }, list.map { it.max }, list.map { it.min }, list.map { it.close }, list.map { it.volume })
-        val r = dev.cueopen.app.uiconnector.custom.TechnicalSuite.analyze(k)
-        return dev.cueopen.app.uiconnector.custom.TechnicalSuite.report(r, "${a.ticker} · ${size}s")
-    }
-
     private fun openCount(): Int = tracked.values.count { it.result == null && it.expSec + 120 > serverNowSec() }
 
-    private suspend fun buy(
+    private suspend fun openOption(
         asset: String, direction: String, amount: Double, minutes: Int, settings: ConnectorSettings?, byAgent: Boolean,
-        targetOpenSec: Long? = null, prevalidatedAtMs: Long? = null,
     ): String = accountOrderCoordinator.runReserved {
-        buyReserved(asset, direction, amount, minutes, settings, byAgent, targetOpenSec, prevalidatedAtMs)
+        openOptionReserved(asset, direction, amount, minutes, settings, byAgent)
     }
 
-    private suspend fun buyReserved(
+    private suspend fun openOptionReserved(
         asset: String, direction: String, amount: Double, minutes: Int, settings: ConnectorSettings?, byAgent: Boolean,
-        targetOpenSec: Long? = null, prevalidatedAtMs: Long? = null,
     ): String {
         ensureConnected()
-        val dir = direction.trim().lowercase()
-        if (dir != "call" && dir != "put") return "direction deve ser call ou put."
+        val side = direction.trim().lowercase()
+        if (side != "call" && side != "put") return "direction deve ser call ou put."
         if (!amount.isFinite() || amount <= 0.0) return "amount deve ser finito e maior que zero."
         if (minutes !in 1..60) return "minutes deve estar entre 1 e 60."
-        val acc = activeBalance() ?: return "RECUSADO: nenhuma carteira ativa foi confirmada pelo servidor; confirme a conta antes de operar."
+        val account = activeBalance() ?: return "RECUSADO: nenhuma carteira ativa foi confirmada pelo servidor; confirme a conta antes de operar."
         if (byAgent && settings != null) {
-            if (targetOpenSec != null && settings.bool("require_jev"))
-                return "RECUSADO: a validação TypeSafe Jev está ligada e não pode ser ignorada pelo dispatcher."
-            if (acc.isReal && !settings.bool("allow_real_agent"))
-                return "RECUSADO: a conta ativa é REAL e o usuário não liberou o agente para operar nela. Troque para demo (set_account) ou peça ao usuário para liberar nas configurações do conector."
+            if (account.isReal && !settings.bool("allow_real_agent"))
+                return "RECUSADO: a conta ativa é REAL e o usuário não liberou o agente para operar nela. Troque para DEMO no conector ou libere a conta REAL nas configurações."
             val maxAmount = settings.num("max_amount", 1.0)
-            if (amount > maxAmount && !settings.bool("mm_enabled")) return "RECUSADO: valor $amount excede o máximo permitido por operação ($maxAmount). Reduza o valor."
-            val maxOpen = settings.num("max_open", 3.0).toInt()
-            if (!settings.bool("mm_enabled") && openCount() >= maxOpen) return "RECUSADO: já existem ${openCount()} operações abertas (máximo $maxOpen). Aguarde fechar."
-            val shortMax = settings.num("short_max_minutes", 5.0).toInt().coerceAtLeast(1)
-            if (minutes > shortMax && dir != "call")
-                return "RECUSADO: operação LONGA (mais de $shortMax min) só pode ser de COMPRA (call). Venda (put) só em operações curtas (até $shortMax min)."
-        }
-        val a = IqProtocol.resolveAsset(loadAssets(), asset) ?: run {
-            val m = runCatching { loadAllAssets() }.getOrDefault(emptyList()).firstOrNull { it.instrumentId.isNotEmpty() && it.ticker.equals(asset.trim(), true) }
-            return if (m != null) "${m.ticker} é ${kindLabel(m.kind)} (margem): use open_position em vez de buy." else "Ativo '$asset' não encontrado. Use open_assets."
-        }
-        if (!a.open) return "O ativo ${a.ticker} está fechado/suspenso agora."
-        val signalTimeframe = if (targetOpenSec != null) {
-            settings?.let { signalTimeframeSeconds(it) }
-                ?: return "RECUSADO: o timeframe salvo para este alvo está ausente ou inválido."
-        } else 60
-        if (byAgent && targetOpenSec != null) {
-            val targetMs = targetOpenSec * 1_000L
-            val preflightAt = IqSignalTiming.revalidateAtMs(targetOpenSec)
-            if (!serverClockFresh()) return "RECUSADO: relógio do servidor stale antes da ordem."
-            if (prevalidatedAtMs == null || prevalidatedAtMs < preflightAt || prevalidatedAtMs >= targetMs)
-                return "RECUSADO: o sinal não concluiu a revalidação pré-candle para este alvo."
-            entryWindowCheck(settings, targetOpenSec, signalTimeframe)?.let { return it }
-        } else if (byAgent) entryWindowCheck(settings)?.let { return it }
-        var finalAmount = amount
-        var useMm = false
-        if (byAgent) {
+            if (amount > maxAmount) return "RECUSADO: valor $amount excede o máximo por opção ($maxAmount)."
+            val maxOpen = settings.num("max_open", 3.0).toInt().coerceAtLeast(1)
+            if (openCount() >= maxOpen) return "RECUSADO: já existem ${openCount()} opções abertas (máximo $maxOpen). Aguarde fechar."
             riskCheck(settings)?.let { return it }
-            if (settings?.bool("mm_enabled") == true) {
-                if (tracked.values.any { it.byAgent && it.result == null && it.expSec + 120 > serverNowSec() })
-                    return "RECUSADO (Masaniello): já existe uma operação do agente em aberto; no gerenciamento as operações são UMA POR VEZ. Aguarde o resultado."
-                val m = mmState(settings)
-                val st = Masaniello.stake(m.bank, m.n, m.k, odds(settings)) ?: return "RECUSADO: ciclo Masaniello encerrado; consulte mm_status."
-                // o Masaniello SOBRESCREVE o valor de entrada (o limite é a banca do ciclo: a entrada nunca passa dela)
-                finalAmount = maxOf(1.0, Math.round(minOf(st, m.bank) * 100) / 100.0) // mínimo da corretora: 1
-                if (finalAmount > m.bank + 1e-9) return "RECUSADO (Masaniello): a banca restante do ciclo (${String.format(Locale.US, "%.2f", m.bank)}) é menor que a entrada mínima de 1. Reinicie o ciclo."
-                useMm = true
-            }
-            if (targetOpenSec != null) {
-                // O par mais recente só fica fechado em T; confirmar uma vez, com prazo curto e sem retry após a abertura.
-                val series = try {
-                    loadClosedCandles(a.ticker, signalTimeframe, 150, timeoutMs = 1_500L)
-                } catch (e: TimeoutCancellationException) {
-                    if (!currentCoroutineContext().isActive) throw e
-                    return "RECUSADO: a confirmação final dos candles excedeu 1,5 s; nenhuma ordem foi enviada."
-                } catch (e: kotlinx.coroutines.CancellationException) {
-                    throw e
-                } catch (e: Throwable) {
-                    return "RECUSADO: candles de ${timeframeLabel(signalTimeframe)} indisponíveis na validação final; nenhuma ordem foi enviada."
-                }
-                val check = analyzeSignal(series, targetOpenSec, targetOpenSec, signalTimeframe, settings!!)
-                if (!check.allowed) return "RECUSADO (validação final ${timeframeLabel(signalTimeframe)}): ${check.reason}"
-                if (check.direction != dir) return "RECUSADO: os dois candles fechados de ${timeframeLabel(signalTimeframe)} não confirmam ${dir.uppercase()} em T."
-            } else {
-                priceActionCheck(a.ticker, dir, settings)?.let { return it }
-                legacyConfluenceCheck(a, dir, settings)?.let { return it }
-            }
         }
-        if (byAgent && (targetOpenSec != null || (settings?.text("entry_against_candle")?.ifEmpty { "true" } ?: "true") == "true")) {
-            val checkAgainst = (settings?.text("entry_against_candle")?.ifEmpty { "true" } ?: "true") == "true"
-            entryCheck(a, dir, targetOpenSec, signalTimeframe, checkAgainst = checkAgainst)?.let { return it }
+        val optionAssets = loadAssets()
+        val active = IqProtocol.resolveAsset(optionAssets, asset) ?: run {
+            val forex = runCatching { loadAllAssets() }.getOrDefault(emptyList()).firstOrNull { it.kind == "forex" && it.ticker.equals(asset.trim(), true) }
+            return if (forex != null) "${forex.ticker} é Forex; use open_forex." else "Ativo '$asset' não encontrado. Use open_assets."
         }
-        var orderTimeoutMs = 15_000
-        if (targetOpenSec != null) {
-            val nowMs = serverNowMs()
-            val safeWindow = (settings?.num("max_entry_delay_sec", 10.0) ?: 10.0).toInt().coerceAtLeast(3)
-            val deadlineMs = targetOpenSec * 1_000L + safeWindow * 1_000L
-            val remainingMs = deadlineMs - nowMs
-            val lastQuoteAt = quoteReceivedAtElapsedMs[a.id]
-            val quoteAge = lastQuoteAt?.let { android.os.SystemClock.elapsedRealtime() - it } ?: Long.MAX_VALUE
-            val latestQuote = quotes[a.id]
-            if (quoteAge < 0L || quoteAge > 2_500L || latestQuote == null || !latestQuote.isFinite() || latestQuote <= 0.0)
-                return "cotação atual indisponível/stale imediatamente antes do envio; nenhuma ordem foi enviada."
-            if (!serverClockFresh() || remainingMs < 500L || !IqSignalTiming.isWithinEntryWindow(nowMs, targetOpenSec, safeWindow.toLong()))
-                return "RECUSADO: a validação terminou fora da janela de envio do candle-alvo; nenhuma ordem foi enviada."
-            orderTimeoutMs = minOf(15_000L, remainingMs).toInt()
-        }
-        val exp = IqProtocol.expirationFor(serverNowSec(), minutes)
-        subscribeQuotes(a.id) // cotação ao vivo para acompanhar ganhando/perdendo
-        val ack = optionExecutionPort.open(IqOptionOrder(acc.id, a.id, dir, exp, finalAmount, IqProtocol.isTurbo(minutes), orderTimeoutMs))
-        val optId = ack.optionId
-        if (optId == null) {
-            err("ordem recusada: ${ack.error}")
-            return "RECUSADA pela IQ Option: ${ack.error}"
-        }
-        tracked[optId] = Tracked(optId, a.ticker, dir, finalAmount, exp, acc.isPractice, acc.currency, activeId = a.id, entry = ack.openPrice ?: quotes[a.id],
-            byAgent = byAgent, mm = useMm, odds = odds(settings))
-        return "Ordem ABERTA na conta ${acc.label}: ${a.ticker} ${dir.uppercase()} ${money(acc.copy(amount = finalAmount))}" + (if (useMm) " (valor do Masaniello)" else "") + " · expira em ~${minutes} min (id $optId). O resultado chega do servidor; consulte positions."
+        if (active.kind !in setOf("turbo", "binary")) return "Somente opções Turbo/binárias podem ser abertas por open_option."
+        if (!active.open) return "O ativo ${active.ticker} está fechado/suspenso agora."
+        val expiration = IqProtocol.expirationFor(serverNowSec(), minutes)
+        subscribeQuotes(active.id)
+        val ack = manualExecution.openOption(IqOptionOrder(account.id, active.id, side, expiration, amount, IqProtocol.isTurbo(minutes)))
+        val optionId = ack.optionId ?: run { err("opção recusada: ${ack.error}"); return "RECUSADA pela IQ Option: ${ack.error}" }
+        tracked[optionId] = Tracked(optionId, active.ticker, side, amount, expiration, account.isPractice, account.currency,
+            activeId = active.id, entry = ack.openPrice ?: quotes[active.id], byAgent = byAgent)
+        return "Opção ABERTA na conta ${account.label}: ${active.ticker} ${side.uppercase()} ${money(account.copy(amount = amount))} · expira em ~${minutes} min (id $optionId). Consulte get_trade_result ou positions."
     }
 
     private fun positionsText(): String {
@@ -1682,13 +784,13 @@ class IqOptionConnector(private val kv: KvStore? = null) : UiConnector {
         val open = tracked.values.filter { it.result == null }.sortedBy { it.expSec }
         val closed = tracked.values.filter { it.result != null }.sortedByDescending { it.expSec }.take(10)
         return buildString {
-            appendLine("== Em execução (${open.size}) ==")
+            appendLine("== Opções em execução (${open.size}) ==")
             if (open.isEmpty()) appendLine("nenhuma")
-            open.forEach { appendLine("${it.id} ${it.asset} ${it.direction.uppercase()} ${it.amount} ${if (it.demo) "DEMO" else "REAL"} · entrada ${fmtPx(it.entry)} · agora ${fmtPx(quotes[it.activeId])} · ${IqRules.favorDiff(it.asset, it.direction, it.entry, quotes[it.activeId])} · " + liveStatus(it, now)) }
-            appendLine("== Últimas fechadas ==")
+            open.forEach { appendLine("${it.id} ${it.asset} ${it.direction.uppercase()} ${it.amount} ${if (it.demo) "DEMO" else "REAL"} · entrada ${fmtPx(it.entry)} · agora ${fmtPx(quotes[it.activeId])} · ${IqTradeRisk.favorDiff(it.asset, it.direction, it.entry, quotes[it.activeId])} · ${liveStatus(it, now)}") }
+            appendLine("== Últimas opções fechadas ==")
             if (closed.isEmpty()) appendLine("nenhuma")
             closed.forEach { appendLine("${it.id} ${it.asset} ${it.direction.uppercase()} ${it.amount} ${if (it.demo) "DEMO" else "REAL"} → ${resultLabel(it.result)}" + (it.profit?.let { p -> " (" + String.format(Locale.US, "%.2f", p) + ")" } ?: "")) }
-            append("Obs.: lista as operações abertas por este app, confirmadas pelo servidor.")
+            append("Os resultados finais das opções vêm dos eventos recebidos da IQ Option nesta sessão.")
         }.trim()
     }
 
@@ -1698,6 +800,18 @@ class IqOptionConnector(private val kv: KvStore? = null) : UiConnector {
         "equal" -> "EMPATE"
         null -> "—"
         else -> r.uppercase()
+    }
+
+    private fun tradeResultText(idRaw: String?): String {
+        val id = idRaw?.toLongOrNull()?.takeIf { it > 0L } ?: return "id inválido."
+        val trade = tracked[id] ?: return "A opção $id não está no acompanhamento desta sessão. Use positions; o protocolo disponível não confirma histórico de Forex já fechado."
+        val result = trade.result
+        return if (result == null) {
+            "Opção $id ${trade.asset} ${trade.direction.uppercase()} ainda em execução · ${liveStatus(trade, serverNowSec())}."
+        } else {
+            "Resultado final da opção $id ${trade.asset} ${trade.direction.uppercase()}: ${resultLabel(result)}" +
+                (trade.profit?.let { " · valor informado pela IQ Option ${String.format(Locale.US, "%.2f", it)}" } ?: ".")
+        }
     }
 
     // ------------------------------------------------------------------ UI declarativa
@@ -1733,7 +847,7 @@ class IqOptionConnector(private val kv: KvStore? = null) : UiConnector {
         blocks += UiBlock.Table(
             "Operações em execução (ao vivo)", listOf("Ativo", "Dir.", "Valor", "Situação", "Pips", "Entrada → Agora"),
             open.map { listOf(it.asset, it.direction.uppercase(), String.format(Locale.US, "%.2f", it.amount),
-                liveStatus(it, now), IqRules.favorDiff(it.asset, it.direction, it.entry, quotes[it.activeId]), "${fmtPx(it.entry)} → ${fmtPx(quotes[it.activeId])}") },
+                liveStatus(it, now), IqTradeRisk.favorDiff(it.asset, it.direction, it.entry, quotes[it.activeId]), "${fmtPx(it.entry)} → ${fmtPx(quotes[it.activeId])}") },
             empty = "Nenhuma operação em execução.",
         )
         blocks += UiBlock.Table(
@@ -1742,77 +856,32 @@ class IqOptionConnector(private val kv: KvStore? = null) : UiConnector {
                 resultLabel(it.result) + (it.profit?.let { p -> " " + String.format(Locale.US, "%.2f", p) } ?: "")) },
             empty = "Sem operações fechadas nesta sessão.",
         )
-        // estratégias MHI do ativo escolhido nas configurações (calculadas em segundo plano)
-        val sAsset = settings.text("strategy_asset").trim()
-        if (sAsset.isNotEmpty()) {
-            val key = IqProtocol.resolveAsset(assets, sAsset)?.ticker
-            val sc = key?.let { stratCache[it] }
-            if (sc == null || System.currentTimeMillis() - sc.at > 50_000) bg.launch { runCatching { strategies(sAsset) } }
-            if (sc != null) {
-                val now2 = serverNowSec()
-                val up = Mhi.upcoming(sc.candles, now2, 10).associateBy { it.variant.name }
-                blocks += UiBlock.Table("Estratégias MHI · ${sc.ticker}", listOf("Estratégia", "G0", "G1", "G2", "Sinais", "Próximo"),
-                    sc.stats.sortedByDescending { it.rateG0 }.map { st -> listOf(st.variant.name, pct(st.rateG0), pct(st.rateG1), pct(st.rateG2), st.signals.toString(),
-                        up[st.variant.name]?.let { "${it.direction.uppercase()} ${hms(it.entryAt)}" } ?: "—") })
-            } else blocks += UiBlock.Note("Calculando estratégias MHI de $sAsset…", Tone.NEUTRAL)
-        }
-        val persistedSignals = signalDispatcher.signals().takeLast(30)
-        if (persistedSignals.isNotEmpty()) {
-            val now2 = serverNowMs() / 1000
-            blocks += UiBlock.Table("Sinais automáticos (persistidos)", listOf("Ativo", "Dir.", "Vela", "Situação"),
-                persistedSignals.sortedBy { it.targetOpenSec }.map { signal ->
-                val status = when (signal.state) {
-                        IqArmedSignal.ARMED -> signal.detail.ifBlank { "armado; revalidação pré-candle pendente" }
-                        IqArmedSignal.VALIDATED -> "revalidado; T agendado"
-                        IqArmedSignal.SUBMITTING -> "envio iniciado/resultado incerto; não repetir"
-                        IqArmedSignal.EXECUTED -> "EXECUTADO"
-                        IqArmedSignal.CANCELLED -> "cancelado"
-                        IqArmedSignal.EXPIRED -> "expirado: ${signal.detail}"
-                        IqArmedSignal.FAILED -> "falhou: ${signal.detail}"
-                        IqArmedSignal.INVALIDATED -> "invalidado: ${signal.detail}"
-                        else -> signal.detail
-                    }
-                    listOf(signal.asset, signal.direction.uppercase(), hms(signal.targetOpenSec) + (if (signal.targetOpenSec > now2) " (em ${signal.targetOpenSec - now2}s)" else ""), status)
-                },
-                empty = "—")
-        }
-        // gerenciamento e regras do agente
-        run {
-            val rk = risk()
-            val items = ArrayList<Stat>()
-            if (settings.bool("mm_enabled")) {
-                val m = mmState(settings)
-                val st = Masaniello.stake(m.bank, m.n, m.k, odds(settings))
-                items += Stat("Masaniello", "${m.wins}/${m.k} de ${m.n}", Tone.NEUTRAL)
-                items += Stat("Próx. entrada", st?.let { String.format(Locale.US, "%.2f", maxOf(1.0, it)) } ?: "—")
-                items += Stat("Banca ciclo", String.format(Locale.US, "%.2f", m.bank), if (m.bank >= m.startBank) Tone.GOOD else Tone.BAD)
-            }
-            items += Stat("Hoje", String.format(Locale.US, "%+.2f", rk.dayPnl), if (rk.dayPnl > 0) Tone.GOOD else if (rk.dayPnl < 0) Tone.BAD else Tone.NEUTRAL)
-            items += Stat("Perdas seq.", rk.consecLosses.toString(), if (rk.consecLosses >= 2) Tone.WARN else Tone.NEUTRAL)
-            if (rk.pausedUntil > System.currentTimeMillis()) items += Stat("Pausado até", SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(rk.pausedUntil)), Tone.WARN)
-            blocks += UiBlock.Stats(items.take(6))
-            blocks += UiBlock.Button("mm_reset", "Reiniciar ciclo Masaniello", risky = true)
-        }
-        if (marginIds.isNotEmpty()) {
-            val mp = runCatching { withTimeout(4_000) { marginPositions() } }.getOrNull()
-            if (mp != null) blocks += UiBlock.Table("Forex / CFD / Cripto", listOf("Ativo", "Lado", "Valor", "P/L"),
-                mp.map { listOf(it.instrument, it.side.uppercase(), "${String.format(Locale.US, "%.2f", it.amount)} ×${it.leverage}", it.pnl?.let { p -> String.format(Locale.US, "%.2f", p) } ?: it.status) },
-                empty = "Nenhuma posição de margem aberta.")
-        }
+        val riskState = risk()
+        val riskStats = arrayListOf(
+            Stat("Resultado diário", String.format(Locale.US, "%+.2f", riskState.dayPnl), if (riskState.dayPnl > 0) Tone.GOOD else if (riskState.dayPnl < 0) Tone.BAD else Tone.NEUTRAL),
+            Stat("Perdas seguidas", riskState.consecLosses.toString(), if (riskState.consecLosses >= 2) Tone.WARN else Tone.NEUTRAL),
+        )
+        if (riskState.pausedUntil > System.currentTimeMillis()) riskStats += Stat("Pausa até", SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(riskState.pausedUntil)), Tone.WARN)
+        blocks += UiBlock.Stats(riskStats)
+        val forex = runCatching { withTimeout(4_000) { marginPositions() } }.getOrNull()
+        if (forex == null) blocks += UiBlock.Note("Posições Forex indisponíveis no momento.", Tone.WARN)
+        else blocks += UiBlock.Table("Posições Forex abertas", listOf("Ativo", "Lado", "Valor", "P/L"),
+            forex.map { listOf(it.instrument, it.side.uppercase(), "${String.format(Locale.US, "%.2f", it.amount)} ×${it.leverage}", it.pnl?.let { p -> String.format(Locale.US, "%.2f", p) } ?: it.status) },
+            empty = "Nenhuma posição Forex aberta.")
         // nunca espera a lista completa: usa o que já tem e atualiza em segundo plano
         refreshAssetsInBackground()
         val all = allAssets.ifEmpty { assets }.takeIf { it.isNotEmpty() }
         if (all == null) blocks += UiBlock.Note("Carregando a lista de ativos…", Tone.NEUTRAL)
         if (all != null) {
             val openA = all.filter { it.open }
-            blocks += UiBlock.Stats(listOf("turbo", "binary", "digital", "forex", "cfd", "crypto").mapNotNull { k ->
+            blocks += UiBlock.Stats(listOf("turbo", "binary", "forex").mapNotNull { k ->
                 val n = openA.count { it.kind == k }; if (all.none { it.kind == k }) null else Stat(kindLabel(k), n.toString())
             }.take(6))
             blocks += UiBlock.Table("Ativos abertos (${openA.size})", listOf("Ativo", "Tipo"),
-                openA.sortedWith(compareBy({ listOf("turbo", "binary", "digital", "forex", "cfd", "crypto").indexOf(it.kind) }, { it.ticker })).take(60).map { listOf(it.ticker, kindLabel(it.kind)) },
+                openA.sortedWith(compareBy({ listOf("turbo", "binary", "forex").indexOf(it.kind) }, { it.ticker })).map { listOf(it.ticker, kindLabel(it.kind)) },
                 empty = "Nenhum ativo aberto agora.")
         }
-        blocks += UiBlock.Note("Mostra as operações abertas por este app; resultados vêm de eventos reais do servidor. Operar envolve risco de perda.", Tone.NEUTRAL)
+        blocks += UiBlock.Note("Resultados de opções vêm de eventos do servidor nesta sessão; Forex mostra o P/L atual retornado pela corretora. Operar envolve risco de perda.", Tone.NEUTRAL)
         return blocks
     }
 
@@ -1824,7 +893,6 @@ class IqOptionConnector(private val kv: KvStore? = null) : UiConnector {
     override suspend fun onAction(actionId: String, args: Map<String, String>, settings: ConnectorSettings): Result<String> = try {
         when (actionId) {
             "account" -> Result.success(switchAccount(if (args["value"] == "real") "real" else "demo"))
-            "mm_reset" -> { val m = mmState(settings); saveMm(mmFresh(settings).copy(cycle = m.cycle + 1, cyclesWon = m.cyclesWon, cyclesLost = m.cyclesLost)); Result.success("Novo ciclo Masaniello iniciado.") }
             else -> Result.failure(IllegalArgumentException("Ação desconhecida: $actionId"))
         }
     } catch (t: Throwable) {
@@ -1835,67 +903,45 @@ class IqOptionConnector(private val kv: KvStore? = null) : UiConnector {
 
     // ------------------------------------------------------------------ portão de validação
     override fun orderIntents(tool: String, args: Map<String, String>): List<dev.cueopen.app.uiconnector.OrderIntent> {
-        if (tool != "buy" && tool != "open_position") return emptyList()
+        if (tool != "open_option" && tool != "open_forex") return emptyList()
         val asset = args["asset"].orEmpty().trim()
-        val side = dev.cueopen.app.trading.Sides.parse(if (tool == "buy") args["direction"] else args["side"])
+        val sideInput = if (tool == "open_option") args["direction"] else args["side"]
+        val side = dev.cueopen.app.trading.Sides.parse(sideInput)
         if (asset.isEmpty() || side == null) return emptyList()
         return listOf(dev.cueopen.app.uiconnector.OrderIntent(asset, side))
     }
 
     // ------------------------------------------------------------------ ferramentas do agente
     override suspend fun callTool(name: String, args: Map<String, String>, settings: ConnectorSettings): String = when (name) {
-        "balance" -> {
-            ensureConnected()
-            val act = activeBalanceSelection.activeId()
-            if (balances.isEmpty()) "Sem dados de saldo ainda."
-            else balances.values.sortedBy { it.type }.joinToString("\n") { "${it.label}: ${money(it)}" + if (it.id == act) " (ativa)" else "" }
-        }
-        "set_account" -> {
-            val acc = args["account"].orEmpty().lowercase()
-            when {
-                acc != "demo" && acc != "real" -> "account deve ser demo ou real."
-                acc == "real" && !settings.bool("allow_real_agent") ->
-                    "RECUSADO: o usuário não liberou o agente para a conta REAL. Continue na DEMO."
-                else -> switchAccount(acc)
-            }
-        }
         "open_assets" -> {
-            val f = args["filter"].orEmpty().trim().uppercase()
-            val k = args["kind"].orEmpty().ifBlank { "all" }.lowercase()
-            val list = loadAllAssets().filter { a ->
-                a.open && (f.isEmpty() || a.ticker.uppercase().contains(f)) &&
-                    (k == "all" || a.kind == k || (k == "options" && (a.kind == "turbo" || a.kind == "binary")))
+            val filter = args["filter"].orEmpty().trim().uppercase()
+            val kind = args["kind"].orEmpty().ifBlank { "all" }.lowercase()
+            val list = loadAllAssets().filter { asset ->
+                asset.open && (filter.isEmpty() || asset.ticker.uppercase().contains(filter)) &&
+                    (kind == "all" || asset.kind == kind || (kind == "options" && asset.kind in setOf("turbo", "binary")))
             }
-            val result = if (list.isEmpty()) "Nenhum ativo aberto" + (if (f.isNotEmpty()) " para '$f'" else "") + (if (k != "all") " ($k)" else "") + "."
-            else list.groupBy { it.kind }.entries.joinToString("\n") { (kind, l) ->
-                "${kindLabel(kind)} (${l.size})${if (kind in setOf("turbo", "binary")) " — operação automática via scan_and_arm" else if (kind == "digital") " — listado (opere somente se também existir em turbo/binária)" else " — use open_position"}: " +
-                    l.take(120).joinToString(", ") { it.ticker }
-            }
-            result + marketRetryHint()
+            if (list.isEmpty()) "Nenhum ativo aberto" + (if (filter.isNotEmpty()) " para '$filter'" else "") + (if (kind != "all") " ($kind)" else ".")
+            else list.groupBy { it.kind }.entries.joinToString("\n") { (assetKind, rows) ->
+                "${kindLabel(assetKind)} (${rows.size}): " + rows.joinToString(", ") { it.ticker }
+            } + marketRetryHint()
         }
-        "mm_status" -> mmText(settings)
-        "strategies" -> strategiesText(args["asset"].orEmpty())
-        "catalog" -> catalogText(args["asset"].orEmpty(), args["time"], args["days"]?.toIntOrNull(), IqProtocol.timeframeSeconds(args["timeframe"] ?: "60") ?: 60)
-        "price_analysis" -> priceAnalysisText(args["asset"].orEmpty(), args["timeframe"], args["count"]?.toIntOrNull(), args["strict"] == "true")
-        "backtest" -> backtestText(args["asset"].orEmpty(), args["timeframe"], args["count"]?.toDoubleOrNull()?.toInt(), args["strong"] == "true", settings)
-        "scan_and_arm" -> scanAndArm(args, settings)
-        "arm_signal" -> "RECUSADO: armamento manual não participa do fluxo automático. Use scan_and_arm para varrer os ativos abertos no T−2 e selecionar um sinal no timeframe configurado."
-        "armed_list" -> armedListText()
-        "disarm" -> disarm(args["asset"].orEmpty())
-        "candle_clock" -> clockText(IqProtocol.timeframeSeconds(args["timeframe"] ?: "60") ?: 60, settings)
-        "indicators" -> indicatorsText(args["asset"].orEmpty(), args["timeframe"], args["count"]?.toDoubleOrNull()?.toInt())
-        "get_candles" -> candlesText(args["asset"].orEmpty(), args["timeframe"], args["count"]?.toDoubleOrNull()?.toInt())
-        "buy" -> "RECUSADO: o agente não pode enviar uma ordem IQ Option imediata. Use scan_and_arm para analisar no T−2 e entrar somente na janela do candle-alvo."
+        "get_candles" -> candlesText(args["asset"].orEmpty(), args["timeframe"], args["count"]?.toIntOrNull())
+        "open_option" -> openOption(
+            args["asset"].orEmpty(), args["direction"].orEmpty(),
+            args["amount"]?.replace(',', '.')?.toDoubleOrNull() ?: 0.0,
+            args["minutes"]?.toIntOrNull() ?: 1, settings, byAgent = true,
+        )
+        "open_forex" -> openForex(args, settings)
+        "close_position" -> closeForex(args["id"])
         "positions" -> {
             ensureConnected()
+            val forex = marginPositions(force = true)
             val base = positionsText()
-            val margin = if (marginIds.isEmpty()) emptyList() else runCatching { marginPositions() }.getOrDefault(emptyList())
-            if (margin.isEmpty()) base else base + "\n== Forex/CFD/cripto ==\n" + margin.joinToString("\n") {
+            if (forex.isEmpty()) base else base + "\n== Forex aberto (P/L atual) ==\n" + forex.joinToString("\n") {
                 "${it.id} ${it.instrument} ${it.side.uppercase()} ${it.amount} ×${it.leverage} · ${it.status} · P/L ${it.pnl?.let { p -> String.format(Locale.US, "%.2f", p) } ?: "—"}"
             }
         }
-        "open_position" -> openMargin(args, settings)
-        "close_position" -> closeMargin(args["id"])
+        "get_trade_result" -> tradeResultText(args["id"])
         else -> "Ferramenta desconhecida: $name"
     }
 

@@ -14,7 +14,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * Testes do protocolo com mensagens no formato documentado por clientes open source da plataforma.
+ * Testes do protocolo comunitário usado pelo conector, sem alegar suporte oficial da corretora.
  * Validam a NOSSA interpretação (parsing/regras); a conexão real com a IQ Option só pode ser
  * verificada com uma conta, no aparelho.
  */
@@ -184,6 +184,16 @@ class IqProtocolTest {
         assertEquals(600, IqProtocol.timeframeSeconds("10m")); assertEquals(3600, IqProtocol.timeframeSeconds("1h"))
         assertEquals(30, IqProtocol.timeframeSeconds("30s"))
         assertNull(IqProtocol.timeframeSeconds("7")); assertNull(IqProtocol.timeframeSeconds("abc"))
+    }
+
+    @Test fun `consultas e ordens do conector estao limitadas a Forex`() {
+        val instruments = obj(IqProtocol.forexInstrumentsMessage("fx"))["msg"]!!.jsonObject
+        assertEquals("get-instruments", instruments["name"]!!.jsonPrimitive.content)
+        assertEquals("forex", instruments["body"]!!.jsonObject["type"]!!.jsonPrimitive.content)
+        val positions = obj(IqProtocol.getPositionsMessage("pos", 44))["msg"]!!.jsonObject
+        assertEquals("[\"forex\"]", positions["body"]!!.jsonObject["instrument_types"].toString())
+        val order = obj(IqProtocol.placeForexOrderMessage("ord", 44, "EURUSD", "buy", 1.0, 5, 20.0, 30.0))["msg"]!!.jsonObject
+        assertEquals("forex", order["body"]!!.jsonObject["instrument_type"]!!.jsonPrimitive.content)
     }
 
     @Test fun `resolucao de ativo ignora caixa e separadores`() {

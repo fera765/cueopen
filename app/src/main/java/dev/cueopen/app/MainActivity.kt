@@ -59,7 +59,17 @@ class MainActivity : ComponentActivity() {
                     CueNav(nav, startOnboarding = startOnboarding)
                     if (splash) SplashScreen(onDone = { splash = false })
                     val ps = pendingSession.value
-                    LaunchedEffect(ps) { if (ps != null) { nav.navigate("chat/$ps"); pendingSession.value = null } }
+                    LaunchedEffect(ps) {
+                        if (ps != null) {
+                            val current = nav.currentBackStackEntry
+                            val currentSession = current?.takeIf { it.destination.route == "chat/{id}" }
+                                ?.arguments?.getString("id")
+                            if (SessionNotificationRouting.shouldOpen(currentSession, ps)) {
+                                nav.navigate("chat/${Uri.encode(ps)}") { launchSingleTop = true }
+                            }
+                            pendingSession.value = null
+                        }
+                    }
                     val shared = sharedText.value
                     LaunchedEffect(shared) { if (shared != null) { nav.navigate("home?draft=${Uri.encode(shared)}"); sharedText.value = null } }
                 }
@@ -73,7 +83,13 @@ class MainActivity : ComponentActivity() {
 
     private fun handleIntent(i: Intent?) {
         i ?: return
-        i.getStringExtra("session")?.let { pendingSession.value = it }
+        val extraId = i.getStringExtra(SessionNotificationRouting.EXTRA_SESSION_ID)
+            ?: i.getStringExtra(SessionNotificationRouting.EXTRA_SESSION)
+        val deepLinkId = i.data?.takeIf { it.scheme == "cueopen" && it.host == "chat" }
+            ?.pathSegments?.lastOrNull()
+        val candidate = SessionNotificationRouting.candidateId(extraId, deepLinkId)
+        // IDs ausentes/desconhecidos não podem criar uma rota chat/{id} inexistente.
+        pendingSession.value = candidate?.takeIf { CueApp.instance.store.session(it) != null }
         if (i.action == Intent.ACTION_SEND) {
             val text = i.getStringExtra(Intent.EXTRA_TEXT)
             @Suppress("DEPRECATION") val uri = i.getParcelableExtra<Uri>(Intent.EXTRA_STREAM)

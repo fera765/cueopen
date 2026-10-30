@@ -11,15 +11,13 @@ import org.junit.Test
 class IqMarketsTest {
     private fun obj(s: String) = Json.parseToJsonElement(s) as JsonObject
 
-    @Test fun `instrumentos de margem e digitais com horario`() {
+    @Test fun `instrumentos Forex abertos e fechados por horario`() {
         val now = 1_000L
-        val fx = IqProtocol.parseInstruments(obj("""{"instruments":[
+        val fx = IqProtocol.parseForexInstruments(obj("""{"instruments":[
             {"id":"EURUSD","name":"front.EURUSD","active_id":1,"schedule":[[900,2000]],"is_suspended":false},
-            {"id":"GBPUSD","name":"GBPUSD","active_id":2,"schedule":[[1500,2000]],"is_suspended":false}]}"""), "forex", now)
+            {"id":"GBPUSD","name":"GBPUSD","active_id":2,"schedule":[[1500,2000]],"is_suspended":false}]}"""), now)
         assertEquals("EURUSD", fx[0].ticker); assertTrue(fx[0].open); assertFalse(fx[1].open)
         assertEquals("forex", fx[0].kind); assertEquals("EURUSD", fx[0].instrumentId)
-        val dg = IqProtocol.parseUnderlying(obj("""{"underlying":[{"active_id":76,"name":"EURUSD-OTC","schedule":[],"is_suspended":false}]}"""), now)
-        assertEquals("digital", dg[0].kind); assertTrue(dg[0].open)
     }
 
     @Test fun `cotacao ao vivo e resultado parcial`() {
@@ -33,10 +31,10 @@ class IqMarketsTest {
         assertTrue(IqProtocol.subscribeQuotesMessage(76).contains("\"candle-generated\""))
     }
 
-    @Test fun `operacao aberta fora do app e ordem de margem`() {
+    @Test fun `operacao aberta fora do app e ordem Forex`() {
         val o = IqProtocol.parseOptionOpened(obj("""{"name":"socket-option-opened","msg":{"id":5,"active_id":76,"direction":"put","amount":2,"expiration_time":1700000060,"value":1.5}}"""))!!
         assertEquals(5L, o.optionId); assertEquals("put", o.direction); assertEquals(1.5, o.openPrice!!, 0.0)
-        val m = IqProtocol.placeMarginOrderMessage("r1", 10, "forex", "EURUSD", "buy", 1.0, 10, 20.0, 30.0)
+        val m = IqProtocol.placeForexOrderMessage("r1", 10, "EURUSD", "buy", 1.0, 10, 20.0, 30.0)
         assertTrue(m.contains("\"place-order-temp\"") && m.contains("\"stop_lose_value\":20.0") && m.contains("\"leverage\":10"))
         val p = IqProtocol.parsePositions(obj("""{"positions":[{"id":9,"instrument_id":"EURUSD","instrument_type":"forex","side":"buy","invest":1,"leverage":10,"pnl_net":0.12,"status":"open"}]}"""))
         assertEquals(0.12, p[0].pnl!!, 0.0); assertEquals("buy", p[0].side)

@@ -24,9 +24,12 @@ class SpecValidatorTest {
 
     @Test fun `settings legados mantem IDs e novos critérios ficam separados`() {
         val settings = IqOptionConnector().spec.settings.associateBy { it.id }
-        assertEquals("true", settings.getValue("require_confluence").default)
-        assertEquals("false", settings.getValue("confluence_strong").default)
-        assertEquals("false", settings.getValue("price_action_strict").default)
+        assertEquals(setOf(
+            "allow_real_agent", "max_amount", "max_open", "daily_stop_loss", "daily_take_profit",
+            "max_consec_losses", "cooldown_min", "require_jev", "allow_margin_agent",
+            "max_margin_amount", "max_forex_open", "max_leverage", "max_stop_loss_pct",
+        ), settings.keys)
+        assertFalse(settings.keys.any { it.contains("strategy") || it.contains("mhi") || it.contains("masaniello") || it.contains("analysis") })
     }
 
     @Test fun `id invalido e recusado`() {

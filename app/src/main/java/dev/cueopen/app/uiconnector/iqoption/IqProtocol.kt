@@ -43,7 +43,7 @@ object IqProtocol {
     }
 
     data class Profile(val balances: List<Balance>, val activeBalanceId: Long?)
-    /** kind: turbo | binary | digital | forex | cfd | crypto. [instrumentId] = id do instrumento de margem (forex/cfd/crypto). */
+    /** kind: turbo | binary | forex. [instrumentId] é o id do instrumento Forex. */
     data class Asset(val id: Int, val ticker: String, val kind: String, val open: Boolean, val instrumentId: String = "")
     data class Quote(val activeId: Int, val price: Double)
     data class OptionOpened(val optionId: Long, val activeId: Int, val direction: String, val amount: Double, val expSec: Long, val openPrice: Double?)
@@ -142,11 +142,9 @@ object IqProtocol {
             put("value", 0)
         })
 
-    /** Ativos de opções digitais. */
-    fun underlyingListMessage(reqId: String): String = sendMessage(reqId, "get-underlying-list", "2.0", buildJsonObject { put("type", "digital-option") })
 
-    /** Instrumentos de margem: type = forex | cfd | crypto. */
-    fun instrumentsMessage(reqId: String, type: String): String = sendMessage(reqId, "get-instruments", "4.0", buildJsonObject { put("type", type) })
+    /** Instrumentos Forex. */
+    fun forexInstrumentsMessage(reqId: String): String = sendMessage(reqId, "get-instruments", "4.0", buildJsonObject { put("type", "forex") })
 
     /** Assina as cotações (velas de 1 s) de um ativo — usadas para o resultado AO VIVO das operações. */
     fun subscribeQuotesMessage(activeId: Int): String = buildJsonObject {
@@ -165,13 +163,13 @@ object IqProtocol {
         }
     }.toString()
 
-    /** Ordem a mercado em forex/CFD/cripto com stop loss e take profit em % (obrigatórios). */
-    fun placeMarginOrderMessage(reqId: String, balanceId: Long, type: String, instrumentId: String, side: String, amount: Double,
-                                leverage: Int, stopLossPct: Double, takeProfitPct: Double): String =
+    /** Ordem Forex a mercado com stop loss e take profit em % (obrigatórios). */
+    fun placeForexOrderMessage(reqId: String, balanceId: Long, instrumentId: String, side: String, amount: Double,
+                               leverage: Int, stopLossPct: Double, takeProfitPct: Double): String =
         sendMessage(reqId, "place-order-temp", "4.0", buildJsonObject {
             put("user_balance_id", balanceId)
             put("client_platform_id", 9)
-            put("instrument_type", type)
+            put("instrument_type", "forex")
             put("instrument_id", instrumentId)
             put("side", side.lowercase())
             put("type", "market")
@@ -191,7 +189,7 @@ object IqProtocol {
     fun closePositionMessage(reqId: String, positionId: Long): String = sendMessage(reqId, "close-position", "1.0", buildJsonObject { put("position_id", positionId) })
 
     fun getPositionsMessage(reqId: String, balanceId: Long): String = sendMessage(reqId, "get-positions", "3.0", buildJsonObject {
-        put("instrument_types", JsonArray(listOf("forex", "cfd", "crypto").map { JsonPrimitive(it) }))
+        put("instrument_types", JsonArray(listOf("forex").map { JsonPrimitive(it) }))
         put("user_balance_id", balanceId)
     })
 
@@ -205,21 +203,14 @@ object IqProtocol {
         return sched.any { w -> val p = w.arr(); val st = p?.getOrNull(0).lng(); val en = p?.getOrNull(1).lng(); st != null && en != null && nowSec in st until en }
     }
 
-    fun parseUnderlying(msg: JsonObject, nowSec: Long): List<Asset> =
-        (msg["underlying"].arr() ?: msg["underlying_list"].arr()).orEmpty().mapNotNull { e ->
-            val a = e.obj() ?: return@mapNotNull null
-            val id = a["active_id"].lng()?.toInt() ?: return@mapNotNull null
-            val name = (a["name"].str() ?: a["underlying"].str() ?: return@mapNotNull null).removePrefix("front.")
-            Asset(id, name, "digital", openNow(a, nowSec))
-        }
 
-    fun parseInstruments(msg: JsonObject, type: String, nowSec: Long): List<Asset> =
+    fun parseForexInstruments(msg: JsonObject, nowSec: Long): List<Asset> =
         msg["instruments"].arr().orEmpty().mapNotNull { e ->
             val a = e.obj() ?: return@mapNotNull null
             val instId = a["id"].str() ?: return@mapNotNull null
             val id = a["active_id"].lng()?.toInt() ?: 0
             val name = (a["ticker"].str() ?: a["name"].str() ?: instId).removePrefix("front.")
-            Asset(id, name, type, openNow(a, nowSec), instId)
+            Asset(id, name, "forex", openNow(a, nowSec), instId)
         }
 
     fun parseQuote(msg: JsonObject): Quote? {

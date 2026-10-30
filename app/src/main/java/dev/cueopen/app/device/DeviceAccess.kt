@@ -4,6 +4,7 @@ import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.app.AppOpsManager
 import android.net.Uri
 import android.os.Build
 import android.provider.Settings
@@ -12,6 +13,43 @@ import android.app.role.RoleManager
 import androidx.compose.runtime.mutableStateListOf
 import dev.cueopen.app.data.now
 import kotlinx.serialization.Serializable
+
+/** Estado observável do Android, separado do consentimento persistido de cada agente. */
+interface AndroidCapabilityState {
+    fun permissionGranted(permission: String): Boolean
+    fun appOpAllowed(operation: String): Boolean
+    fun roleHeld(role: String): Boolean
+    fun specialAccessGranted(capability: String): Boolean
+}
+
+private class RealAndroidCapabilityState(private val ctx: Context) : AndroidCapabilityState {
+    override fun permissionGranted(permission: String): Boolean =
+        ctx.checkSelfPermission(permission) == PackageManager.PERMISSION_GRANTED
+
+    override fun appOpAllowed(operation: String): Boolean = runCatching {
+        val appOps = ctx.getSystemService(AppOpsManager::class.java) ?: return false
+        val mode = appOps.checkOpNoThrow(operation, android.os.Process.myUid(), ctx.packageName)
+        mode != AppOpsManager.MODE_IGNORED && mode != AppOpsManager.MODE_ERRORED
+    }.getOrDefault(false)
+
+    override fun roleHeld(role: String): Boolean = runCatching {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            val manager = ctx.getSystemService(RoleManager::class.java)
+            manager?.isRoleAvailable(role) == true && manager.isRoleHeld(role)
+        } else role == RoleManager.ROLE_SMS && Telephony.Sms.getDefaultSmsPackage(ctx) == ctx.packageName
+    }.getOrDefault(false)
+
+    override fun specialAccessGranted(capability: String): Boolean = when (capability) {
+        DeviceCaps.NOTIF_READ -> {
+            val enabled = Settings.Secure.getString(ctx.contentResolver, "enabled_notification_listeners").orEmpty()
+            enabled.split(':').mapNotNull(ComponentName::unflattenFromString)
+                .any { it.packageName == ctx.packageName && it.className == CueNotificationListener::class.java.name }
+        }
+        DeviceCaps.OVERLAY -> Settings.canDrawOverlays(ctx)
+        DeviceCaps.SCREEN -> ScreenCapture.hasPermission()
+        else -> true
+    }
+}
 
 /** Capacidades de aparelho configuradas individualmente em cada perfil de agente. */
 object DeviceCaps {
@@ -47,8 +85,23 @@ object DeviceCaps {
         Cap(SCREEN, "Capturar a tela", "Captura pontual após a confirmação do diálogo de projeção do Android."),
     )
 
-    private fun hasPermission(ctx: Context, permission: String): Boolean =
-        ctx.checkSelfPermission(permission) == PackageManager.PERMISSION_GRANTED
+    private fun hasPermission(state: AndroidCapabilityState, permission: String, appOp: String? = null): Boolean =
+        state.permissionGranted(permission) && (appOp == null || state.appOpAllowed(appOp))
+
+    private fun androidState(ctx: Context): AndroidCapabilityState = RealAndroidCapabilityState(ctx)
+
+    private fun appOpFor(permission: String): String? = when (permission) {
+        android.Manifest.permission.READ_CALENDAR -> "android:read_calendar"
+        android.Manifest.permission.READ_CALL_LOG -> "android:read_call_log"
+        android.Manifest.permission.READ_CONTACTS -> "android:read_contacts"
+        android.Manifest.permission.ACCESS_COARSE_LOCATION -> "android:coarse_location"
+        android.Manifest.permission.ACCESS_FINE_LOCATION -> "android:fine_location"
+        android.Manifest.permission.READ_SMS -> "android:read_sms"
+        android.Manifest.permission.RECORD_AUDIO -> "android:record_audio"
+        android.Manifest.permission.BLUETOOTH_CONNECT -> "android:bluetooth_connect"
+        android.Manifest.permission.POST_NOTIFICATIONS -> "android:post_notification"
+        else -> null
+    }
 
     private fun usesNearbyRuntimePermission(): Boolean =
         DeviceCapPolicy.bluetoothConnectRuntimePermissionRequired(Build.VERSION.SDK_INT)
@@ -66,35 +119,29 @@ object DeviceCaps {
         else -> emptyList()
     }
 
-    fun hasSmsRole(ctx: Context): Boolean = runCatching {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            val roleManager = ctx.getSystemService(RoleManager::class.java)
-            roleManager?.isRoleAvailable(RoleManager.ROLE_SMS) == true && roleManager.isRoleHeld(RoleManager.ROLE_SMS)
-        } else {
-            Telephony.Sms.getDefaultSmsPackage(ctx) == ctx.packageName
-        }
-    }.getOrDefault(false)
+    fun hasSmsRole(ctx: Context): Boolean = hasSmsRole(androidState(ctx))
+
+    fun hasSmsRole(state: AndroidCapabilityState): Boolean = state.roleHeld(RoleManager.ROLE_SMS)
 
     /** Revalida permissões do sistema em tempo real; não confia apenas no consentimento persistido do agente. */
-    fun granted(ctx: Context, id: String): Boolean = when (id) {
-        BLUETOOTH -> if (usesNearbyRuntimePermission()) hasPermission(ctx, android.Manifest.permission.BLUETOOTH_CONNECT)
-            else hasPermission(ctx, android.Manifest.permission.BLUETOOTH)
-        CALENDAR -> hasPermission(ctx, android.Manifest.permission.READ_CALENDAR)
-        CALL_LOG -> hasPermission(ctx, android.Manifest.permission.READ_CALL_LOG)
-        CONTACTS -> hasPermission(ctx, android.Manifest.permission.READ_CONTACTS)
-        LOCATION -> hasPermission(ctx, android.Manifest.permission.ACCESS_COARSE_LOCATION) ||
-            hasPermission(ctx, android.Manifest.permission.ACCESS_FINE_LOCATION)
-        SMS -> hasSmsRole(ctx) && hasPermission(ctx, android.Manifest.permission.READ_SMS)
-        MICROPHONE -> hasPermission(ctx, android.Manifest.permission.RECORD_AUDIO)
+    fun granted(ctx: Context, id: String): Boolean = granted(androidState(ctx), id)
+
+    /** Pure decision function used by JVM tests; it never mutates or revokes Android state. */
+    fun granted(state: AndroidCapabilityState, id: String): Boolean = when (id) {
+        BLUETOOTH -> if (usesNearbyRuntimePermission()) hasPermission(state, android.Manifest.permission.BLUETOOTH_CONNECT, appOpFor(android.Manifest.permission.BLUETOOTH_CONNECT))
+            else hasPermission(state, android.Manifest.permission.BLUETOOTH, appOpFor(android.Manifest.permission.BLUETOOTH))
+        CALENDAR -> hasPermission(state, android.Manifest.permission.READ_CALENDAR, appOpFor(android.Manifest.permission.READ_CALENDAR))
+        CALL_LOG -> hasPermission(state, android.Manifest.permission.READ_CALL_LOG, appOpFor(android.Manifest.permission.READ_CALL_LOG))
+        CONTACTS -> hasPermission(state, android.Manifest.permission.READ_CONTACTS, appOpFor(android.Manifest.permission.READ_CONTACTS))
+        LOCATION -> (hasPermission(state, android.Manifest.permission.ACCESS_COARSE_LOCATION, appOpFor(android.Manifest.permission.ACCESS_COARSE_LOCATION)) ||
+            hasPermission(state, android.Manifest.permission.ACCESS_FINE_LOCATION, appOpFor(android.Manifest.permission.ACCESS_FINE_LOCATION)))
+        SMS -> hasSmsRole(state) && hasPermission(state, android.Manifest.permission.READ_SMS, appOpFor(android.Manifest.permission.READ_SMS))
+        MICROPHONE -> hasPermission(state, android.Manifest.permission.RECORD_AUDIO, appOpFor(android.Manifest.permission.RECORD_AUDIO))
         PHONE_CALLS, BACKGROUND -> true // São consentimentos por agente, não permissões perigosas do Android.
-        NOTIF_READ -> {
-            val enabled = Settings.Secure.getString(ctx.contentResolver, "enabled_notification_listeners").orEmpty()
-            enabled.split(':').mapNotNull(ComponentName::unflattenFromString)
-                .any { it.packageName == ctx.packageName && it.className == CueNotificationListener::class.java.name }
-        }
-        NOTIF_POST -> if (Build.VERSION.SDK_INT >= 33) hasPermission(ctx, android.Manifest.permission.POST_NOTIFICATIONS) else true
-        OVERLAY -> Settings.canDrawOverlays(ctx)
-        SCREEN -> ScreenCapture.hasPermission()
+        NOTIF_READ -> state.specialAccessGranted(NOTIF_READ)
+        NOTIF_POST -> if (Build.VERSION.SDK_INT >= 33) hasPermission(state, android.Manifest.permission.POST_NOTIFICATIONS, appOpFor(android.Manifest.permission.POST_NOTIFICATIONS)) else true
+        OVERLAY -> state.specialAccessGranted(OVERLAY)
+        SCREEN -> state.specialAccessGranted(SCREEN)
         else -> false
     }
 
@@ -128,7 +175,13 @@ object DeviceCaps {
             SMS -> return
             BACKGROUND -> if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)
                 else Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:${ctx.packageName}"))
-            else -> return
+            else -> {
+                // Runtime permission já concedida, mas AppOp revogado: só a tela oficial
+                // de detalhes do app pode permitir ao usuário revisar esse estado.
+                if (runtimePermissions(ctx, id).isNotEmpty())
+                    Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:${ctx.packageName}"))
+                else return
+            }
         }
         runCatching {
             if (intent.flags and Intent.FLAG_ACTIVITY_NEW_TASK == 0) intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)

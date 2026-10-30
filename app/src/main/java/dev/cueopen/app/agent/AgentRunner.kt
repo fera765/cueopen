@@ -787,10 +787,20 @@ class AgentRunner(
 
     private fun notifyAgent(a: AgentProfile, text: String) = runCatching {
         val nm = ctx.getSystemService(android.app.NotificationManager::class.java)
-        val pi = android.app.PendingIntent.getActivity(ctx, a.id.hashCode(),
-            android.content.Intent(ctx, dev.cueopen.app.MainActivity::class.java).putExtra("session", a.homeSessionId),
+        val sessionId = dev.cueopen.app.SessionNotificationRouting.validSessionId(a.homeSessionId)
+        val key = sessionId ?: "invalid-agent-session:${a.id}"
+        val intent = android.content.Intent(ctx, dev.cueopen.app.MainActivity::class.java)
+            .setAction(dev.cueopen.app.SessionNotificationRouting.ACTION_OPEN_SESSION)
+            .addFlags(android.content.Intent.FLAG_ACTIVITY_CLEAR_TOP or android.content.Intent.FLAG_ACTIVITY_SINGLE_TOP)
+        sessionId?.let {
+            intent.putExtra(dev.cueopen.app.SessionNotificationRouting.EXTRA_SESSION, it)
+                .putExtra(dev.cueopen.app.SessionNotificationRouting.EXTRA_SESSION_ID, it)
+                .setData(android.net.Uri.parse(dev.cueopen.app.SessionNotificationRouting.deepLink(it)))
+        }
+        val stableId = dev.cueopen.app.SessionNotificationRouting.stableId(key)
+        val pi = android.app.PendingIntent.getActivity(ctx, stableId, intent,
             android.app.PendingIntent.FLAG_IMMUTABLE or android.app.PendingIntent.FLAG_UPDATE_CURRENT)
-        nm.notify(a.id.hashCode(), android.app.Notification.Builder(ctx, dev.cueopen.app.CueApp.CH_TASKS)
+        nm.notify(stableId, android.app.Notification.Builder(ctx, dev.cueopen.app.CueApp.CH_TASKS)
             .setSmallIcon(android.R.drawable.ic_dialog_info).setContentTitle(a.name).setContentText(text.ifBlank { "Concluiu uma ação" })
             .setStyle(android.app.Notification.BigTextStyle().bigText(plainText(text))).setContentText(plainText(text).take(120)).setContentIntent(pi).setAutoCancel(true).build())
     }
@@ -974,7 +984,7 @@ class AgentRunner(
                 if (dev.cueopen.app.device.DeviceCaps.SMS in requestedCaps && !dev.cueopen.app.device.DeviceCaps.hasSmsRole(ctx))
                     appendLine("6c. A leitura da caixa de entrada SMS não está disponível neste app, que não é elegível a app padrão de SMS. Não solicite ROLE_SMS nem use notificações ou outra via lateral. device_sms_compose, se estiver no schema, apenas abre um rascunho para revisão do usuário.")
             }
-            appendLine("6c. TEMPO DE VELA (trading de opções/velas): nunca durma um tempo fixo esperando o candle. Para toda operação AUTOMÁTICA na IQ Option, use uic_iqoption_scan_and_arm — não chame buy direto nem arm_signal para pular a seleção T−2. O scanner usa o timeframe configurado (M1/M2/M5/M10), agenda no relógio do servidor em T−2 min, revalida em T−10 s e mantém o gatilho em background; acompanhe armed_list e cancele com disarm. Os dois candles do período escolhido só ficam confirmados quando ambos fecharam antes/de T; em T valide o par final e o candle-alvo do mesmo período. Não exija consenso de outros timeframes nem use MHI. Não durma até T para então analisar. Se precisar esperar manualmente, chame candle_clock e passe server_now_epoch_ms ao sleep para acordar 10 s antes; se T−10 já passou, espere o próximo alvo. Dados stale/inconsistentes ou janela perdida significam não operar.")
+            appendLine("6c. IQ OPTION: use apenas as ferramentas manuais expostas pelo conector para login, ativos abertos, candles, abrir opção/Forex, fechar Forex e consultar posições/resultados. Não há scanner, estratégia nem execução automática nesse conector; não invente ferramentas removidas nem transforme candles em uma ordem automática.")
             appendLine("7. MODO CONTÍNUO: se o usuário pedir para monitorar, acompanhar, repetir ou rodar por horas/dias, NÃO finalize. Faça a verificação, registre em notes_write e chame `sleep` (minutos até a próxima verificação). Repita até o usuário pausar.")
             appendLine("8. Fora do modo contínuo, termine com `finish` (resumo curto + arquivos). Responda no idioma do usuário.")
             appendLine("8a. DÚVIDA REAL → `ask_question`: só quando o usuário pediu uma tarefa E existe uma dúvida verdadeira que muda o resultado (ex.: qual de duas abordagens, público, formato, escopo) e errar custaria refazer muito trabalho ou algo irreversível. NÃO use para confirmar (\"posso começar?\"), para coisas que você descobre pesquisando/lendo arquivos, nem para preferências triviais — nesses casos assuma o mais razoável e diga o que assumiu. No máximo UMA vez por pedido, com 1–4 perguntas objetivas e 2–4 opções cada (\"Outra resposta\" já aparece). Depois das respostas, siga direto.")
@@ -1044,9 +1054,8 @@ class AgentRunner(
                         // conectores de ordem que dispensam o Jev (setting require_jev OFF) vs. os que exigem
                         val noJev = usable.filter { it.spec.tools.any { t -> t.requiresSignal } && it.spec.settings.any { s2 -> s2.id == "require_jev" } && !hub.settings(it).bool("require_jev") }.map { it.spec.name }
                         val needJev = usable.filter { it.spec.tools.any { t -> t.requiresSignal } && (it.spec.settings.none { s2 -> s2.id == "require_jev" } || hub.settings(it).bool("require_jev")) }.map { it.spec.name }
-                        if (needJev.isNotEmpty()) appendLine("- ORDENS em ${needJev.joinToString()}: ANTES de CADA compra e CADA venda chame typesafe_jev_check (venue = id do conector, id = ticker, direction call/put) e só opere com ✅ OPERAR; o app recusa ordens sem validação (uso único, 5 min). Operações CURTAS usam compra (call) e venda (put); operações LONGAS (acima do limite de minutos curtos do conector) só de COMPRA (call).")
-                        if (noJev.isNotEmpty()) appendLine("- ENTRADA AUTOMÁTICA (IQ Option, Jev desligado): use uic_iqoption_scan_and_arm. Ele varre ativos turbo/binários abertos em T−2 min no timeframe configurado (M1/M2/M5/M10), usa dois candles fechados desse período, Price Action e TechnicalSuite se o filtro estiver ligado, e escolhe um candidato pelo ranqueamento Price Action já existente. Não usa MHI nem exige consenso de períodos diferentes. Revalida em T−10 s; em T confirma os dois candles anteriores, o candle-alvo, a cotação atual e as regras de risco. Se faltar dado, houver atraso ou divergência, não opera. Acompanhe armed_list; use disarm para cancelar. Não durma até T.")
-                        if (noJev.isNotEmpty()) appendLine("- ORDENS em ${noJev.joinToString()}: a validação TypeSafe Jev está DESLIGADA — NÃO chame typesafe_jev_check para este conector. Siga somente Price Action, o timeframe configurado, o filtro TechnicalSuite se ligado, os dois candles do período escolhido e os limites da janela/risco; não invoque estratégias MHI.")
+                        if (needJev.isNotEmpty()) appendLine("- ORDENS em ${needJev.joinToString()}: ANTES de CADA nova ordem chame typesafe_jev_check (venue = id do conector, id = ticker, direction call/put para opções ou buy/sell para Forex) e só opere com ✅ OPERAR; o app recusa ordens sem validação (uso único, 5 min). Siga o lado permitido pela ferramenta e não aplique call/put a Forex.")
+                        if (noJev.isNotEmpty()) appendLine("- ORDENS em ${noJev.joinToString()}: TypeSafe Jev está desligado — não chame typesafe_jev_check. Use somente as ferramentas manuais expostas e respeite todas as salvaguardas e limites do conector; isso não ativa estratégia nem execução automática.")
                         appendLine("- Solana day trade e conectores de trading têm capital e posições independentes: não use um para cobrir o outro. Se a resposta disser que outro agente está operando o ativo, aguarde ou escolha outro; faça uma ordem por vez.")
                     }
                     appendLine("- A sessão e as credenciais são gerenciadas pelo app; você nunca vê nem pede senha. Se uma ferramenta responder que é preciso fazer login, avise o usuário.")
@@ -1167,12 +1176,11 @@ class AgentRunner(
         if (builder) add(tool("connector_propose", "Mostra ao usuário o card 'Instalar conector' no chat. Só aceita definição que passou pelo dry-run offline com o MESMO JSON e possui atestado válido; o card não alegará que serviço real foi conectado.", buildJsonObject {
             put("json", str("Definição JSON completa e válida do conector"))
         }, listOf("json")))
-        if (allowMultiAgent) add(tool("sleep", "Modo contínuo: pausa e depois retoma automaticamente. Use UM modo: minutes, seconds, ou align_candle_seconds. Para IQ Option, copie server_now_epoch_ms de candle_clock para calcular pelo relógio do servidor; por padrão acorda 10 s antes da próxima abertura.", buildJsonObject {
+        if (allowMultiAgent) add(tool("sleep", "Modo contínuo: pausa e depois retoma automaticamente. Use UM modo: minutes, seconds, ou align_candle_seconds. Use seconds para esperas curtas e minutes para verificações recorrentes.", buildJsonObject {
             put("minutes", int("Minutos até a próxima verificação (1-1440)"))
             put("seconds", int("Segundos até a próxima verificação (1-86400) — para esperas curtas e precisas"))
-            put("align_candle_seconds", int("Tempo gráfico em segundos (60=M1, 120=M2, 300=M5, 600=M10): acorda antes da próxima abertura"))
+            put("align_candle_seconds", int("Intervalo em segundos para alinhar a próxima verificação a um período"))
             put("lead_seconds", int("Com align_candle_seconds: quantos segundos antes da abertura acordar (padrão 10, 2-30)"))
-            put("server_now_epoch_ms", str("Opcional: epoch em milissegundos copiado do campo server_now_epoch_ms de candle_clock IQ Option"))
             put("reason", str("O que fazer ao acordar"))
         }, listOf("reason")))
         if (allowMultiAgent) add(tool("create_skill", "Cria uma nova skill na biblioteca do usuário.", buildJsonObject {
@@ -1433,20 +1441,10 @@ class AgentRunner(
             s.accuracyModel.ifBlank { "typesafe/jev-router" }, s.baseUrl,
         )
         val effective = maxOf(minAccuracy, TradeCoordinator.gate.floor)
-        // Enriquecimento automático: guarda o contexto de cada ativo separadamente para nunca cobrir um sinal sem dados com o de outro.
-        val autoContexts: Map<String, String> = run {
-            val iq = dev.cueopen.app.CueApp.instance.uiConnectors.get("iqoption") as? dev.cueopen.app.uiconnector.iqoption.IqOptionConnector
-            val iqSignals = inputs.filter { it.venue.equals("iqoption", true) }
-            if (iq == null || !iq.isLoggedIn || iqSignals.isEmpty()) emptyMap() else kotlinx.coroutines.coroutineScope {
-                iqSignals.take(6).map { sig -> async {
-                    val raw = runCatching { iq.jevContext(sig.id, sig.direction.orEmpty()) }.getOrDefault("")
-                    sig.id to raw.takeIf { dev.cueopen.app.trading.SignalEvaluationAdapter.hasUsableBrokerContext(it) }.orEmpty()
-                } }.awaitAll().toMap()
-            }
-        }
-        val missing = inputs.filter { !it.hasEvidence && (it.venue?.equals("iqoption", true) != true || autoContexts[it.id].isNullOrBlank()) }
-        if (missing.isNotEmpty()) return "Dados reais ausentes para: ${missing.joinToString { it.id }}. Nenhuma ordem foi liberada. Envie preço/velas/tendência/liquidez ou use o contexto automático disponível da IQ Option."
-        val ctxText = autoContexts.filterValues { it.isNotBlank() }.entries.joinToString("\n\n") { (id, value) -> "Sinal $id:\n$value" }
+        // Não buscar nem calcular contexto automático da IQ Option: o Jev recebe apenas evidências fornecidas na chamada.
+        val missing = inputs.filter { !it.hasEvidence }
+        if (missing.isNotEmpty()) return "Dados reais ausentes para: ${missing.joinToString { it.id }}. Nenhuma ordem foi liberada. Envie candles/cotações e o contexto necessário explicitamente."
+        val ctxText = ""
         val useSystemOne = dev.cueopen.app.trading.SignalEvaluationAdapter.usesSystemOne(model, s.baseUrl)
         val results = try {
             TradeCoordinator.validationMutex.withLock {
@@ -1622,13 +1620,13 @@ class AgentRunner(
                     align != null && align >= 5 -> {
                         val tf = align.coerceIn(5, 86_400)
                         val lead = (i("lead_seconds") ?: 10).coerceIn(2, 30)
-                        val nowMs = s("server_now_epoch_ms").toLongOrNull() ?: System.currentTimeMillis()
+                        val nowMs = System.currentTimeMillis()
                         var nextOpen = (nowMs / 1000 / tf + 1) * tf // próxima abertura (epoch s, alinhada ao tempo gráfico)
                         var wait = (nextOpen * 1000 - nowMs) / 1000.0 - lead
                         if (wait < 0) { nextOpen += tf; wait += tf } // lead já passou: mira a abertura seguinte
                         val hhmmss = SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date(nextOpen * 1000))
                         Triple(wait.toInt().coerceAtLeast(1), "Aguardando a próxima vela de ${tfLabel(tf)} (abre $hhmmss)",
-                            "Acordo ${lead}s antes da vela de ${tfLabel(tf)} que abre às $hhmmss — analise e entre no INÍCIO dela.")
+                            "Acordo ${lead}s antes da próxima fronteira de período ${tfLabel(tf)}, às $hhmmss.")
                     }
                     i("seconds") != null -> { val sc = i("seconds")!!.coerceIn(1, 86_400); Triple(sc, "Aguardando ${sc}s", "") }
                     else -> { val m = (i("minutes") ?: 5).coerceIn(1, 1440); Triple(m * 60, "Aguardando $m min", "") }

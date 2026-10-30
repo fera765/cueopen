@@ -15,6 +15,7 @@ import androidx.work.WorkerParameters
 import androidx.work.workDataOf
 import dev.cueopen.app.CueApp
 import dev.cueopen.app.MainActivity
+import dev.cueopen.app.SessionNotificationRouting
 import dev.cueopen.app.data.Repeat
 import dev.cueopen.app.data.ScheduledTask
 import dev.cueopen.app.data.Session
@@ -66,11 +67,22 @@ class ScheduledWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(
     }
 
     private fun notify(app: CueApp, sessionId: String, title: String) {
-        val pi = PendingIntent.getActivity(app, sessionId.hashCode(),
-            Intent(app, MainActivity::class.java).putExtra("session", sessionId), PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
+        val validId = SessionNotificationRouting.validSessionId(sessionId)
+        val key = validId ?: "invalid-session:$title"
+        val intent = Intent(app, MainActivity::class.java)
+            .setAction(SessionNotificationRouting.ACTION_OPEN_SESSION)
+            .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+        validId?.let {
+            intent.putExtra(SessionNotificationRouting.EXTRA_SESSION, it)
+                .putExtra(SessionNotificationRouting.EXTRA_SESSION_ID, it)
+                .setData(android.net.Uri.parse(SessionNotificationRouting.deepLink(it)))
+        }
+        val stableId = SessionNotificationRouting.stableId(key)
+        val pi = PendingIntent.getActivity(app, stableId, intent,
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
         val n = Notification.Builder(app, CueApp.CH_TASKS).setSmallIcon(android.R.drawable.ic_popup_reminder)
             .setContentTitle("Tarefa agendada concluída").setContentText(title).setContentIntent(pi).setAutoCancel(true).build()
-        app.getSystemService(NotificationManager::class.java).notify(sessionId.hashCode(), n)
+        app.getSystemService(NotificationManager::class.java).notify(stableId, n)
     }
 }
 
@@ -98,6 +110,5 @@ class BootReceiver : android.content.BroadcastReceiver() {
         // criar a Application já chama startAutonomy(); aqui só garantimos o worker
         AutonomyWorker.ensure(context)
         dev.cueopen.app.scheduler.Heartbeat.rescheduleAll(context)
-        dev.cueopen.app.uiconnector.iqoption.IqSignalAlarms.rescheduleAll(context)
     }
 }

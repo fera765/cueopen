@@ -645,6 +645,8 @@ fun DevicePermissionsCard(a: dev.cueopen.app.data.AgentProfile, onChange: (dev.c
     var tick by remember { mutableIntStateOf(0) }
     val permissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { tick++ }
     fun requestCap(id: String) {
+        // O launcher/Settings só é aberto quando o estado real do Android está faltante.
+        if (dev.cueopen.app.device.DeviceCaps.granted(ctx, id)) return
         val missing = dev.cueopen.app.device.DeviceCaps.runtimePermissions(ctx, id)
             .filter { ctx.checkSelfPermission(it) != PackageManager.PERMISSION_GRANTED }
         if (missing.isNotEmpty()) permissionLauncher.launch(missing.toTypedArray())
@@ -677,12 +679,12 @@ fun DevicePermissionsCard(a: dev.cueopen.app.data.AgentProfile, onChange: (dev.c
                         Text(cap.desc, fontSize = 12.sp, color = c.ink2)
                         if (on) Text(dev.cueopen.app.device.DeviceCaps.status(ctx, cap.id), fontSize = 11.sp,
                             color = if (granted) c.ok else c.warn,
-                            modifier = if (cap.id == dev.cueopen.app.device.DeviceCaps.SMS) Modifier
+                            modifier = if (cap.id == dev.cueopen.app.device.DeviceCaps.SMS || granted) Modifier
                                 else Modifier.clickable { requestCap(cap.id) })
                     }
                     Switch(on, { v ->
                         onChange(a.copy(deviceCaps = if (v) a.deviceCaps + cap.id else a.deviceCaps - cap.id))
-                        if (v) requestCap(cap.id)
+                        if (v && !dev.cueopen.app.device.DeviceCaps.granted(ctx, cap.id)) requestCap(cap.id)
                     }, colors = SwitchDefaults.colors(checkedTrackColor = c.ink, checkedThumbColor = c.bg))
                 }
             }

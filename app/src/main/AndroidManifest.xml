@@ -58,11 +58,6 @@
             android:exported="false"
             android:foregroundServiceType="dataSync" />
 
-        <service
-            android:name=".uiconnector.iqoption.IqSignalDispatchService"
-            android:exported="false"
-            android:foregroundServiceType="dataSync" />
-
         <receiver android:name=".scheduler.BootReceiver" android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
@@ -70,7 +65,6 @@
             </intent-filter>
         </receiver>
 
-        <receiver android:name=".uiconnector.iqoption.IqSignalAlarmReceiver" android:exported="false" />
 
         <receiver android:name=".scheduler.HeartbeatReceiver" android:exported="false">
             <intent-filter><action android:name="com.fluwy.bot.HEARTBEAT" /></intent-filter>
