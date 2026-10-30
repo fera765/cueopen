@@ -20,7 +20,7 @@ data class ConnectorValidationAttestation(
 )
 
 object ConnectorAttestationPolicy {
-    const val CURRENT_VERSION = 1
+    const val CURRENT_VERSION = 2
     val REQUIRED_CHECKS = setOf(
         "schema",
         "static_guardrails",
@@ -30,28 +30,28 @@ object ConnectorAttestationPolicy {
         "external_effects_held",
     )
 
-    fun digest(json: String): String {
-        val parsed = Json.parseToJsonElement(CustomDefParser.stripFences(json))
+    fun digest(yaml: String): String {
+        val parsed = ConnectorYamlCodec.parse(CustomDefParser.stripFences(yaml))
         val canonical = canonical(parsed)
         return MessageDigest.getInstance("SHA-256")
             .digest(canonical.toByteArray(Charsets.UTF_8))
             .joinToString("") { "%02x".format(it) }
     }
 
-    fun issue(json: String, checks: Set<String>, now: Long = System.currentTimeMillis()): ConnectorValidationAttestation =
+    fun issue(yaml: String, checks: Set<String>, now: Long = System.currentTimeMillis()): ConnectorValidationAttestation =
         ConnectorValidationAttestation(
-            definitionSha256 = digest(json),
+            definitionSha256 = digest(yaml),
             policyVersion = CURRENT_VERSION,
             testedAtMillis = now,
             checks = checks.sorted(),
-            summary = "Dry-run offline: esquema, guardrails, requests e saídas simulados; sem chamadas externas ou execução de código gerado.",
+            summary = "Dry-run YAML offline: esquema, guardrails, requests e saídas simulados; sem chamadas externas ou execução de código gerado.",
         )
 
-    fun isInstallable(json: String, proof: ConnectorValidationAttestation?): Boolean {
+    fun isInstallable(yaml: String, proof: ConnectorValidationAttestation?): Boolean {
         if (proof == null || proof.policyVersion != CURRENT_VERSION) return false
         if (proof.testedAtMillis <= 0L || proof.definitionSha256.length != 64) return false
         if (!proof.checks.containsAll(REQUIRED_CHECKS)) return false
-        return runCatching { digest(json) == proof.definitionSha256 }.getOrDefault(false)
+        return runCatching { digest(yaml) == proof.definitionSha256 }.getOrDefault(false)
     }
 
     private fun canonical(value: JsonElement): String = when (value) {

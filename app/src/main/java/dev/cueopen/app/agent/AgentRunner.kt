@@ -241,6 +241,8 @@ class AgentRunner(
         // Detecção de loop de ferramentas: mesma chamada (nome+args) repetida sem progresso.
         val toolSigWindow = ArrayDeque<String>()
         val resultSigWindow = ArrayDeque<String>()
+        // Reutiliza o resultado de chamadas idênticas do builder durante esta sessão; evita dry-runs e cards duplicados.
+        val connectorBuilderResults = ExactToolCallMemo<ToolResult>()
         val invalidAccessibilitySnapshots = dev.cueopen.app.device.InvalidAccessibilitySnapshotGuard()
         val visualInspectionUsed = mutableSetOf<String>()
         val accessibilityReadScreenCompleted = mutableSetOf<String>()
@@ -421,10 +423,12 @@ class AgentRunner(
                 val tradeResultTool = call.name == "uic_iqoption_open_option" || call.name == "uic_iqoption_get_trade_result"
                 val cacheKey = call.name + "|" + normArgs(call.argsJson)
                 val cachedTradeResult = if (tradeResultTool) tradeCallCache[cacheKey] else null
+                val cacheConnectorResult = memoizeConnectorBuilderCall(call.name)
+                val cachedConnectorResult = if (cacheConnectorResult) connectorBuilderResults[cacheKey] else null
                 val rawResult = if (blockedSnapshotReuse) {
                     ToolResult("ERRO: Snapshot ausente ou invalidado; nenhuma ação foi executada com o ID já recusado. Use somente IDs da releitura atual:\n${blockedSnapshotRead.orEmpty()}")
                 } else try {
-                    cachedTradeResult ?: runTool(
+                    cachedTradeResult ?: cachedConnectorResult ?: runTool(
                         sessionId, call, allowDeviceTools = tokenBudgetOverride == null,
                         model = modelId, visualInspectionUsed = visualInspectionUsed,
                         accessibilityReadScreenCompleted = accessibilityReadScreenCompleted,
@@ -469,6 +473,7 @@ class AgentRunner(
                     isStaleAccessibilitySnapshotFailure(call.name, rawResult.output))
                     staleSnapshotRecoveryCache[accessibilitySnapshotId] = rawResult.output
                 if (tradeResultTool && cachedTradeResult == null) tradeCallCache[cacheKey] = rawResult
+                if (cacheConnectorResult && cachedConnectorResult == null) connectorBuilderResults[cacheKey] = rawResult
                 val consumedWait = if (tradeResultTool) IqTradeWaitDirective.consume(rawResult.output) else null
                 val outputText = consumedWait?.output ?: rawResult.output
                 val result = rawResult.copy(output = if (cachedTradeResult != null)
@@ -516,6 +521,7 @@ class AgentRunner(
             run {
                 var tripped: String? = null
                 var trippedRepeatable = true
+                var trippedStrict = false
                 for (call in reply.toolCalls) {
                     if (call.name in controlTools) continue
                     val repeatable = isRepeatableTool(call.name)
@@ -523,7 +529,11 @@ class AgentRunner(
                     toolSigWindow.addLast(sig)
                     while (toolSigWindow.size > 16) toolSigWindow.removeFirst()
                     val same = toolSigWindow.count { it == sig }
-                    if (same >= (if (repeatable) 6 else 3)) { tripped = call.name; trippedRepeatable = trippedRepeatable && repeatable }
+                    if (same >= repeatToolThreshold(call.name)) {
+                        tripped = call.name
+                        trippedRepeatable = trippedRepeatable && repeatable
+                        trippedStrict = call.name in STRICT_REPEAT_TOOLS
+                    }
                     // mesmo conteúdo longo por caminhos diferentes (ex.: reler cópias do mesmo arquivo) — só para leituras puras
                     if (!repeatable && call.id in resultLong) {
                         val rsig = call.name + "#" + resultHashes[call.id]
@@ -536,7 +546,11 @@ class AgentRunner(
                     if (++cleanRounds >= 5) { toolLoopNudges = 0; cleanRounds = 0 } // voltou a progredir: zera os avisos
                 } else {
                     cleanRounds = 0
-                    val limit = if (trippedRepeatable) 4 else 2
+                    val limit = when {
+                        trippedStrict -> 1
+                        trippedRepeatable -> 4
+                        else -> 2
+                    }
                     if (++toolLoopNudges >= limit) {
                         runCatching { dev.cueopen.app.diag.ErrorLog.log("agent", "Loop de ferramenta sem progresso: $tripped (interrompido).", sessionId, tripped) }
                         store.addItemUnique(sessionId, ChatItem.Error(text = "O agente repetiu exatamente a mesma ação ($tripped), com os mesmos argumentos e o mesmo resultado, várias vezes seguidas. Interrompi para evitar um loop. Ajuste o pedido/abordagem ou troque de modelo."))
@@ -808,8 +822,8 @@ class AgentRunner(
 
     /** Ferramentas cujo resultado depende do estado do ambiente (repetir pode ser legítimo). */
     private fun isRepeatableTool(name: String): Boolean {
-        val pure = setOf("file_read", "file_list", "memory_search", "notes_read", "connector_spec", "skill_load", "connector_validate")
-        if (name in pure) return false
+        if (name in STRICT_REPEAT_TOOLS) return false
+        if (name in PURE_REPEAT_TOOLS) return false
         return true // browser_*, device_*, shell, uic_*, mcp_*, wallet/market e demais ferramentas de ambiente
     }
 
@@ -825,6 +839,18 @@ class AgentRunner(
 
     /** Detectores puros de loop/degeneração (sem Android) — testáveis na JVM. */
     companion object LoopGuards {
+        private val STRICT_REPEAT_TOOLS = setOf("connector_validate", "connector_test", "connector_propose")
+        private val PURE_REPEAT_TOOLS = setOf("file_read", "file_list", "memory_search", "notes_read", "connector_spec", "skill_load")
+
+        /** Duas chamadas idênticas de builder com o mesmo resultado já indicam ausência de progresso. */
+        fun repeatToolThreshold(name: String): Int = when {
+            name in STRICT_REPEAT_TOOLS -> 2
+            name in PURE_REPEAT_TOOLS -> 3
+            else -> 6
+        }
+
+        fun memoizeConnectorBuilderCall(name: String): Boolean = name in STRICT_REPEAT_TOOLS
+
         private val ACTION_INTENT = Regex(
             "(?i)\\b(vou|irei|vamos|deixa eu|deixe-me|agora vou|primeiro vou|em seguida vou|let me|i['’ ]?ll|i will|i'?m going to|going to|gonna)\\b" +
                 "[^.\\n]{0,45}?\\b(pesquis|busc|procur|verific|chec|test|analis|olh|consult|abrir|abro|naveg|acess|execut|rod|cria|crio|ger|baix|instal|configur|valid|compil|ler|leia|list|escrev|salv|implement|corrig|investig|continu|search|fetch|open|navigat|run|execut|check|download|install|creat|read|writ|analyz|look)")
@@ -1152,7 +1178,7 @@ class AgentRunner(
             appendLine("7. MODO CONTÍNUO: se o usuário pedir para monitorar, acompanhar, repetir ou rodar por horas/dias, NÃO finalize. Faça a verificação, registre em notes_write e chame `sleep` (minutos até a próxima verificação). Repita até o usuário pausar.")
             appendLine("8. Fora do modo contínuo, termine com `finish` (resumo curto + arquivos). Responda no idioma do usuário.")
             appendLine("8a. DÚVIDA REAL → `ask_question`: só quando o usuário pediu uma tarefa E existe uma dúvida verdadeira que muda o resultado (ex.: qual de duas abordagens, público, formato, escopo) e errar custaria refazer muito trabalho ou algo irreversível. NÃO use para confirmar (\"posso começar?\"), para coisas que você descobre pesquisando/lendo arquivos, nem para preferências triviais — nesses casos assuma o mais razoável e diga o que assumiu. No máximo UMA vez por pedido, com 1–4 perguntas objetivas e 2–4 opções cada (\"Outra resposta\" já aparece). Depois das respostas, siga direto.")
-            appendLine("8b0. DADOS SENSÍVEIS → `ask_secure`: para API key, token, e-mail/senha, dados de login ou de formulário, NUNCA peça para o usuário digitar no chat — chame ask_secure com os campos. Você nunca verá os valores; depois use o marcador {{secret:<nome>}} nos argumentos (shell, browser_type, browser_navigate, file_write, file_edit, ferramentas uic_*/mcp_*, connector_test login_json/settings_json/args_json) que o app troca pelo valor na execução. Nunca tente imprimir, ecoar ou adivinhar o valor. Se o usuário colar um segredo no chat, use-o só se necessário e recomende o formulário seguro.")
+            appendLine("8b0. DADOS SENSÍVEIS → `ask_secure`: para API key, token, e-mail/senha, dados de login ou de formulário, NUNCA peça para o usuário digitar no chat — chame ask_secure com os campos. Você nunca verá os valores; depois use o marcador {{secret:<nome>}} nos argumentos de execução que o app troca pelo valor. Nunca tente imprimir, ecoar ou adivinhar o valor. Não inclua segredos em definições YAML nem em amostras do connector_test. Se o usuário colar um segredo no chat, use-o só se necessário e recomende o formulário seguro.")
             SecretVault.names(sessionId).takeIf { it.isNotEmpty() }?.let { appendLine("8b1. Dados seguros já disponíveis nesta tarefa (use o marcador, sem pedir de novo): " + it.joinToString { n -> "{{secret:$n}}" }) }
             appendLine("8b. ELEMENTOS CueUI: quando um elemento interativo ajudar na resposta (opções para o usuário tocar, gráfico, calculadora, tabela, estatísticas, passos, barra de progresso, aviso, chave→valor), inclua um bloco ```cueui com UM objeto JSON `{\"type\": ...}`. O chat renderiza nativo; NÃO escreva o JSON como texto nem explique o bloco. Tipos e campos: " +
                 "buttons {items:[{label, send?|copy?|url?, tone?}]} (send = texto enviado a você ao tocar); " +
@@ -1199,11 +1225,11 @@ class AgentRunner(
             }
             if (session.connectorBuilder) appendLine()
             if (session.connectorBuilder) appendLine("## Criar UI Connectors (esta conversa é o criador de conectores)")
-            if (session.connectorBuilder) appendLine("- Fluxo obrigatório: chame connector_spec, crie JSON declarativo, use connector_validate até zero erros, depois connector_test e só então connector_propose. connector_test é um DRY-RUN OFFLINE: usa fixtures HTTP/WebSocket e filesystem virtual; nunca usa rede externa, credenciais reais, browser real, setup/comandos gerados ou código arbitrário. Operações file declarativas podem ser testadas no filesystem em memória; conector que dependa de shell/setup falha fechado até existir executor restrito. Segredos/marcadores não são necessários e nunca devem ser pedidos para validar. O relatório distingue mocks de verificações estruturais; nunca diga que uma API real, permissão, login ou execução/arquivo real foi verificado. Se aparecer ✗, corrija e teste novamente; connector_propose fica bloqueado até o mesmo JSON passar. Se falta URL ou esquema da API, pesquise documentação oficial ou pergunte. Para fontes sem endpoint público autorizado/estável, explique a limitação e NÃO proponha scraping nem contorno de login/CAPTCHA.")
+            if (session.connectorBuilder) appendLine("- Fluxo obrigatório: chame connector_spec, escreva uma definição YAML, use connector_validate até zero erros, depois connector_test e só então connector_propose. `yaml` é a definição; `settings_yaml` e `args_yaml` são opcionais e só carregam amostras não secretas. connector_test é um DRY-RUN OFFLINE com fixtures HTTP/WebSocket e filesystem virtual; nunca usa rede externa, credenciais reais, browser real, setup/comandos gerados ou código arbitrário. Operações file declarativas podem ser testadas no filesystem em memória; conector que dependa de shell/setup falha fechado. Segredos/marcadores não são necessários e nunca devem ser pedidos para validar. O relatório distingue mocks de verificações estruturais; nunca diga que API, permissão, login ou execução real foram verificados. Corrija erros alterando o YAML; não repita uma chamada idêntica após a mesma falha. connector_propose fica bloqueado até o mesmo YAML passar no teste. Se faltar URL/esquema, pesquise documentação oficial ou pergunte; não proponha scraping nem contorno de login/CAPTCHA.")
             if (session.connectorBuilder) appendLine("- Tempo real e ações externas: realtime/HTTP são conferidos estruturalmente e por transporte simulado; nenhuma mensagem, ordem, publicação ou compra é enviada no teste. Use apenas protocolo documentado oficialmente, risky/limits/requiresSignal quando aplicável, e deixe claro que o handshake real ainda precisa de autorização.")
             if (session.connectorBuilder) appendLine("- CAPACIDADES DO APARELHO (terminal, arquivos, browser): o dry-run usa filesystem e browser substitutos; comandos, scripts, setup e páginas reais NÃO são executados/abertos antes da instalação. Prefira APIs oficiais e compute/file declarativo; declare os limites e não afirme que código de shell ou artefatos gerados dinamicamente passaram em execução real. Scraping de Facebook/Meta Ads Library é bloqueado; somente uma API oficial autorizada poderia ser considerada, e o dry-run offline não comprova token/permissões, portanto não proponha sem validação autorizada posterior.")
             if (session.connectorBuilder) appendLine("- Geradores de copy/VSL: se o conector chamar uma API de geração textual, use outputPolicy.type=vsl; envie duração, idioma e guardrails na requisição, declare 3–12 seções obrigatórias e, quando o usuário der termos proibidos, use forbiddenTermsParam. A validação verifica contagem estimada (WPM × minutos com tolerância), idioma por heurística local (PT/EN/ES/FR), seções e termos proibidos; não é uma garantia de duração falada nem uma revisão semântica de fatos/alegações.")
-            if (session.connectorBuilder) appendLine("- CÁLCULOS (indicadores técnicos, estatística, sinais, tabelas derivadas, conversões): use o bloco compute do SDK — expressões com a biblioteca de funções do app (sma, ema, rsi, macd, bollinger, stoch, adx, ichimoku, supertrend, psar, vwap… e map/filter/reduce/zip_rows). Busque os dados reais (ex.: velas) com request/source e calcule tudo no compute; nunca peça ao usuário para calcular nem invente valores. Pedidos como 'todos os indicadores do TradingView' = um conector com compute cobrindo médias, osciladores, volatilidade, tendência e volume, com sinal e resumo (veja o exemplo de indicadores na especificação).")
+            if (session.connectorBuilder) appendLine("- CÁLCULOS (indicadores técnicos, estatística, sinais, tabelas derivadas, conversões): use o bloco compute do SDK — expressões com a biblioteca de funções do app (sma, ema, rsi, macd, bollinger, stoch, adx, ichimoku, supertrend, psar, vwap… e map/filter/reduce/zip_rows). Busque os dados reais com request/source e calcule no compute; nunca peça ao usuário para calcular nem invente valores. Declare em YAML somente os cálculos necessários e valide o resultado no dry-run.")
             runCatching {
                 val hub = dev.cueopen.app.CueApp.instance.uiConnectors
                 val usable = hub.connectors.filter { hub.usableBy(it, agent) }
@@ -1334,18 +1360,18 @@ class AgentRunner(
         }, listOf("fact")))
         add(tool("memory_search", "Busca na memória de longo prazo.", buildJsonObject { put("query", str("Busca")) }, listOf("query")))
         add(tool("skill_load", "Carrega as instruções completas de uma skill.", buildJsonObject { put("name", str("Nome da skill")) }, listOf("name")))
-        if (builder) add(tool("connector_spec", "Retorna a especificação COMPLETA do formato JSON de UI Connectors do CueOpen (esquema, regras, filtros, exemplos). Chame ANTES de escrever um conector.", buildJsonObject {}))
-        if (builder) add(tool("connector_validate", "Valida uma definição JSON de UI Connector com o parser real do app. Retorna OK ou a lista exata de erros (caminho + motivo). Corrija e valide de novo até zero erros.", buildJsonObject {
-            put("json", str("Definição JSON completa do conector"))
-        }, listOf("json")))
-        if (builder) add(tool("connector_test", "Executa dry-run OFFLINE com transporte HTTP/WebSocket e filesystem em mocks; testa schema, guardrails, templates, renderização e políticas de saída. Nunca chama APIs reais, envia ações, abre browser ou executa setup/shell/código gerado; conectores que dependem de shell/setup falham fechado. Para VSL, valida duração estimada, idioma, ordem das seções e termos proibidos. Obrigatório passar antes de connector_propose; o resultado não comprova login/permissões ou disponibilidade real do serviço.", buildJsonObject {
-            put("json", str("Definição JSON completa do conector"))
-            put("settings_json", str("Opcional: valores de exemplo não secretos para as configurações (settings)"))
-            put("args_json", str("Exemplos de entrada não secretos por ferramenta (opcional; se omitidos, o teste usa valores sintéticos), ex.: {\"buscar\":{\"termo\":\"amostra\",\"tipo\":\"artist\"}}"))
-        }, listOf("json")))
-        if (builder) add(tool("connector_propose", "Mostra ao usuário o card 'Instalar conector' no chat. Só aceita definição que passou pelo dry-run offline com o MESMO JSON e possui atestado válido; o card não alegará que serviço real foi conectado.", buildJsonObject {
-            put("json", str("Definição JSON completa e válida do conector"))
-        }, listOf("json")))
+        if (builder) add(tool("connector_spec", "Retorna a especificação YAML completa do UI Connector SDK (campos, tipos, limites e guardrails), sem presets. Chame antes de escrever uma definição.", buildJsonObject {}))
+        if (builder) add(tool("connector_validate", "Valida uma definição YAML de UI Connector. Retorna OK ou erros acionáveis com caminho e motivo. Corrija o YAML antes de validar de novo.", buildJsonObject {
+            put("yaml", str("Definição YAML completa do conector"))
+        }, listOf("yaml")))
+        if (builder) add(tool("connector_test", "Executa dry-run OFFLINE de uma definição YAML com transporte HTTP/WebSocket e filesystem em mocks; testa schema, guardrails, templates, renderização e políticas de saída. Nunca chama APIs reais, envia ações, abre browser ou executa setup/shell/código gerado. O resultado não comprova login, permissões ou disponibilidade real.", buildJsonObject {
+            put("yaml", str("Definição YAML completa do conector"))
+            put("settings_yaml", str("Opcional: mapa YAML com valores de exemplo não secretos para settings"))
+            put("args_yaml", str("Opcional: mapa YAML de argumentos de exemplo não secretos por ferramenta; sem isso, o teste usa valores sintéticos"))
+        }, listOf("yaml")))
+        if (builder) add(tool("connector_propose", "Mostra ao usuário o card 'Instalar conector'. Só aceita o mesmo YAML que passou no dry-run offline e possui atestado válido; o card não alegará que o serviço real foi conectado.", buildJsonObject {
+            put("yaml", str("Definição YAML completa e válida do conector"))
+        }, listOf("yaml")))
         if (allowMultiAgent) add(tool("sleep", "Modo contínuo: pausa e depois retoma automaticamente. Use UM modo: minutes, seconds, ou align_candle_seconds. Use seconds para esperas curtas e minutes para verificações recorrentes.", buildJsonObject {
             put("minutes", int("Minutos até a próxima verificação (1-1440)"))
             put("seconds", int("Segundos até a próxima verificação (1-86400) — para esperas curtas e precisas"))
@@ -1683,19 +1709,25 @@ class AgentRunner(
     }
 
     /** Ferramentas do criador de UI Connectors (só em sessões abertas pelo editor de conectores). */
-    /** Atestado do último JSON aprovado no dry-run offline, por sessão do criador. */
+    /** Atestado da última definição YAML aprovada no dry-run offline, por sessão do criador. */
     private val builderPassed = java.util.concurrent.ConcurrentHashMap<String, dev.cueopen.app.uiconnector.custom.ConnectorValidationAttestation>()
 
-    private fun strMap(raw: String): Map<String, String> = runCatching {
-        (this.json.parseToJsonElement(raw.ifBlank { "{}" }) as JsonObject).mapValues { (_, x) -> (x as? kotlinx.serialization.json.JsonPrimitive)?.contentOrNull ?: x.toString() }
-    }.getOrDefault(emptyMap())
+    private fun yamlStringMap(raw: String): Map<String, String> {
+        if (raw.isBlank()) return emptyMap()
+        val root = dev.cueopen.app.uiconnector.custom.ConnectorYamlCodec.parse(raw) as? JsonObject
+            ?: throw IllegalArgumentException("a raiz precisa ser um mapa YAML")
+        return root.mapValues { (_, value) ->
+            (value as? kotlinx.serialization.json.JsonPrimitive)?.contentOrNull
+                ?: throw IllegalArgumentException("os valores devem ser escalares")
+        }
+    }
 
-    private suspend fun connectorTool(sessionId: String, name: String, json: String, argsJson: String = "", loginJson: String = "", settingsJson: String = ""): String {
+    private suspend fun connectorTool(sessionId: String, name: String, yaml: String, argsYaml: String = "", settingsYaml: String = ""): String {
         if (store.session(sessionId)?.connectorBuilder != true)
             return "Indisponível: crie conectores pela página Conectores → Novo conector → Criar com a IA."
         if (name == "connector_spec") return dev.cueopen.app.uiconnector.custom.SdkPrompt.MARKDOWN
         return run {
-                val raw = json.trim().removePrefix("```json").removePrefix("```").removeSuffix("```").trim()
+                val raw = dev.cueopen.app.uiconnector.custom.CustomDefParser.stripFences(yaml)
                 val parsed = dev.cueopen.app.uiconnector.custom.CustomDefParser.parse(raw)
                 val hub = dev.cueopen.app.CueApp.instance.uiConnectors
                 val d = parsed.def
@@ -1706,32 +1738,40 @@ class AgentRunner(
                 else when {
                     clash -> "INVÁLIDO: o id '${d.id}' pertence a um conector do app. Troque o id."
                     name == "connector_test" -> {
-                        val toolArgs = runCatching {
-                            (this.json.parseToJsonElement(argsJson.ifBlank { "{}" }) as JsonObject).mapValues { (_, v) ->
-                                (v as? JsonObject)?.mapValues { (_, x) -> (x as? kotlinx.serialization.json.JsonPrimitive)?.contentOrNull ?: x.toString() }.orEmpty()
+                        val toolArgs = try {
+                            if (argsYaml.isBlank()) emptyMap() else {
+                                val root = dev.cueopen.app.uiconnector.custom.ConnectorYamlCodec.parse(argsYaml) as? JsonObject
+                                    ?: throw IllegalArgumentException("a raiz precisa ser um mapa YAML por nome de ferramenta")
+                                root.mapValues { (_, value) ->
+                                    val values = value as? JsonObject ?: throw IllegalArgumentException("cada ferramenta precisa mapear argumentos em um mapa YAML")
+                                    values.mapValues { (_, v) -> (v as? kotlinx.serialization.json.JsonPrimitive)?.contentOrNull ?: v.toString() }
+                                }
                             }
-                        }.getOrDefault(emptyMap())
-                        val settingOverrides = strMap(settingsJson)
+                        } catch (t: Exception) {
+                            return "INVÁLIDO — args_yaml: ${t.message ?: "sintaxe incorreta"}. Corrija as amostras ou remova args_yaml para usar valores sintéticos."
+                        }
+                        val settingOverrides = try { yamlStringMap(settingsYaml) } catch (t: Exception) {
+                            return "INVÁLIDO — settings_yaml: ${t.message ?: "sintaxe incorreta"}. Corrija o mapa ou remova settings_yaml."
+                        }
                         val result = runCatching {
                             dev.cueopen.app.uiconnector.custom.ConnectorDryRunValidator.validate(raw, d, toolArgs, settingOverrides)
                         }.getOrElse { dev.cueopen.app.uiconnector.custom.ConnectorDryRunValidator.Result(false, "✗ Falha no dry-run: ${it.message ?: it.javaClass.simpleName}", null) }
                         val passed = result.passed && result.attestation != null
                         if (passed) builderPassed[sessionId] = result.attestation!! else builderPassed.remove(sessionId)
                         (if (passed) "PASSOU — dry-run local offline concluído; nenhuma chamada externa nem código gerado foi executado.\n"
-                         else "FALHOU — o conector NÃO pode ser proposto assim. Corrija cada ✗ abaixo e rode connector_test de novo:\n") +
+                         else "FALHOU — o conector NÃO pode ser proposto assim. Corrija os erros no YAML e rode connector_test com a definição corrigida; não repita a mesma chamada após o mesmo erro:\n") +
                             result.report.take(7000) +
-                            (if (passed) "\nLogin, permissões e comportamento real da API serão testados somente quando o usuário conectar/autorizar o conector. Agora chame connector_propose com o MESMO JSON." else "")
+                            (if (passed) "\nLogin, permissões e comportamento real da API serão testados somente quando o usuário conectar/autorizar o conector. Agora chame connector_propose com o MESMO YAML." else "")
                     }
                     name == "connector_propose" && !dev.cueopen.app.uiconnector.custom.ConnectorAttestationPolicy.isInstallable(raw, builderPassed[sessionId]) ->
-                        "BLOQUEADO pelos guardrails: este JSON ainda não passou em connector_test. Rode connector_test com este MESMO JSON (com args_json de exemplo para as ferramentas) e só proponha quando PASSOU."
-                    name == "connector_validate" -> "OK — definição válida (host ${d.host}, ${d.tools.size} ferramenta(s), ${d.panels.size} painel(is))." +
+                        "BLOQUEADO pelos guardrails: este YAML ainda não passou em connector_test. Rode connector_test com este MESMO YAML e só proponha quando PASSOU."
+                    name == "connector_validate" -> "OK — definição YAML válida (host ${d.host}, ${d.tools.size} ferramenta(s), ${d.panels.size} painel(is))." +
                         (if (parsed.warnings.isNotEmpty()) "\nAvisos (não bloqueiam; corrija se fizer sentido):\n" + parsed.warnings.joinToString("\n") { "- $it" } else "") +
-                        "\nAgora chame connector_test com o MESMO JSON e args_json com valores de exemplo não secretos (ou deixe o teste gerar valores sintéticos)" +
-                        " Em seguida connector_test executa apenas mocks offline — sem credenciais reais, rede externa ou código arbitrário."
+                        "\nAgora chame connector_test com o MESMO YAML e, opcionalmente, args_yaml/settings_yaml com amostras não secretas. O teste usa apenas mocks offline — sem credenciais reais, rede externa ou código arbitrário."
                     else -> {
                         store.addItem(sessionId, ChatItem.ConnectorProposal(
                             connectorId = d.id, name = d.name, description = d.description, host = d.host,
-                            tools = d.tools.map { it.name }, json = raw,
+                            tools = d.tools.map { it.name }, yaml = raw,
                             capabilities = d.capabilities.toList().sorted(),
                             validation = builderPassed[sessionId],
                         ))
@@ -1837,23 +1877,23 @@ class AgentRunner(
             }
             "connector_spec", "connector_validate", "connector_test", "connector_propose" -> {
                 // passo visível no chat: o que está sendo feito, com o quê, e o resultado
-                val cname = runCatching { (json.parseToJsonElement(CustomDefParserFence.strip(s("json"))) as JsonObject)["name"]?.jsonPrimitive?.contentOrNull }.getOrNull().orEmpty()
+                val cname = runCatching { dev.cueopen.app.uiconnector.custom.CustomDefParser.parse(s("yaml")).def?.name }.getOrNull().orEmpty()
                 val testArgs = runCatching {
-                    (json.parseToJsonElement(s("args_json").ifBlank { "{}" }) as JsonObject).entries.joinToString("; ") { (tool, v) ->
+                    (dev.cueopen.app.uiconnector.custom.ConnectorYamlCodec.parse(s("args_yaml").ifBlank { "{}" }) as JsonObject).entries.joinToString("; ") { (tool, v) ->
                         tool + "(" + ((v as? JsonObject)?.entries?.joinToString(", ") { (k, x) -> k + "=" + ((x as? kotlinx.serialization.json.JsonPrimitive)?.contentOrNull ?: x.toString()) } ?: "") + ")"
                     }
                 }.getOrDefault("")
                 val (title, args) = when (call.name) {
-                    "connector_spec" -> "Lendo a especificação do SDK" to "formato JSON, regras e exemplos"
-                    "connector_validate" -> "Validando a definição do conector" to cname.ifBlank { "JSON" }
-                    "connector_test" -> (if (testArgs.isBlank()) "Validando o conector (guardrails + execução real)" else "Validando o conector com exemplos (guardrails + execução real)") to
+                    "connector_spec" -> "Lendo a especificação do SDK" to "formato YAML e regras"
+                    "connector_validate" -> "Validando a definição do conector" to cname.ifBlank { "YAML" }
+                    "connector_test" -> (if (testArgs.isBlank()) "Validando o conector (guardrails + mocks offline)" else "Validando o conector com amostras (guardrails + mocks offline)") to
                         listOf(cname, testArgs).filter { it.isNotBlank() }.joinToString(" · ")
                     else -> "Preparando o card de instalação" to cname
                 }
                 val step = ChatItem.Step(tool = call.name, title = title, args = args)
                 store.addItem(sessionId, step)
                 setActivity(sessionId, Activity(Activity.Kind.THINKING, title))
-                val out = SecretVault.redact(sessionId, connectorTool(sessionId, call.name, s("json"), s("args_json"), s("login_json"), s("settings_json")))
+                val out = SecretVault.redact(sessionId, connectorTool(sessionId, call.name, s("yaml"), s("args_yaml"), s("settings_yaml")))
                 val failed = out.startsWith("INVÁLIDO") || out.startsWith("FALHOU") || out.startsWith("BLOQUEADO") || out.startsWith("ERRO")
                 val summary = when {
                     call.name == "connector_spec" -> "Especificação carregada (${out.length / 1024} KB)."

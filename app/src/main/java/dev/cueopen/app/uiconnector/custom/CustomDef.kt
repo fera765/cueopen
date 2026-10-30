@@ -10,7 +10,6 @@ import dev.cueopen.app.uiconnector.SpecValidator
 import dev.cueopen.app.uiconnector.Tone
 import dev.cueopen.app.uiconnector.ToolSpec
 import dev.cueopen.app.uiconnector.UiConnectorSpec
-import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
@@ -18,7 +17,7 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 
 /*
- * Definição declarativa (JSON) de um conector criado pelo usuário: HTTP, realtime, compute e capacidades
+ * Definição declarativa (YAML) de um conector criado pelo usuário: HTTP, realtime, compute e capacidades
  * locais explicitamente autorizadas. O parser e os guardrails validam a definição antes da instalação.
  * Referência completa em docs/ui-connector-sdk.md.
  */
@@ -124,7 +123,7 @@ object CustomDefParser {
 
     data class Parsed(val def: CustomDef?, val errors: List<String>, val warnings: List<String>)
 
-    /** Remove cercas de Markdown (```json … ```) que IAs costumam colocar em volta do JSON. */
+    /** Remove cercas de Markdown (```yaml … ```) que IAs costumam colocar em volta da definição. */
     fun stripFences(raw: String): String {
         var t = raw.trim()
         if (t.startsWith("```")) {
@@ -135,24 +134,22 @@ object CustomDefParser {
         return t.trim()
     }
 
-    private fun jsonSyntaxError(text: String, cause: Throwable): String {
-        val detail = (cause.message ?: "erro de sintaxe").take(180)
-        val offset = Regex("""offset\s+(\d+)""", RegexOption.IGNORE_CASE).find(detail)?.groupValues?.get(1)?.toIntOrNull()
-        val location = offset?.takeIf { it in 0..text.length }?.let { at ->
-            val before = text.substring(0, at)
-            "linha ${before.count { it == '\n' } + 1}, coluna ${before.length - (before.lastIndexOf('\n') + 1) + 1}"
-        }
-        val where = location?.let { " ($it)" }.orEmpty()
-        return "JSON inválido$where: $detail. Confira vírgulas e aspas; dentro de strings, escape aspas como \\\" e quebras de linha como \\n."
+    private fun syntaxError(cause: Throwable): String {
+        val message = cause.message.orEmpty()
+        val duplicate = cause.javaClass.simpleName.contains("DuplicateKey", true) || message.contains("duplicate key", true)
+        val detail = if (duplicate) message.lineSequence().firstOrNull { it.contains("duplicate key", true) }?.trim()?.take(180).orEmpty().ifBlank { "chave repetida" }
+            else message.lineSequence().firstOrNull().orEmpty().take(220).ifBlank { "erro de sintaxe" }
+        val kind = if (duplicate) " (chave duplicada)" else ""
+        return "YAML inválido$kind: $detail. Confira indentação, dois-pontos, listas e aspas; valores com {{...}} devem ficar entre aspas."
     }
 
     fun parse(input: String): Parsed {
         val text = stripFences(input)
         if (text.length > MAX_CHARS) return Parsed(null, listOf("Definição maior que 64 KB."), emptyList())
-        val root = try { Json.parseToJsonElement(text) } catch (t: Exception) {
-            return Parsed(null, listOf(jsonSyntaxError(text, t)), emptyList())
+        val root = try { ConnectorYamlCodec.parse(text) } catch (t: Exception) {
+            return Parsed(null, listOf(syntaxError(t)), emptyList())
         }
-        val o = root as? JsonObject ?: return Parsed(null, listOf("A raiz deve ser um objeto JSON { … }."), emptyList())
+        val o = root as? JsonObject ?: return Parsed(null, listOf("A raiz deve ser um mapa YAML de pares chave/valor."), emptyList())
         val c = Ctx()
         val def = c.build(o)
         if (def != null) {

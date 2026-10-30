@@ -1,6 +1,7 @@
 package dev.cueopen.app.data
 
 import dev.cueopen.app.uiconnector.custom.ConnectorValidationAttestation
+import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import java.util.UUID
 
@@ -75,13 +76,13 @@ sealed class ChatItem {
         val description: String,
         val host: String,
         val tools: List<String> = emptyList(),
-        val json: String,
+        @SerialName("json") val yaml: String,
         val installed: Boolean = false,
-        /** Capacidades declaradas no JSON; o dry-run não as executa e a autorização cabe ao usuário. */
+        /** Capacidades declaradas no YAML; o dry-run não as executa e a autorização cabe ao usuário. */
         val capabilities: List<String> = emptyList(),
         /** Campo legado para compatibilidade com cards antigos; o builder atual não guarda credenciais. */
         val loginSecrets: Map<String, String> = emptyMap(),
-        /** Prova persistida do dry-run offline, vinculada ao SHA-256 canônico do JSON proposto. */
+        /** Prova persistida do dry-run offline, vinculada ao SHA-256 canônico da definição YAML. */
         val validation: ConnectorValidationAttestation? = null,
     ) : ChatItem()
 

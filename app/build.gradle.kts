@@ -24,8 +24,8 @@ android {
         // do sandbox a partir de filesDir. Os .so do proot também vêm em jniLibs.
         targetSdk = 28
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
-        versionCode = 61
-        versionName = "4.17.9"
+        versionCode = 62
+        versionName = "4.17.10"
         ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64") }
     }
     signingConfigs {
@@ -94,6 +94,7 @@ dependencies {
     implementation("org.sol4k:sol4k:0.8.2")
     implementation("cash.z.ecc.android:kotlin-bip39:1.0.9")
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.3")
+    implementation("org.yaml:snakeyaml:2.2")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
     testImplementation("junit:junit:4.13.2")
     androidTestImplementation("androidx.test.ext:junit:1.2.1")

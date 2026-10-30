@@ -10,5 +10,7 @@
 -dontwarn org.conscrypt.**
 -dontwarn org.bouncycastle.**
 -dontwarn org.openjsse.**
+# SnakeYAML SafeConstructor rejeita tags JavaBean; java.beans não existe no Android e essa introspecção não é usada.
+-dontwarn java.beans.**
 -dontobfuscate
 -keep class com.caverock.androidsvg.** { *; }

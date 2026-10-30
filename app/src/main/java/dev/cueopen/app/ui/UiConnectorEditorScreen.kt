@@ -33,14 +33,13 @@ import dev.cueopen.app.uiconnector.UiBlock
 import dev.cueopen.app.uiconnector.custom.CustomConnector
 import dev.cueopen.app.uiconnector.custom.CustomDef
 import dev.cueopen.app.uiconnector.custom.CustomDefParser
-import dev.cueopen.app.uiconnector.custom.CustomTemplates
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 /**
- * Criador de UI Connectors: o usuário escreve (ou pede à IA) a definição JSON, vê a validação ao vivo,
+ * Criador de UI Connectors: o usuário escreve (ou pede à IA) a definição YAML, vê a validação ao vivo,
  * testa login/painéis/ferramentas e salva. Nada é executado no aparelho além de requisições HTTPS
  * ao host declarado em baseUrl.
  */
@@ -63,7 +62,7 @@ fun UiConnectorEditorScreen(nav: NavController, id: String) {
         }
     }
 
-    var text by remember { mutableStateOf(if (editing) hub.customJson(id).orEmpty() else CustomTemplates.MINIMAL.json) }
+    var text by remember { mutableStateOf(if (editing) hub.customYaml(id).orEmpty() else "") }
     var parsed by remember { mutableStateOf<CustomDefParser.Parsed?>(null) }
     var message by remember { mutableStateOf<String?>(null) }
     var saveError by remember { mutableStateOf<String?>(null) }
@@ -71,7 +70,6 @@ fun UiConnectorEditorScreen(nav: NavController, id: String) {
     var confirmDelete by remember { mutableStateOf(false) }
     var aiDialog by remember { mutableStateOf(false) }
     var aiText by remember { mutableStateOf("") }
-    var pendingTemplate by remember { mutableStateOf<CustomTemplates.Entry?>(null) }
 
     // validação ao vivo (debounce)
     LaunchedEffect(text) {
@@ -91,14 +89,9 @@ fun UiConnectorEditorScreen(nav: NavController, id: String) {
         LazyColumn(Modifier.padding(pad), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             item {
                 Text(
-                    "Descreva o conector em JSON (login, painéis, ações e ferramentas do agente). Só requisições HTTPS ao host de baseUrl — nada mais roda no aparelho. Toque em Doc para baixar o prompt do SDK e usar em qualquer IA, ou em Criar com a IA para o chat criar, validar e instalar.",
+                    "Descreva o conector em YAML (login, painéis, ações e ferramentas do agente). Só requisições HTTPS ao host declarado — nada mais roda no aparelho. Toque em Doc para baixar a especificação do SDK, ou em Criar com a IA para o chat criar, validar e instalar.",
                     fontSize = 13.sp, color = c.ink2,
                 )
-            }
-            item {
-                Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    CustomTemplates.ALL.forEach { t -> Chip(t.title) { pendingTemplate = t } }
-                }
             }
             item {
                 OutlinedTextField(
@@ -107,7 +100,7 @@ fun UiConnectorEditorScreen(nav: NavController, id: String) {
                     textStyle = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 12.sp),
                     shape = RoundedCornerShape(14.dp),
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Ascii),
-                    label = { Text("Definição (JSON)") },
+                    label = { Text("Definição (YAML)") },
                 )
             }
             item {
@@ -116,7 +109,7 @@ fun UiConnectorEditorScreen(nav: NavController, id: String) {
                         val pasted = clipboard.getText()?.text
                         if (!pasted.isNullOrBlank()) text = pasted
                     }, shape = RoundedCornerShape(12.dp)) { Text("Colar") }
-                    OutlinedButton({ clipboard.setText(AnnotatedString(text)); message = "JSON copiado." }, shape = RoundedCornerShape(12.dp)) { Text("Copiar") }
+                    OutlinedButton({ clipboard.setText(AnnotatedString(text)); message = "YAML copiado." }, shape = RoundedCornerShape(12.dp)) { Text("Copiar") }
                     OutlinedButton({
                         aiDialog = true
                     }, shape = RoundedCornerShape(12.dp)) { Icon(Icons.Rounded.AutoAwesome, null, Modifier.size(18.dp)); Spacer(Modifier.width(6.dp)); Text("Criar com a IA") }
@@ -159,14 +152,6 @@ fun UiConnectorEditorScreen(nav: NavController, id: String) {
                 }) { Text("Criar") }
             },
             dismissButton = { TextButton({ aiDialog = false }) { Text("Cancelar") } },
-        )
-    }
-    pendingTemplate?.let { t ->
-        AlertDialog(
-            onDismissRequest = { pendingTemplate = null },
-            title = { Text("Usar modelo?") }, text = { Text("Substitui o texto atual pelo modelo \"${t.title}\".") },
-            confirmButton = { TextButton({ text = t.json; pendingTemplate = null }) { Text("Substituir") } },
-            dismissButton = { TextButton({ pendingTemplate = null }) { Text("Cancelar") } },
         )
     }
     if (confirmSave && def != null) {

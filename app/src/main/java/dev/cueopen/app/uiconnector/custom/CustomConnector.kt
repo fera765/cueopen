@@ -497,7 +497,7 @@ class CustomConnector(
             if (t.shell != null && !terminalReady) { fail("ferramenta ${t.name}: não executada porque o terminal/setup falhou (veja acima)"); continue }
             val args = toolArgs[t.name].orEmpty()
             val missing = t.params.filter { it.required && args[it.name].isNullOrBlank() }.map { it.name }
-            if (missing.isNotEmpty()) { fail("ferramenta ${t.name}: informe exemplos REAIS em args_json para ${missing.joinToString()} — sem isso não dá para provar que ela funciona"); continue }
+            if (missing.isNotEmpty()) { fail("ferramenta ${t.name}: informe exemplos REAIS em args_yaml para ${missing.joinToString()} — sem isso não dá para provar que ela funciona"); continue }
             val runs = if (t.shell != null || t.file?.op == "write") 2 else 1
             var passedAll = true
             for (n in 1..runs) {
@@ -511,7 +511,7 @@ class CustomConnector(
                 when {
                     out.startsWith("ERRO") || out.startsWith("RECUSAD") -> { passedAll = false; fail("ferramenta ${t.name}$tag: " + out.take(1500) + hint(out)) }
                     out.isBlank() -> { passedAll = false; fail("ferramenta ${t.name}$tag: resposta vazia") }
-                    out.startsWith(NO_RESULTS) -> { passedAll = false; fail("ferramenta ${t.name}$tag: os exemplos de args_json não trouxeram nenhum item — use exemplos REAIS que retornem dados, para provar que o modelo de cada item funciona") }
+                    out.startsWith(NO_RESULTS) -> { passedAll = false; fail("ferramenta ${t.name}$tag: os exemplos de args_yaml não trouxeram nenhum item — use exemplos REAIS que retornem dados, para provar que o modelo de cada item funciona") }
                     hidden != null -> { passedAll = false; fail("ferramenta ${t.name}$tag: terminou, mas a saída mostra falha: \"$hidden\"" + hint(hidden) + "\nSaída:\n" + raw.takeLast(1200)) }
                     else -> if (n == 1) sb.appendLine("✓ ferramenta ${t.name} (${secs}s): " + out.replace("\n", " ⏎ ").take(300))
                         else sb.appendLine("✓ ferramenta ${t.name}: 2ª execução também passou")

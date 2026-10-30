@@ -1,251 +1,89 @@
 # CueOpen UI Connector SDK
 
-SDK open source para criar **conectores com interface própria** dentro do CueOpen: tela de login,
-painéis com dados ao vivo, ações do usuário e **ferramentas que o agente pode chamar**.
-Exemplos de uso: IQ Option (incluído), Gmail, Binance, B3, Nubank…
+O SDK oferece conectores com interface própria: login, painéis, ações do usuário e ferramentas que o agente pode chamar. Há duas formas de implementação: conectores nativos em Kotlin e conectores personalizados declarativos, escritos em YAML.
 
-Código: `app/src/main/java/dev/cueopen/app/uiconnector/`
+## O que o app gerencia
 
-## O que o app faz por você
-
-| Responsabilidade | Onde |
+| Responsabilidade | Componente |
 |---|---|
-| Formulário de login a partir de `loginFields` | `ui/UiConnectorScreen.kt` |
-| Cofre cifrado das credenciais (AES-256-GCM, Android Keystore) | `CredentialVault.kt` |
-| Painéis genéricos (cabeçalho, números, tabelas, seletores, botões, avisos) | `UiBlock` + `UiBlockView` |
-| Toggle **"Agent required ?"**, **Habilitado** e configurações do conector | `UiConnectorHub.kt` |
-| Toggle **por agente** ao criar/editar o agente ("Usar <conector>") | `AgentEditScreen` (`AgentProfile.uiConnectorIds`) |
-| Ferramentas `uic_<id>_<ferramenta>` entregues ao LLM | `UiConnectorHub.toolDefinitions` |
-| Redação de segredos em toda saída que vai ao LLM | `Redactor` |
-| Erros de execução no log de erros (Configurações) | `ErrorLog` (origem `uiconnector`) |
-| Validação do contrato (roda em testes e no registro) | `SpecValidator` |
+| Formulário de login | `ui/UiConnectorScreen.kt` |
+| Cofre de credenciais cifrado com AES-256-GCM e Android Keystore | `CredentialVault.kt` |
+| Painéis genéricos | `UiBlock` e `UiBlockView` |
+| Habilitação, configurações e seleção por agente | `UiConnectorHub.kt`, `AgentProfile.uiConnectorIds` |
+| Ferramentas do agente `uic_<id>_<ferramenta>` | `UiConnectorHub.toolDefinitions` |
+| Redação de segredos | `Redactor` |
+| Erros de execução | `ErrorLog`, origem `uiconnector` |
+| Validação de conectores nativos | `SpecValidator` |
 
-## Regras de acesso do agente
+Um agente só recebe as ferramentas de um conector quando ele está habilitado e conectado (ou tem credenciais para reconectar). Se **Agent required ?** estiver ligado, o agente também precisa ter o conector selecionado no perfil.
 
-Um agente só enxerga as ferramentas de um conector se **todas** valerem:
+## Segurança
 
-1. o conector está **habilitado** e **conectado** (ou tem credenciais no cofre para reconectar);
-2. se **"Agent required ?"** estiver **ligado** (padrão): o agente ativou o conector no próprio perfil;
-   se estiver **desligado**: qualquer conversa pode usar.
+- Senhas, tokens e valores extraídos ficam fora do contexto do modelo. Não os inclua em mensagens de erro nem em definições.
+- Operações sensíveis devem ser `risky`, aplicar limites configuráveis e responder `RECUSADO: <motivo>` quando forem negadas.
+- `onAction` representa uma ação explícita do usuário; `callTool` representa uma chamada do agente.
+- Credenciais nunca devem ser substituídas por valores sintéticos durante uma execução real. O dry-run do criador é outra coisa: ele usa mocks locais e não comprova acesso real.
 
-## Segurança (obrigatória para novos conectores)
+## Conectores nativos em Kotlin
 
-- Credenciais e tokens **nunca** entram no contexto do LLM. Devolva-os em `secrets()` para o hub
-  redigi-los de qualquer saída. Não os coloque em mensagens de erro.
-- Ferramentas que movem dinheiro/dados (`risky = true`) devem aplicar **limites configuráveis**
-  (`SettingSpec`) e responder `RECUSADO: <motivo>` quando violados — o prompt do agente instrui a
-  respeitar essas recusas.
-- `onAction` é o usuário tocando na UI; `callTool` é o agente. Só `callTool` passa pelos limites.
-- Nada de dados sintéticos: se o serviço falhar, devolva o erro real.
+Conectores nativos implementam `UiConnector`, declaram o contrato em `UiConnectorSpec` e são registrados em `UiConnectorHub.connectors`. A especificação inclui `id`, nome, descrição, versão, campos de login, configurações e ferramentas. Use `SpecValidator.validate(spec)` e um teste para garantir que todas as ferramentas têm handler. Os blocos de UI disponíveis incluem `Header`, `Stats`, `Table`, `Segmented`, `Button` e `Note`; a tela atualiza os dados periodicamente enquanto está aberta.
 
-## Criando um conector
+O diretório `uiconnector/iqoption/` implementa o cliente não oficial da IQ Option. Seu protocolo pode mudar sem aviso; mensagens inesperadas são registradas para diagnóstico. Os limites do agente e as aprovações de ordens continuam impostos pelo app.
 
-1. **Descreva** o conector num `UiConnectorSpec` (id `[a-z0-9]`, campos de login, configurações, ferramentas).
-2. **Implemente** `UiConnector`:
+O diretório `uiconnector/gmail/` usa a API oficial do Gmail, OAuth 2.0 com PKCE e redirect loopback. O usuário configura o próprio projeto Google Cloud e o app mantém o refresh token no cofre cifrado. Envio de mensagens continua sujeito à autorização e aos limites configurados.
 
-```kotlin
-class MeuConector : UiConnector {
-    override val spec = UiConnectorSpec(
-        id = "meuservico", name = "Meu Serviço", description = "O que faz", version = "1.0.0",
-        loginFields = listOf(
-            LoginField("email", "E-mail", FieldType.EMAIL),
-            LoginField("password", "Senha", FieldType.PASSWORD),   // obrigatório: ao menos um PASSWORD
-        ),
-        settings = listOf(SettingSpec("max_valor", "Valor máximo (agente)", "Teto por operação", SettingType.NUMBER, "10")),
-        tools = listOf(ToolSpec("saldo", "Consulta o saldo")),
-    )
-    override val isLoggedIn get() = token != null
-    override suspend fun login(credentials: Map<String, String>): Result<Unit> = TODO()
-    override suspend fun logout() { token = null }
-    override suspend fun snapshot(settings: ConnectorSettings): List<UiBlock> = listOf(
-        UiBlock.Header("Meu Serviço", "conta@exemplo.com", "ONLINE", Tone.GOOD),
-        UiBlock.Stats(listOf(Stat("Saldo", "R$ 10,00"))),
-    )
-    override suspend fun onAction(actionId: String, args: Map<String, String>, settings: ConnectorSettings) = Result.success("ok")
-    override suspend fun callTool(name: String, args: Map<String, String>, settings: ConnectorSettings): String = when (name) {
-        "saldo" -> "R$ 10,00"
-        else -> "Ferramenta desconhecida: $name"
-    }
-    override fun secrets() = listOfNotNull(token)
-}
-```
+## Conectores personalizados em YAML
 
-3. **Registre** em `UiConnectorHub.connectors`.
-4. **Valide**: `SpecValidator.validate(spec)` precisa devolver lista vazia — adicione o teste
-   (veja `SpecValidatorTest`, que também garante que toda ferramenta declarada tem handler).
+Em **Conectores → UI Conectores → Criar conector (SDK)**, a definição começa vazia. O editor não oferece presets ou exemplos preenchidos. O usuário pode escrever YAML ou pedir ao agente que crie, valide, teste offline e proponha a instalação.
 
-## Blocos de UI disponíveis
+O formato-fonte da definição é YAML. O parser produz o modelo tipado interno usado pela execução, pelo validador e pelos guardrails. Definições antigas em JSON continuam legíveis como formato legado; ao salvar/importar um legado, o app normaliza e persiste a definição em `.yaml`. O app não converte para YAML outros JSON do produto: payloads de APIs, mensagens de ferramentas, armazenamento do app e o envelope de backup continuam usando seus formatos próprios. O backup das definições permanece um contêiner JSON, sem credenciais.
 
-`Header` · `Stats` · `Table` · `Segmented` (com confirmação opcional, ex.: trocar para conta real) ·
-`Button` · `Note`. O painel é reconsultado a cada 5 s enquanto a tela está aberta.
+O parser limita a definição a 64 KB e a profundidade permitida, rejeita chaves duplicadas e tags customizadas, desativa aliases de coleções e exige um mapa na raiz. Evite âncoras e aliases. Coloque entre aspas strings que começam por `{{...}}`, parecem número/booleano/data ou contêm pontuação que possa ser interpretada pelo YAML. Valores de data que devam permanecer texto também precisam de aspas.
 
-## Conector IQ Option
+A especificação completa do contrato YAML fica em [`SdkPrompt.kt`](../app/src/main/java/dev/cueopen/app/uiconnector/custom/SdkPrompt.kt) e é a mesma apresentada no botão **Doc** e ao agente por `connector_spec`.
 
-`uiconnector/iqoption/` — a IQ Option **não tem API oficial**: o protocolo (login HTTP + WebSocket)
-segue o que clientes open source documentam e pode mudar sem aviso. Por isso:
-`IqProtocol.kt` é puro e testado (mensagens e regras), e qualquer resposta inesperada vai para o
-log de erros com os nomes das últimas mensagens recebidas, para diagnóstico.
+### Campos suportados
 
-Limites do agente: conta **REAL** só se liberada nas configurações; valor máximo por operação;
-máximo de operações abertas. "Operações em execução" lista as operações abertas por este app,
-fechadas por eventos reais do servidor.
+A raiz exige `id`, `name` e `description`; `baseUrl` é necessário para rede, mas pode faltar num conector só de cálculo. O `id` tem 2–20 caracteres, começa com letra minúscula e usa apenas letras minúsculas e dígitos. `baseUrl` e `allowedHosts` limitam destinos de rede.
 
----
+Campos opcionais da raiz: `version`, `accent`, `headers`, `login`, `settings`, `panels`, `actions`, `tools`, `realtime`, `capabilities` e `setup`.
 
-## Conector Gmail (OAuth)
+- **Login:** `fields` declara de 1 a 8 campos (`text`, `email`, `password`, `number`) e exige ao menos um campo de senha. `request`, `extract` e `verify` declaram a autenticação; chaves de API podem não fazer uma requisição de login.
+- **Requests:** `method`, exatamente um de `path` ou `url`, e opcionalmente `query`, `headers`, `body` ou `form`. Só HTTPS e hosts declarados; `body` e `form` não coexistem. Respostas JSON, XML/RSS/Atom, JSONP, NDJSON, CSV/TSV, HTML e texto puro são normalizadas.
+- **Settings:** até 20 opções do usuário do tipo `number`, `switch` ou `text`, com valor padrão e, quando necessário, teto de risco.
+- **Panels:** até 10 blocos `header`, `stats`, `table` ou `note`. Tabelas têm até 8 colunas e 100 linhas, e leem uma resposta ou coleção realtime.
+- **Actions:** até 10 botões explícitos do usuário. Método diferente de GET requer `risky: true`.
+- **Tools:** até 30 ferramentas com nome snake_case, descrição e até 12 parâmetros tipados. Cada ferramenta usa no máximo uma fonte operacional: `request`, `send`, `source`, `shell`, `file` ou `fetch`. `response` e `list` modelam a saída.
+- **Limites e ordens:** `limits` vincula parâmetros numéricos a settings numéricas. Operações sensíveis exigem `risky`; ordens exigem `requiresSignal`, `orderIntent`, limites e a validação TypeSafe Jev imposta pelo app.
 
-`uiconnector/gmail/` — API oficial do Gmail com OAuth 2.0 + PKCE e redirect loopback (`127.0.0.1`).
-O usuário cria, no **próprio** projeto do Google Cloud, a Gmail API e um *ID do cliente OAuth* do tipo
-**App para computador**, e informa client ID e secret. O login abre a tela oficial do Google; o app guarda
-só o **refresh token** no cofre cifrado (`persistedCredentials`). Escopos: `gmail.readonly` e `gmail.send`.
-Ferramentas: `unread`, `search`, `read`, `labels` e `send` (sensível: só com "Agente pode ENVIAR" ligado,
-confirmação e teto diário). Em projetos em modo *Teste* o Google expira a autorização em 7 dias.
+### Templates e cálculo
 
----
+Modelos `{{...}}` acessam somente variáveis disponíveis no contexto da definição: campos de login, valores extraídos, settings, parâmetros, estado realtime, `rid`, `now` e resultados de `compute`. A resposta atual pode ser lida por caminhos como `$.campo[0]` em textos de exibição e respostas, não em host, headers ou URL. Os filtros incluem codificação de URL, conversões numéricas, texto, datas, remoção de HTML, truncamento e Base64.
 
-## Criar conectores na própria app (definição JSON)
+`compute` executa expressões locais em respostas, settings, estado realtime e parâmetros. Não acessa rede, arquivos ou segredos. Inclui operações de listas e séries, estatística e indicadores técnicos, com limites de operações, cálculos por item e tamanho de lista. Use somente as funções efetivamente implementadas pelo motor.
 
-Em **Conectores → UI Conectores → Criar conector (SDK)** o usuário escreve (ou pede à IA) uma definição JSON.
-O editor valida ao vivo, permite **testar** login/painéis/ferramentas e só então salva. Nada é executado no
-aparelho: a definição só faz requisições **HTTPS** e conexões **WSS** aos hosts de `baseUrl`/`allowedHosts` (porta 443,
-sem IP/localhost/rede privada, sem redirecionamentos, resposta HTTP ≤ 2 MB em 20 s, mensagem WebSocket ≤ 1 MB).
-Conectores em **tempo real** (corretoras de ações/Forex/cripto, cotações e saldo ao vivo, ordens com resposta
-por `request_id`) usam o bloco `realtime` — a mesma arquitetura do conector IQ Option, declarativa.
-A especificação completa (a mesma do botão **Doc** do editor) está em `SdkPrompt.kt`.
+### Tempo real e capacidades
 
-```json
-{
-  "id": "minhaapi", "name": "Minha API", "description": "…", "version": "1.0", "accent": "#FF6B3D",
-  "baseUrl": "https://api.exemplo.com",
-  "headers": { "Authorization": "Bearer {{token}}" },
-  "login": {
-    "fields": [ { "id": "email", "type": "email", "label": "E-mail" }, { "id": "password", "type": "password", "label": "Senha" } ],
-    "request": { "method": "POST", "path": "/auth/login", "body": { "email": "{{email}}", "password": "{{password}}" } },
-    "extract": { "token": "$.token" },
-    "verify": { "path": "/me" }
-  },
-  "settings": [ { "id": "maxValor", "label": "…", "description": "…", "type": "number", "default": "10", "risky": true } ],
-  "panels": [
-    { "type": "header", "title": "{{$.name}}", "request": { "path": "/me" } },
-    { "type": "stats", "request": { "path": "/summary" }, "items": [ { "label": "Total", "value": "{{$.total|num:2}}", "tone": "good" } ] },
-    { "type": "table", "title": "Itens", "request": { "path": "/items" }, "rows": "$.items[*]", "columns": [ { "title": "Nome", "value": "{{$.name}}" } ] },
-    { "type": "note", "text": "Texto", "tone": "warn" }
-  ],
-  "actions": [ { "id": "refresh", "label": "Atualizar", "request": { "path": "/refresh" } } ],
-  "tools": [
-    { "name": "enviar", "description": "…", "risky": true,
-      "params": [ { "name": "valor", "description": "…", "type": "number" } ],
-      "limits": [ { "param": "valor", "maxSetting": "maxValor" } ],
-      "request": { "method": "POST", "path": "/send", "body": { "amount": "{{valor|num}}" } },
-      "response": "Enviado: {{$.id}}" }
-  ]
-}
-```
+`realtime` suporta WebSocket `wss://` em host autorizado, mensagens `onOpen`, heartbeat e regras `match`, `set` e `push`. As regras atualizam estado e coleções consultáveis por painéis e ferramentas. Ferramentas podem enviar mensagens e aguardar resposta correlacionada por `rid`.
 
-* **Variáveis** `{{x}}`: campos de login, valores de `extract` (`$.caminho`, `header:Nome`, `cookie:Nome`),
-  parâmetros da ferramenta e `{{s.<setting>}}`. `{{$.a.b[0]}}` lê a resposta JSON atual (só `.nome`, `['nome']`, `[n]`, `[-1]`, `[*]`).
-* **Filtros**: `url`, `json`, `num[:N]`, `int`, `upper`, `lower`, `trim`, `default:X`, `date`, `pct:N`, `bool`, `raw`.
-  Um valor único `"{{v|num}}"` no corpo vira número JSON.
-* **Segurança**: senhas e valores extraídos nunca vão ao LLM (redigidos); métodos ≠ GET exigem `"risky": true`;
-  `limits` impõe teto numérico vindo das configurações do usuário; `login.request` é opcional (API key); o agente só
-  usa o conector se o usuário ativar (“Agent required ?” + perfil do agente).
-* **Ordens**: ferramenta com `"requiresSignal": true` + `"orderIntent": {"asset": "{{par}}", "direction": "{{lado}}"}`
-  só executa após validação TypeSafe Jev do ativo/lado (uso único, 5 min) — igual ao IQ Option.
+`capabilities` declara recursos opcionais do aparelho. Cada recurso fica desabilitado até autorização do usuário:
 
-### Computação (`compute`)
+- `terminal`: comando isolado e limitado por tempo; `setup` prepara dependências uma vez. Argumentos templated são escapados, mas isso não torna seguro código arbitrário.
+- `files`: operações `read`, `write`, `list`, `delete` e `replace` no workspace isolado. Escrita, exclusão e substituição exigem `risky`. `replace` altera somente a correspondência esperada; a gravação é atômica. No DSL do conector a edição declarativa é `file.op: replace`; `file_edit` continua como ferramenta interna do agente no workspace da tarefa, fora do esquema do conector.
+- `browser`: busca HTTPS de host autorizado e leitura do texto renderizado; não contorna autenticação, CAPTCHA ou controle de acesso.
 
-Painéis e ferramentas aceitam `"compute": {"nome": "expressão"}` — um motor de expressões puro (sem rede, arquivos
-ou segredos; orçamento de 3 milhões de operações) com aritmética, lógica, listas, objetos, lambdas
-(`map/filter/reduce/sort_by/zip_rows`) e uma biblioteca de análise técnica no padrão TradingView (SMA, EMA, WMA, HMA,
-VWMA, ALMA, KAMA, RSI, Estocástico, Stoch RSI, MACD, PPO, CCI, Williams %R, MFI, ROC, Momentum, TRIX, CMO, DPO, TSI,
-AO, UO, Fisher, ATR, Bollinger, Keltner, Donchian, ADX/DI, Aroon, PSAR, Supertrend, Ichimoku, Choppiness, Elder,
-Pivôs, OBV, VWAP, A/D, CMF, Heikin Ashi…). Resultados: `{{c.nome}}` nos modelos e `"rows": "c.nome"` em tabelas/listas.
-O modelo "Indicadores técnicos calculados" do editor monta mais de 30 indicadores com sinal e resumo técnico sobre
-velas reais da Binance.
+## Validação e dry-run do criador com IA
 
-### Tempo real (`realtime`)
+O fluxo de criação é `connector_spec` → `connector_validate` → `connector_test` → `connector_propose`. O agente não deve repetir uma chamada idêntica após receber o mesmo erro; corrija o YAML ou encerre explicando o bloqueio. Durante uma sessão, a mesma assinatura de `connector_validate`, `connector_test` ou `connector_propose` reutiliza o resultado em memória, evitando executar o mesmo dry-run ou criar um segundo cartão de proposta. Se o agente continuar repetindo sem progresso, o guard interrompe o ciclo após a segunda ocorrência.
 
-```json
-"realtime": {
-  "url": "wss://ws.suacorretora.com/stream",
-  "connect": "login",
-  "onOpen": [ { "type": "auth", "token": "{{token}}" }, { "type": "subscribe", "channels": ["balance", "quotes"] } ],
-  "heartbeat": { "everySec": 20, "message": { "type": "ping" } },
-  "rules": [
-    { "match": { "$.type": "balance" }, "set": { "saldo": "$.data.amount" } },
-    { "match": { "$.type": "quote" }, "push": { "to": "cotacoes", "item": "$.data", "key": "$.symbol", "max": 50 } }
-  ]
-}
-```
+`connector_test` usa o parser e os guardrails reais do SDK, mas substitui as integrações por fixtures HTTP/WebSocket, filesystem virtual e respostas simuladas de browser/shell. Login usa valores sintéticos. O teste não abre rede externa, não resolve credenciais reais, não abre páginas, não executa `setup`/shell/código gerado e não envia mensagens, ordens, publicações ou pagamentos. Ferramentas que dependem de shell/setup falham fechadas no dry-run.
 
-- Conecta ao entrar (`connect: "login"`) ou no primeiro uso (`"auto"`, fontes públicas); envia `onOpen`, mantém
-  `heartbeat` e reconecta sozinha (até 5 tentativas com espera crescente; depois, no próximo uso).
-- Cada mensagem recebida passa pelas `rules`: `set` grava o **estado** (`{{rt.saldo}}`, além de `{{rt.connected}}` e
-  `{{rt.messages}}`); `push` mantém **coleções** (mais recentes primeiro; `key` substitui o item com a mesma chave).
-- Painéis e ferramentas leem coleções com `"source": "cotacoes"` (`"rows": "$.items[*]"`) e o estado com `{{rt.…}}`.
-- Ferramenta com `send` envia uma mensagem e, com `await.match` (ex.: `{"$.request_id": "{{rid}}"}`), espera a resposta
-  correspondente; `{{rid}}` é único por chamada. Ordens via `send` seguem as mesmas proteções: `risky` (confirmação),
-  `limits` (teto do usuário) e `requiresSignal` + `orderIntent` (validação TypeSafe Jev + coordenação entre agentes).
-- O criador com IA só libera a instalação depois de `connector_test` passar em um dry-run offline; esse teste não prova acesso, login ou disponibilidade do serviço real.
+O atestado é vinculado ao SHA-256 canônico do YAML e à versão da política. O mesmo YAML precisa passar no dry-run para ser proposto; o app revalida antes de exibir o botão e novamente antes de salvar. Alterar a definição exige um novo teste. O resultado comprova apenas os contratos exercitados localmente — não confirma endpoint ativo, autenticação, permissão ou disponibilidade real do serviço.
 
-## Guardrails do criador com IA (validação antes da instalação)
+A política de saída `outputPolicy` do tipo `vsl` pode conferir duração estimada, idioma por heurística, ordem de seções e termos proibidos. A contagem não garante duração de locução nem revisa semântica ou fatos.
 
-Um conector criado pelo chat **Criar com a IA** só chega ao card de instalação depois de passar em `connector_test`
-com o mesmo JSON. O resultado é vinculado por SHA-256 canônico à definição e guardado no próprio card; JSON alterado,
-proposta antiga sem prova ou versão de política incompatível não mostra botão de instalação.
+Não invente endpoints, não use scraping ou contorne login/CAPTCHA. Serviços sem API pública/autorizada estável devem ser explicados como indisponíveis para este formato. OAuth de consentimento/PKCE, WebSocket binário, mTLS, CAPTCHA e 2FA interativo podem exigir implementação nativa.
 
-O pipeline usa parser e guardrails reais do SDK, mas substitui toda integração externa por fixtures locais:
+## TypeSafe Jev e coordenação de ordens
 
-1. **Schema e segurança estática:** parser, templates, hosts, HTTPS/WSS, declarações de capacidades e
-   `ConnectorGuardrails.staticCheck` são verificados. URLs e hosts são conferidos sem abrir socket externo.
-2. **Requests/painéis/ferramentas:** HTTP e WebSocket recebem respostas determinísticas de mocks; os templates,
-   tabelas e saídas são renderizados. Login, quando declarado, usa valores sintéticos descartáveis — nunca pede nem
-   resolve credenciais reais. Ações, ordens e mensagens de envio não são reproduzidas.
-3. **Filesystem/capacidades:** operações `file` usam um filesystem virtual e gravação seguida de leitura é conferida.
-   Browser é substituído por fixture; nenhuma página é aberta. Qualquer ferramenta com `shell` ou qualquer `setup`
-   falha fechado, porque não há executor que comprove isolamento de rede/IO para código arbitrário. Nenhum comando,
-   script ou código gerado é executado.
-4. **Gate de instalação:** `connector_propose` exige o atestado atual para o mesmo JSON; o card revalida o SHA-256
-   antes de exibir e novamente antes de salvar. O card avisa que serviço/login real e execução de capacidades ficam
-   para depois da instalação e da autorização do usuário.
-
-Não coloque segredos fixos no JSON. `connector_test` não precisa de `ask_secure`, `login_json` nem token real.
-O teste offline não comprova que uma API aceita as credenciais, que um endpoint ainda existe, nem que uma permissão
-foi concedida. Para fontes sem API pública e autorizada, não use scraping, CAPTCHA ou contorno de login; explique a
-limitação e não proponha o conector. Em especial, o dry-run não pode provar autorização da Meta para a Biblioteca de
-Anúncios, então essa fonte fica bloqueada até existir alternativa autorizada validável.
-
-## Política de saída para copy/VSL
-
-Uma ferramenta de geração textual pode declarar `outputPolicy` para o app recusar saídas fora do contrato. A requisição
-precisa enviar duração, idioma e as instruções de guardrail; o texto final (`response`) é medido depois de renderizar:
-
-```json
-"outputPolicy": {
-  "type": "vsl",
-  "durationParam": "duracao_minutos",
-  "languageParam": "idioma",
-  "guardrailsParam": "guardrails",
-  "forbiddenTermsParam": "termos_proibidos",
-  "wordsPerMinute": 130,
-  "tolerance": 0.20,
-  "requiredSections": ["Abertura", "Problema", "Solução", "Oferta", "Chamada para ação"]
-}
-```
-
-`durationParam` deve ser numérico (1–240 min), `languageParam` e `guardrailsParam` texto, e pelo menos 3 seções
-são obrigatórias. A contagem estimada usa palavras/minuto e tolerância configurada; o idioma é uma heurística local
-para português, inglês, espanhol ou francês; cabeçalhos explícitos são conferidos na ordem declarada e `forbiddenTermsParam` bloqueia termos separados
-por vírgula/ponto e vírgula/linha. Isso não garante tempo exato de fala, não interpreta todas as instruções em linguagem
-natural e não faz revisão factual/semântica. O serviço gerador ainda precisa ser autorizado e testado fora do dry-run.
-
-Em produção cada comando de conector roda isolado: `cd /root/workspace; bash -c '<run>' < /dev/null` — processo
-próprio (cd/export/exit não vazam para a próxima chamada nem matam a sessão do terminal) e sem stdin.
-
-## Validação TypeSafe Jev e coordenação (imposto em código)
-
-`typesafe_jev_check` grava aprovações (piso 70, uso único, 5 min, por agente/venue/ativo/lado). `wallet_swap` (compra e venda)
-e as ferramentas `requiresSignal` consomem a aprovação; sem ela a ordem é recusada. Regras automáticas (`trade_set_rule`) são só de saída
-(SL/TP) e dispensam validação, assim como o trailing stop. Execuções na carteira Solana são serializadas (`walletMutex`),
-cada conector tem uma ordem por vez (`venueLock`) e um ativo não é operado por dois agentes ao mesmo tempo (`claim`).
-Solana e IQ Option têm capital independente.
+`typesafe_jev_check` grava aprovações com piso 70, uso único e validade de 5 minutos, por agente/venue/ativo/lado. `wallet_swap` e ferramentas declaradas com `requiresSignal` consomem a aprovação; sem ela a ordem é recusada. Regras automáticas de saída, como SL/TP e trailing stop, seguem as próprias proteções. Execuções na carteira Solana são serializadas por `walletMutex`, cada venue usa `venueLock` e um ativo não é operado por dois agentes ao mesmo tempo. Solana e IQ Option têm capital independente.

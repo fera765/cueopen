@@ -77,7 +77,7 @@ class CustomEngineTest {
         assertFalse(SafeDns.blocked(java.net.InetAddress.getByName("8.8.8.8")))
     }
 
-    @Test fun `todos os modelos iniciais sao validos`() {
+    @Test fun `fixtures JSON legadas permanecem legiveis para compatibilidade`() {
         CustomTemplates.ALL.forEach { t ->
             val p = CustomDefParser.parse(t.json)
             assertEquals("modelo '${t.title}': ${p.errors}", emptyList<String>(), p.errors)
@@ -90,8 +90,8 @@ class CustomEngineTest {
 
     @Test fun `validador pega os erros mais comuns`() {
         fun errs(j: String) = CustomDefParser.parse(j).errors.joinToString("\n")
-        assertTrue(errs("{").contains("JSON inválido"))
-        assertTrue(errs("[]").contains("objeto"))
+        assertTrue(errs("{").contains("YAML inválido"))
+        assertTrue(errs("[]").contains("mapa YAML"))
         assertTrue(errs(mod(base, "https://api.exemplo.com", "http://api.exemplo.com")).contains("https"))
         assertTrue(errs(mod(base, "https://api.exemplo.com", "https://127.0.0.1")).contains("IP"))
         assertTrue(errs(mod(base, "\"type\": \"password\"", "\"type\": \"text\"")).contains("PASSWORD"))
@@ -194,9 +194,11 @@ class CustomEngineTest {
         assertEquals(1, i.size); assertEquals(Side.BUY, i[0].side); assertEquals("EURUSD", i[0].asset)
     }
 
-    @Test fun `prompt do sdk contem exemplos validos e aceita cercas markdown`() {
-        assertTrue(SdkPrompt.MARKDOWN.contains("\"baseUrl\""))
-        assertTrue(SdkPrompt.MARKDOWN.contains(CustomTemplates.TOKEN_LOGIN.json))
+    @Test fun `prompt do sdk documenta YAML sem presets JSON e aceita cercas markdown`() {
+        assertTrue(SdkPrompt.MARKDOWN.contains("`baseUrl`"))
+        assertTrue(SdkPrompt.MARKDOWN.contains("definição YAML"))
+        assertFalse(SdkPrompt.MARKDOWN.contains("```json"))
+        assertFalse(SdkPrompt.MARKDOWN.contains(CustomTemplates.TOKEN_LOGIN.json))
         assertFalse(SdkPrompt.MARKDOWN.contains("${'$'}{"))
         val fenced = "```json\n" + CustomTemplates.MINIMAL.json + "\n```"
         assertEquals(emptyList<String>(), CustomDefParser.parse(fenced).errors)

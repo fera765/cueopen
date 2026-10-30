@@ -22,7 +22,7 @@ object ConnectorDryRunValidator {
     )
 
     suspend fun validate(
-        rawJson: String,
+        rawYaml: String,
         def: CustomDef,
         examples: Map<String, Map<String, String>> = emptyMap(),
         settingsInput: Map<String, String> = emptyMap(),
@@ -36,7 +36,7 @@ object ConnectorDryRunValidator {
             errors.forEach { report.appendLine("✗ $it") }
             return Result(false, report.toString().trim(), null)
         }
-        report.appendLine("✓ JSON e schema: definição tipada, hosts e templates passaram no parser real")
+        report.appendLine("✓ YAML e schema: definição tipada, hosts e templates passaram no parser real")
         report.appendLine("✓ guardrails estáticos: nenhum bloqueio de shell/arquivo conhecido")
 
         val shellTool = def.tools.firstOrNull { it.shell != null }
@@ -189,7 +189,7 @@ object ConnectorDryRunValidator {
             report.appendLine("✓ efeitos externos: ações, ordens e envios não foram executados")
             warnings.forEach { report.appendLine("Aviso (não bloqueante): $it") }
             val checks = ConnectorAttestationPolicy.REQUIRED_CHECKS
-            val proof = ConnectorAttestationPolicy.issue(rawJson, checks)
+            val proof = ConnectorAttestationPolicy.issue(rawYaml, checks)
             return Result(true, redact(report.toString().trim(), conn), proof)
         } catch (c: kotlinx.coroutines.CancellationException) {
             throw c
@@ -245,7 +245,7 @@ object ConnectorDryRunValidator {
             p.name to value
         }
 
-    private fun sanitizeExample(value: String): String = Regex("\\{\\{secret:[^}]+}}")
+    private fun sanitizeExample(value: String): String = Regex("\\{\\{secret:[^}]+\\}\\}")
         .replace(value) { "VALIDATION_ONLY" }
         .take(2_000)
 

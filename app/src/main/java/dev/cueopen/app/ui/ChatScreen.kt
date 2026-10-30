@@ -823,8 +823,8 @@ private fun ConnectorProposalCard(p: ChatItem.ConnectorProposal, sessionId: Stri
     var busy by remember(p.id) { mutableStateOf(false) }
     var error by remember(p.id) { mutableStateOf<String?>(null) }
     val exists = remember(p.id, p.installed) { app.uiConnectors.isCustom(p.connectorId) }
-    val validationValid = remember(p.id, p.json, p.validation) {
-        dev.cueopen.app.uiconnector.custom.ConnectorAttestationPolicy.isInstallable(p.json, p.validation)
+    val validationValid = remember(p.id, p.yaml, p.validation) {
+        dev.cueopen.app.uiconnector.custom.ConnectorAttestationPolicy.isInstallable(p.yaml, p.validation)
     }
     // Capacidades são autorizadas somente no momento da instalação (o usuário pode desmarcar).
     var grantCaps by remember(p.id) { mutableStateOf(true) }
@@ -855,18 +855,18 @@ private fun ConnectorProposalCard(p: ChatItem.ConnectorProposal, sessionId: Stri
         if (p.installed) {
             Text("Pronto: ative-o no agente em Agents → editar → UI Conectores.", fontSize = 12.sp, color = c.ink2)
         } else if (!validationValid) {
-            Text("Instalação bloqueada. Volte ao criador e rode connector_test novamente para este JSON.", fontSize = 12.sp, color = c.err)
+            Text("Instalação bloqueada. Volte ao criador e rode connector_test novamente para esta definição YAML.", fontSize = 12.sp, color = c.err)
         } else {
             Button(
                 onClick = {
                     scope.launch {
                         busy = true; error = null
-                        if (!dev.cueopen.app.uiconnector.custom.ConnectorAttestationPolicy.isInstallable(p.json, p.validation)) {
+                        if (!dev.cueopen.app.uiconnector.custom.ConnectorAttestationPolicy.isInstallable(p.yaml, p.validation)) {
                             error = "A validação não corresponde mais a esta definição. Volte ao criador e teste novamente."
                             busy = false
                             return@launch
                         }
-                        app.uiConnectors.saveCustom(p.json)
+                        app.uiConnectors.saveCustom(p.yaml)
                             .onSuccess {
                                 if (grantCaps) p.capabilities.forEach { cap -> app.uiConnectors.setCapabilityGranted(p.connectorId, cap, true) }
                                 if (secretsReady && sessionId != null) {

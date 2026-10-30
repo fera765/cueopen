@@ -88,11 +88,11 @@ class UiConnectorHub(context: Context) {
         return next
     }
 
-    fun customJson(id: String): String? = customStore.rawJson(id)
+    fun customYaml(id: String): String? = customStore.rawYaml(id)
 
     /** Valida e grava a definição. Se mudou, a sessão/credenciais antigas deixam de valer. */
-    suspend fun saveCustom(jsonText: String): Result<CustomDef> {
-        val r = customStore.save(jsonText, builtin.map { it.spec.id }.toSet())
+    suspend fun saveCustom(yamlText: String): Result<CustomDef> {
+        val r = customStore.save(yamlText, builtin.map { it.spec.id }.toSet())
         r.onSuccess { def ->
             val previous = custom
             val old = previous.firstOrNull { it.spec.id == def.id } as? CustomConnector
@@ -118,8 +118,8 @@ class UiConnectorHub(context: Context) {
      */
     fun exportBackup(): String {
         val defs = JsonArray(custom.mapNotNull { c ->
-            val raw = customStore.rawJson(c.spec.id) ?: return@mapNotNull null
-            val el = runCatching { kotlinx.serialization.json.Json.parseToJsonElement(CustomDefParser.stripFences(raw)) }.getOrNull() ?: return@mapNotNull null
+            val raw = customStore.rawYaml(c.spec.id) ?: return@mapNotNull null
+            val el = runCatching { dev.cueopen.app.uiconnector.custom.ConnectorYamlCodec.parse(CustomDefParser.stripFences(raw)) }.getOrNull() ?: return@mapNotNull null
             buildJsonObject { put("id", c.spec.id); put("definition", el) }
         })
         val p = buildJsonObject {

@@ -175,7 +175,7 @@ class ConnectorGuardrailsTest {
     @Test fun missingExampleArgsBlock() = runBlocking {
         val (ok, report) = CustomConnector(slides(), http = NoHttp, bridge = ValidationBridge()).selfTest(noSettings, emptyMap())
         assertFalse(report, ok)
-        assertTrue(report, report.contains("args_json"))
+        assertTrue(report, report.contains("args_yaml"))
     }
 
     @Test fun loginConnectorStillValidatesTerminal() = runBlocking {
