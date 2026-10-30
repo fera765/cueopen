@@ -55,12 +55,13 @@ class ContextManager(private val store: Store, private val sandbox: Sandbox, pri
      * um resumo curto com um ponteiro file_read para a saída completa salva em .cue/out — o agente só traz de volta
      * o que precisar. Narrações antigas do assistente também são encurtadas (não têm valor de estado). As mensagens
      * do usuário e os resultados recentes ficam intactos, preservando a qualidade.
-     */
+    */
     fun microCompact(h: List<LlmMessage>, sessionId: String? = null, keepRecentTools: Int = 6): List<LlmMessage> {
-        val toolIdx = h.indices.filter { h[it].role == "tool" }
+        val safeHistory = ToolCallHistoryNormalizer.normalize(h)
+        val toolIdx = safeHistory.indices.filter { safeHistory[it].role == "tool" }
         val oldTools = toolIdx.dropLast(keepRecentTools).toSet()
-        val lastAssistant = h.indexOfLast { it.role == "assistant" }
-        return h.mapIndexed { i, m ->
+        val lastAssistant = safeHistory.indexOfLast { it.role == "assistant" }
+        return safeHistory.mapIndexed { i, m ->
             when {
                 i in oldTools && (m.content?.length ?: 0) > 240 -> {
                     val full = m.content ?: ""
@@ -89,16 +90,21 @@ class ContextManager(private val store: Store, private val sandbox: Sandbox, pri
     // ---------- Camada 2 ----------
     /** Compacta se o histórico estimado passar do orçamento. Retorna a sessão atualizada (ou a mesma). */
     suspend fun compactIfNeeded(s: Session, force: Boolean = false): Session {
+        val normalized = ToolCallHistoryNormalizer.normalize(s.llm)
+        val current = if (normalized != s.llm) {
+            store.editSession(s.id) { it.copy(llm = normalized) }
+            s.copy(llm = normalized)
+        } else s
         val budget = store.settings.contextBudget
-        if (!force && (!s.autoCompact || estimateTokens(s.llm) + estimateTokens(s.summary) < budget)) return s
-        if (s.llm.size < 4) return s
+        if (!force && (!current.autoCompact || estimateTokens(current.llm) + estimateTokens(current.summary) < budget)) return current
+        if (current.llm.size < 4) return current
         val keep = store.settings.keepRecentMessages.coerceAtLeast(4)
         // ponto de corte seguro: uma mensagem user/assistant (nunca no meio das respostas de ferramentas)
-        var cut = (s.llm.size - keep).coerceAtLeast(1)
-        while (cut > 0 && s.llm[cut].role == "tool") cut--
-        if (cut <= 0) return s
-        val head = s.llm.subList(0, cut)
-        val tail = s.llm.subList(cut, s.llm.size)
+        var cut = (current.llm.size - keep).coerceAtLeast(1)
+        while (cut > 0 && current.llm[cut].role == "tool") cut--
+        if (cut <= 0) return current
+        val head = current.llm.subList(0, cut)
+        val tail = current.llm.subList(cut, current.llm.size)
         val transcript = buildString {
             head.forEach { m ->
                 val body = (m.content ?: "").take(1500)
@@ -118,20 +124,20 @@ class ContextManager(private val store: Store, private val sandbox: Sandbox, pri
             Preserve números, nomes, caminhos e URLs exatos. Não invente nada.
 
             Resumo anterior (se houver):
-            ${s.summary.ifBlank { "(nenhum)" }}
+            ${current.summary.ifBlank { "(nenhum)" }}
 
             Histórico a compactar:
             $transcript
         """.trimIndent()
-        val summary = runCatching { llm.quick(prompt, maxTokens = 1500, conversationId = s.id) }.getOrNull()
+        val summary = runCatching { llm.quick(prompt, maxTokens = 1500, conversationId = current.id) }.getOrNull()
         val updated = if (!summary.isNullOrBlank()) {
-            s.copy(llm = tail, summary = summary, compactions = s.compactions + 1)
+            current.copy(llm = tail, summary = summary, compactions = current.compactions + 1)
         } else {
             // circuit breaker: perde as rodadas mais antigas, mas destrava a sessão
-            s.copy(llm = tail, compactions = s.compactions + 1,
-                summary = (s.summary + "\n[Parte antiga do histórico descartada por falha ao resumir]").trim())
+            current.copy(llm = tail, compactions = current.compactions + 1,
+                summary = (current.summary + "\n[Parte antiga do histórico descartada por falha ao resumir]").trim())
         }
-        store.editSession(s.id) { it.copy(llm = updated.llm, summary = updated.summary, compactions = updated.compactions) }
+        store.editSession(current.id) { it.copy(llm = updated.llm, summary = updated.summary, compactions = updated.compactions) }
         return updated
     }
 

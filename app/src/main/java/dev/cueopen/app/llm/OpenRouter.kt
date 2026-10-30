@@ -1,4 +1,5 @@
 package dev.cueopen.app.llm
+import dev.cueopen.app.agent.ToolCallHistoryNormalizer
 import dev.cueopen.app.data.LlmMessage
 import dev.cueopen.app.data.Settings
 import kotlinx.coroutines.Dispatchers
@@ -118,11 +119,14 @@ class OpenRouter(private val settings: () -> Settings) {
         val openRouter = isOpenRouter(s.baseUrl)
         val openCodeSession = OpenCodeProtocol.sessionHeader(s.baseUrl, conversationId)
         val openCodeUserAgent = OpenCodeProtocol.userAgent(s.baseUrl)
+        // Nunca envia um assistant.tool_calls pendente: interrompidos recebem marcador explícito,
+        // replies órfãos/duplicados são removidos e cada call_id fica respondido exatamente uma vez.
+        val safeMessages = ToolCallHistoryNormalizer.normalize(messages)
         fun buildBody(disableReasoning: Boolean, structuredOutput: Boolean) = buildJsonObject {
             put("model", mdl)
             put("max_tokens", maxTokens)
             put("temperature", 0.2)
-            put("messages", buildJsonArray { messages.forEach { add(it.toJson()) } })
+            put("messages", buildJsonArray { safeMessages.forEach { add(it.toJson()) } })
             if (tools != null && tools.isNotEmpty()) {
                 put("tools", tools)
                 put("tool_choice", "auto")
@@ -181,19 +185,24 @@ class OpenRouter(private val settings: () -> Settings) {
         val msg = choice0["message"]!!.jsonObject
         val content = msg["content"]?.let { runCatching { it.jsonPrimitive.contentOrNull }.getOrNull() }
         val tcs = msg["tool_calls"]?.takeIf { it is JsonArray }?.jsonArray
-        val calls = tcs?.map { tc ->
-            val o = tc.jsonObject
-            val f = o["function"]!!.jsonObject
-            ToolCall(
-                id = o["id"]?.jsonPrimitive?.contentOrNull ?: "call_${System.nanoTime()}",
-                name = f["name"]!!.jsonPrimitive.content,
-                argsJson = f["arguments"]?.jsonPrimitive?.contentOrNull ?: "{}",
-            )
-        }.orEmpty()
+        val parsedCalls = tcs.orEmpty().mapNotNull { tc ->
+            runCatching {
+                val o = tc.jsonObject
+                val f = o["function"]?.jsonObject ?: return@runCatching null
+                val id = o["id"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() } ?: return@runCatching null
+                val name = f["name"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() } ?: return@runCatching null
+                val args = f["arguments"]?.let { element ->
+                    if (element is kotlinx.serialization.json.JsonPrimitive) element.contentOrNull ?: "{}" else element.toString()
+                } ?: "{}"
+                tc to ToolCall(id, name, args)
+            }.getOrNull()
+        }.distinctBy { it.second.id }
+        val calls = parsedCalls.map { it.second }
+        val rawToolCalls = parsedCalls.takeIf { it.isNotEmpty() }?.let { JsonArray(it.map { pair -> pair.first }).toString() }
         val u = root["usage"]?.let { runCatching { it.jsonObject }.getOrNull() }
         fun num(o: JsonObject?, key: String) = o?.get(key)?.let { runCatching { it.jsonPrimitive.content.toDouble().toLong() }.getOrNull() } ?: 0L
         val cachedTok = u?.get("prompt_tokens_details")?.let { runCatching { it.jsonObject }.getOrNull() }?.let { num(it, "cached_tokens") } ?: 0L
-        LlmReply(content, calls, tcs?.toString(), Usage(num(u, "prompt_tokens"), num(u, "completion_tokens"), cachedTok), truncated = finish == "length")
+        LlmReply(content, calls, rawToolCalls, Usage(num(u, "prompt_tokens"), num(u, "completion_tokens"), cachedTok), truncated = finish == "length")
     }
 
     /** Chamada nativa System One para Jev: não passa pelo endpoint de geração de texto. */

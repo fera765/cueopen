@@ -98,5 +98,6 @@ class BootReceiver : android.content.BroadcastReceiver() {
         // criar a Application já chama startAutonomy(); aqui só garantimos o worker
         AutonomyWorker.ensure(context)
         dev.cueopen.app.scheduler.Heartbeat.rescheduleAll(context)
+        dev.cueopen.app.uiconnector.iqoption.IqSignalAlarms.rescheduleAll(context)
     }
 }

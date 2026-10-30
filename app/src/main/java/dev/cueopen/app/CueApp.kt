@@ -59,6 +59,7 @@ class CueApp : Application() {
         getSystemService(NotificationManager::class.java).createNotificationChannel(
             NotificationChannel(CH_TASKS, "Tarefas", NotificationManager.IMPORTANCE_DEFAULT)
         )
+        dev.cueopen.app.uiconnector.iqoption.IqSignalAlarms.rescheduleAll(this)
     }
 
     companion object {

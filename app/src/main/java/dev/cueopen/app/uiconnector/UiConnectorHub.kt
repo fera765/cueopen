@@ -43,7 +43,9 @@ class UiConnectorHub(context: Context) {
     private val builtin: List<UiConnector> = listOf<UiConnector>(IqOptionConnector(object : dev.cueopen.app.uiconnector.iqoption.KvStore {
         private val sp = context.applicationContext.getSharedPreferences("iq_state", Context.MODE_PRIVATE)
         override fun get(key: String): String? = sp.getString(key, null)
-        override fun put(key: String, value: String) { sp.edit().putString(key, value).apply() }
+        override fun put(key: String, value: String) {
+            check(sp.edit().putString(key, value).commit()) { "Não foi possível persistir o estado do conector IQ Option." }
+        }
     }), dev.cueopen.app.uiconnector.gmail.GmailConnector(ctx)).filter { c ->
         val problems = SpecValidator.validate(c.spec)
         if (problems.isNotEmpty()) ErrorLog.log("uiconnector", "spec inválido (${c.spec.id}): " + problems.joinToString("; "))
