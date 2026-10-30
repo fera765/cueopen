@@ -49,6 +49,19 @@ class CueApp : Application() {
     fun browserFor(sessionId: String): BrowserHost = browsers.computeIfAbsent(sessionId) { BrowserHost(this) }
     /** Fecha e descarta o browser isolado de uma sessão (ex.: subagente que terminou). */
     fun closeBrowser(sessionId: String) { browsers.remove(sessionId)?.dispose() }
+    /** Exclui um chat e encerra somente suas execuções, agendas e heartbeats associados. */
+    fun deleteChat(sessionId: String) {
+        val deletion = store.deleteSessionAndLinkedWork(sessionId)
+        deletion.cancelledScheduledTaskIds.forEach { dev.cueopen.app.scheduler.Scheduler.cancel(this, it) }
+        deletion.cancelledHeartbeatAgentIds.forEach { dev.cueopen.app.scheduler.Heartbeat.cancel(this, it) }
+        deletion.removedSessionIds.forEach { id ->
+            agent.stop(id)
+            closeBrowser(id)
+            getSystemService(NotificationManager::class.java)
+                .cancel(SessionNotificationRouting.stableId(id))
+        }
+        store.cleanupWorkspaces(deletion.removedSessionIds)
+    }
     val browser: BrowserHost get() = browserFor("__legacy__")
     lateinit var llm: OpenRouter; private set
     lateinit var agent: AgentRunner; private set

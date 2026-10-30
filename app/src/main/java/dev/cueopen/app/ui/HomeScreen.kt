@@ -641,7 +641,8 @@ private fun DrawerItem(icon: ImageVector, text: String, badge: String? = null, o
 @Composable
 private fun SessionRow(s: Session, agent: AgentProfile?, onClick: () -> Unit) {
     val c = Cue.c
-    val store = CueApp.instance.store
+    val app = CueApp.instance
+    val store = app.store
     var menu by remember { mutableStateOf(false) }
     var renameDialog by remember { mutableStateOf(false) }
     var deleteDialog by remember { mutableStateOf(false) }
@@ -683,7 +684,7 @@ private fun SessionRow(s: Session, agent: AgentProfile?, onClick: () -> Unit) {
         onDismissRequest = { deleteDialog = false },
         title = { Text("Excluir conversa?") },
         text = { Text("O chat “${s.title}” e seu histórico serão removidos deste aparelho.") },
-        confirmButton = { TextButton(onClick = { store.deleteSession(s.id); deleteDialog = false }) { Text("Excluir", color = c.err) } },
+        confirmButton = { TextButton(onClick = { app.deleteChat(s.id); deleteDialog = false }) { Text("Excluir", color = c.err) } },
         dismissButton = { TextButton(onClick = { deleteDialog = false }) { Text("Cancelar") } }
     )
 }

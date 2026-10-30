@@ -153,7 +153,7 @@ fun ChatScreen(nav: NavController, sessionId: String) {
                     DropdownMenuItem({ Text("Agendar esta tarefa") }, {
                         menu = false
                         val first = session.items.firstOrNull { it is ChatItem.User } as? ChatItem.User
-                        val t = dev.cueopen.app.data.ScheduledTask(title = session.title, prompt = first?.text ?: "", agentId = session.agentId)
+                        val t = dev.cueopen.app.data.ScheduledTask(title = session.title, prompt = first?.text ?: "", agentId = session.agentId, sourceSessionId = sessionId)
                         app.store.upsertScheduled(t); nav.navigate("scheduled/${t.id}")
                     }, leadingIcon = { Icon(Icons.Rounded.Schedule, null) })
                     DropdownMenuItem({ Text("Uso e contexto") }, { menu = false; usage = true }, leadingIcon = { Icon(Icons.Rounded.DataUsage, null) })
@@ -163,7 +163,7 @@ fun ChatScreen(nav: NavController, sessionId: String) {
                         menu = false; app.agent.pauseAgent(autoAgent.id)
                     }, leadingIcon = { Icon(Icons.Rounded.PauseCircle, null) })
                     DropdownMenuItem({ Text("Excluir", color = c.err) }, {
-                        menu = false; app.agent.stop(sessionId); app.store.deleteSession(sessionId); nav.popBackStack()
+                        menu = false; app.deleteChat(sessionId); nav.popBackStack()
                     }, leadingIcon = { Icon(Icons.Rounded.Delete, null, tint = c.err) })
                 }
             },

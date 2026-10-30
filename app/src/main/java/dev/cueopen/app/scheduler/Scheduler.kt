@@ -35,19 +35,23 @@ object Scheduler {
         val data = workDataOf("id" to t.id)
         when (t.repeat) {
             Repeat.ONCE -> wm.enqueueUniqueWork(name(t.id), ExistingWorkPolicy.REPLACE,
-                OneTimeWorkRequestBuilder<ScheduledWorker>().setInitialDelay(delayMs, TimeUnit.MILLISECONDS).setInputData(data).build())
+                OneTimeWorkRequestBuilder<ScheduledWorker>().setInitialDelay(delayMs, TimeUnit.MILLISECONDS).setInputData(data).addTag(name(t.id)).build())
             else -> {
                 val (n, unit) = when (t.repeat) { Repeat.HALF_HOUR -> 30L to TimeUnit.MINUTES; Repeat.HOURLY -> 1L to TimeUnit.HOURS; Repeat.DAILY -> 1L to TimeUnit.DAYS; else -> 7L to TimeUnit.DAYS }
                 wm.enqueueUniquePeriodicWork(name(t.id), ExistingPeriodicWorkPolicy.UPDATE,
-                    PeriodicWorkRequestBuilder<ScheduledWorker>(n, unit).setInitialDelay(delayMs, TimeUnit.MILLISECONDS).setInputData(data).build())
+                    PeriodicWorkRequestBuilder<ScheduledWorker>(n, unit).setInitialDelay(delayMs, TimeUnit.MILLISECONDS).setInputData(data).addTag(name(t.id)).build())
             }
         }
     }
 
-    fun cancel(ctx: Context, id: String) = WorkManager.getInstance(ctx).cancelUniqueWork(name(id))
+    fun cancel(ctx: Context, id: String) {
+        val workManager = WorkManager.getInstance(ctx)
+        workManager.cancelUniqueWork(name(id))
+        workManager.cancelAllWorkByTag(name(id))
+    }
 
     fun runNow(ctx: Context, id: String) = WorkManager.getInstance(ctx).enqueue(
-        OneTimeWorkRequestBuilder<ScheduledWorker>().setInputData(workDataOf("id" to id)).build())
+        OneTimeWorkRequestBuilder<ScheduledWorker>().setInputData(workDataOf("id" to id)).addTag(name(id)).build())
 }
 
 class ScheduledWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, params) {
@@ -56,11 +60,26 @@ class ScheduledWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(
         val id = inputData.getString("id") ?: return Result.failure()
         val task = app.store.state.value.scheduled.firstOrNull { it.id == id } ?: return Result.failure()
         val session = Session(title = "⏰ ${task.title}", agentId = task.agentId, scheduledTaskId = task.id)
-        app.store.upsertSession(session)
-        app.store.upsertScheduled(task.copy(lastRunAt = now(), lastSessionId = session.id))
+        if (!app.store.beginScheduledRun(id, session)) return Result.failure()
         val job = app.agent.send(session.id, task.prompt)
-        job.join()
-        while (app.agent.isRunning(session.id)) delay(1000)
+        try {
+            if (isStopped || !app.store.isScheduledRunActive(id, session.id)) {
+                app.agent.stop(session.id)
+                return Result.failure()
+            }
+            job.join()
+            while (app.agent.isRunning(session.id)) {
+                if (isStopped || !app.store.isScheduledRunActive(id, session.id)) {
+                    app.agent.stop(session.id)
+                    return Result.failure()
+                }
+                delay(1000)
+            }
+        } catch (cancelled: kotlinx.coroutines.CancellationException) {
+            app.agent.stop(session.id)
+            throw cancelled
+        }
+        if (!app.store.isScheduledRunActive(id, session.id)) return Result.failure()
         app.store.flush()
         if (app.store.settings.notifyOnDone) notify(app, session.id, task.title)
         return Result.success()

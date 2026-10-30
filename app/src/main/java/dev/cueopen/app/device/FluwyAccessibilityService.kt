@@ -45,7 +45,7 @@ class FluwyAccessibilityService : AccessibilityService() {
     private data class Visit(val node: AccessibilityNodeInfo, val path: List<Int>)
     private data class LocatedTarget(val node: AccessibilityNodeInfo, val windowBounds: Rect)
 
-    private var snapshot: Snapshot? = null
+    private val snapshots = AccessibilitySnapshotStore<Snapshot>()
 
     override fun onServiceConnected() {
         super.onServiceConnected()
@@ -64,22 +64,26 @@ class FluwyAccessibilityService : AccessibilityService() {
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
-        // Não lê o evento nem seu texto; qualquer alteração torna os IDs anteriores obsoletos.
-        snapshot = null
+        // Eventos de conteúdo/foco podem ser ruído ou animações. locate() sempre relê a janela e
+        // compara caminho, visibilidade e fingerprint antes da ação. Só uma troca de janela invalida tudo.
+        if (event?.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED ||
+            event?.eventType == AccessibilityEvent.TYPE_WINDOWS_CHANGED) {
+            snapshots.clear()
+        }
     }
 
     override fun onInterrupt() {
-        snapshot = null
+        snapshots.clear()
     }
 
     override fun onUnbind(intent: Intent?): Boolean {
-        snapshot = null
+        snapshots.clear()
         AccessibilityAutomationBridge.disconnect(this)
         return super.onUnbind(intent)
     }
 
     override fun onDestroy() {
-        snapshot = null
+        snapshots.clear()
         AccessibilityAutomationBridge.disconnect(this)
         super.onDestroy()
     }
@@ -129,15 +133,15 @@ class FluwyAccessibilityService : AccessibilityService() {
             }
         }
 
-        snapshot = Snapshot(
+        snapshots.put(sessionId, Snapshot(
             id = snapshotId,
             ownerSessionId = sessionId,
             createdAt = SystemClock.elapsedRealtime(),
             packageName = window.packageName,
             windowId = window.id,
             targets = targets,
-        )
-        val header = "Tela acessível no app ${window.packageName}. snapshot_id=$snapshotId. IDs temporários (máx. ${SNAPSHOT_TTL_MS / 1000}s); releia após cada ação ou mudança."
+        ))
+        val header = "Tela acessível no app ${window.packageName}. snapshot_id=$snapshotId. IDs temporários (máx. ${SNAPSHOT_TTL_MS / 1000}s); releia após cada ação ou mudança observável."
         val body = if (lines.isEmpty()) "Nenhum controle/texto acessível foi encontrado nesta tela." else lines.joinToString("\n")
         return (header + "\n" + body).take(MAX_SCREEN_OUTPUT_CHARS)
     }
@@ -149,7 +153,7 @@ class FluwyAccessibilityService : AccessibilityService() {
         repeat(MAX_CLICK_ANCESTORS) {
             val current = node ?: return@repeat
             if (current.isClickable && current.performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
-                snapshot = null
+                snapshots.remove(sessionId)
                 return "Toque executado no elemento $elementId. Releia a tela antes da próxima ação."
             }
             node = current.parent
@@ -157,7 +161,7 @@ class FluwyAccessibilityService : AccessibilityService() {
 
         val bounds = Rect().also(located.node::getBoundsInScreen)
         if (dispatchTap(bounds, located.windowBounds)) {
-            snapshot = null
+            snapshots.remove(sessionId)
             return "Toque por gesto enviado ao elemento $elementId. Releia a tela antes da próxima ação."
         }
         error("O elemento $elementId não aceitou toque; releia a tela ou peça ao usuário para concluir manualmente.")
@@ -180,7 +184,7 @@ class FluwyAccessibilityService : AccessibilityService() {
         if (!node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)) {
             error("O app não permite preencher este campo por acessibilidade; não foi usado clipboard nem screenshot.")
         }
-        snapshot = null
+        snapshots.remove(sessionId)
         return "Texto definido no campo (${safeText.length} caracteres; conteúdo omitido). Releia a tela para conferir o estado."
     }
 
@@ -197,7 +201,7 @@ class FluwyAccessibilityService : AccessibilityService() {
             val current = node ?: return@repeat
             val action = if (forward) AccessibilityNodeInfo.ACTION_SCROLL_FORWARD else AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD
             if (current.isScrollable && current.performAction(action)) {
-                snapshot = null
+                snapshots.remove(sessionId)
                 return if (forward) "Rolagem para baixo solicitada." else "Rolagem para cima solicitada."
             }
             node = current.parent
@@ -205,7 +209,7 @@ class FluwyAccessibilityService : AccessibilityService() {
 
         val bounds = Rect().also(located.node::getBoundsInScreen)
         if (dispatchScroll(bounds, located.windowBounds, forward)) {
-            snapshot = null
+            snapshots.remove(sessionId)
             return if (forward) "Gesto de rolagem para baixo enviado." else "Gesto de rolagem para cima enviado."
         }
         error("O elemento $elementId não permite rolagem por acessibilidade; releia a tela ou peça ao usuário para concluir manualmente.")
@@ -214,7 +218,7 @@ class FluwyAccessibilityService : AccessibilityService() {
     internal fun back(sessionId: String): String {
         requireAuthorized(sessionId)
         if (!performGlobalAction(GLOBAL_ACTION_BACK)) error("O Android recusou a ação Voltar.")
-        snapshot = null
+        snapshots.remove(sessionId)
         return "Ação Voltar enviada. Releia a tela antes de continuar."
     }
 
@@ -236,18 +240,19 @@ class FluwyAccessibilityService : AccessibilityService() {
     }
 
     private fun locate(sessionId: String, snapshotId: String, elementId: Int): LocatedTarget {
-        val saved = snapshot ?: error("Snapshot ausente ou invalidado; execute read_screen novamente.")
+        val saved = snapshots[sessionId]
+            ?: error("Snapshot ausente ou invalidado; nenhuma ação foi executada. Execute device_accessibility_read_screen novamente e use somente os IDs novos.")
         if (saved.ownerSessionId != sessionId) {
-            error("Snapshot pertence a outra tarefa; execute read_screen nesta tarefa antes da ação.")
+            error("Snapshot pertence a outra tarefa; execute device_accessibility_read_screen nesta tarefa antes da ação.")
         }
         if (saved.id != snapshotId || SystemClock.elapsedRealtime() - saved.createdAt > SNAPSHOT_TTL_MS) {
-            snapshot = null
+            snapshots.remove(sessionId)
             error("snapshot_id expirado ou diferente da tela atual; execute read_screen novamente.")
         }
         val target = saved.targets[elementId] ?: error("element_id desconhecido neste snapshot; execute read_screen novamente.")
         val window = activeWindow()
         if (window.packageName != saved.packageName || (saved.windowId >= 0 && window.id != saved.windowId)) {
-            snapshot = null
+            snapshots.remove(sessionId)
             error("A janela mudou desde a leitura; execute read_screen novamente.")
         }
         var node = window.root
@@ -255,7 +260,7 @@ class FluwyAccessibilityService : AccessibilityService() {
             node = node.getChild(index) ?: error("A árvore de controles mudou; execute read_screen novamente.")
         }
         if (!node.isVisibleToUser || fingerprint(node) != target.fingerprint) {
-            snapshot = null
+            snapshots.remove(sessionId)
             error("O controle mudou desde a leitura; execute read_screen novamente.")
         }
         return LocatedTarget(node, window.bounds)

@@ -132,6 +132,56 @@ class Store(context: Context) {
     var onDeleteWorkspace: ((String) -> Unit)? = null
     fun deleteSession(id: String) { runCatching { onDeleteWorkspace?.invoke(id) }; update { st -> st.copy(sessions = st.sessions.filterNot { it.id == id }) } }
 
+    /** Remove chat, agendas explicitamente ligadas, execuções dessas agendas e heartbeats órfãos. */
+    internal fun deleteSessionAndLinkedWork(id: String): SessionDeletionPlan {
+        val plan = synchronized(stateLock) {
+            val current = _state.value
+            val next = current.planSessionDeletion(id)
+            if (next.state != current) {
+                revision += 1
+                _state.value = next.state
+                snapshots.value = VersionedState(revision, next.state)
+            }
+            next
+        }
+        return plan
+    }
+
+    /** Limpa workspaces somente depois de o chamador parar os jobs do chat removido. */
+    internal fun cleanupWorkspaces(sessionIds: Collection<String>) {
+        sessionIds.forEach { id -> runCatching { onDeleteWorkspace?.invoke(id) } }
+    }
+
+    /** Cria a sessão de execução e atualiza o registro da agenda sob o mesmo lock da exclusão. */
+    internal fun beginScheduledRun(taskId: String, session: Session): Boolean = synchronized(stateLock) {
+        val current = _state.value
+        val task = current.scheduled.firstOrNull { it.id == taskId } ?: return@synchronized false
+        if (session.scheduledTaskId != taskId) return@synchronized false
+        if (task.sourceSessionId != null && current.sessions.none { it.id == task.sourceSessionId })
+            return@synchronized false
+
+        val next = current.copy(
+            sessions = if (current.sessions.any { it.id == session.id })
+                current.sessions.map { if (it.id == session.id) session else it }
+            else listOf(session) + current.sessions,
+            scheduled = current.scheduled.map {
+                if (it.id == taskId) it.copy(lastRunAt = now(), lastSessionId = session.id) else it
+            },
+        )
+        revision += 1
+        _state.value = next
+        snapshots.value = VersionedState(revision, next)
+        true
+    }
+
+    internal fun isScheduledRunActive(taskId: String, sessionId: String): Boolean {
+        val current = _state.value
+        val task = current.scheduled.firstOrNull { it.id == taskId } ?: return false
+        val session = current.sessions.firstOrNull { it.id == sessionId } ?: return false
+        return session.scheduledTaskId == taskId &&
+            (task.sourceSessionId == null || current.sessions.any { it.id == task.sourceSessionId })
+    }
+
     // ---- Agents / Skills / Agendadas / Knowledge ----
     fun upsertAgent(a: AgentProfile) = update { st ->
         st.copy(agents = if (st.agents.any { it.id == a.id }) st.agents.map { if (it.id == a.id) a else it } else st.agents + a)

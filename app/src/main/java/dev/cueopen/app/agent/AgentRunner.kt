@@ -225,6 +225,7 @@ class AgentRunner(
         // Detecção de loop de ferramentas: mesma chamada (nome+args) repetida sem progresso.
         val toolSigWindow = ArrayDeque<String>()
         val resultSigWindow = ArrayDeque<String>()
+        val invalidAccessibilitySnapshots = dev.cueopen.app.device.InvalidAccessibilitySnapshotGuard()
         var toolLoopNudges = 0
         var cleanRounds = 0
         val controlTools = setOf("tools_load", "sleep", "set_schedule", "ask_user", "ask_question", "ask_secure", "finish", "complete_step", "notes_write", "notes_read")
@@ -374,6 +375,14 @@ class AgentRunner(
             val resultHashes = HashMap<String, Int>()
             val resultLong = HashSet<String>()
             for (call in reply.toolCalls) {
+                val accessibilitySnapshotId = if (call.name == "device_accessibility_click") runCatching {
+                    json.parseToJsonElement(call.argsJson).jsonObject["snapshot_id"]?.jsonPrimitive?.contentOrNull
+                }.getOrNull() else null
+                if (invalidAccessibilitySnapshots.shouldBlock(accessibilitySnapshotId)) {
+                    store.addItemUnique(sessionId, ChatItem.Error(text = "O snapshot de acessibilidade já foi recusado; não repeti o toque. Leia a tela novamente e use somente o snapshot_id e element_id novos antes de tentar outra vez."))
+                    store.editSession(sessionId) { it.copy(status = SessionStatus.WAITING_USER) }
+                    return
+                }
                 // Auto-recuperação: uma exceção em qualquer ferramenta vira um erro acionável devolvido
                 // ao modelo (nunca derruba o loop do agente).
                 val tradeResultTool = call.name == "uic_iqoption_open_option" || call.name == "uic_iqoption_get_trade_result"
@@ -387,6 +396,8 @@ class AgentRunner(
                     runCatching { dev.cueopen.app.diag.ErrorLog.log(errorSource(call.name), "${t.javaClass.simpleName}: ${t.message.orEmpty()}", sessionId, call.name) }
                     ToolResult(output = "ERRO ao executar a ferramenta \"${call.name}\": ${t.message?.take(300) ?: t.javaClass.simpleName}. Diagnostique a causa, ajuste os argumentos/abordagem e tente de outra forma; não repita a mesma chamada. Se estiver bloqueado, chame finish explicando.")
                 }
+                if (call.name == "device_accessibility_click")
+                    invalidAccessibilitySnapshots.recordFailure(accessibilitySnapshotId, rawResult.output)
                 if (tradeResultTool && cachedTradeResult == null) tradeCallCache[cacheKey] = rawResult
                 val consumedWait = if (tradeResultTool) IqTradeWaitDirective.consume(rawResult.output) else null
                 val outputText = consumedWait?.output ?: rawResult.output
@@ -1387,7 +1398,7 @@ class AgentRunner(
         if ("device_accessibility_read_screen" in deviceTools)
             add(tool("device_accessibility_read_screen", "Lê somente a árvore de texto/controles visíveis da janela atual; não captura screenshot. Senhas são ocultadas. IDs temporários expiram ou invalidam após mudanças.", buildJsonObject {}))
         if ("device_accessibility_click" in deviceTools)
-            add(tool("device_accessibility_click", "Toca um controle visível do snapshot atual. Releia a tela após a ação.", buildJsonObject {
+            add(tool("device_accessibility_click", "Toca um controle visível do snapshot atual. Releia a tela após a ação. Se receber erro de snapshot ausente/invalidado, não repita esse click: chame device_accessibility_read_screen e use somente IDs novos.", buildJsonObject {
                 put("snapshot_id", str("ID retornado por device_accessibility_read_screen"))
                 put("element_id", int("ID do elemento no snapshot atual"))
             }, listOf("snapshot_id", "element_id")))
