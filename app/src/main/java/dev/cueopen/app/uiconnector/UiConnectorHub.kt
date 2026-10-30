@@ -1,6 +1,7 @@
 package dev.cueopen.app.uiconnector
 
 import android.content.Context
+import android.os.SystemClock
 import dev.cueopen.app.data.AgentProfile
 import dev.cueopen.app.diag.ErrorLog
 import dev.cueopen.app.trading.Side
@@ -12,12 +13,14 @@ import dev.cueopen.app.uiconnector.custom.CustomDef
 import dev.cueopen.app.uiconnector.custom.CustomDefParser
 import dev.cueopen.app.uiconnector.iqoption.IqOptionConnector
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.sync.Mutex
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.put
+import java.util.concurrent.ConcurrentHashMap
 
 /**
  * Hub dos UI Connectors: registro, cofre de credenciais, toggles e ponte com o agente.
@@ -38,6 +41,11 @@ class UiConnectorHub(context: Context) {
     private val prefs = ctx.getSharedPreferences("uic_prefs", Context.MODE_PRIVATE)
     val vault = CredentialVault(ctx)
     private val customStore = CustomConnectorStore(ctx)
+    private val automaticLoginBackoff = ConnectorRetryBackoff()
+    private val automaticLoginLocks = ConcurrentHashMap<String, Mutex>()
+
+    private fun automaticLoginLock(id: String): Mutex = automaticLoginLocks.computeIfAbsent(id) { Mutex() }
+    private fun usesAutomaticLoginBackoff(id: String): Boolean = id == "iqoption"
 
     /** Conectores que vêm com o app. Para adicionar um novo em Kotlin: crie a classe e acrescente aqui. */
     private val builtin: List<UiConnector> = listOf<UiConnector>(IqOptionConnector(object : dev.cueopen.app.uiconnector.iqoption.KvStore {
@@ -179,10 +187,22 @@ class UiConnectorHub(context: Context) {
         val c = get(id) ?: return Result.failure(IllegalArgumentException("Conector desconhecido: $id"))
         val missing = c.spec.loginFields.filter { it.required && credentials[it.id].isNullOrBlank() }
         if (missing.isNotEmpty()) return Result.failure(IllegalArgumentException("Preencha: " + missing.joinToString { it.label }))
-        val r = c.login(credentials)
+        val r = automaticLoginLock(id).withLock {
+            if (usesAutomaticLoginBackoff(id)) automaticLoginBackoff.reset(id) // login iniciado pelo usuário ignora o cooldown automático
+            try {
+                c.login(credentials)
+            } catch (cancel: kotlinx.coroutines.CancellationException) {
+                throw cancel
+            } catch (t: Throwable) {
+                Result.failure(t)
+            }
+        }
         if (r.isSuccess) {
+            if (usesAutomaticLoginBackoff(id)) automaticLoginBackoff.reset(id)
             if (remember) runCatching { vault.save(id, c.persistedCredentials() ?: credentials) }.onFailure { ErrorLog.log("uiconnector", "cofre: ${it.message}", null, id) }
             else vault.clear(id)
+        } else if (usesAutomaticLoginBackoff(id)) {
+            automaticLoginBackoff.recordFailure(id, SystemClock.elapsedRealtime(), r.exceptionOrNull()?.message.orEmpty())
         }
         return r
     }
@@ -190,6 +210,7 @@ class UiConnectorHub(context: Context) {
     suspend fun logout(id: String) {
         get(id)?.logout()
         vault.clear(id)
+        automaticLoginBackoff.reset(id)
     }
 
     /** Reconecta com as credenciais do cofre (processo reiniciado). */
@@ -197,7 +218,31 @@ class UiConnectorHub(context: Context) {
         val c = get(id) ?: return Result.failure(IllegalArgumentException("Conector desconhecido: $id"))
         if (c.isLoggedIn) return Result.success(Unit)
         val saved = vault.load(id) ?: return Result.failure(IllegalStateException("${c.spec.name}: faça login no conector (Conectores → UI Conectores)."))
-        return c.login(saved)
+        return automaticLoginLock(id).withLock {
+            if (c.isLoggedIn) return@withLock Result.success(Unit)
+            val now = SystemClock.elapsedRealtime()
+            val remainingMs = if (usesAutomaticLoginBackoff(id)) automaticLoginBackoff.remainingMs(id, now) else 0L
+            if (remainingMs > 0L) {
+                val waitSec = (remainingMs + 999L) / 1_000L
+                val lastReason = automaticLoginBackoff.state(id)?.reason.orEmpty().take(120)
+                return@withLock Result.failure(ConnectorRetryDeferredException(
+                    "${c.spec.name}: tentativa automática pausada por falha recente; nova tentativa em ${waitSec}s." +
+                        if (lastReason.isBlank()) "" else " Último erro: $lastReason"
+                ))
+            }
+            val result = try {
+                c.login(saved)
+            } catch (cancel: kotlinx.coroutines.CancellationException) {
+                throw cancel
+            } catch (t: Throwable) {
+                Result.failure(t)
+            }
+            if (usesAutomaticLoginBackoff(id)) {
+                if (result.isSuccess) automaticLoginBackoff.reset(id)
+                else automaticLoginBackoff.recordFailure(id, SystemClock.elapsedRealtime(), result.exceptionOrNull()?.message.orEmpty())
+            }
+            result
+        }
     }
 
     // ------------------------------------------------------------------ ponte com o agente
@@ -269,7 +314,8 @@ class UiConnectorHub(context: Context) {
         } catch (t: kotlinx.coroutines.CancellationException) {
             throw t
         } catch (t: Throwable) {
-            runCatching { ErrorLog.log("uiconnector", "$fullName: ${t.javaClass.simpleName}: ${t.message.orEmpty()}", null, fullName) }
+            if (t !is ConnectorRetryDeferredException)
+                runCatching { ErrorLog.log("uiconnector", "$fullName: ${t.javaClass.simpleName}: ${t.message.orEmpty()}", null, fullName) }
             "ERRO em ${c.spec.name}: ${t.message ?: t.javaClass.simpleName}"
         }
         return Redactor.redact(out, c.secrets())

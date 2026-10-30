@@ -25,6 +25,7 @@ class IqSignalTimingTest {
     @Test fun `analise e revalidacao ocorrem em T menos dois minutos e dez segundos`() {
         val target = alignedNowSec + 600L
         assertEquals((target - 120L) * 1_000L, IqSignalTiming.analysisAtMs(target))
+        assertEquals((target - 90L) * 1_000L, IqSignalTiming.preconnectAtMs(target))
         assertEquals((target - 10L) * 1_000L, IqSignalTiming.revalidateAtMs(target))
     }
 

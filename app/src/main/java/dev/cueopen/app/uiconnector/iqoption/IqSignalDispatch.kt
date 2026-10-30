@@ -164,7 +164,7 @@ interface IqSignalDispatchPort {
 enum class IqDispatchOutcome { WAITING, VALIDATED, EXECUTED, EXPIRED, CANCELLED, DUPLICATE, UNKNOWN, NOT_FOUND }
 
 /**
- * Motor independente do loop/LLM do agente. Os alarmes o acordam em T−10 e em T; cada transição
+ * Motor independente do loop/LLM do agente. Os alarmes o acordam em T−90, T−10 e em T; cada transição
  * persistida é reentrante e o claim SUBMITTING garante no máximo uma tentativa por candle.
  */
 class IqOptionSignalDispatcher(
@@ -188,7 +188,7 @@ class IqOptionSignalDispatcher(
         }
         if (!store.putIfNoSignalForTarget(armed))
             return store.get(signal.id) ?: store.all().first { it.targetOpenSec == signal.targetOpenSec }
-        val scheduled = runCatching { alarms.schedule(armed, IqSignalTiming.revalidateAtMs(armed.targetOpenSec)) }.getOrDefault(false)
+        val scheduled = runCatching { alarms.schedule(armed, IqSignalTiming.preconnectAtMs(armed.targetOpenSec)) }.getOrDefault(false)
         if (!scheduled) return store.update(armed.id) {
             it.copy(state = IqArmedSignal.EXPIRED, detail = "não foi possível programar alarme exato; nenhuma ordem")
         } ?: armed.copy(state = IqArmedSignal.EXPIRED)
@@ -212,7 +212,7 @@ class IqOptionSignalDispatcher(
                 return@withLock IqDispatchOutcome.WAITING
             }
             if (now > revalidateAt + REVALIDATION_LATE_TOLERANCE_MS || now >= signal.targetOpenMs)
-                return@withLock expire(signal.id, "revalidação T−10 perdeu a janela; nenhuma ordem")
+                return@withLock expire(signal.id, "T−10 atrasado; sem ordem")
             val failure = runCatching { port.revalidate(signal) }.getOrElse {
                 if (it is kotlinx.coroutines.CancellationException) throw it
                 "revalidação T−10 falhou: ${it.message ?: it.javaClass.simpleName}"
@@ -304,13 +304,30 @@ class IqOptionSignalDispatcher(
         return false
     }
 
+    /** Se o pré-aquecimento falhar, conserva o sinal e tenta novamente no T−10, nunca depois dele. O horário local só decide se ainda cabe reagendar; a ordem exige relógio fresco do servidor. */
+    fun deferUntilRevalidation(id: String, nowEpochMs: Long, reason: String): Boolean {
+        val current = store.get(id) ?: return false
+        if (current.state != IqArmedSignal.ARMED) return false
+        val retryAt = IqSignalTiming.revalidateAtMs(current.targetOpenSec)
+        if (nowEpochMs >= retryAt || !alarms.canScheduleExact()) return false
+        val updated = store.update(id) {
+            if (it.state == IqArmedSignal.ARMED)
+                it.copy(detail = "Pré-conexão falhou; tentará em T−10: ${reason.take(120)}")
+            else it
+        } ?: return false
+        if (updated.state != IqArmedSignal.ARMED) return false
+        if (runCatching { alarms.schedule(updated, retryAt) }.getOrDefault(false)) return true
+        expire(id, "falha ao reagendar T−10 após pré-conexão; nenhuma ordem")
+        return false
+    }
+
     fun rescheduleAll() {
         for (signal in store.all().filter { it.state in IqArmedSignal.ACTIVE_STATES }) {
             if (!alarms.canScheduleExact()) {
                 store.update(signal.id) { it.copy(state = IqArmedSignal.EXPIRED, detail = "permissão de alarme exato ausente após reinício; nenhuma ordem") }
                 alarms.cancel(signal)
             } else {
-                val next = if (signal.state == IqArmedSignal.ARMED) IqSignalTiming.revalidateAtMs(signal.targetOpenSec) else signal.targetOpenMs
+                val next = if (signal.state == IqArmedSignal.ARMED) IqSignalTiming.preconnectAtMs(signal.targetOpenSec) else signal.targetOpenMs
                 if (!alarms.schedule(signal, next))
                     store.update(signal.id) { it.copy(state = IqArmedSignal.EXPIRED, detail = "alarme exato não pôde ser restaurado; nenhuma ordem") }
             }
@@ -340,5 +357,5 @@ class IqOptionSignalDispatcher(
         }
     }
 
-    companion object { const val REVALIDATION_LATE_TOLERANCE_MS = 1_000L }
+    companion object { const val REVALIDATION_LATE_TOLERANCE_MS = 5_000L }
 }

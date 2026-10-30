@@ -7,6 +7,7 @@ import dev.cueopen.app.uiconnector.iqoption.IqDispatchOutcome
 import dev.cueopen.app.uiconnector.iqoption.IqOptionSignalDispatcher
 import dev.cueopen.app.uiconnector.iqoption.IqSignalDispatchPort
 import dev.cueopen.app.uiconnector.iqoption.IqSignalLedger
+import dev.cueopen.app.uiconnector.iqoption.IqSignalTiming
 import dev.cueopen.app.uiconnector.iqoption.IqSignalStore
 import dev.cueopen.app.uiconnector.iqoption.IqSubmissionResult
 import dev.cueopen.app.uiconnector.iqoption.KvStore
@@ -86,6 +87,65 @@ class IqOptionSignalDispatchTest {
         assertEquals(1, broker.validations.get())
         assertEquals(1, broker.submissions.get())
         assertEquals(IqArmedSignal.EXECUTED, store.get(sig.id)?.state)
+    }
+
+    @Test fun `preconexao acorda cedo e reagenda a revalidacao T menos dez`() = runBlocking {
+        val sig = signal()
+        val store = IqSignalLedger(MemoryKv())
+        val clock = FakeClock(sig.targetOpenMs - 90_000L)
+        val alarms = FakeAlarms()
+        val broker = FakePort()
+        val dispatch = dispatcher(store, clock, alarms, broker)
+
+        dispatch.arm(sig)
+        assertEquals(IqSignalTiming.preconnectAtMs(sig.targetOpenSec), alarms.scheduled.last().second)
+        assertEquals(IqDispatchOutcome.WAITING, dispatch.wake(sig.id))
+        assertEquals(IqSignalTiming.revalidateAtMs(sig.targetOpenSec), alarms.scheduled.last().second)
+        clock.now = sig.targetOpenMs - 10_000L
+        assertEquals(IqDispatchOutcome.VALIDATED, dispatch.wake(sig.id))
+        assertEquals(1, broker.validations.get())
+    }
+
+    @Test fun `falha na preconexao conserva sinal para uma tentativa em T menos dez`() = runBlocking {
+        val sig = signal()
+        val store = IqSignalLedger(MemoryKv())
+        val clock = FakeClock(sig.targetOpenMs - 90_000L)
+        val alarms = FakeAlarms()
+        val broker = FakePort()
+        val dispatch = dispatcher(store, clock, alarms, broker)
+        dispatch.arm(sig)
+
+        assertTrue(dispatch.deferUntilRevalidation(sig.id, sig.targetOpenMs - 30_000L, "connect timeout"))
+        assertEquals(IqArmedSignal.ARMED, store.get(sig.id)?.state)
+        assertTrue(store.get(sig.id)?.detail?.contains("connect timeout") == true)
+        assertEquals(IqSignalTiming.revalidateAtMs(sig.targetOpenSec), alarms.scheduled.last().second)
+        clock.now = sig.targetOpenMs - 10_000L
+        assertEquals(IqDispatchOutcome.VALIDATED, dispatch.wake(sig.id))
+    }
+
+    @Test fun `preconexao nao pode ser adiada depois do prazo T menos dez`() {
+        val sig = signal()
+        val store = IqSignalLedger(MemoryKv())
+        val alarms = FakeAlarms()
+        val dispatch = dispatcher(store, FakeClock(sig.targetOpenMs - 90_000L), alarms, FakePort())
+        dispatch.arm(sig)
+
+        assertFalse(dispatch.deferUntilRevalidation(sig.id, sig.targetOpenMs - 9_999L, "timeout"))
+        assertEquals(IqArmedSignal.ARMED, store.get(sig.id)?.state)
+    }
+
+    @Test fun `atraso de ate cinco segundos ainda pode revalidar antes da abertura`() = runBlocking {
+        val sig = signal()
+        val store = IqSignalLedger(MemoryKv())
+        val clock = FakeClock(sig.targetOpenMs - 6_000L)
+        val alarms = FakeAlarms()
+        val broker = FakePort()
+        val dispatch = dispatcher(store, clock, alarms, broker)
+        dispatch.arm(sig)
+
+        assertEquals(IqDispatchOutcome.VALIDATED, dispatch.wake(sig.id))
+        assertEquals(1, broker.validations.get())
+        assertEquals(0, broker.submissions.get())
     }
 
     @Test fun `revalidacao acordada 16 segundos tarde expira sem ordem`() = runBlocking {

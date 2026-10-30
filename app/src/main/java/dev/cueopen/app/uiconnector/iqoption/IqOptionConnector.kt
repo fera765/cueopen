@@ -2,6 +2,8 @@ package dev.cueopen.app.uiconnector.iqoption
 
 import dev.cueopen.app.diag.ErrorLog
 import dev.cueopen.app.uiconnector.ConnectorSettings
+import dev.cueopen.app.uiconnector.ConnectorRetryBackoff
+import dev.cueopen.app.uiconnector.ConnectorRetryDeferredException
 import dev.cueopen.app.uiconnector.FieldType
 import dev.cueopen.app.uiconnector.LoginField
 import dev.cueopen.app.uiconnector.ParamSpec
@@ -229,6 +231,7 @@ class IqOptionConnector(private val kv: KvStore? = null) : UiConnector {
     private val client = OkHttpClient.Builder()
         .connectTimeout(15, TimeUnit.SECONDS).readTimeout(30, TimeUnit.SECONDS).pingInterval(20, TimeUnit.SECONDS).build()
     private val mutex = Mutex()
+    private val connectionRetryBackoff = ConnectorRetryBackoff()
     /** Reserva comum mantida até ACK para buy normal, arm, margem e troca de conta. */
     private val accountOrderCoordinator = IqOptionOrderCoordinator()
     private val counter = AtomicLong(1)
@@ -340,6 +343,7 @@ class IqOptionConnector(private val kv: KvStore? = null) : UiConnector {
         require(e.isNotEmpty() && p.isNotEmpty()) { "Informe e-mail e senha." }
         mutex.withLock { connectLocked(e, p) }
         creds = mapOf("email" to e, "password" to p)
+        connectionRetryBackoff.reset("iqoption")
         resetMarketCircuit() // login explícito: circuitos antigos não migram entre contas/sessões
         // carrega TODOS os ativos uma vez, já no login, e deixa em cache (o agente não espera por isso depois)
         allAssetsAt = 0L
@@ -347,6 +351,7 @@ class IqOptionConnector(private val kv: KvStore? = null) : UiConnector {
         Result.success(Unit)
     } catch (t: Throwable) {
         if (t is kotlinx.coroutines.CancellationException) throw t
+        connectionRetryBackoff.recordFailure("iqoption", android.os.SystemClock.elapsedRealtime(), t.message ?: t.javaClass.simpleName)
         err("login falhou: ${t.message}")
         Result.failure(IllegalStateException(friendly(t)))
     }
@@ -399,9 +404,13 @@ class IqOptionConnector(private val kv: KvStore? = null) : UiConnector {
     }
 
     private fun dropConnection(reason: String) {
+        generation.incrementAndGet() // invalida callbacks tardios do socket perdido
         subscribed.clear()
         authenticated = false
         ws = null
+        serverEpochAtSyncMs = 0L
+        serverElapsedAtSyncMs = 0L
+        serverSyncElapsedMs = 0L
         activeBalanceSelection.invalidate()
         val failure = IOException("Conexão com a IQ Option perdida: $reason")
         waiters.forEach { it.deferred.completeExceptionally(failure) }
@@ -414,6 +423,9 @@ class IqOptionConnector(private val kv: KvStore? = null) : UiConnector {
         ws = null
         authenticated = false
         subscribed.clear()
+        serverEpochAtSyncMs = 0L
+        serverElapsedAtSyncMs = 0L
+        serverSyncElapsedMs = 0L
         activeBalanceSelection.invalidate()
     }
 
@@ -422,6 +434,7 @@ class IqOptionConnector(private val kv: KvStore? = null) : UiConnector {
     private suspend fun logoutReserved() {
         signalDispatcher.signals().filter { it.state in IqArmedSignal.ACTIVE_STATES }.forEach { signalDispatcher.cancel(it.id) }
         resetMarketCircuit()
+        connectionRetryBackoff.reset("iqoption")
         closeSocket()
         ssid = null
         creds = null
@@ -438,16 +451,49 @@ class IqOptionConnector(private val kv: KvStore? = null) : UiConnector {
         activeBalanceSelection.invalidate()
     }
 
-    private suspend fun ensureConnected() {
-        if (authenticated && ws != null) return
+    private suspend fun ensureConnected(requireFreshServerClock: Boolean = false) {
+        fun ready(): Boolean = authenticated && ws != null && (!requireFreshServerClock || serverClockFresh())
+        if (ready()) return
         val c = creds ?: error("Sessão da IQ Option não iniciada. Faça login no conector.")
         mutex.withLock {
-            if (!(authenticated && ws != null)) connectLocked(c["email"].orEmpty(), c["password"].orEmpty())
+            if (ready()) return@withLock
+            val now = android.os.SystemClock.elapsedRealtime()
+            val waitMs = connectionRetryBackoff.remainingMs("iqoption", now)
+            if (waitMs > 0L) {
+                val waitSec = (waitMs + 999L) / 1_000L
+                val reason = connectionRetryBackoff.state("iqoption")?.reason.orEmpty().take(120)
+                throw ConnectorRetryDeferredException(
+                    "Reconexão IQ Option pausada após falha recente; nova tentativa em ${waitSec}s." +
+                        if (reason.isBlank()) "" else " Último erro: $reason"
+                )
+            }
+            try {
+                connectLocked(c["email"].orEmpty(), c["password"].orEmpty())
+                if (requireFreshServerClock && !awaitFreshServerClock())
+                    error("Relógio da IQ Option não sincronizou após a reconexão.")
+                connectionRetryBackoff.reset("iqoption")
+            } catch (t: Throwable) {
+                if (t is kotlinx.coroutines.CancellationException) throw t
+                connectionRetryBackoff.recordFailure("iqoption", android.os.SystemClock.elapsedRealtime(), t.message ?: t.javaClass.simpleName)
+                throw t
+            }
         }
         // reconectou: restaura cotações de operações em aberto e gatilhos de vela ainda ativos
         tracked.values.filter { it.result == null && it.activeId != 0 }.forEach { subscribeQuotes(it.activeId) }
         armed.filter { it.status == "armado" || it.status == "revalidando T−10" || it.status.startsWith("revalidado") }
             .map { it.activeId }.distinct().forEach { subscribeQuotes(it) }
+    }
+
+    /** Credenciais presentes não provam que o socket está vivo; exige sessão autenticada e timeSync recente. */
+    suspend fun prepareSignalDispatch(): Result<Unit> = try {
+        if (authenticated && ws != null && !serverClockFresh()) awaitFreshServerClock()
+        ensureConnected(requireFreshServerClock = true)
+        if (!serverClockFresh()) error("Relógio da IQ Option ausente/stale após preparar a sessão.")
+        Result.success(Unit)
+    } catch (cancel: kotlinx.coroutines.CancellationException) {
+        throw cancel
+    } catch (t: Throwable) {
+        Result.failure(t)
     }
 
     private fun subscribeQuotes(activeId: Int) {
@@ -1219,6 +1265,9 @@ class IqOptionConnector(private val kv: KvStore? = null) : UiConnector {
 
     fun failSignalBeforeDispatch(signalId: String, reason: String) = signalDispatcher.failBeforeDispatch(signalId, reason)
 
+    fun deferSignalUntilRevalidation(signalId: String, nowEpochMs: Long, reason: String): Boolean =
+        signalDispatcher.deferUntilRevalidation(signalId, nowEpochMs, reason)
+
     private fun armedListText(): String {
         val now = serverNowSec()
         val lines = ArrayList<String>()
@@ -1227,7 +1276,7 @@ class IqOptionConnector(private val kv: KvStore? = null) : UiConnector {
         }
         signalDispatcher.signals().sortedBy { it.targetOpenSec }.takeLast(30).forEach { signal ->
             val status = when (signal.state) {
-                IqArmedSignal.ARMED -> "armado/persistido; aguardando T−10"
+                IqArmedSignal.ARMED -> if (signal.detail.startsWith("Pré-conexão falhou")) signal.detail else "armado/persistido; aguardando T−10"
                 IqArmedSignal.VALIDATED -> "revalidado; aguardando alarme T"
                 IqArmedSignal.SUBMITTING -> "envio iniciado/resultado incerto; não repetir automaticamente"
                 IqArmedSignal.EXECUTED -> "EXECUTADO: ${signal.detail}"

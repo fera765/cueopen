@@ -5,6 +5,7 @@ object IqSignalTiming {
     const val CANDLE_SECONDS = 60L
     const val ANALYSIS_LEAD_SECONDS = 120L
     const val REVALIDATION_LEAD_SECONDS = 10L
+    const val PRECONNECT_LEAD_SECONDS = 90L
     private const val MILLIS_PER_SECOND = 1_000L
 
     /** Próxima abertura alinhada ao timeframe escolhido e pelo menos [leadSeconds] à frente. */
@@ -26,6 +27,10 @@ object IqSignalTiming {
         Math.subtractExact(Math.multiplyExact(targetOpenSec, MILLIS_PER_SECOND), leadSeconds * MILLIS_PER_SECOND)
 
     fun revalidateAtMs(targetOpenSec: Long, leadSeconds: Long = REVALIDATION_LEAD_SECONDS): Long =
+        Math.subtractExact(Math.multiplyExact(targetOpenSec, MILLIS_PER_SECOND), leadSeconds * MILLIS_PER_SECOND)
+
+    /** Acorda o serviço antes de T−10 para aquecer/reconectar a sessão sem envolver o agente. */
+    fun preconnectAtMs(targetOpenSec: Long, leadSeconds: Long = PRECONNECT_LEAD_SECONDS): Long =
         Math.subtractExact(Math.multiplyExact(targetOpenSec, MILLIS_PER_SECOND), leadSeconds * MILLIS_PER_SECOND)
 
     /** A vela mais recente que já deveria estar fechada no instante informado. */

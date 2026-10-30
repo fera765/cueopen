@@ -79,7 +79,7 @@ object IqSignalAlarms {
                 continue
             }
             val whenMs = if (signal.state == IqArmedSignal.ARMED)
-                IqSignalTiming.revalidateAtMs(signal.targetOpenSec) else signal.targetOpenMs
+                IqSignalTiming.preconnectAtMs(signal.targetOpenSec) else signal.targetOpenMs
             if (!schedule(context, signal, whenMs)) {
                 ledger.update(signal.id) {
                     it.copy(state = IqArmedSignal.EXPIRED, detail = "alarme exato não pôde ser restaurado; nenhuma ordem")
@@ -97,6 +97,24 @@ object IqSignalAlarms {
         }
         cancel(context, signalId)
     }
+
+    /** RTC local só decide se ainda cabe reagendar; o dispatcher exige timeSync do servidor antes de qualquer ordem. */
+    fun deferUntilRevalidation(context: Context, signalId: String, nowEpochMs: Long, reason: String): Boolean {
+        val ledger = store(context)
+        val current = ledger.get(signalId) ?: return false
+        if (current.state != IqArmedSignal.ARMED) return false
+        val retryAt = IqSignalTiming.revalidateAtMs(current.targetOpenSec)
+        if (nowEpochMs >= retryAt || !canScheduleExact(context)) return false
+        val updated = ledger.update(signalId) {
+            if (it.state == IqArmedSignal.ARMED)
+                it.copy(detail = "Pré-conexão falhou; tentará em T−10: ${reason.take(120)}")
+            else it
+        } ?: return false
+        if (updated.state != IqArmedSignal.ARMED) return false
+        if (schedule(context, updated, retryAt)) return true
+        expire(context, signalId, "falha ao reagendar T−10 após pré-conexão; nenhuma ordem")
+        return false
+    }
 }
 
 class IqSignalAlarmReceiver : BroadcastReceiver() {
@@ -113,7 +131,9 @@ class IqSignalAlarmReceiver : BroadcastReceiver() {
                 .putExtra(IqSignalAlarms.EXTRA_SIGNAL_ID, id)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) context.startForegroundService(service) else context.startService(service)
         }.onFailure {
-            IqSignalAlarms.expire(context, id, "Android não permitiu iniciar o serviço de dispatch; nenhuma ordem")
+            val reason = "Android não permitiu iniciar o serviço de pré-conexão"
+            if (!IqSignalAlarms.deferUntilRevalidation(context, id, System.currentTimeMillis(), reason))
+                IqSignalAlarms.expire(context, id, "$reason; nenhuma ordem")
         }
     }
 }
@@ -142,11 +162,18 @@ class IqSignalDispatchService : Service() {
                     } else if (!app.uiConnectors.enabled("iqoption")) {
                         connector.failSignalBeforeDispatch(id, "conector desativado pelo usuário; nenhuma ordem")
                     } else {
-                        val login = withTimeoutOrNull(20_000L) { app.uiConnectors.ensureLoggedIn("iqoption") }
-                        if (login == null) {
-                            connector.failSignalBeforeDispatch(id, "reconexão da corretora excedeu 20 s; nenhuma ordem")
-                        } else if (login.isFailure) {
-                            connector.failSignalBeforeDispatch(id, "conexão da corretora indisponível: ${login.exceptionOrNull()?.message ?: "login não confirmado"}; nenhuma ordem")
+                        val prepared = withTimeoutOrNull(75_000L) {
+                            val login = app.uiConnectors.ensureLoggedIn("iqoption")
+                            if (login.isFailure) login else connector.prepareSignalDispatch()
+                        }
+                        if (prepared == null) {
+                            val reason = "pré-conexão/sincronização excedeu 75 s"
+                            if (!connector.deferSignalUntilRevalidation(id, System.currentTimeMillis(), reason))
+                                connector.failSignalBeforeDispatch(id, "$reason; nenhuma ordem")
+                        } else if (prepared.isFailure) {
+                            val reason = "conexão/relógio da corretora indisponível: ${prepared.exceptionOrNull()?.message ?: "sincronização não confirmada"}"
+                            if (!connector.deferSignalUntilRevalidation(id, System.currentTimeMillis(), reason))
+                                connector.failSignalBeforeDispatch(id, "$reason; nenhuma ordem")
                         } else {
                             connector.dispatchSignalAlarm(id)
                         }
