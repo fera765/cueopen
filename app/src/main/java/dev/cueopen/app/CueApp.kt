@@ -3,6 +3,9 @@ package dev.cueopen.app
 import android.app.Application
 import android.app.NotificationChannel
 import android.app.NotificationManager
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import dev.cueopen.app.agent.AgentRunner
 import dev.cueopen.app.browser.BrowserHost
 import dev.cueopen.app.data.Store
@@ -11,6 +14,7 @@ import dev.cueopen.app.sandbox.Sandbox
 
 /** Container simples de dependências (sem login, tudo local). */
 class CueApp : Application() {
+    val applicationScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     lateinit var store: Store; private set
     lateinit var sandbox: Sandbox; private set
     private val browsers = java.util.concurrent.ConcurrentHashMap<String, BrowserHost>()
@@ -48,7 +52,6 @@ class CueApp : Application() {
         terminals = dev.cueopen.app.sandbox.TerminalManager(this, sandbox)
         agent = AgentRunner(store, sandbox, ::browserFor, llm, terminals, this)
         agent.resumeSleeping()
-        dev.cueopen.app.scheduler.Heartbeat.rescheduleAll(this)
         agent.startAutonomy()
         dev.cueopen.app.scheduler.AutonomyWorker.ensure(this)
         // terminal já ativo em segundo plano assim que o app abre (se o sandbox estiver instalado)

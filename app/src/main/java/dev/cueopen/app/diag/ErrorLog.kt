@@ -47,11 +47,13 @@ object ErrorLog {
         }
     }
 
-    fun readAll(context: Context): String =
+    fun readAll(context: Context): String = synchronized(lock) {
         runCatching { file(context).takeIf { it.exists() }?.readText() }.getOrNull().orEmpty()
+    }
 
-    fun sizeBytes(context: Context): Long =
+    fun sizeBytes(context: Context): Long = synchronized(lock) {
         runCatching { file(context).takeIf { it.exists() }?.length() ?: 0L }.getOrDefault(0L)
+    }
 
-    fun clear(context: Context) { runCatching { file(context).delete() } }
+    fun clear(context: Context) { synchronized(lock) { runCatching { file(context).delete() } } }
 }

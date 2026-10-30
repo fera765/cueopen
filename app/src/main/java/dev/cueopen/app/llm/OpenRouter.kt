@@ -32,6 +32,8 @@ data class ToolCall(val id: String, val name: String, val argsJson: String)
 data class Usage(val prompt: Long = 0, val completion: Long = 0, val cached: Long = 0)
 data class LlmReply(val content: String?, val toolCalls: List<ToolCall>, val rawToolCallsJson: String?, val usage: Usage = Usage(), val truncated: Boolean = false)
 
+class LlmRequestFailure(message: String, val retryable: Boolean, cause: Throwable? = null) : IOException(message, cause)
+
 /** Transporte OpenAI-compatible (OpenRouter por padrão), com suporte opcional ao System One do Jev. */
 class OpenRouter(private val settings: () -> Settings) {
     private val json = Json { ignoreUnknownKeys = true }
@@ -140,7 +142,11 @@ class OpenRouter(private val settings: () -> Settings) {
                 }
                 .post(buildBody(disableReasoning, structuredOutput).toString().toRequestBody("application/json".toMediaType()))
                 .build()
-            return http.newCall(req).execute().use { response -> response.code to response.body?.string().orEmpty() }
+            return try {
+                http.newCall(req).execute().use { response -> response.code to response.body?.string().orEmpty() }
+            } catch (e: IOException) {
+                throw LlmRequestFailure("Falha de comunicação com o provedor: ${e.message ?: "erro de rede"}", retryable = true, cause = e)
+            }
         }
         var disable = openRouter && s.disableThinking && mdl !in forceReasoning
         var structuredOutput = jsonResponse
@@ -165,7 +171,8 @@ class OpenRouter(private val settings: () -> Settings) {
         }
         if (code !in 200..299) {
             val msg = runCatching { json.parseToJsonElement(text).jsonObject["error"]?.jsonObject?.get("message")?.jsonPrimitive?.content }.getOrNull()
-            throw IOException("HTTP $code — ${msg ?: text.take(160)}")
+            val retryable = code == 408 || code == 425 || code == 429 || code in 500..599
+            throw LlmRequestFailure("HTTP $code — ${msg ?: text.take(160)}", retryable = retryable)
         }
         val root = json.parseToJsonElement(text).jsonObject
         root["error"]?.let { throw IOException("LLM: $it") }

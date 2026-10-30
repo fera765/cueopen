@@ -16,7 +16,10 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
-import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 import java.io.File
 import java.util.concurrent.ConcurrentHashMap
 
@@ -31,6 +34,8 @@ import java.util.concurrent.ConcurrentHashMap
  *   tempo real) e espera um marcador de fim com o código de saída.
  */
 class TerminalManager(private val ctx: Context, private val sandbox: Sandbox) {
+    private val startupScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val scriptsLock = Mutex()
 
     inner class Session(val key: String, private val cwd: String) {
         @Volatile var view: TerminalView? = null
@@ -67,28 +72,51 @@ class TerminalManager(private val ctx: Context, private val sandbox: Sandbox) {
             override fun logStackTrace(tag: String?, e: Exception?) { android.util.Log.e(tag, "erro", e) }
         }
 
-        /** Cria (no main thread) e inicia o processo. Sem view, inicia com 100x36 para o agente. */
+        /** Prepara arquivos em IO e cria a sessão nativa na Main. Sem view, inicia com 100x36 para o agente. */
         fun start() {
             check(Looper.myLooper() == Looper.getMainLooper())
-            if (_alive.value) return
-            sandbox.prepareScripts()
+            if (_alive.value || startJob?.isActive == true) return
+            val result = kotlinx.coroutines.CompletableDeferred<Boolean>()
+            startResult = result
             promptReady = kotlinx.coroutines.CompletableDeferred()
-            // First launch reuses the installed Alpine base; it never downloads Alpine per chat.
-            if (!runBlocking { sandbox.ensureEnvironment(key) }) {
-                android.util.Log.e("CueOpenTerminal", "Ambiente Linux do chat não foi criado; consulte o log do Sandbox nas Configurações.")
-                return
+            startJob = startupScope.launch {
+                val prepared = runCatching {
+                    scriptsLock.withLock { sandbox.prepareScripts() }
+                    // Reuses the installed Alpine base; this only prepares the per-session workspace.
+                    if (!sandbox.ensureEnvironment(key)) false else {
+                        File(sandbox.publicFor(key), cwd.removePrefix("/root/")).mkdirs()
+                        installShellHook(key)
+                        true
+                    }
+                }.getOrElse {
+                    android.util.Log.e("CueOpenTerminal", "Falha ao preparar o ambiente Linux do chat.", it)
+                    false
+                }
+                if (!prepared) {
+                    android.util.Log.e("CueOpenTerminal", "Ambiente Linux do chat não foi criado; consulte o log do Sandbox nas Configurações.")
+                    result.complete(false)
+                    return@launch
+                }
+                try {
+                    withContext(Dispatchers.Main) {
+                        if (!_alive.value) {
+                            val shell = "cd '$cwd' 2>/dev/null; if command -v bash >/dev/null 2>&1; then exec bash --rcfile /root/.bashrc -i; else exec sh -i; fi"
+                            term = TerminalSession(
+                                "/system/bin/sh", sandbox.prefix.absolutePath,
+                                arrayOf("sh", File(sandbox.prefix, "init-sandbox.sh").absolutePath, "/bin/sh", "-c", shell),
+                                sandbox.envArray(key), 5000, client,
+                            )
+                            _alive.value = true
+                            val v = view
+                            if (v != null) v.attachSession(term) else term.updateSize(100, 36, 12, 24)
+                        }
+                    }
+                    result.complete(_alive.value)
+                } catch (t: Throwable) {
+                    android.util.Log.e("CueOpenTerminal", "Falha ao iniciar a sessão de terminal.", t)
+                    result.complete(false)
+                }
             }
-            File(sandbox.publicFor(key), cwd.removePrefix("/root/")).mkdirs()
-            installShellHook(key)
-            val shell = "cd '$cwd' 2>/dev/null; if command -v bash >/dev/null 2>&1; then exec bash --rcfile /root/.bashrc -i; else exec sh -i; fi"
-            term = TerminalSession(
-                "/system/bin/sh", sandbox.prefix.absolutePath,
-                arrayOf("sh", File(sandbox.prefix, "init-sandbox.sh").absolutePath, "/bin/sh", "-c", shell),
-                sandbox.envArray(key), 5000, client,
-            )
-            _alive.value = true
-            val v = view
-            if (v != null) v.attachSession(term) else term.updateSize(100, 36, 12, 24)
         }
 
         fun write(s: String) = main.post { if (_alive.value) term.write(s) }
@@ -106,7 +134,13 @@ class TerminalManager(private val ctx: Context, private val sandbox: Sandbox) {
             main.post { if (_alive.value) term.write("\u0003") }
         }
 
-        fun kill() { cancelAgentCommand(); if (_alive.value) runCatching { term.finishIfRunning() }; _alive.value = false }
+        fun kill() {
+            startJob?.cancel()
+            if (!startResult.isCompleted) startResult.complete(false)
+            cancelAgentCommand()
+            if (_alive.value) runCatching { term.finishIfRunning() }
+            _alive.value = false
+        }
 
         private suspend fun transcript(): String = withContext(Dispatchers.Main) {
             runCatching { term.emulator?.screen?.transcriptTextWithFullLinesJoined ?: "" }.getOrDefault("")
@@ -114,6 +148,8 @@ class TerminalManager(private val ctx: Context, private val sandbox: Sandbox) {
 
         @Volatile private var pending: kotlinx.coroutines.CompletableDeferred<Int>? = null
         @Volatile private var promptReady = kotlinx.coroutines.CompletableDeferred<Unit>()
+        private var startJob: Job? = null
+        private var startResult = kotlinx.coroutines.CompletableDeferred<Boolean>().also { it.complete(false) }
         internal fun onPromptReturned(exit: Int) {
             promptReady.complete(Unit)
             pending?.complete(exit)
@@ -126,10 +162,11 @@ class TerminalManager(private val ctx: Context, private val sandbox: Sandbox) {
          */
         suspend fun runAgentCommand(command: String, timeoutSec: Long, background: Boolean): Sandbox.ExecResult =
             agentLock.withLock {
-                withContext(Dispatchers.Main) { if (!_alive.value) start() }
-                // Aguarde o primeiro prompt confirmado pelo OSC do bash; iniciar o processo não
-                // significa que o shell já está pronto para receber comandos.
-                val ready = withTimeoutOrNull(12_000) { promptReady.await(); true } ?: false
+                val startup = withContext(Dispatchers.Main) { if (!_alive.value) start(); startResult }
+                // A preparação é assíncrona; iniciar o processo não significa que o prompt do bash já apareceu.
+                val ready = withTimeoutOrNull(12_000) {
+                    if (!startup.await()) false else { promptReady.await(); true }
+                } ?: false
                 if (!ready || !_alive.value) {
                     return@withLock Sandbox.ExecResult(-1, "Shell não ficou pronto: prompt do bash não foi detectado.", true)
                 }

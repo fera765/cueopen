@@ -1,7 +1,11 @@
 package dev.cueopen.app.data
 
 import dev.cueopen.app.BuildConfig
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
@@ -41,6 +45,7 @@ object ProviderModels {
 
     private data class Entry(val loadedAt: Long, val models: List<Model>)
     private val cache = ConcurrentHashMap<String, Entry>()
+    private val fetchLocks = ConcurrentHashMap<String, Mutex>()
     private val json = Json { ignoreUnknownKeys = true }
     private const val CACHE_MS = 10 * 60 * 1000L
     // O catálogo Go enumera modelos de famílias diferentes, mas esta tela usa o endpoint OpenAI /chat/completions.
@@ -94,9 +99,16 @@ object ProviderModels {
         val cacheKey = "$endpoint|${fingerprint(apiKey)}|systemone=$includeSystemOne"
         val now = System.currentTimeMillis()
         if (!forceRefresh) cache[cacheKey]?.takeIf { now - it.loadedAt < CACHE_MS }?.let { return it.models }
+        val requestedAt = now
         return withContext(Dispatchers.IO) {
-            val beforeFetch = System.currentTimeMillis()
-            if (!forceRefresh) cache[cacheKey]?.takeIf { beforeFetch - it.loadedAt < CACHE_MS }?.let { return@withContext it.models }
+            val lock = fetchLocks.computeIfAbsent(cacheKey) { Mutex() }
+            lock.withLock {
+                val beforeFetch = System.currentTimeMillis()
+                cache[cacheKey]?.let { entry ->
+                    val fresh = beforeFetch - entry.loadedAt < CACHE_MS
+                    val refreshedByConcurrentRequest = forceRefresh && entry.loadedAt >= requestedAt
+                    if (refreshedByConcurrentRequest || (!forceRefresh && fresh)) return@withLock entry.models
+                }
             fun fetch(url: String): List<Model> {
                 val parsedUrl = url.toHttpUrl()
                 val request = Request.Builder().url(parsedUrl).header("Accept", "application/json").apply {
@@ -109,18 +121,22 @@ object ProviderModels {
                 }
                 return parseCatalog(body)
             }
+            val base = validatedBase(baseUrl)
+            val consoleEndpoint = if (includeSystemOne && base.host.equals("opencode.ai", ignoreCase = true))
+                base.newBuilder().encodedPath("/inference/v1/models").build().toString() else null
+            val consoleModels = consoleEndpoint?.let { url -> async {
+                try { fetch(url).filter(::isSystemOneModel).map { it.copy(apiFamily = "systemone") } }
+                catch (cancel: CancellationException) { throw cancel }
+                catch (_: Exception) { emptyList() }
+            } }
             val primary = fetch(endpoint)
             val models = primary.filter { supportsChatCompletions(baseUrl, it.id) || (includeSystemOne && isSystemOneModel(it)) }.toMutableList()
-            val base = validatedBase(baseUrl)
-            if (includeSystemOne && base.host.equals("opencode.ai", ignoreCase = true)) {
-                val consoleEndpoint = base.newBuilder().encodedPath("/inference/v1/models").build().toString()
-                runCatching { fetch(consoleEndpoint).filter(::isSystemOneModel).map { it.copy(apiFamily = "systemone") } }
-                    .getOrNull()?.let(models::addAll)
-            }
+            consoleModels?.await()?.let(models::addAll)
             val distinctModels = models.distinctBy { it.id }
             if (distinctModels.isEmpty()) throw IOException("O endpoint respondeu, mas não retornou modelos compatíveis.")
             cache[cacheKey] = Entry(System.currentTimeMillis(), distinctModels)
             distinctModels
+            }
         }
     }
 

@@ -56,7 +56,11 @@ import dev.cueopen.app.data.AgentProfile
 import dev.cueopen.app.data.Session
 import dev.cueopen.app.data.SessionStatus
 import dev.cueopen.app.ui.theme.Cue
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Calendar
@@ -64,27 +68,33 @@ import java.util.Date
 import java.util.Locale
 
 /** Ponto de entrada de uma nova tarefa: cria a sessão, copia anexos e dispara o agente. */
-fun startTask(nav: NavController, text: String, agentId: String?, attachments: List<Uri> = emptyList(), ctx: android.content.Context) {
+suspend fun startTask(nav: NavController, text: String, agentId: String?, attachments: List<Uri> = emptyList(), ctx: android.content.Context) {
     val app = CueApp.instance
     val s = Session(agentId = agentId)
     app.store.upsertSession(s)
-    val ws = app.sandbox.workspaceFor(s.id)
-    val names = attachments.mapNotNull { u ->
-        runCatching {
-            val name = queryName(ctx, u)
-            ctx.contentResolver.openInputStream(u)!!.use { i -> File(ws, name).outputStream().use { i.copyTo(it) } }
-            name
-        }.getOrNull()
+    val names = if (attachments.isEmpty()) emptyList() else withContext(Dispatchers.IO) {
+        val ws = app.sandbox.workspaceFor(s.id)
+        attachments.mapNotNull { u ->
+            runCatching {
+                val name = queryName(ctx, u)
+                ctx.contentResolver.openInputStream(u)?.use { i -> File(ws, name).outputStream().use { i.copyTo(it) } }
+                    ?: error("O anexo não pôde ser aberto.")
+                name
+            }.getOrNull()
+        }
     }
     app.agent.send(s.id, text, names)
     nav.navigate("chat/${s.id}")
 }
 
+private fun safeAttachmentName(name: String): String =
+    name.substringAfterLast('/').substringAfterLast('\\').replace("..", "_").trim().ifBlank { "arquivo" }
+
 fun queryName(ctx: android.content.Context, u: Uri): String {
     ctx.contentResolver.query(u, arrayOf(android.provider.OpenableColumns.DISPLAY_NAME), null, null, null)?.use { c ->
-        if (c.moveToFirst()) return c.getString(0)
+        if (c.moveToFirst()) return safeAttachmentName(c.getString(0).orEmpty())
     }
-    return u.lastPathSegment?.substringAfterLast('/') ?: "arquivo"
+    return safeAttachmentName(u.lastPathSegment.orEmpty())
 }
 
 data class Starter(val title: String, val icon: ImageVector, val tint: Long, val prompt: String)
@@ -99,14 +109,45 @@ val starters = listOf(
     Starter("Analisar dados", Icons.Rounded.QueryStats, 0xFFDDF4F4, "Analise os dados do arquivo anexado e gere gráficos sobre "),
 )
 
+private data class HomeHeaderState(
+    val agents: List<AgentProfile>,
+    val userName: String,
+    val apiKey: String,
+)
+
+private data class DrawerSnapshot(
+    val sessions: List<Session>,
+    val connectedConnectorCount: Int,
+)
+
 @Composable
 fun HomeScreen(nav: NavController, initialDraft: String? = null, initialAgent: String? = null) {
     val app = CueApp.instance
-    val st by app.store.state.collectAsStateWithLifecycle()
+    val headerFlow = remember(app) {
+        app.store.state.map { state ->
+            HomeHeaderState(state.agents, state.settings.userName, state.settings.apiKey)
+        }.distinctUntilChanged()
+    }
+    val currentState = remember(app) {
+        app.store.state.value.let { HomeHeaderState(it.agents, it.settings.userName, it.settings.apiKey) }
+    }
+    val st by headerFlow.collectAsStateWithLifecycle(currentState)
     val drawer = rememberDrawerState(DrawerValue.Closed)
     val scope = rememberCoroutineScope()
+    var drawerSnapshot by remember(app) {
+        val state = app.store.state.value
+        mutableStateOf(DrawerSnapshot(state.sessions, state.connectors.count { it.connectedAt != null }))
+    }
+    LaunchedEffect(drawer.isOpen) {
+        if (drawer.isOpen) {
+            app.store.state.map { state ->
+                DrawerSnapshot(state.sessions, state.connectors.count { it.connectedAt != null })
+            }.distinctUntilChanged().collect { drawerSnapshot = it }
+        }
+    }
     var draft by remember { mutableStateOf(initialDraft ?: "") }
     var agentId by remember { mutableStateOf(initialAgent) }
+    var sendingTask by remember { mutableStateOf(false) }
     val agent = st.agents.firstOrNull { it.id == agentId }
     val ctx = LocalContext.current
     val c = Cue.c
@@ -115,7 +156,7 @@ fun HomeScreen(nav: NavController, initialDraft: String? = null, initialAgent: S
         drawerState = drawer,
         drawerContent = {
             ModalDrawerSheet(drawerContainerColor = c.bg, modifier = Modifier.width(310.dp)) {
-                SessionDrawer(nav, st.sessions, st.agents, onClose = { scope.launch { drawer.close() } }, onNew = {
+                SessionDrawer(nav, drawerSnapshot.sessions, st.agents, drawerSnapshot.connectedConnectorCount, onClose = { scope.launch { drawer.close() } }, onNew = {
                     draft = ""; scope.launch { drawer.close() }
                 })
             }
@@ -123,23 +164,27 @@ fun HomeScreen(nav: NavController, initialDraft: String? = null, initialAgent: S
     ) {
         Scaffold(containerColor = c.bg, topBar = {
             Row(Modifier.fillMaxWidth().statusBarsPadding().padding(horizontal = 8.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
-                IconButton({ scope.launch { drawer.open() } }) { Icon(Icons.Rounded.Menu, "Menu") }
+                IconButton({
+                    val state = app.store.state.value
+                    drawerSnapshot = DrawerSnapshot(state.sessions, state.connectors.count { it.connectedAt != null })
+                    scope.launch { drawer.open() }
+                }) { Icon(Icons.Rounded.Menu, "Menu") }
                 AgentSelector(agent, st.agents, onSelect = { agentId = it }, onManage = { nav.navigate("agents") })
                 Spacer(Modifier.weight(1f))
                 IconButton({ nav.navigate("terminal") }) { Icon(Icons.Rounded.Terminal, "Terminal") }
-                IconButton({ nav.navigate("settings") }) { Icon(Icons.Rounded.Tune, "Configurações") }
+                IconButton({ nav.navigate("settings") { launchSingleTop = true } }) { Icon(Icons.Rounded.Tune, "Configurações") }
             }
         }) { pad ->
             Column(Modifier.fillMaxSize().padding(pad).imePadding()) {
                 Column(Modifier.weight(1f).padding(horizontal = 20.dp), verticalArrangement = Arrangement.Center) {
                     AgentFace(Color(agent?.color ?: 0xFFFF6B3D), agent?.face ?: "wink", 56.dp)
                     Spacer(Modifier.height(16.dp))
-                    val hello = st.settings.userName.ifBlank { null }?.let { "Olá, $it" } ?: "Olá"
+                    val hello = st.userName.ifBlank { null }?.let { "Olá, $it" } ?: "Olá"
                     Text(hello, style = MaterialTheme.typography.headlineLarge, color = c.ink3)
                     Text(if (agent != null) "O que ${agent.name} deve fazer?" else "O que posso fazer por você?", style = MaterialTheme.typography.headlineLarge)
-                    if (st.settings.apiKey.isBlank()) {
+                    if (st.apiKey.isBlank()) {
                         Spacer(Modifier.height(16.dp))
-                        Row(Modifier.clip(RoundedCornerShape(14.dp)).background(c.accentSoft).clickable { nav.navigate("settings") }.padding(12.dp),
+                        Row(Modifier.clip(RoundedCornerShape(14.dp)).background(c.accentSoft).clickable { nav.navigate("settings") { launchSingleTop = true } }.padding(12.dp),
                             verticalAlignment = Alignment.CenterVertically) {
                             Icon(Icons.Rounded.Key, null, tint = c.accent); Spacer(Modifier.width(8.dp))
                             Text("Adicione sua chave OpenRouter para começar", style = MaterialTheme.typography.bodyMedium)
@@ -160,7 +205,17 @@ fun HomeScreen(nav: NavController, initialDraft: String? = null, initialAgent: S
                 Composer(
                     value = draft, onChange = { draft = it },
                     placeholder = "Atribua uma tarefa ou pergunte qualquer coisa",
-                    onSend = { text, files -> if (text.isNotBlank()) { startTask(nav, text, agentId, files, ctx); draft = "" } },
+                    onSend = { text, files ->
+                        if (text.isNotBlank() && !sendingTask) {
+                            val selectedAgent = agentId
+                            sendingTask = true
+                            draft = ""
+                            app.applicationScope.launch {
+                                try { startTask(nav, text, selectedAgent, files, ctx) }
+                                finally { sendingTask = false }
+                            }
+                        }
+                    },
                 )
             }
         }
@@ -241,7 +296,14 @@ fun Composer(
         }
     }
     var files by remember { mutableStateOf(listOf<Uri>()) }
+    var fileNames by remember { mutableStateOf<Map<Uri, String>>(emptyMap()) }
     val ctx = LocalContext.current
+    LaunchedEffect(files) {
+        val selected = files
+        fileNames = withContext(Dispatchers.IO) {
+            selected.associateWith { uri -> runCatching { queryName(ctx, uri) }.getOrDefault("arquivo") }
+        }
+    }
     val pick = rememberLauncherForActivityResult(ActivityResultContracts.GetMultipleContents()) { files = files + it }
     var recording by remember { mutableStateOf(false) }
     var voiceText by remember { mutableStateOf("") }
@@ -325,13 +387,19 @@ fun Composer(
     }
     // Sugestões de comandos (/) e menções (@ skills e agents)
     val token = editor.text.substringAfterLast(' ').substringAfterLast('\n')
-    val stAll = CueApp.instance.store.state.collectAsStateWithLifecycle().value
-    val suggestions: List<Triple<String, String, String>> = remember(token, stAll.skills, stAll.agents) {
+    val catalogFlow = remember {
+        CueApp.instance.store.state.map { it.skills to it.agents }.distinctUntilChanged()
+    }
+    val initialCatalog = remember {
+        CueApp.instance.store.state.value.let { it.skills to it.agents }
+    }
+    val catalog by catalogFlow.collectAsStateWithLifecycle(initialCatalog)
+    val suggestions: List<Triple<String, String, String>> = remember(token, catalog.first, catalog.second) {
         when {
             value.startsWith("/") && !value.contains(' ') -> slashCommands.filter { it.first.startsWith(value, true) }.map { Triple(it.first, it.second, it.first + " ") }
             token.startsWith("@") -> (listOf(Triple("@create-agent", "Criar um novo agente a partir de uma descrição", "@create-agent ")) +
-                stAll.agents.map { Triple("@" + it.name, "Agent", "@" + it.name + " ") } +
-                stAll.skills.filter { it.enabled }.map { Triple("@" + it.name, "Skill · " + it.description.take(60), "@" + it.name + " ") })
+                catalog.second.map { Triple("@" + it.name, "Agent", "@" + it.name + " ") } +
+                catalog.first.filter { it.enabled }.map { Triple("@" + it.name, "Skill · " + it.description.take(60), "@" + it.name + " ") })
                 .filter { it.first.contains(token.drop(1), true) }.take(12)
             else -> emptyList()
         }
@@ -385,7 +453,7 @@ fun Composer(
                 files.forEach { u ->
                     Row(Modifier.clip(RoundedCornerShape(10.dp)).background(c.surface2).padding(horizontal = 10.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
                         Icon(Icons.Rounded.Description, null, Modifier.size(14.dp)); Spacer(Modifier.width(4.dp))
-                        Text(queryName(ctx, u), fontSize = 12.sp, maxLines = 1)
+                        Text(fileNames[u] ?: "Carregando…", fontSize = 12.sp, maxLines = 1)
                         Spacer(Modifier.width(4.dp))
                         Icon(Icons.Rounded.Close, "Remover", Modifier.size(14.dp).clickable { files = files - u })
                     }
@@ -516,14 +584,16 @@ fun RoundIcon(icon: ImageVector, desc: String, onClick: () -> Unit) {
 }
 
 @Composable
-private fun SessionDrawer(nav: NavController, sessions: List<Session>, agents: List<AgentProfile>, onClose: () -> Unit, onNew: () -> Unit) {
+private fun SessionDrawer(nav: NavController, sessions: List<Session>, agents: List<AgentProfile>, connectedConnectorCount: Int, onClose: () -> Unit, onNew: () -> Unit) {
     val c = Cue.c
-    val st0 = CueApp.instance.store.state.value
     var query by remember { mutableStateOf("") }
     // Sessões de subagentes são detalhes internos da tarefa pai, nunca chats independentes na navegação.
-    val filtered = sessions.filterNot { it.title.startsWith("[Worker ", ignoreCase = true) }
-        .filter { query.isBlank() || it.title.contains(query, true) }
-        .sortedByDescending { it.updatedAt }
+    val filtered = remember(sessions, query) {
+        sessions.filterNot { it.title.startsWith("[Worker ", ignoreCase = true) }
+            .filter { query.isBlank() || it.title.contains(query, true) }
+            .sortedByDescending { it.updatedAt }
+    }
+    val groups = remember(filtered) { filtered.groupBy { dayGroup(it.updatedAt) } }
     fun go(r: String) { onClose(); nav.navigate(r) }
     Column(Modifier.fillMaxSize().statusBarsPadding().padding(12.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -537,7 +607,7 @@ private fun SessionDrawer(nav: NavController, sessions: List<Session>, agents: L
         Spacer(Modifier.height(4.dp))
         DrawerItem(Icons.Rounded.Groups, "Agents", "${agents.size}") { go("agents") }
         DrawerItem(Icons.Rounded.AutoAwesome, "Skills") { go("skills") }
-        DrawerItem(Icons.Rounded.Cable, "Conectores", "${st0.connectors.count { it.connectedAt != null }}".takeIf { it != "0" }) { go("connectors") }
+        DrawerItem(Icons.Rounded.Cable, "Conectores", "$connectedConnectorCount".takeIf { it != "0" }) { go("connectors") }
         DrawerItem(Icons.Rounded.Schedule, "Tarefas agendadas") { go("scheduled") }
         DrawerItem(Icons.Rounded.LibraryBooks, "Knowledge") { go("knowledge") }
         DrawerItem(Icons.Rounded.Psychology, "Memória") { go("memory") }
@@ -546,7 +616,6 @@ private fun SessionDrawer(nav: NavController, sessions: List<Session>, agents: L
         DrawerItem(Icons.Rounded.Computer, "Computador (sandbox)") { go("sandbox") }
         Divider()
         LazyColumn(Modifier.weight(1f)) {
-            val groups = filtered.groupBy { dayGroup(it.updatedAt) }
             groups.forEach { (g, list) ->
                 item { SectionLabel(g) }
                 items(list, key = { it.id }) { s -> SessionRow(s, agents.firstOrNull { it.id == s.agentId }) { go("chat/${s.id}") } }

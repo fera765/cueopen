@@ -53,7 +53,9 @@ import dev.cueopen.app.data.SessionStatus
 import dev.cueopen.app.data.StepStatus
 import dev.cueopen.app.ui.theme.Cue
 import java.io.File
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -74,6 +76,7 @@ fun ChatScreen(nav: NavController, sessionId: String) {
     val running = session.status == SessionStatus.RUNNING
     val list = rememberLazyListState()
     var draft by remember { mutableStateOf("") }
+    var copyingAttachments by remember { mutableStateOf(false) }
     var replyingTo by remember(sessionId) { mutableStateOf<ChatItem.Assistant?>(null) }
     var menu by remember { mutableStateOf(false) }
     var rename by remember { mutableStateOf(false) }
@@ -247,11 +250,32 @@ fun ChatScreen(nav: NavController, sessionId: String) {
                         }
                         return@Composer
                     }
-                    val ws = app.sandbox.workspaceFor(sessionId)
-                    val names = files.mapNotNull { u -> runCatching {
-                        val n = queryName(ctx, u); ctx.contentResolver.openInputStream(u)!!.use { i -> File(ws, n).outputStream().use { i.copyTo(it) } }; n
-                    }.getOrNull() }
-                    app.agent.send(sessionId, text, names, quotedReply = replyingTo?.text); draft = ""; replyingTo = null
+                    val reply = replyingTo?.text
+                    val attachments = files.toList()
+                    if (attachments.isEmpty()) {
+                        app.agent.send(sessionId, text, emptyList(), quotedReply = reply)
+                        draft = ""; replyingTo = null
+                    } else {
+                        if (copyingAttachments) return@Composer
+                        copyingAttachments = true
+                        draft = ""; replyingTo = null
+                        app.applicationScope.launch {
+                            try {
+                                val names = withContext(Dispatchers.IO) {
+                                    val ws = app.sandbox.workspaceFor(sessionId)
+                                    attachments.mapNotNull { u -> runCatching {
+                                        val name = queryName(ctx, u)
+                                        ctx.contentResolver.openInputStream(u)?.use { i -> File(ws, name).outputStream().use { i.copyTo(it) } }
+                                            ?: error("O anexo não pôde ser aberto.")
+                                        name
+                                    }.getOrNull() }
+                                }
+                                app.agent.send(sessionId, text, names, quotedReply = reply)
+                            } finally {
+                                copyingAttachments = false
+                            }
+                        }
+                    }
                 },
             )
         }

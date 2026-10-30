@@ -28,14 +28,25 @@ import dev.cueopen.app.CueApp
 import dev.cueopen.app.data.ThemeMode
 import dev.cueopen.app.sandbox.Sandbox
 import dev.cueopen.app.ui.theme.Cue
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.withContext
 
 @Composable
 fun SettingsScreen(nav: NavController) {
     val app = CueApp.instance
-    val st by app.store.state.collectAsStateWithLifecycle()
-    val s = st.settings
+    val scope = rememberCoroutineScope()
+    val settingsFlow = remember(app) {
+        app.store.state.map { it.settings to it.memories.size }.distinctUntilChanged()
+    }
+    val initialSettings = remember(app) {
+        app.store.state.value.let { it.settings to it.memories.size }
+    }
+    val settingsSnapshot by settingsFlow.collectAsStateWithLifecycle(initialSettings)
+    val s = settingsSnapshot.first
     val c = Cue.c
     var confirmClear by remember { mutableStateOf(false) }
     Scaffold(containerColor = c.bg, topBar = { CueTopBar("Configurações", { nav.popBackStack() }) }) { pad ->
@@ -75,7 +86,7 @@ fun SettingsScreen(nav: NavController) {
             Text("Orçamento de contexto antes de compactar: ${s.contextBudget / 1000}k tokens", fontSize = 14.sp)
             Slider(s.contextBudget.toFloat(), { v -> app.store.updateSettings { it.copy(contextBudget = (v / 1000).toInt() * 1000) } }, valueRange = 8000f..120000f,
                 colors = SliderDefaults.colors(thumbColor = c.ink, activeTrackColor = c.ink))
-            SettingsLink(Icons.Rounded.Psychology, "Memória de longo prazo", "${st.memories.size} itens") { nav.navigate("memory") }
+            SettingsLink(Icons.Rounded.Psychology, "Memória de longo prazo", "${settingsSnapshot.second} itens") { nav.navigate("memory") }
             SectionLabel("Carteira")
             SettingsLink(Icons.Rounded.AccountBalanceWallet, "Carteira Solana", "Criar ou restaurar carteira local e consultar saldo") { nav.navigate("wallet") }
             // Chave Demo gratuita e opcional da CoinGecko para o mercado (evita rate limit). Vazio = keyless.
@@ -99,21 +110,35 @@ fun SettingsScreen(nav: NavController) {
             SettingsLink(Icons.Rounded.Computer, "Sandbox Linux", "Instalar, pacotes, reinstalar") { nav.navigate("sandbox") }
             SettingsLink(Icons.Rounded.Terminal, "Abrir terminal", "Shell interativo no Alpine") { nav.navigate("terminal") }
             SettingsLink(Icons.Rounded.FolderOpen, "Arquivos", "/root no sandbox") { nav.navigate("files") }
-            val crash = remember { java.io.File(app.filesDir, "last_crash.txt").takeIf { it.exists() }?.readText() }
+            var crash by remember { mutableStateOf<String?>(null) }
+            var logBytes by remember { mutableLongStateOf(-1L) }
+            var logTail by remember { mutableStateOf("") }
+            var logRefresh by remember { mutableIntStateOf(0) }
+            val diagnosticContext = remember(nav) { nav.context.applicationContext }
+            LaunchedEffect(logRefresh) {
+                val diagnosticSnapshot = withContext(Dispatchers.IO) {
+                    val crashText = java.io.File(app.filesDir, "last_crash.txt").takeIf { it.exists() }?.readText()
+                    val bytes = dev.cueopen.app.diag.ErrorLog.sizeBytes(diagnosticContext)
+                    val tail = dev.cueopen.app.diag.ErrorLog.readAll(diagnosticContext).takeLast(2500)
+                    Triple(crashText, bytes, tail)
+                }
+                crash = diagnosticSnapshot.first
+                logBytes = diagnosticSnapshot.second
+                logTail = diagnosticSnapshot.third
+            }
             if (crash != null) {
                 SectionLabel("Último erro")
                 Text(crash.take(3000), Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(Color(0xFF0F1115)).padding(12.dp),
                     color = Color(0xFFFF8A8A), fontFamily = FontFamily.Monospace, fontSize = 10.sp)
             }
             SectionLabel("Logs de erros")
-            var logRefresh by remember { mutableStateOf(0) }
-            val logBytes = remember(logRefresh) { dev.cueopen.app.diag.ErrorLog.sizeBytes(nav.context) }
-            val logTail = remember(logRefresh) { dev.cueopen.app.diag.ErrorLog.readAll(nav.context).takeLast(2500) }
             Text(
                 "Guarda as FALHAS reais do app (ferramentas do agente, browser, terminal, swaps, mercado, crashes) — nunca o conteúdo das conversas. Baixe e envie aqui no Claude para eu corrigir.",
                 fontSize = 12.sp, color = c.ink2
             )
-            if (logBytes <= 0L) {
+            if (logBytes < 0L) {
+                CueCard { Text("Carregando logs…", color = c.ink2, fontSize = 13.sp) }
+            } else if (logBytes == 0L) {
                 CueCard { Text("Nenhum erro registrado até agora. 🎉", color = c.ink2, fontSize = 13.sp) }
             } else {
                 Text("${logBytes / 1024 + 1} KB registrados", fontSize = 12.sp, color = c.ink3)
@@ -136,11 +161,21 @@ fun SettingsScreen(nav: NavController) {
                         }
                     }) { Icon(Icons.Rounded.Download, null, Modifier.size(16.dp)); Spacer(Modifier.width(6.dp)); Text("Baixar / enviar") }
                     OutlinedButton(modifier = Modifier.weight(1f), onClick = {
-                        val clip = nav.context.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
-                        clip.setPrimaryClip(android.content.ClipData.newPlainText("Fluwy Bot log de erros", dev.cueopen.app.diag.ErrorLog.readAll(nav.context)))
+                        val context = nav.context.applicationContext
+                        scope.launch {
+                            val text = withContext(Dispatchers.IO) { dev.cueopen.app.diag.ErrorLog.readAll(context) }
+                            val clip = context.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                            clip.setPrimaryClip(android.content.ClipData.newPlainText("Fluwy Bot log de erros", text))
+                        }
                     }) { Icon(Icons.Rounded.ContentCopy, null, Modifier.size(16.dp)); Spacer(Modifier.width(6.dp)); Text("Copiar") }
                 }
-                TextButton(onClick = { dev.cueopen.app.diag.ErrorLog.clear(nav.context); logRefresh++ }) {
+                TextButton(onClick = {
+                    val context = nav.context.applicationContext
+                    scope.launch {
+                        withContext(Dispatchers.IO) { dev.cueopen.app.diag.ErrorLog.clear(context) }
+                        logRefresh++
+                    }
+                }) {
                     Text("Limpar log", color = c.err)
                 }
             }

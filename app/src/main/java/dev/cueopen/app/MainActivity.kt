@@ -22,6 +22,7 @@ import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import androidx.compose.ui.Modifier
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.lifecycleScope
 import androidx.navigation.NavHostController
 import androidx.navigation.NavType
 import androidx.navigation.navArgument
@@ -32,6 +33,9 @@ import dev.cueopen.app.ui.*
 import dev.cueopen.app.ui.theme.Cue
 import dev.cueopen.app.ui.theme.CueTheme
 import java.io.File
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 class MainActivity : ComponentActivity() {
     private val pendingSession = mutableStateOf<String?>(null)
@@ -65,7 +69,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onNewIntent(intent: Intent) { super.onNewIntent(intent); handleIntent(intent) }
 
-    override fun onStop() { super.onStop(); CueApp.instance.store.flush() }
+    override fun onStop() { super.onStop(); CueApp.instance.store.flushAsync() }
 
     private fun handleIntent(i: Intent?) {
         i ?: return
@@ -73,15 +77,21 @@ class MainActivity : ComponentActivity() {
         if (i.action == Intent.ACTION_SEND) {
             val text = i.getStringExtra(Intent.EXTRA_TEXT)
             @Suppress("DEPRECATION") val uri = i.getParcelableExtra<Uri>(Intent.EXTRA_STREAM)
-            val fileNote = uri?.let { u ->
-                runCatching {
-                    val name = u.lastPathSegment?.substringAfterLast('/') ?: "arquivo"
-                    val dest = File(CueApp.instance.sandbox.workspaceRoot, "inbox/$name").apply { parentFile?.mkdirs() }
-                    contentResolver.openInputStream(u)!!.use { inp -> dest.outputStream().use { inp.copyTo(it) } }
-                    "\n[Arquivo recebido: /root/workspace/inbox/$name]"
-                }.getOrNull()
-            }.orEmpty()
-            sharedText.value = (text.orEmpty() + fileNote).ifBlank { null }
+            lifecycleScope.launch {
+                val fileNote = uri?.let { u ->
+                    withContext(Dispatchers.IO) {
+                        runCatching {
+                            val name = u.lastPathSegment?.substringAfterLast('/')?.substringAfterLast('\\')
+                                ?.replace("..", "_")?.ifBlank { "arquivo" } ?: "arquivo"
+                            val dest = File(CueApp.instance.sandbox.workspaceRoot, "inbox/$name").apply { parentFile?.mkdirs() }
+                            contentResolver.openInputStream(u)?.use { inp -> dest.outputStream().use { inp.copyTo(it) } }
+                                ?: error("O arquivo compartilhado não pôde ser aberto.")
+                            "\n[Arquivo recebido: /root/workspace/inbox/$name]"
+                        }.getOrNull()
+                    }
+                }.orEmpty()
+                sharedText.value = (text.orEmpty() + fileNote).ifBlank { null }
+            }
         }
     }
 }
@@ -89,11 +99,19 @@ class MainActivity : ComponentActivity() {
 @Composable
 fun CueNav(nav: NavHostController, startOnboarding: Boolean) {
     NavHost(nav, startDestination = if (startOnboarding) "onboarding" else "home",
-        // transições curtas e leves (GPU): fade + leve deslize
-        enterTransition = { fadeIn(tween(170)) + slideInHorizontally(tween(210)) { it / 14 } },
-        exitTransition = { fadeOut(tween(110)) },
-        popEnterTransition = { fadeIn(tween(170)) },
-        popExitTransition = { fadeOut(tween(110)) + slideOutHorizontally(tween(180)) { it / 14 } },
+        // A Home tem um drawer; não animar sua saída/retorno evita disputar frames com o drawer.
+        enterTransition = {
+            if (initialState.destination.route?.startsWith("home") == true) EnterTransition.None else fadeIn(tween(110))
+        },
+        exitTransition = {
+            if (initialState.destination.route?.startsWith("home") == true) ExitTransition.None else fadeOut(tween(80))
+        },
+        popEnterTransition = {
+            if (targetState.destination.route?.startsWith("home") == true) EnterTransition.None else fadeIn(tween(110))
+        },
+        popExitTransition = {
+            if (targetState.destination.route?.startsWith("home") == true) ExitTransition.None else fadeOut(tween(80))
+        },
     ) {
         composable("onboarding") { OnboardingScreen(onDone = { nav.navigate("home") { popUpTo("onboarding") { inclusive = true } } }) }
         composable("home?draft={draft}&agent={agent}", arguments = listOf(

@@ -47,12 +47,12 @@ fun SplashScreen(onDone: () -> Unit) {
 
     LaunchedEffect(Unit) {
         launch { drop.animateTo(0f, spring(dampingRatio = 0.45f, stiffness = 260f)) }
-        delay(260)
-        squash.animateTo(0.86f, tween(90)); squash.animateTo(1f, spring(dampingRatio = 0.35f, stiffness = 500f))
-        launch { title.animateTo(1f, tween(380, easing = FastOutSlowInEasing)) }
-        "Fluwy Bot".forEach { ch -> typed += ch; delay(55) }
-        delay(420)
-        alphaAll.animateTo(0f, tween(260))
+        delay(140)
+        squash.animateTo(0.86f, tween(60)); squash.animateTo(1f, spring(dampingRatio = 0.35f, stiffness = 500f))
+        launch { title.animateTo(1f, tween(220, easing = FastOutSlowInEasing)) }
+        "Fluwy Bot".forEach { ch -> typed += ch; delay(32) }
+        delay(80)
+        alphaAll.animateTo(0f, tween(180))
         onDone()
     }
 

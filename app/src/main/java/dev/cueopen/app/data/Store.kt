@@ -11,6 +11,7 @@ import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.onEach
+import kotlinx.coroutines.launch
 import kotlinx.serialization.json.Json
 import java.io.File
 import java.io.IOException
@@ -66,6 +67,14 @@ class Store(context: Context) {
 
     fun flush() {
         synchronized(stateLock) { save(snapshots.value) }
+    }
+
+    /** Persiste o snapshot mais recente fora da thread da UI ao encerrar uma Activity. */
+    fun flushAsync() {
+        scope.launch {
+            runCatching { synchronized(stateLock) { save(snapshots.value) } }
+                .onFailure { android.util.Log.e("CueOpenStore", "Falha ao salvar o estado local", it) }
+        }
     }
 
     fun update(fn: (AppState) -> AppState) {

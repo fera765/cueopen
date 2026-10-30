@@ -274,9 +274,11 @@ class AgentRunner(
                         throw c
                     } catch (t: Throwable) {
                         attempt++
-                        if (attempt >= 3) {
-                            runCatching { dev.cueopen.app.diag.ErrorLog.log("agent", "LLM falhou 3x: ${t.javaClass.simpleName}: ${t.message.orEmpty()}", sessionId, "llm") }
-                            store.addItemUnique(sessionId, ChatItem.Error(text = "O modelo falhou (${t.message?.take(120)}). Tentei 3 vezes. Toque em enviar para continuar, ou troque de modelo em Configurações."))
+                        val retryable = (t as? dev.cueopen.app.llm.LlmRequestFailure)?.retryable == true
+                        if (!retryable || attempt >= 3) {
+                            runCatching { dev.cueopen.app.diag.ErrorLog.log("agent", "LLM falhou após $attempt tentativa(s): ${t.javaClass.simpleName}: ${t.message.orEmpty()}", sessionId, "llm") }
+                            val attempts = if (attempt == 1) "Não repeti porque a falha não foi classificada como transitória." else "Tentei $attempt vezes."
+                            store.addItemUnique(sessionId, ChatItem.Error(text = "O modelo falhou (${t.message?.take(120)}). $attempts Toque em enviar para continuar, ou troque de modelo em Configurações."))
                             store.editSession(sessionId) { it.copy(status = SessionStatus.WAITING_USER) }
                             return
                         }
@@ -856,10 +858,11 @@ class AgentRunner(
 
     /** Ao reabrir o app (ou o serviço reiniciar o processo), retoma agentes contínuos. */
     fun resumeSleeping() {
-        store.state.value.sessions.filter { it.status == SessionStatus.SLEEPING || (it.continuous && it.status == SessionStatus.STOPPED && it.wakeAt != null) }.forEach { s ->
+        val sleepingSessions = store.state.value.sessions.filter { it.status == SessionStatus.SLEEPING || (it.continuous && it.status == SessionStatus.STOPPED && it.wakeAt != null) }
+        if (sleepingSessions.isNotEmpty()) dev.cueopen.app.sandbox.SandboxService.start(ctx, "Agente em modo contínuo")
+        sleepingSessions.forEach { s ->
             if (jobs[s.id]?.isActive == true) return@forEach
             val wake = s.wakeAt ?: System.currentTimeMillis()
-            dev.cueopen.app.sandbox.SandboxService.start(ctx, "Agente em modo contínuo")
             jobs[s.id] = scope.launch {
                 try {
                     while (System.currentTimeMillis() < wake) kotlinx.coroutines.delay(minOf(30_000L, wake - System.currentTimeMillis()).coerceAtLeast(1000))
