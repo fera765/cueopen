@@ -126,9 +126,10 @@ fun SettingsScreen(nav: NavController) {
                 logBytes = diagnosticSnapshot.second
                 logTail = diagnosticSnapshot.third
             }
-            if (crash != null) {
+            val lastCrash = crash
+            if (lastCrash != null) {
                 SectionLabel("Último erro")
-                Text(crash.take(3000), Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(Color(0xFF0F1115)).padding(12.dp),
+                Text(lastCrash.take(3000), Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(Color(0xFF0F1115)).padding(12.dp),
                     color = Color(0xFFFF8A8A), fontFamily = FontFamily.Monospace, fontSize = 10.sp)
             }
             SectionLabel("Logs de erros")
