@@ -81,6 +81,16 @@ class ToolContextPlannerTest {
         assertTrue(ToolContextPlanner.plan(input("integra com a api x", builder = true)).groups.contains("connector_builder"))
     }
 
+    @Test fun deniedGroupsDoNotBecomeLoadableFromContextIndex() {
+        val p = ToolContextPlanner.plan(ToolContextPlanner.Input(
+            sessionId = sid(), query = "faça uma transferência e consulte saldo", usedTools = emptySet(), builder = false,
+            allowedGroups = setOf("core"), connectors = conns, mcpServers = emptyMap(),
+        ))
+        assertEquals(setOf("core"), p.groups)
+        assertFalse(p.hiddenGroups.contains("wallet"))
+        assertFalse(p.keepTool("wallet_swap", connOf, mcpOf))
+    }
+
     @Test fun budgetsShrinkAsHistoryGrows() {
         val small = ToolContextPlanner.plan(input("x", hist = 1_000))
         val big = ToolContextPlanner.plan(input("x", hist = 20_000))
