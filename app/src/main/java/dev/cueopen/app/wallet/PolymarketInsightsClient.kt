@@ -132,7 +132,9 @@ class PolymarketInsightsClient(
         .callTimeout(30, TimeUnit.SECONDS)
         .connectTimeout(8, TimeUnit.SECONDS)
         .readTimeout(20, TimeUnit.SECONDS)
-        .build()
+        .build(),
+    private val retryDelay: suspend (Long) -> Unit = { delay(it) },
+    private val nowMillis: () -> Long = System::currentTimeMillis,
 ) {
     private val json = Json { ignoreUnknownKeys = true; isLenient = true }
 
@@ -258,7 +260,8 @@ class PolymarketInsightsClient(
                 .build()
             val response = executeWithDnsRetry(request)
             val code = response.code
-            val retryAfterSeconds = response.header("Retry-After")?.toLongOrNull()
+            val retryAfterMillis = HttpRetryAfter.delayMillis(response.header("Retry-After"), nowMillis())
+            val retryAfterSeconds = retryAfterMillis?.let(HttpRetryAfter::secondsCeiling)
             val traceId = response.header("x-trace-id")
             val body = response.use { it.body?.string().orEmpty() }
             if (body.length > POLYMARKET_MAX_RESPONSE_CHARS) throw IOException("Resposta da Polymarket excedeu o limite local de leitura.")
@@ -266,9 +269,9 @@ class PolymarketInsightsClient(
                 return runCatching { json.parseToJsonElement(body).jsonObject }
                     .getOrElse { throw IOException("Resposta JSON inválida da Data API da Polymarket.") }
             }
-            if (code in setOf(429, 503) && attempt == 0 && retryAfterSeconds != null && retryAfterSeconds in 0..5) {
+            if (code in setOf(429, 503) && attempt == 0 && retryAfterMillis != null && retryAfterMillis <= MAX_AUTOMATIC_RETRY_WAIT_MS) {
                 attempt++
-                delay((retryAfterSeconds * 1000L).coerceAtLeast(1000L))
+                retryDelay(retryAfterMillis)
                 continue
             }
             val retryNote = retryAfterSeconds?.let { " Aguarde $it s conforme Retry-After." }.orEmpty()
@@ -285,7 +288,7 @@ class PolymarketInsightsClient(
             } catch (e: UnknownHostException) {
                 if (retries >= DNS_MAX_RETRIES) {
                     throw IOException(
-                        "Não foi possível resolver data-api.polymarket.com. Verifique a conexão, o DNS privado/VPN e tente novamente.",
+                        "Não foi possível resolver ${request.url.host}. Verifique a conexão, o DNS privado/VPN e tente novamente.",
                         e
                     )
                 }
@@ -310,6 +313,7 @@ class PolymarketInsightsClient(
         private const val MIN_REQUEST_INTERVAL_MS = 125L
         private const val DNS_MAX_RETRIES = 2
         private const val DNS_RETRY_BASE_DELAY_MS = 300L
+        private const val MAX_AUTOMATIC_RETRY_WAIT_MS = 60_000L
         private val globalRequestMutex = Mutex()
         private var lastRequestAtMs = 0L
     }

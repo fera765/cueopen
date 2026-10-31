@@ -43,6 +43,7 @@ class LlmRequestFailure(
     val retryable: Boolean,
     cause: Throwable? = null,
     val retryAfterMillis: Long? = null,
+    val responseTruncated: Boolean = false,
 ) : IOException(message, cause)
 
 /** Transporte OpenAI-compatible (OpenRouter por padrão). */
@@ -146,7 +147,7 @@ class OpenRouter(private val settings: () -> Settings) {
         messages: List<LlmMessage>,
         tools: JsonArray? = null,
         model: String? = null,
-        maxTokens: Int? = 16000,
+        maxTokens: Int? = 8192,
         jsonResponse: Boolean = false,
         conversationId: String? = null,
     ): LlmReply = withContext(Dispatchers.IO) {
@@ -233,21 +234,30 @@ class OpenRouter(private val settings: () -> Settings) {
         val finish = choice0["finish_reason"]?.let { runCatching { it.jsonPrimitive.contentOrNull }.getOrNull() }
         val msg = choice0["message"]!!.jsonObject
         val content = msg["content"]?.let { runCatching { it.jsonPrimitive.contentOrNull }.getOrNull() }
-        val tcs = msg["tool_calls"]?.takeIf { it is JsonArray }?.jsonArray
+        val rawCallsElement = msg["tool_calls"]
+        if (rawCallsElement != null && rawCallsElement !is JsonArray) {
+            throw LlmRequestFailure("O provedor retornou tool_calls em formato inválido; nenhuma ferramenta foi executada.", retryable = true)
+        }
+        val tcs = rawCallsElement?.jsonArray
         val parsedCalls = tcs.orEmpty().mapNotNull { tc ->
-            runCatching {
-                val o = tc.jsonObject
-                val f = o["function"]?.jsonObject ?: return@runCatching null
-                val id = o["id"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() } ?: return@runCatching null
-                val name = f["name"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() } ?: return@runCatching null
-                val args = f["arguments"]?.let { element ->
-                    if (element is kotlinx.serialization.json.JsonPrimitive) element.contentOrNull ?: "{}" else element.toString()
-                } ?: "{}"
-                tc to ToolCall(id, name, args)
-            }.getOrNull()
-        }.distinctBy { it.second.id }
+            ToolCallHistoryNormalizer.canonicalizeToolCall(tc)?.let { it to ToolCall(it.id, it.name, it.argsJson) }
+        }
+        if (parsedCalls.size != tcs.orEmpty().size || parsedCalls.map { it.second.id }.distinct().size != parsedCalls.size) {
+            throw LlmRequestFailure(
+                "O provedor retornou argumentos de ferramenta incompletos ou JSON inválido; nenhuma chamada foi executada e o histórico não foi alterado.",
+                retryable = true,
+                responseTruncated = true,
+            )
+        }
+        if (finish == "length" && !tcs.isNullOrEmpty()) {
+            throw LlmRequestFailure(
+                "A resposta do provedor foi cortada no limite de saída; as chamadas de ferramenta não foram executadas.",
+                retryable = true,
+                responseTruncated = true,
+            )
+        }
         val calls = parsedCalls.map { it.second }
-        val rawToolCalls = parsedCalls.takeIf { it.isNotEmpty() }?.let { JsonArray(it.map { pair -> pair.first }).toString() }
+        val rawToolCalls = parsedCalls.takeIf { it.isNotEmpty() }?.let { JsonArray(it.map { pair -> pair.first.normalizedJson }).toString() }
         val u = root["usage"]?.let { runCatching { it.jsonObject }.getOrNull() }
         fun num(o: JsonObject?, key: String) = o?.get(key)?.let { runCatching { it.jsonPrimitive.content.toDouble().toLong() }.getOrNull() } ?: 0L
         val cachedTok = u?.get("prompt_tokens_details")?.let { runCatching { it.jsonObject }.getOrNull() }?.let { num(it, "cached_tokens") } ?: 0L

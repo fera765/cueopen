@@ -10,6 +10,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.IOException
+import java.time.Instant
 import java.util.concurrent.atomic.AtomicInteger
 
 class SolanaMarketDataClientTest {
@@ -46,5 +47,7 @@ class SolanaMarketDataClientTest {
     fun publicKeylessQuotaAdviceReflectsCurrentGeckoLimit() {
         assertTrue(geckoRateLimitMessage(null).contains("10 chamadas por minuto"))
         assertTrue(geckoRateLimitMessage("25").contains("Aguarde 25 s"))
+        val now = Instant.parse("2026-01-01T00:00:00Z").toEpochMilli()
+        assertTrue(geckoRateLimitMessage("Thu, 01 Jan 2026 00:00:30 GMT", now).contains("Aguarde 30 s conforme Retry-After"))
     }
 }

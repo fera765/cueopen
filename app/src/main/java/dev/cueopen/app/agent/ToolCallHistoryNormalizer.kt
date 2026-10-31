@@ -57,7 +57,11 @@ object ToolCallHistoryNormalizer {
 
             val parsed = parseCalls(message.toolCallsJson)
             val unique = parsed.filter { globallySeenCallIds.add(it.ref.id) }
-            val sanitizedJson = if (unique.isEmpty()) null else JsonArray(unique.map { it.raw }).toString()
+            if (unique.isEmpty()) {
+                if (!message.content.isNullOrBlank()) output += message.copy(toolCallsJson = null)
+                continue
+            }
+            val sanitizedJson = JsonArray(unique.map { it.raw }).toString()
             output += message.copy(toolCallsJson = sanitizedJson)
             pending = unique.map { it.ref }
         }
@@ -70,9 +74,36 @@ object ToolCallHistoryNormalizer {
         if (raw.isNullOrBlank()) return raw
         return runCatching {
             val calls = json.parseToJsonElement(raw).jsonArray
-            JsonArray(calls.map(::redactToolCall)).toString()
+            calls.mapNotNull { canonicalizeToolCall(it)?.normalizedJson }
+                .takeIf { it.isNotEmpty() }?.let { JsonArray(it).toString() }
         }.getOrNull()
     }
+
+    /** Validates nested function arguments and canonicalizes them to the OpenAI-compatible string form. */
+    data class CanonicalToolCall(
+        val id: String,
+        val name: String,
+        val argsJson: String,
+        val normalizedJson: JsonElement,
+    )
+
+    fun canonicalizeToolCall(element: JsonElement): CanonicalToolCall? = runCatching {
+        val call = element.jsonObject
+        val id = call["id"]?.jsonPrimitive?.content?.takeIf { it.isNotBlank() } ?: return@runCatching null
+        val function = call["function"]?.jsonObject ?: return@runCatching null
+        val name = function["name"]?.jsonPrimitive?.content?.takeIf { it.isNotBlank() } ?: return@runCatching null
+        val rawArguments = function["arguments"] ?: return@runCatching null
+        val arguments = if (rawArguments is JsonPrimitive && rawArguments.isString) {
+            json.parseToJsonElement(rawArguments.content)
+        } else rawArguments
+        if (arguments !is JsonObject) return@runCatching null
+        val argsJson = arguments.toString()
+        val normalizedFunction = JsonObject(function.toMutableMap().apply {
+            put("arguments", JsonPrimitive(argsJson))
+        })
+        val normalizedCall = JsonObject(call.toMutableMap().apply { put("function", normalizedFunction) })
+        CanonicalToolCall(id, name, argsJson, redactToolCall(normalizedCall))
+    }.getOrNull()
 
     private fun redactToolCall(element: JsonElement): JsonElement {
         val call = runCatching { element.jsonObject }.getOrNull() ?: return element
@@ -99,13 +130,7 @@ object ToolCallHistoryNormalizer {
 
     private fun parseCalls(raw: String): List<ParsedCall> = runCatching {
         json.parseToJsonElement(raw).jsonArray.mapNotNull { element ->
-            runCatching {
-                val call = element.jsonObject
-                val id = call["id"]?.jsonPrimitive?.content?.takeIf { it.isNotBlank() } ?: return@runCatching null
-                val name = call["function"]?.jsonObject?.get("name")?.jsonPrimitive?.content?.takeIf { it.isNotBlank() }
-                    ?: return@runCatching null
-                ParsedCall(CallRef(id, name), redactToolCall(element))
-            }.getOrNull()
+            canonicalizeToolCall(element)?.let { call -> ParsedCall(CallRef(call.id, call.name), call.normalizedJson) }
         }
     }.getOrDefault(emptyList())
 }

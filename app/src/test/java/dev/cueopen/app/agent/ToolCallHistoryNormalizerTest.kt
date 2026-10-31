@@ -7,6 +7,7 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -94,5 +95,36 @@ class ToolCallHistoryNormalizerTest {
         assertEquals(2, result.size)
         assertEquals(null, result.first().toolCallsJson)
         assertFalse(result.any { it.role == "tool" })
+    }
+
+    @Test fun `argumento JSON truncado dentro de envelope valido e removido do historico`() {
+        val truncated = """[{"id":"broken","type":"function","function":{"name":"shell","arguments":"{\"command\":\"echo\""}}]"""
+        val callElement = Json.parseToJsonElement(truncated).jsonArray.single()
+        assertNull(ToolCallHistoryNormalizer.canonicalizeToolCall(callElement))
+
+        val normalized = ToolCallHistoryNormalizer.normalize(listOf(
+            LlmMessage("assistant", null, toolCallsJson = truncated),
+            tool("broken", content = "ERRO: argumentos descartados"),
+            LlmMessage("user", "tente de novo"),
+        ))
+
+        assertEquals(listOf("user"), normalized.map { it.role })
+        assertFalse(normalized.any { it.toolCallId == "broken" })
+        assertFalse(normalized.joinToString { it.toolCallsJson.orEmpty() }.contains("command"))
+    }
+
+    @Test fun `argumentos validos aceitam string ou objeto e canonizam para string JSON`() {
+        val raw = """[{"id":"string","type":"function","function":{"name":"lookup","arguments":"{\"nested\":{\"n\":1},\"label\":\"ação\"}"}},{"id":"object","type":"function","function":{"name":"lookup","arguments":{"enabled":true}}}]"""
+        val normalized = ToolCallHistoryNormalizer.normalize(listOf(
+            LlmMessage("assistant", null, toolCallsJson = raw),
+            tool("string"), tool("object"),
+        ))
+        val calls = Json.parseToJsonElement(normalized.first { it.role == "assistant" }.toolCallsJson!!).jsonArray
+        assertEquals(2, calls.size)
+        val stringArgs = calls[0].jsonObject.getValue("function").jsonObject.getValue("arguments").jsonPrimitive.content
+        val objectArgs = calls[1].jsonObject.getValue("function").jsonObject.getValue("arguments").jsonPrimitive.content
+        assertEquals("1", Json.parseToJsonElement(stringArgs).jsonObject.getValue("nested").jsonObject.getValue("n").jsonPrimitive.content)
+        assertEquals("true", Json.parseToJsonElement(objectArgs).jsonObject.getValue("enabled").jsonPrimitive.content)
+        assertEquals(listOf("ok", "ok"), normalized.filter { it.role == "tool" }.map { it.content })
     }
 }

@@ -1,7 +1,11 @@
 package dev.cueopen.app.wallet
 
 import kotlinx.coroutines.runBlocking
+import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
+import okhttp3.Protocol
+import okhttp3.Response
+import okhttp3.ResponseBody.Companion.toResponseBody
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -33,6 +37,56 @@ class PolymarketInsightsClientTest {
 
         assertEquals(3, attempts.get())
         assertTrue(failure?.message.orEmpty().contains("DNS privado/VPN"))
+    }
+
+    @Test
+    fun retries429OnlyAfterTheAdvertisedDelay() {
+        val attempts = AtomicInteger()
+        val waits = mutableListOf<Long>()
+        val http = OkHttpClient.Builder().addInterceptor { chain ->
+            val attempt = attempts.incrementAndGet()
+            Response.Builder()
+                .request(chain.request())
+                .protocol(Protocol.HTTP_1_1)
+                .code(if (attempt == 1) 429 else 200)
+                .message(if (attempt == 1) "Too Many Requests" else "OK")
+                .apply { if (attempt == 1) header("Retry-After", "7") }
+                .body((if (attempt == 1) "{}" else "{\"data\":[]}").toResponseBody("application/json".toMediaType()))
+                .build()
+        }.build()
+        val client = PolymarketInsightsClient(http = http, retryDelay = { waits += it })
+
+        val report = runBlocking { client.analyzeLast90Days(candidatesPerBoard = 1) }
+
+        assertEquals(0, report.candidateCount)
+        assertEquals(3, attempts.get()) // 429, retry of the monthly board, then all-time board
+        assertEquals(listOf(7_000L), waits)
+    }
+
+    @Test
+    fun doesNotRetry429BeforeLongRetryAfterAndReturnsTheRequiredWait() {
+        val attempts = AtomicInteger()
+        val waits = mutableListOf<Long>()
+        val http = OkHttpClient.Builder().addInterceptor { chain ->
+            attempts.incrementAndGet()
+            Response.Builder()
+                .request(chain.request())
+                .protocol(Protocol.HTTP_1_1)
+                .code(429)
+                .message("Too Many Requests")
+                .header("Retry-After", "120")
+                .body("{}".toResponseBody("application/json".toMediaType()))
+                .build()
+        }.build()
+        val client = PolymarketInsightsClient(http = http, retryDelay = { waits += it })
+
+        val failure = runCatching { runBlocking { client.analyzeLast90Days(candidatesPerBoard = 1) } }.exceptionOrNull()
+
+        assertTrue(failure is PolymarketApiException)
+        assertEquals(120L, (failure as PolymarketApiException).retryAfterSeconds)
+        assertTrue(failure.message.orEmpty().contains("Aguarde 120 s conforme Retry-After"))
+        assertEquals(1, attempts.get())
+        assertTrue(waits.isEmpty())
     }
 
     @Test

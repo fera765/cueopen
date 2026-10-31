@@ -291,12 +291,19 @@ class AgentRunner(
                     return
                 }
                 safeOutput.coerceAtMost(2048L).toInt()
-            } ?: 16000
+            } ?: 8192
+            var currentReplyTokenLimit = replyTokenLimit
             val reply = run {
                 var attempt = 0
                 while (true) {
                     try {
-                        return@run llm.chat(listOf(sys) + history, tools = stepTools, model = stepModel(agent), maxTokens = replyTokenLimit, conversationId = sessionId)
+                        val response = llm.chat(listOf(sys) + history, tools = stepTools, model = stepModel(agent), maxTokens = currentReplyTokenLimit, conversationId = sessionId)
+                        if (response.truncated) throw dev.cueopen.app.llm.LlmRequestFailure(
+                            "A resposta do provedor foi cortada no limite de saída; ela não foi gravada no histórico.",
+                            retryable = true,
+                            responseTruncated = true,
+                        )
+                        return@run response
                     } catch (c: kotlinx.coroutines.CancellationException) {
                         throw c
                     } catch (t: Throwable) {
@@ -309,6 +316,9 @@ class AgentRunner(
                             store.addItemUnique(sessionId, ChatItem.Error(text = "O modelo falhou (${t.message?.take(120)}). $attempts Toque em enviar para continuar, ou troque de modelo em Configurações."))
                             store.editSession(sessionId) { it.copy(status = SessionStatus.WAITING_USER) }
                             return
+                        }
+                        if (llmFailure.responseTruncated && tokenBudgetOverride == null) {
+                            currentReplyTokenLimit = (currentReplyTokenLimit.toLong() * 2L).coerceAtMost(16_000L).toInt()
                         }
                         val delayMs = dev.cueopen.app.llm.LlmRetryPolicy.delayMillis(attempt, llmFailure.retryAfterMillis)
                         val waitLabel = (delayMs / 1_000L).coerceAtLeast(1L)

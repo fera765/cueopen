@@ -425,8 +425,13 @@ class SolanaMarketDataClient(
         private val cache = java.util.concurrent.ConcurrentHashMap<String, Pair<Long, String>>()
     }
 }
-internal fun geckoRateLimitMessage(retryAfterHeader: String?): String {
-    val retryAfterSeconds = retryAfterHeader?.toLongOrNull()?.takeIf { it > 0L }
+internal fun geckoRateLimitMessage(
+    retryAfterHeader: String?,
+    nowMillis: Long = System.currentTimeMillis()
+): String {
+    val retryAfterSeconds = HttpRetryAfter.delayMillis(retryAfterHeader, nowMillis)
+        ?.takeIf { it > 0L }
+        ?.let(HttpRetryAfter::secondsCeiling)
     return if (retryAfterSeconds != null) {
         "limite de requisições GeckoTerminal (HTTP 429). Aguarde $retryAfterSeconds s conforme Retry-After."
     } else {
