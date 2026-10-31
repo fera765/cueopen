@@ -62,14 +62,6 @@ class WalletAgentPolicyStore(context: Context) {
         setAgentCapability(agentId, CAPABILITY_DAY_TRADE, enabled)
     }
 
-    /** Public Polymarket analytics is an independent read-only grant; it never enables wallet actions. */
-    fun canAgentReadPolymarketInsights(agentId: String): Boolean =
-        prefs.getBoolean(agentCapabilityKey(agentId, CAPABILITY_POLYMARKET_INSIGHTS), false)
-
-    fun setAgentReadPolymarketInsights(agentId: String, enabled: Boolean) {
-        setAgentCapability(agentId, CAPABILITY_POLYMARKET_INSIGHTS, enabled)
-    }
-
     /**
      * Returns the persisted policy for a transfer identity. Autonomous execution is only turned on
      * when the user explicitly enabled both request-transfer and autonomous-transfer for this agent;
@@ -175,8 +167,7 @@ class WalletAgentPolicyStore(context: Context) {
         readBalance: Boolean,
         requestTransfer: Boolean,
         autonomousTransfer: Boolean = false,
-        dayTrade: Boolean = false,
-        polymarketInsights: Boolean = false
+        dayTrade: Boolean = false
     ) {
         require(agentId.isNotBlank()) { "Agent ID is required" }
         // Autonomous execution can never be on without the base request-transfer grant.
@@ -187,7 +178,6 @@ class WalletAgentPolicyStore(context: Context) {
             .putBoolean(agentCapabilityKey(agentId, CAPABILITY_REQUEST_TRANSFER), requestTransfer)
             .putBoolean(agentCapabilityKey(agentId, CAPABILITY_AUTONOMOUS_TRANSFER), autonomous)
             .putBoolean(agentCapabilityKey(agentId, CAPABILITY_DAY_TRADE), dayTrade)
-            .putBoolean(agentCapabilityKey(agentId, CAPABILITY_POLYMARKET_INSIGHTS), polymarketInsights)
             .commit()) { "Could not persist wallet agent permissions" }
     }
 
@@ -221,7 +211,6 @@ class WalletAgentPolicyStore(context: Context) {
         private const val CAPABILITY_REQUEST_TRANSFER = "request_transfer"
         private const val CAPABILITY_AUTONOMOUS_TRANSFER = "autonomous_transfer"
         private const val CAPABILITY_DAY_TRADE = "day_trade"
-        private const val CAPABILITY_POLYMARKET_INSIGHTS = "polymarket_insights"
         private const val MAX_AGENT_TRANSFER_LAMPORTS = 50_000_000L
         private const val DAILY_AGENT_TRANSFER_LIMIT_LAMPORTS = 100_000_000L
 

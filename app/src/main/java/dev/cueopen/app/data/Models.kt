@@ -231,6 +231,10 @@ data class AgentProfile(
     val skillIds: List<String> = emptyList(),
     val memory: List<String> = emptyList(),
     val useBrowser: Boolean = true,
+    /** Permite tarefas que usam Browser continuarem em segundo plano, separado do acesso normal ao Browser. */
+    val browserAutonomy: Boolean = false,
+    /** Marca se o toggle de autonomia do Browser foi quem adicionou o consentimento BACKGROUND. */
+    val browserAutonomyGrantedBackground: Boolean = false,
     val useTerminal: Boolean = true,
     val createdAt: Long = now(),
     // ---- Autonomia 24/7 (heartbeat) ----

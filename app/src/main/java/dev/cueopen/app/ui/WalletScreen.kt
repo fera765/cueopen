@@ -257,10 +257,6 @@ fun WalletScreen(nav: NavController) {
                     Icon(Icons.Rounded.TrendingUp, null, Modifier.size(18.dp)); Spacer(Modifier.width(8.dp))
                     Text("Mercado — descobrir criptos (novas → antigas)")
                 }
-                OutlinedButton(onClick = { nav.navigate("wallet/polymarket") }, modifier = Modifier.fillMaxWidth()) {
-                    Icon(Icons.Rounded.TrendingUp, null, Modifier.size(18.dp)); Spacer(Modifier.width(8.dp))
-                    Text("Polymarket — analisar carteiras (90 dias)")
-                }
 
                 // ---- Assets ----
                 Card(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(22.dp), colors = CardDefaults.cardColors(containerColor = c.surface)) {

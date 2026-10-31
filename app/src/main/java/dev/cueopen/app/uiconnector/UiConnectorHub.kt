@@ -59,7 +59,18 @@ class UiConnectorHub(context: Context) {
     }, httpClientProvider = { base ->
         cueApp?.proxyHttpClient(ProxyScope.AGENT_API, base)
             ?: throw IOException("CueApp indisponível; recusando conexão IQ Option direta.")
-    }), dev.cueopen.app.uiconnector.gmail.GmailConnector(ctx)).filter { c ->
+    }), dev.cueopen.app.uiconnector.gmail.GmailConnector(ctx), dev.cueopen.app.uiconnector.polymarket.PolymarketPublicConnector(
+        curlProgram = ctx.assets.open("connectors/polymarket_curl.py").bufferedReader().use { it.readText() },
+        runInTerminal = { sessionId, command ->
+            val app = cueApp ?: throw IOException("CueApp indisponível; a consulta Polymarket precisa do terminal Linux local.")
+            val result = app.terminals.get(sessionId).runAgentCommand(command, timeoutSec = 240, background = false)
+            when {
+                result.timedOut -> throw IOException("A consulta Polymarket excedeu o timeout do terminal Linux.")
+                result.exitCode != 0 -> throw IOException(result.output.takeLast(600).ifBlank { "curl terminou com código ${result.exitCode}." })
+                else -> result.output
+            }
+        },
+    )).filter { c ->
         val problems = SpecValidator.validate(c.spec)
         if (problems.isNotEmpty()) ErrorLog.log("uiconnector", "spec inválido (${c.spec.id}): " + problems.joinToString("; "))
         problems.isEmpty()
@@ -424,6 +435,7 @@ class UiConnectorHub(context: Context) {
     fun usableBy(c: UiConnector, agent: AgentProfile?): Boolean {
         val id = c.spec.id
         if (!enabled(id)) return false
+        if (c is RequiresAgentTerminal && agent?.useTerminal != true) return false
         // Login NÃO é exigido para expor as ferramentas: se a sessão caiu, a chamada responde pedindo login
         // (ou reconecta sozinha com o cofre). Assim o agente nunca "perde" o conector em silêncio.
         val agentOptedIn = agent?.uiConnectorIds?.contains(id) == true
@@ -467,7 +479,13 @@ class UiConnectorHub(context: Context) {
      * Executa a ferramenta `uic_<id>_<tool>` para o agente. Nunca lança: devolve texto (erros viram texto).
      * [agentKey] identifica quem opera (id do agente, ou da sessão) — base da coordenação e das reservas.
      */
-    suspend fun callTool(agent: AgentProfile?, agentKey: String, fullName: String, args: JsonObject): String {
+    suspend fun callTool(
+        agent: AgentProfile?,
+        agentKey: String,
+        fullName: String,
+        args: JsonObject,
+        context: UiConnectorCallContext = UiConnectorCallContext(),
+    ): String {
         val (id, tool) = SpecValidator.parseToolName(fullName) ?: return "Ferramenta inválida: $fullName"
         val c = get(id) ?: return "Conector desconhecido: $id"
         if (!usableBy(c, agent)) return "Este agente não tem acesso ao conector ${c.spec.name}. Ative-o no perfil do agente (UI Conectores)."
@@ -478,7 +496,7 @@ class UiConnectorHub(context: Context) {
             if (ts.opensOrder) {
                 guardedCall(c, tool, agentKey, strArgs)
             } else if (c is CustomConnector) c.callTool(tool, strArgs, settings(c), delegatedModel = agent?.model)
-            else c.callTool(tool, strArgs, settings(c))
+            else c.callTool(tool, strArgs, settings(c), context)
         } catch (t: kotlinx.coroutines.CancellationException) {
             throw t
         } catch (t: Throwable) {

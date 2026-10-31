@@ -77,6 +77,12 @@ data class UiConnectorSpec(
     val accent: Long = 0xFFFF6B3D,
 )
 
+/** Contexto de execução que alguns conectores precisam para usar recursos da sessão atual. */
+data class UiConnectorCallContext(val sessionId: String? = null)
+
+/** Marca um connector cujas ferramentas dependem da capacidade Terminal Linux do Agent. */
+interface RequiresAgentTerminal
+
 enum class Tone { NEUTRAL, GOOD, BAD, WARN }
 
 data class Stat(val label: String, val value: String, val tone: Tone = Tone.NEUTRAL)
@@ -134,6 +140,14 @@ interface UiConnector {
 
     /** Ferramenta chamada pelo agente; só recebe limites e coordenação implementados no conector e no Hub. */
     suspend fun callTool(name: String, args: Map<String, String>, settings: ConnectorSettings): String
+
+    /** Contextual overload; existing connectors retain their original call contract. */
+    suspend fun callTool(
+        name: String,
+        args: Map<String, String>,
+        settings: ConnectorSettings,
+        context: UiConnectorCallContext,
+    ): String = callTool(name, args, settings)
 
     /**
      * Para ferramentas com `opensOrder`: quais ordens (ativo + lado) a chamada abriria.

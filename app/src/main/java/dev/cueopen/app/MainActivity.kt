@@ -207,7 +207,6 @@ fun CueNav(nav: NavHostController, startOnboarding: Boolean) {
         composable("wallet/swap") { WalletSwapScreen(nav) }
         composable("wallet/more") { WalletMoreScreen(nav) }
         composable("wallet/market") { WalletMarketScreen(nav) }
-        composable("wallet/polymarket") { WalletPolymarketInsightsScreen(nav) }
         composable("sandbox") { SandboxScreen(nav) }
         composable("terminal") { StandaloneTerminalScreen(nav) }
     }

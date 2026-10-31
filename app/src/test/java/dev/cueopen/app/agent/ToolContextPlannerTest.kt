@@ -6,7 +6,11 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class ToolContextPlannerTest {
-    private val conns = mapOf("iqoption" to ("IQ Option" to "Opções binárias e forex"), "eduzz" to ("Eduzz" to "Vendas e produtos digitais"))
+    private val conns = mapOf(
+        "iqoption" to ("IQ Option" to "Opções binárias e forex"),
+        "eduzz" to ("Eduzz" to "Vendas e produtos digitais"),
+        "polymarket" to ("Polymarket público" to "Carteiras EVM públicas via curl no terminal Linux"),
+    )
     private fun sid() = "ctx-" + System.nanoTime()
     private fun input(q: String, used: Set<String> = emptySet(), sid: String = sid(), builder: Boolean = false, hist: Int = 0) =
         ToolContextPlanner.Input(sid, q, used, builder, connectors = conns, mcpServers = mapOf("mcp_github" to "github"), historyTokens = hist, contextBudget = 24_000)
@@ -32,10 +36,12 @@ class ToolContextPlannerTest {
         assertFalse(p.keepTool("uic_eduzz_vendas", connOf, mcpOf))
     }
 
-    @Test fun polymarketAnalysisRequestLoadsReadOnlyWalletToolGroup() {
+    @Test fun polymarketAnalysisUsesIndependentConnectorInsteadOfWalletTools() {
         val p = ToolContextPlanner.plan(input("analise carteiras lucrativas da Polymarket nos últimos 90 dias"))
-        assertTrue(p.groups.contains("wallet"))
-        assertTrue(p.keepTool("wallet_polymarket_insights", connOf, mcpOf))
+        assertFalse(p.groups.contains("wallet"))
+        assertTrue(p.connectors.contains("polymarket"))
+        assertTrue(p.keepTool("uic_polymarket_analyze_wallets", connOf, mcpOf))
+        assertFalse(p.keepTool("wallet_swap", connOf, mcpOf))
     }
 
     @Test fun contactAddressBookBluetoothAndCallsLoadDeviceTools() {

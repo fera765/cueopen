@@ -108,7 +108,6 @@ fun AgentEditScreen(nav: NavController, id: String) {
     var walletRequestTransfer by remember(a.id) { mutableStateOf(walletPolicies.canAgentRequestTransfer(a.id)) }
     var walletAutonomousTransfer by remember(a.id) { mutableStateOf(walletPolicies.canAgentAutonomousTransfer(a.id)) }
     var walletDayTrade by remember(a.id) { mutableStateOf(walletPolicies.canAgentDayTrade(a.id)) }
-    var walletPolymarketInsights by remember(a.id) { mutableStateOf(walletPolicies.canAgentReadPolymarketInsights(a.id)) }
     Scaffold(containerColor = c.bg, topBar = {
         CueTopBar(if (existing == null) "Criar Agent" else a.name, { nav.popBackStack() }) {
             if (existing != null) IconButton({ app.store.deleteAgent(id); nav.popBackStack() }) { Icon(Icons.Rounded.Delete, "Excluir", tint = c.err) }
@@ -165,7 +164,16 @@ fun AgentEditScreen(nav: NavController, id: String) {
             when (capTab) {
                 0 -> {
                     ToggleRow("Terminal Linux", "Executar comandos no sandbox", a.useTerminal) { a = a.copy(useTerminal = it) }
-                    ToggleRow("Browser", "Navegar e interagir com sites", a.useBrowser) { a = a.copy(useBrowser = it) }
+                    ToggleRow("Browser", "Navegar e interagir com sites", a.useBrowser) {
+                        a = dev.cueopen.app.device.BrowserAutonomyPolicy.setBrowserEnabled(a, it)
+                    }
+                    if (a.useBrowser) ToggleRow(
+                        "Autonomia do Browser",
+                        "Permite que tarefas deste Agent continuem usando Browser em segundo plano. Liga o consentimento interno ‘Executar em segundo plano’, mas não agenda tarefas sozinho nem altera permissões globais do Android. Ao desligar, remove apenas o consentimento que esta opção adicionou; um consentimento anterior fica preservado.",
+                        a.browserAutonomy,
+                    ) { enabled ->
+                        a = dev.cueopen.app.device.BrowserAutonomyPolicy.setEnabled(a, enabled)
+                    }
 
                 }
                 1 -> {
@@ -232,11 +240,6 @@ fun AgentEditScreen(nav: NavController, id: String) {
                             )
                         }
                     }
-                    ToggleRow(
-                        "Insights públicos da Polymarket (somente leitura)",
-                        "Permite consultar uma amostra de carteiras e posições encerradas nos últimos 90 dias via API pública, sem API key. Não habilita acesso à carteira Solana, trading nem cópia de ordens.",
-                        walletPolymarketInsights
-                    ) { walletPolymarketInsights = it }
 
                 }
             }
@@ -270,8 +273,7 @@ fun AgentEditScreen(nav: NavController, id: String) {
                     readBalance = walletAccess && walletReadBalance,
                     requestTransfer = walletAccess && walletRequestTransfer,
                     autonomousTransfer = walletAccess && walletRequestTransfer && walletAutonomousTransfer,
-                    dayTrade = walletAccess && walletDayTrade,
-                    polymarketInsights = walletPolymarketInsights
+                    dayTrade = walletAccess && walletDayTrade
                 )
                 if (a.autonomous) app.agent.startAutonomy()
                 nav.popBackStack()
@@ -695,7 +697,12 @@ fun DevicePermissionsCard(a: dev.cueopen.app.data.AgentProfile, onChange: (dev.c
                         if (cap.id == dev.cueopen.app.device.DeviceCaps.ACCESSIBILITY && v) {
                             showAccessibilityDisclosure = true
                         } else {
-                            onChange(a.copy(deviceCaps = if (v) (a.deviceCaps + cap.id).distinct() else a.deviceCaps - cap.id))
+                            val updated = if (cap.id == dev.cueopen.app.device.DeviceCapPolicy.BACKGROUND) {
+                                dev.cueopen.app.device.BrowserAutonomyPolicy.setBackgroundEnabled(a, v)
+                            } else {
+                                a.copy(deviceCaps = if (v) (a.deviceCaps + cap.id).distinct() else a.deviceCaps - cap.id)
+                            }
+                            onChange(updated)
                             if (v && !dev.cueopen.app.device.DeviceCaps.granted(ctx, cap.id)) requestCap(cap.id)
                         }
                     }, colors = SwitchDefaults.colors(checkedTrackColor = c.ink, checkedThumbColor = c.bg))
