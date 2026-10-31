@@ -22,6 +22,7 @@ import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.put
 import java.io.IOException
+import java.security.MessageDigest
 import java.util.concurrent.ConcurrentHashMap
 
 /**
@@ -105,6 +106,19 @@ class UiConnectorHub(context: Context) {
         return r
     }
 
+    /** Atualiza pela proposta do chat sem limpar o cofre; o bloco login é imutável no sanitizer. */
+    private suspend fun saveCustomKeepingCredentials(yamlText: String): Result<CustomDef> {
+        val result = customStore.save(yamlText, builtin.map { it.spec.id }.toSet())
+        if (result.isFailure) return result
+        val def = result.getOrNull() ?: return Result.failure(IllegalStateException("A definição não foi salva."))
+        val previous = custom
+        val old = previous.firstOrNull { it.spec.id == def.id } as? CustomConnector
+        if (old != null && old.def != def) old.logout()
+        custom = loadCustom(previous)
+        runCatching { dev.cueopen.app.uiconnector.custom.AndroidHostBridge.deleteValidation(def.id) }
+        return Result.success(def)
+    }
+
     suspend fun deleteCustom(id: String) {
         (custom.firstOrNull { it.spec.id == id })?.logout()
         vault.clear(id)
@@ -186,6 +200,156 @@ class UiConnectorHub(context: Context) {
 
     fun settings(c: UiConnector): ConnectorSettings =
         ConnectorSettings { key -> c.spec.settings.firstOrNull { it.id == key }?.let { settingValue(c, it) } }
+
+    data class EditableSetting(
+        val id: String,
+        val label: String,
+        val description: String,
+        val type: SettingType,
+        val value: String,
+        val risky: Boolean,
+    )
+
+    data class EditableConfiguration(
+        val id: String,
+        val name: String,
+        val description: String,
+        val enabled: Boolean,
+        val agentRequired: Boolean,
+        val settings: List<EditableSetting>,
+        val fingerprint: String,
+    )
+
+    fun isSecretSetting(setting: SettingSpec): Boolean =
+        Regex("(?i)(secret|token|password|passwd|api.?key|credential|senha|chave|segredo|auth)")
+            .containsMatchIn("${setting.id} ${setting.label} ${setting.description}")
+
+    /** Só expõe à IA valores de configuração não secretos; capacidades e credenciais ficam fora do escopo. */
+    fun editableConfiguration(id: String): EditableConfiguration? {
+        val c = get(id) ?: return null
+        val editable = c.spec.settings.filterNot(::isSecretSetting).mapNotNull { s ->
+            val value = settingValue(c, s)
+            val suspiciousMetadata = listOf(s.id, s.label, s.description).any {
+                dev.cueopen.app.uiconnector.custom.ConnectorDefinitionEdit.containsSecretLikeValue(it)
+            }
+            if (suspiciousMetadata || dev.cueopen.app.uiconnector.custom.ConnectorDefinitionEdit.containsSecretLikeValue(value)) null
+            else EditableSetting(s.id, s.label, s.description, s.type, value, s.risky)
+        }
+        return EditableConfiguration(id, c.spec.name, c.spec.description, enabled(id), agentRequired(id), editable, configurationFingerprint(id))
+    }
+
+    /** Fingerprint local: inclui a definição inteira, mas apenas o hash é exposto fora do Hub. */
+    fun configurationFingerprint(id: String): String {
+        val c = get(id) ?: return ""
+        val material = buildString {
+            append(c.spec.id).append('\n').append(c.spec.name).append('\n').append(c.spec.version).append('\n')
+            append(enabled(id)).append('\n').append(agentRequired(id)).append('\n')
+            c.spec.settings.sortedBy { it.id }.forEach { s ->
+                append(s.id).append('|').append(s.label).append('|').append(s.type.name).append('|').append(s.default).append('|').append(s.risky)
+                    .append('=').append(settingValue(c, s)).append('\n')
+            }
+            append(customYaml(id).orEmpty())
+        }
+        return MessageDigest.getInstance("SHA-256").digest(material.toByteArray(Charsets.UTF_8))
+            .joinToString("") { "%02x".format(it) }
+    }
+
+    /** Aplica apenas campos editáveis após comparar o estado que originou o card; nada de rede/login é executado. */
+    suspend fun applyEditableConfiguration(
+        id: String,
+        expectedFingerprint: String,
+        enabledValue: Boolean?,
+        agentRequiredValue: Boolean?,
+        settingChanges: Map<String, String>,
+        definitionYaml: String? = null,
+        sessionId: String? = null,
+    ): Result<Unit> = try {
+        val current = get(id) ?: throw IllegalArgumentException("Este conector não está mais instalado.")
+        if (expectedFingerprint.isBlank() || configurationFingerprint(id) != expectedFingerprint)
+            throw IllegalStateException("A configuração do conector mudou desde a proposta. Reabra o chat de edição para revisar o estado atual.")
+
+        var updatedDefinition: String? = null
+        var settingsSpecs: List<SettingSpec> = current.spec.settings
+        if (!definitionYaml.isNullOrBlank()) {
+            if (!isCustom(id)) throw IllegalArgumentException("A definição compilada deste conector não pode ser alterada pelo chat.")
+            val original = customYaml(id) ?: throw IllegalStateException("A definição customizada não está disponível.")
+            val chatId = sessionId?.takeIf { it.isNotBlank() } ?: throw IllegalArgumentException("A sessão da proposta não está disponível.")
+            val restored = try {
+                dev.cueopen.app.uiconnector.custom.ConnectorDefinitionEdit.restore(original, definitionYaml, chatId)
+            } catch (cancel: kotlinx.coroutines.CancellationException) {
+                throw cancel
+            } catch (_: Exception) {
+                throw IllegalArgumentException("A definição proposta não passou nas validações de segurança.")
+            }
+            val originalTree = try {
+                dev.cueopen.app.uiconnector.custom.ConnectorYamlCodec.parse(original)
+            } catch (cancel: kotlinx.coroutines.CancellationException) {
+                throw cancel
+            } catch (_: Exception) {
+                throw IllegalStateException("A definição instalada não pôde ser lida com segurança.")
+            }
+            val updatedTree = try {
+                dev.cueopen.app.uiconnector.custom.ConnectorYamlCodec.parse(restored)
+            } catch (cancel: kotlinx.coroutines.CancellationException) {
+                throw cancel
+            } catch (_: Exception) {
+                throw IllegalArgumentException("A definição proposta não pôde ser interpretada com segurança.")
+            }
+            if (originalTree != updatedTree) {
+                val parsed = dev.cueopen.app.uiconnector.custom.CustomDefParser.parse(restored)
+                val newDef = parsed.def ?: throw IllegalArgumentException("A definição proposta não passou no schema do conector.")
+                if (newDef.id != id) throw IllegalArgumentException("A definição não pode mudar o id do conector selecionado.")
+                val oldDef = dev.cueopen.app.uiconnector.custom.CustomDefParser.parse(original).def
+                    ?: throw IllegalStateException("A definição instalada não passou no parser.")
+                if (newDef.login != oldDef.login || newDef.headers != oldDef.headers || newDef.capabilities != oldDef.capabilities || newDef.setup != oldDef.setup)
+                    throw IllegalArgumentException("Login, cabeçalhos, permissões e setup não podem ser alterados pelo chat.")
+                settingsSpecs = newDef.settings
+                updatedDefinition = restored
+            }
+        }
+        if (enabledValue == null && agentRequiredValue == null && settingChanges.isEmpty() && updatedDefinition == null)
+            throw IllegalArgumentException("A proposta não contém alterações.")
+
+        val allowed = settingsSpecs.filterNot(::isSecretSetting).filter { spec ->
+            val previous = current.spec.settings.firstOrNull { it.id == spec.id }
+            val currentValue = previous?.let { settingValue(current, it) } ?: spec.default
+            !dev.cueopen.app.uiconnector.custom.ConnectorDefinitionEdit.containsSecretLikeValue(currentValue) &&
+                !dev.cueopen.app.uiconnector.custom.ConnectorDefinitionEdit.containsSecretLikeValue(spec.default)
+        }.associateBy { it.id }
+        val validated = settingChanges.map { (key, value) ->
+            val spec = allowed[key] ?: throw IllegalArgumentException("A configuração '$key' não pode ser alterada por este chat.")
+            if (value.length > 4096) throw IllegalArgumentException("O valor de '${spec.label}' é longo demais.")
+            if (dev.cueopen.app.uiconnector.custom.ConnectorDefinitionEdit.containsSecretLikeValue(value))
+                throw IllegalArgumentException("A proposta contém um valor que parece segredo; use o formulário seguro do conector para credenciais.")
+            when (spec.type) {
+                SettingType.SWITCH -> if (value.lowercase() !in setOf("true", "false")) throw IllegalArgumentException("'${spec.label}' precisa ser true ou false.")
+                SettingType.NUMBER -> if (value.replace(',', '.').toDoubleOrNull()?.isFinite() != true) throw IllegalArgumentException("'${spec.label}' precisa ser um número válido.")
+                SettingType.TEXT -> Unit
+            }
+            key to value
+        }
+
+        if (updatedDefinition != null) {
+            val parsed = dev.cueopen.app.uiconnector.custom.CustomDefParser.parse(updatedDefinition)
+            val def = parsed.def ?: throw IllegalArgumentException("A definição não passou no schema.")
+            val validation = dev.cueopen.app.uiconnector.custom.ConnectorDryRunValidator.validate(updatedDefinition, def, settingsInput = settingChanges)
+            if (!validation.passed) throw IllegalArgumentException("A validação offline do preview não passou. Nenhum acesso de rede, ação real ou credencial foi usado.")
+            saveCustomKeepingCredentials(updatedDefinition).getOrElse {
+                throw IllegalStateException("Não foi possível salvar a atualização do conector.")
+            }
+        }
+
+        val editor = prefs.edit()
+        enabledValue?.let { editor.putBoolean("enabled_$id", it) }
+        agentRequiredValue?.let { editor.putBoolean("agentreq_$id", it) }
+        validated.forEach { (key, value) -> editor.putString("set_${id}_$key", value) }
+        check(editor.commit()) { "Não foi possível salvar a atualização do conector." }
+        Result.success(Unit)
+    } catch (cancel: kotlinx.coroutines.CancellationException) {
+        throw cancel
+    } catch (t: Throwable) {
+        Result.failure(t)
+    }
 
     // ------------------------------------------------------------------ sessão
     fun hasSavedCredentials(id: String): Boolean = vault.has(id)

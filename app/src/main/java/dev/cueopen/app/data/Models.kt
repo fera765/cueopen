@@ -86,6 +86,24 @@ sealed class ChatItem {
         val validation: ConnectorValidationAttestation? = null,
     ) : ChatItem()
 
+    /** Alterações de configuração propostas por IA para um único UI Connector, aguardando aplicação humana. */
+    @Serializable
+    data class ConnectorEditProposal(
+        override val id: String = newId(),
+        override val time: Long = now(),
+        val connectorId: String,
+        val connectorName: String,
+        val summary: String,
+        val settings: Map<String, String> = emptyMap(),
+        val enabled: Boolean? = null,
+        val agentRequired: Boolean? = null,
+        /** Definição funcional sanitizada (nunca contém valores protegidos), pronta para revisão no card. */
+        val definitionYaml: String? = null,
+        /** Fingerprint não reversível da configuração vista ao propor; bloqueia aplicação sobre estado desatualizado. */
+        val baseFingerprint: String,
+        val applied: Boolean = false,
+    ) : ChatItem()
+
     /** Perguntas de múltipla escolha do agente (ask_question): aparece só quando há uma dúvida real. */
     @Serializable
     data class Question(
@@ -184,6 +202,10 @@ data class Session(
     val autoCompact: Boolean = true,
     /** Sessão aberta pelo criador de UI Connectors: só nela as ferramentas connector_* existem. */
     val connectorBuilder: Boolean = false,
+    /** Chat de edição vinculado a um único UI Connector; não habilita ferramentas gerais nem outros conectores. */
+    val connectorEditId: String? = null,
+    /** Fingerprint da configuração apresentada ao abrir o chat de edição. */
+    val connectorEditFingerprint: String? = null,
 )
 
 /** Memória de longo prazo (global ou de um Agent), recuperada por relevância — não toda de uma vez. */

@@ -44,6 +44,8 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.CancellationException
 
 @Composable
 private fun toneColor(t: Tone): Color {
@@ -171,41 +173,97 @@ fun UiConnectorScreen(nav: NavController, id: String) {
     val scope = rememberCoroutineScope()
     val lifecycleOwner = LocalLifecycleOwner.current
 
-    var loggedIn by remember { mutableStateOf(connector.isLoggedIn) }
+    var loggedIn by remember(id, connector) { mutableStateOf(connector.isLoggedIn) }
     var blocks by remember { mutableStateOf<List<UiBlock>>(emptyList()) }
+    var snapshotLoading by remember(id, connector) { mutableStateOf(connector.isLoggedIn) }
+    var snapshotLoaded by remember(id, connector) { mutableStateOf(false) }
+    var snapshotAttempt by remember(id, connector) { mutableStateOf(0) }
     var busy by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
     var notice by remember { mutableStateOf<String?>(null) }
     val fields = remember { mutableStateMapOf<String, String>() }
     var remember_ by remember { mutableStateOf(true) }
-    var enabled by remember { mutableStateOf(hub.enabled(id)) }
-    var agentRequired by remember { mutableStateOf(hub.agentRequired(id)) }
+    var configVersion by remember(id, connector) { mutableStateOf(0) }
+    var enabled by remember(id, connector, configVersion) { mutableStateOf(hub.enabled(id)) }
+    var agentRequired by remember(id, connector, configVersion) { mutableStateOf(hub.agentRequired(id)) }
 
-    val refreshMutex = remember(id) { Mutex() }
+    fun openAiEditChat() {
+        val config = hub.editableConfiguration(id) ?: return
+        val connectorName = if (dev.cueopen.app.uiconnector.custom.ConnectorDefinitionEdit.containsSecretLikeValue(connector.spec.name))
+            "conector selecionado" else connector.spec.name.take(160)
+        val promptHint = if (hub.isCustom(id))
+            "Peça mudanças nas configurações ou na definição funcional (painéis, ações e ferramentas); credenciais e permissões permanecem protegidas."
+        else "Peça mudanças nas configurações disponíveis; a definição interna deste conector não é editável pelo chat."
+        val session = dev.cueopen.app.data.Session(
+            title = "Editar: $connectorName",
+            connectorEditId = id,
+            connectorEditFingerprint = config.fingerprint,
+            items = listOf(dev.cueopen.app.data.ChatItem.Assistant(
+                text = "Este chat está vinculado apenas a $connectorName. $promptHint A IA mostrará um card para você revisar e aplicar.",
+                final = true,
+            )),
+        )
+        CueApp.instance.store.upsertSession(session)
+        nav.navigate("chat/${session.id}")
+    }
+
+    val refreshMutex = remember(id, connector) { Mutex() }
     suspend fun refresh(): Boolean = refreshMutex.withLock {
-        val next = runCatching { connector.snapshot(hub.settings(connector)) }
-            .getOrElse {
-                CueApp.instance.connectorDebugLog.recordFailure(id, "snapshot", it)
-                listOf(UiBlock.Note(it.message ?: it.javaClass.simpleName, Tone.BAD))
+        val attempt = ++snapshotAttempt
+        snapshotLoading = true
+        val watchdog = scope.launch {
+            delay(15_000L)
+            if (snapshotAttempt == attempt && snapshotLoading) {
+                snapshotLoading = false
+                snapshotLoaded = true
+                blocks = listOf(UiBlock.Note("A consulta continua demorando. O indicador foi encerrado; toque em atualizar para tentar novamente.", Tone.WARN))
             }
-        val changed = next != blocks
-        if (changed) blocks = next
-        changed
+        }
+        try {
+            val next = withTimeoutOrNull(15_000L) { connector.snapshot(hub.settings(connector)) }
+            if (snapshotAttempt != attempt) false
+            else if (next == null) {
+                blocks = listOf(UiBlock.Note("A consulta do conector excedeu 15 segundos e foi interrompida. Toque em atualizar para tentar novamente.", Tone.WARN))
+                snapshotLoaded = true
+                false
+            } else {
+                val changed = next != blocks
+                if (changed) blocks = next
+                snapshotLoaded = true
+                changed
+            }
+        } catch (cancel: CancellationException) {
+            throw cancel
+        } catch (t: Throwable) {
+            if (snapshotAttempt == attempt) {
+                CueApp.instance.connectorDebugLog.recordFailure(id, "snapshot", t)
+                blocks = listOf(UiBlock.Note(t.message ?: t.javaClass.simpleName, Tone.BAD))
+                snapshotLoaded = true
+            }
+            false
+        } finally {
+            watchdog.cancel()
+            if (snapshotAttempt == attempt) snapshotLoading = false
+        }
     }
 
     // Reconecta sozinho com as credenciais do cofre ao abrir a tela.
-    LaunchedEffect(id) {
+    LaunchedEffect(id, connector) {
         if (!connector.isLoggedIn && hub.hasSavedCredentials(id)) {
             busy = true
-            hub.ensureLoggedIn(id).onSuccess { loggedIn = true }.onFailure { error = it.message }
-            busy = false
+            try {
+                hub.ensureLoggedIn(id).onSuccess { loggedIn = true }.onFailure { error = it.message }
+            } finally {
+                busy = false
+            }
         }
     }
     // A tela observa eventos do conector enquanto visível. Sem push, usa fallback
     // exponencial limitado; não mantém ciclo de atualização oculto em background.
-    LaunchedEffect(id, loggedIn, lifecycleOwner) {
+    LaunchedEffect(id, connector, loggedIn, lifecycleOwner) {
         lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
             coroutineScope {
+                configVersion++
                 if (connector.isLoggedIn) {
                     loggedIn = true
                     refresh()
@@ -234,7 +292,8 @@ fun UiConnectorScreen(nav: NavController, id: String) {
 
     Scaffold(containerColor = c.bg, topBar = {
         CueTopBar(connector.spec.name, { nav.popBackStack() }) {
-            if (loggedIn) IconButton({ scope.launch { refresh() } }) { Icon(Icons.Rounded.Refresh, "Atualizar") }
+            IconButton(onClick = ::openAiEditChat) { Icon(Icons.Rounded.Edit, "Editar com IA", tint = c.accent) }
+            if (loggedIn) IconButton(onClick = { scope.launch { refresh() } }, enabled = !snapshotLoading) { Icon(Icons.Rounded.Refresh, "Atualizar") }
         }
     }) { pad ->
         LazyColumn(Modifier.padding(pad), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -242,20 +301,26 @@ fun UiConnectorScreen(nav: NavController, id: String) {
                 LoginCard(connector, fields, remember_, { remember_ = it }, busy, error) {
                     scope.launch {
                         busy = true; error = null
-                        // senhas vão exatamente como digitadas; os demais campos sem espaços nas pontas
-                        val creds = connector.spec.loginFields.associate { f ->
-                            val raw = fields[f.id].orEmpty()
-                            f.id to (if (f.type == FieldType.PASSWORD) raw else raw.trim())
+                        try {
+                            // senhas vão exatamente como digitadas; os demais campos sem espaços nas pontas
+                            val creds = connector.spec.loginFields.associate { f ->
+                                val raw = fields[f.id].orEmpty()
+                                f.id to (if (f.type == FieldType.PASSWORD) raw else raw.trim())
+                            }
+                            hub.login(id, creds, remember_)
+                                .onSuccess { loggedIn = true; fields.clear() }
+                                .onFailure { error = it.message ?: "Falha no login." }
+                        } finally {
+                            busy = false
                         }
-                        hub.login(id, creds, remember_)
-                            .onSuccess { loggedIn = true; fields.clear() }
-                            .onFailure { error = it.message ?: "Falha no login." }
-                        busy = false
                     }
                 }
             } else {
                 notice?.let { n -> item { Text(n, fontSize = 13.sp, color = c.ink2, modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(c.accentSoft).padding(12.dp)) } }
-                if (blocks.isEmpty()) item { Box(Modifier.fillMaxWidth().padding(24.dp), contentAlignment = Alignment.Center) { CircularProgressIndicator(Modifier.size(28.dp), strokeWidth = 2.dp, color = c.accent) } }
+                if (snapshotLoading) item { Box(Modifier.fillMaxWidth().padding(24.dp), contentAlignment = Alignment.Center) { CircularProgressIndicator(Modifier.size(28.dp), strokeWidth = 2.dp, color = c.accent) } }
+                else if (snapshotLoaded && blocks.isEmpty()) item {
+                    Text("Nenhum painel foi retornado pelo conector. Toque em atualizar para tentar novamente.", fontSize = 13.sp, color = c.ink3, modifier = Modifier.fillMaxWidth().padding(16.dp))
+                }
                 blocks.forEach { b ->
                     item {
                         UiBlockView(b) { action, args ->
@@ -280,11 +345,11 @@ fun UiConnectorScreen(nav: NavController, id: String) {
                     connector.spec.settings.forEach { s ->
                         when (s.type) {
                             SettingType.SWITCH -> {
-                                var v by remember(s.id) { mutableStateOf(hub.settingValue(connector, s).equals("true", true)) }
+                                var v by remember(s.id, configVersion) { mutableStateOf(hub.settingValue(connector, s).equals("true", true)) }
                                 ToggleRow(s.label + if (s.risky) "  ⚠" else "", s.description, v) { v = it; hub.setSetting(connector, s, it.toString()) }
                             }
                             else -> {
-                                var v by remember(s.id) { mutableStateOf(hub.settingValue(connector, s)) }
+                                var v by remember(s.id, configVersion) { mutableStateOf(hub.settingValue(connector, s)) }
                                 Column {
                                     OutlinedTextField(
                                         value = v, onValueChange = { v = it; hub.setSetting(connector, s, it) },

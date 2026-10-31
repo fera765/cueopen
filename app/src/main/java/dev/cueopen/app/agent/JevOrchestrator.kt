@@ -45,7 +45,7 @@ object JevOrchestrator {
             "device_accessibility_scroll", "device_accessibility_back",
             "device_accessibility_inspect_image"
         ),
-        "connector_builder" to setOf("connector_spec", "connector_validate", "connector_test", "connector_propose"),
+        "connector_builder" to setOf("connector_spec", "connector_validate", "connector_test", "connector_propose", "connector_edit_propose"),
     )
 
     private val GROUP_OF: Map<String, String> = GROUPS.flatMap { (g, ts) -> ts.map { it to g } }.toMap()

@@ -407,6 +407,7 @@ fun TimelineItem(item: ChatItem, onOpenComputer: (String) -> Unit, onOpenMedia: 
         is ChatItem.Media -> MediaCard(item, onOpenMedia)
         is ChatItem.Error -> InfoRow(Icons.Rounded.ErrorOutline, item.text, Cue.c.err)
         is ChatItem.ConnectorProposal -> ConnectorProposalCard(item, sessionId, nav)
+        is ChatItem.ConnectorEditProposal -> ConnectorEditProposalCard(item, sessionId)
         is ChatItem.Question -> QuestionCard(item, sessionId)
         is ChatItem.SecureForm -> SecureFormCard(item, sessionId)
     }
@@ -792,6 +793,7 @@ fun sessionMarkdown(s: Session): String = buildString {
             is ChatItem.Plan -> { appendLine("**Plano:** ${i.goal}"); i.phases.forEach { appendLine("- [${if (it.done) "x" else " "}] ${it.title}") }; appendLine() }
             is ChatItem.Error -> appendLine("⚠️ ${i.text}\n")
             is ChatItem.ConnectorProposal -> appendLine("🧩 Conector ${i.name} (${i.host})${if (i.installed) " — instalado" else ""}\n")
+            is ChatItem.ConnectorEditProposal -> appendLine("⚙️ Atualização de ${i.connectorName}: ${i.summary}${if (i.applied) " — aplicada" else " — pendente"}\n")
             is ChatItem.Question -> { i.questions.forEachIndexed { n, q -> appendLine("❓ ${q.question} → ${i.answers.getOrNull(n)?.joinToString().orEmpty().ifBlank { "—" }}") }; appendLine() }
             is ChatItem.SecureForm -> appendLine("🔒 ${i.title}: ${if (i.state == "submitted") "enviado com segurança (" + i.submitted.joinToString() + ")" else i.state}\n")
             is ChatItem.Media -> appendLine("🖼 ${i.caption} (${java.io.File(i.path).name})\n")
@@ -883,6 +885,95 @@ private fun ConnectorProposalCard(p: ChatItem.ConnectorProposal, sessionId: Stri
                 enabled = !busy, modifier = Modifier.fillMaxWidth().height(48.dp), shape = RoundedCornerShape(14.dp),
             ) { Text(if (exists) "Atualizar conector" else "Instalar conector", fontWeight = FontWeight.SemiBold) }
             Text("Dry-run validou o contrato com mocks locais; API/login reais e comandos não foram executados. O agente só usa o conector se você o ativar.", fontSize = 11.sp, color = c.ink3)
+        }
+    }
+}
+
+/** Card de revisão e aplicação explícita para configurações de um único conector. */
+@Composable
+private fun ConnectorEditProposalCard(p: ChatItem.ConnectorEditProposal, sessionId: String?) {
+    val c = Cue.c
+    val app = CueApp.instance
+    val scope = rememberCoroutineScope()
+    var busy by remember(p.id) { mutableStateOf(false) }
+    var error by remember(p.id) { mutableStateOf<String?>(null) }
+    var showDefinition by remember(p.id) { mutableStateOf(false) }
+    val current = app.uiConnectors.editableConfiguration(p.connectorId)
+    val settingById = current?.settings.orEmpty().associateBy { it.id }
+    val risky = p.settings.keys.any { settingById[it]?.risky == true }
+    Column(
+        Modifier.fillMaxWidth().clip(RoundedCornerShape(18.dp)).background(c.surface)
+            .border(1.dp, if (p.applied) c.ok else c.accent, RoundedCornerShape(18.dp)).padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Icon(if (p.applied) Icons.Rounded.CheckCircle else Icons.Rounded.Tune, null, tint = if (p.applied) c.ok else c.accent)
+            Spacer(Modifier.width(10.dp))
+            Column(Modifier.weight(1f)) {
+                Text(p.connectorName, fontWeight = FontWeight.SemiBold, fontSize = 16.sp)
+                Text(if (p.applied) "Atualização aplicada" else "Revisar atualização", fontSize = 12.sp, color = if (p.applied) c.ok else c.ink2)
+            }
+        }
+        Text(p.summary, fontSize = 13.sp, color = c.ink2)
+        if (p.enabled != null) Text("Habilitado: ${if (p.enabled) "ligado" else "desligado"}", fontSize = 13.sp)
+        if (p.agentRequired != null) Text("Agent required?: ${if (p.agentRequired) "ligado" else "desligado"}", fontSize = 13.sp)
+        p.settings.forEach { (id, value) ->
+            val label = settingById[id]?.label ?: id
+            Text("$label → $value", fontSize = 13.sp, color = c.ink)
+        }
+        if (p.definitionYaml != null) {
+            Text("Definição funcional", fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
+            TextButton(onClick = { showDefinition = !showDefinition }, contentPadding = PaddingValues(horizontal = 0.dp, vertical = 2.dp)) {
+                Text(if (showDefinition) "Ocultar YAML sanitizado" else "Revisar YAML sanitizado")
+            }
+            if (showDefinition) SelectionContainer {
+                Text(
+                    p.definitionYaml,
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = 10.sp,
+                    color = c.ink2,
+                    modifier = Modifier.fillMaxWidth().heightIn(max = 300.dp).verticalScroll(rememberScrollState())
+                        .horizontalScroll(rememberScrollState()).background(c.bg, RoundedCornerShape(10.dp)).padding(10.dp),
+                )
+            }
+            if (!p.applied) Text(
+                "A aprovação grava a definição, mas não executa ações. Mudanças em ferramentas ou ações podem fazer chamadas externas quando forem usadas depois; credenciais e permissões ficam preservadas.",
+                fontSize = 12.sp, color = c.warn,
+            )
+        }
+        if (risky && !p.applied) Text("Atenção: esta proposta altera uma configuração marcada como sensível. Revise antes de aplicar.", fontSize = 12.sp, color = c.warn)
+        error?.let { Text(it, fontSize = 12.sp, color = c.err) }
+        if (!p.applied) {
+            Button(
+                onClick = {
+                    scope.launch {
+                        busy = true
+                        error = null
+                        val result = app.uiConnectors.applyEditableConfiguration(
+                            p.connectorId, p.baseFingerprint, p.enabled, p.agentRequired, p.settings,
+                            definitionYaml = p.definitionYaml,
+                            sessionId = sessionId,
+                        )
+                        result.onSuccess {
+                            if (sessionId != null) {
+                                app.store.replaceItem(sessionId, p.copy(applied = true))
+                                val nextFingerprint = app.uiConnectors.configurationFingerprint(p.connectorId)
+                                app.store.editSession(sessionId) { session ->
+                                    if (session.connectorEditId == p.connectorId) session.copy(connectorEditFingerprint = nextFingerprint) else session
+                                }
+                            }
+                        }.onFailure { error = it.message ?: "Não foi possível aplicar a atualização." }
+                        busy = false
+                    }
+                },
+                enabled = !busy && current != null,
+                modifier = Modifier.fillMaxWidth().height(48.dp),
+                shape = RoundedCornerShape(14.dp),
+            ) {
+                if (busy) CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp, color = c.bg)
+                else Text("Atualizar conector", fontWeight = FontWeight.SemiBold)
+            }
+            Text("A configuração só muda depois deste toque. Nenhuma rede externa, login ou ação real é executada; validações de definição usam mocks locais.", fontSize = 11.sp, color = c.ink3)
         }
     }
 }

@@ -708,6 +708,7 @@ fun previewOf(i: dev.cueopen.app.data.ChatItem): String = when (i) {
     is dev.cueopen.app.data.ChatItem.Plan -> i.goal
     is dev.cueopen.app.data.ChatItem.Error -> i.text
     is dev.cueopen.app.data.ChatItem.ConnectorProposal -> "🧩 Conector " + i.name
+    is dev.cueopen.app.data.ChatItem.ConnectorEditProposal -> "Atualização de " + i.connectorName
     is dev.cueopen.app.data.ChatItem.Question -> "❓ " + (i.questions.firstOrNull()?.question ?: "Pergunta")
     is dev.cueopen.app.data.ChatItem.SecureForm -> "🔒 " + i.title
     is dev.cueopen.app.data.ChatItem.Media -> "🖼 " + (i.caption.ifBlank { java.io.File(i.path).name })
