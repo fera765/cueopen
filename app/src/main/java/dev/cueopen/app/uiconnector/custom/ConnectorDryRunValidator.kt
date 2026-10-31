@@ -322,7 +322,7 @@ object ConnectorDryRunValidator {
             BridgeResult(true, "dry-run: setup registrado, comando não executado")
         override suspend fun shell(command: String, timeoutSec: Int): BridgeResult =
             BridgeResult(true, "dry-run: shell não executado; fixture local de saída")
-        override suspend fun runAgentTask(task: String, model: String?, maxSteps: Int, budgetTokens: Int, timeoutSec: Int): BridgeResult =
+        override suspend fun runAgentTask(task: String, model: String?, maxSteps: Int, timeoutSec: Int): BridgeResult =
             if (Capabilities.AGENT in capabilities && task.isNotBlank()) BridgeResult(true, "dry-run: agente LLM não executado; saída mock local")
             else BridgeResult(false, "delegação LLM bloqueada no mock")
         override suspend fun fileOp(op: String, path: String, content: String?): BridgeResult {

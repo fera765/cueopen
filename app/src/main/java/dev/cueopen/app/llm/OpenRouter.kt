@@ -1,8 +1,10 @@
 package dev.cueopen.app.llm
 import dev.cueopen.app.agent.ToolCallHistoryNormalizer
 import dev.cueopen.app.data.LlmMessage
+import dev.cueopen.app.data.ProviderModels
 import dev.cueopen.app.data.Settings
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
@@ -34,6 +36,7 @@ import kotlin.coroutines.resumeWithException
 data class ToolCall(val id: String, val name: String, val argsJson: String)
 data class Usage(val prompt: Long = 0, val completion: Long = 0, val cached: Long = 0)
 data class LlmReply(val content: String?, val toolCalls: List<ToolCall>, val rawToolCallsJson: String?, val usage: Usage = Usage(), val truncated: Boolean = false)
+data class LlmModelLimits(val contextTokens: Int? = null, val maxCompletionTokens: Int? = null)
 
 class LlmRequestFailure(
     message: String,
@@ -51,6 +54,29 @@ class OpenRouter(private val settings: () -> Settings) {
             throw IOException("CueApp ainda não inicializou; recusando conexão Agent/API direta.", it)
         }
         return app.proxyHttpClient(ProxyScope.AGENT_API, baseHttp)
+    }
+
+    /** Contexto do modelo para dimensionar tarefas delegadas; catálogo e chat usam o mesmo proxy Agent/API. */
+    suspend fun modelLimits(modelId: String?): LlmModelLimits? = withContext(Dispatchers.IO) {
+        val s = settings()
+        val selected = modelId?.takeIf { it.isNotBlank() } ?: s.model
+        if (selected.isBlank()) return@withContext null
+        try {
+            val model = ProviderModels.all(
+                s.baseUrl,
+                s.apiKey,
+                httpClient = http(),
+                cacheScope = s.agentApiProxyId ?: "direct",
+            ).firstOrNull { it.id == selected } ?: return@withContext null
+            LlmModelLimits(
+                contextTokens = model.context.takeIf { it > 0 },
+                maxCompletionTokens = model.maxCompletionTokens.takeIf { it > 0 },
+            ).takeIf { it.contextTokens != null || it.maxCompletionTokens != null }
+        } catch (cancel: CancellationException) {
+            throw cancel
+        } catch (_: Exception) {
+            null
+        }
     }
 
     // modelos que recusam reasoning desligado (lembrado em runtime para não repetir o erro)
@@ -120,7 +146,7 @@ class OpenRouter(private val settings: () -> Settings) {
         messages: List<LlmMessage>,
         tools: JsonArray? = null,
         model: String? = null,
-        maxTokens: Int = 16000,
+        maxTokens: Int? = 16000,
         jsonResponse: Boolean = false,
         conversationId: String? = null,
     ): LlmReply = withContext(Dispatchers.IO) {
@@ -135,7 +161,7 @@ class OpenRouter(private val settings: () -> Settings) {
         val safeMessages = ToolCallHistoryNormalizer.normalize(messages)
         fun buildBody(disableReasoning: Boolean, structuredOutput: Boolean) = buildJsonObject {
             put("model", mdl)
-            put("max_tokens", maxTokens)
+            if (maxTokens != null) put("max_tokens", maxTokens)
             put("temperature", 0.2)
             put("messages", buildJsonArray { safeMessages.forEach { add(it.toJson()) } })
             if (tools != null && tools.isNotEmpty()) {

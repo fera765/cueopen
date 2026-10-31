@@ -11,12 +11,13 @@ import org.junit.Test
 class ProviderModelsTest {
     @Test fun `catalogo OpenAI aceita data, metadata e parametros`() {
         val models = ProviderModels.parseCatalog(
-            """{"object":"list","data":[{"id":"glm-5.3","object":"model","owned_by":"opencode"},{"id":"acme/agent","name":"Agent","context_length":64000,"pricing":{"prompt":"0.000001","completion":"0.000002"},"supported_parameters":["tools","json"]}]}"""
+            """{"object":"list","data":[{"id":"glm-5.3","object":"model","owned_by":"opencode"},{"id":"acme/agent","name":"Agent","context_length":64000,"top_provider":{"max_completion_tokens":8192},"pricing":{"prompt":"0.000001","completion":"0.000002"},"supported_parameters":["tools","json"]}]}"""
         )
         assertEquals(2, models.size)
         assertEquals("glm-5.3", models[0].id)
         assertEquals("Agent", models[1].name)
         assertEquals(64_000, models[1].context)
+        assertEquals(8_192, models[1].maxCompletionTokens)
         assertEquals(1.0, models[1].promptPrice!!, 0.00001)
         assertEquals(2.0, models[1].completionPrice!!, 0.00001)
         assertTrue("tools" in models[1].supportedParameters)
@@ -28,6 +29,9 @@ class ProviderModelsTest {
         assertEquals("b", ProviderModels.parseCatalog("""{"models":[{"id":"b"}]}""").single().id)
         assertTrue(ProviderModels.parseCatalog("not json").isEmpty())
         assertNull(array.single().promptPrice)
+        val topProvider = ProviderModels.parseCatalog("""[{"id":"nested","top_provider":{"context_length":32000,"max_completion_tokens":4096}}]""").single()
+        assertEquals(32_000, topProvider.context)
+        assertEquals(4_096, topProvider.maxCompletionTokens)
     }
 
     @Test fun `OpenCode Go usa endpoint de modelos documentado fora do base OpenAI`() {

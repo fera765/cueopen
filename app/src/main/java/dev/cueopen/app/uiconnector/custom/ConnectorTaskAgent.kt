@@ -17,7 +17,7 @@ fun interface ConnectorTaskModel {
         messages: List<LlmMessage>,
         tools: JsonArray,
         model: String?,
-        maxTokens: Int,
+        maxTokens: Int?,
         conversationId: String,
     ): LlmReply
 }
@@ -33,21 +33,23 @@ class ConnectorTaskAgent(
     private val bridge: HostBridge,
 ) {
     companion object {
-        const val MAX_TASK_CHARS = 8_000
         const val MAX_STEPS = 12
-        const val MAX_BUDGET_TOKENS = 12_000
         const val MAX_TOOL_CALLS = 24
-        const val MAX_CONTEXT_CHARS = 64_000
-        const val MAX_TOOL_RESULT_CHARS = 6_000
         const val MAX_WRITE_CHARS = 512_000
     }
 
-    suspend fun run(task: String, modelId: String?, maxSteps: Int, budgetTokens: Int): BridgeResult {
+    suspend fun run(
+        task: String,
+        modelId: String?,
+        maxSteps: Int,
+        modelContextTokens: Int? = null,
+        modelMaxCompletionTokens: Int? = null,
+    ): BridgeResult {
         val cleanTask = task.trim()
         if (cleanTask.isEmpty()) return BridgeResult(false, "a tarefa delegada está vazia")
-        if (cleanTask.length > MAX_TASK_CHARS) return BridgeResult(false, "a tarefa delegada excede $MAX_TASK_CHARS caracteres")
         val stepLimit = maxSteps.coerceIn(1, MAX_STEPS)
-        var remainingTokens = budgetTokens.coerceIn(512, MAX_BUDGET_TOKENS)
+        val contextWindow = modelContextTokens?.takeIf { it > 0 }?.toLong()
+        val providerOutputLimit = modelMaxCompletionTokens?.takeIf { it > 0 }?.toLong()
         val conversationId = "uic-$connectorId-${UUID.randomUUID()}"
         val messages = arrayListOf(
             LlmMessage("system", systemPrompt()),
@@ -57,29 +59,36 @@ class ConnectorTaskAgent(
         var lastProgress = ""
 
         for (step in 1..stepLimit) {
-            if (messages.sumOf { (it.content?.length ?: 0) + (it.toolCallsJson?.length ?: 0) } > MAX_CONTEXT_CHARS)
-                return BridgeResult(false, "tarefa interrompida: limite local de contexto atingido${progressSuffix(lastProgress)}")
             val tools = availableTools()
+            val maxPromptTokens = contextWindow
+            compactHistory(messages, tools, maxPromptTokens)
             val estimatedPrompt = estimatePrompt(messages, tools)
-            val outputBudget = remainingTokens.toLong() - estimatedPrompt
-            if (outputBudget < 128L) return BridgeResult(false, "orçamento restante insuficiente para contexto e resposta do agente${progressSuffix(lastProgress)}")
-            val perCallBudget = outputBudget.coerceAtMost(2_048L).toInt()
+            if (maxPromptTokens != null && estimatedPrompt > maxPromptTokens)
+                return BridgeResult(false, "pedido e histórico preservado excedem a janela nativa de $contextWindow tokens do modelo${progressSuffix(lastProgress)}")
+            val contextOutputHeadroom = contextWindow?.minus(estimatedPrompt)
+            if (contextOutputHeadroom != null && contextOutputHeadroom <= 0L)
+                return BridgeResult(false, "o pedido ocupa toda a janela nativa de contexto do modelo; selecione um modelo com janela maior${progressSuffix(lastProgress)}")
+            val perCallMaxTokens = listOfNotNull(contextOutputHeadroom, providerOutputLimit).minOrNull()
+                ?.takeIf { it > 0L }?.coerceAtMost(Int.MAX_VALUE.toLong())?.toInt()
             val reply = try {
-                model.chat(messages.toList(), tools, modelId?.takeIf { it.isNotBlank() }, perCallBudget, conversationId)
+                model.chat(messages.toList(), tools, modelId?.takeIf { it.isNotBlank() }, perCallMaxTokens, conversationId)
             } catch (cancel: CancellationException) {
                 throw cancel
             } catch (t: Throwable) {
                 return BridgeResult(false, "falha na chamada do modelo (${t.javaClass.simpleName})${progressSuffix(lastProgress)}")
             }
-            val inputTokens = reply.usage.prompt.takeIf { it > 0 } ?: estimatedPrompt
-            val outputTokens = reply.usage.completion.takeIf { it > 0 } ?: estimateCompletion(reply)
-            val spent = saturatedAdd(inputTokens.coerceAtLeast(0L), outputTokens.coerceAtLeast(1L))
-            if (spent > remainingTokens.toLong()) return BridgeResult(false, "orçamento total de tokens do agente excedido${progressSuffix(lastProgress)}")
-            remainingTokens -= spent.toInt()
-            if (!reply.content.isNullOrBlank()) lastProgress = reply.content.trim().take(MAX_TOOL_RESULT_CHARS)
+            if (!reply.content.isNullOrBlank()) lastProgress = reply.content.trim()
 
             if (reply.toolCalls.isEmpty()) {
                 val answer = reply.content?.trim().orEmpty()
+                if (reply.truncated) {
+                    if (step >= stepLimit)
+                        return BridgeResult(false, "resposta truncada pela janela/limite nativo de saída do modelo e o limite de passos foi atingido${progressSuffix(answer)}")
+                    messages += LlmMessage("assistant", answer)
+                    messages += LlmMessage("user", "A resposta anterior foi cortada pelo limite de saída. Continue do ponto exato em que parou, sem repetir o texto concluído, e termine a tarefa.")
+                    lastProgress = answer
+                    continue
+                }
                 return if (answer.isBlank()) BridgeResult(false, "o modelo encerrou sem resposta${progressSuffix(lastProgress)}")
                 else BridgeResult(true, "Concluído em $step passo(s) do agente.\n$answer".take(BridgeSecurity.MAX_OUTPUT_CHARS))
             }
@@ -91,12 +100,11 @@ class ConnectorTaskAgent(
                 val result = if (toolCalls > MAX_TOOL_CALLS) {
                     "ERRO: limite total de $MAX_TOOL_CALLS chamadas de ferramenta atingido."
                 } else executeTool(call.name, call.argsJson)
-                messages += LlmMessage("tool", result.take(MAX_TOOL_RESULT_CHARS), toolCallId = call.id, name = call.name)
+                messages += LlmMessage("tool", result.take(BridgeSecurity.MAX_OUTPUT_CHARS), toolCallId = call.id, name = call.name)
             }
             reply.toolCalls.drop(4).forEach { call ->
                 messages += LlmMessage("tool", "ERRO: máximo de quatro chamadas por resposta do agente.", toolCallId = call.id, name = call.name)
             }
-            if (remainingTokens <= 0) return BridgeResult(false, "orçamento total de tokens do agente esgotado${progressSuffix(lastProgress)}")
             if (step == stepLimit) return BridgeResult(false, "limite de $stepLimit passos do agente atingido${progressSuffix(lastProgress)}")
         }
         return BridgeResult(false, "a tarefa delegada foi interrompida${progressSuffix(lastProgress)}")
@@ -145,14 +153,14 @@ class ConnectorTaskAgent(
                     if (command.length > BridgeSecurity.MAX_CMD_CHARS) return "ERRO: comando excede ${BridgeSecurity.MAX_CMD_CHARS} caracteres."
                     val timeout = (integer("timeout_sec") ?: 60).coerceIn(1, 90)
                     val result = bridge.agentShell(command, timeout)
-                    (if (result.ok) "OK: " else "ERRO: ") + result.text.take(MAX_TOOL_RESULT_CHARS)
+                    (if (result.ok) "OK: " else "ERRO: ") + result.text.take(BridgeSecurity.MAX_OUTPUT_CHARS)
                 }
                 "file_list", "file_read" -> {
                     if (!bridge.granted(Capabilities.FILES)) return "RECUSADO: a autorização de arquivos foi revogada ou não foi concedida."
                     val path = text("path").orEmpty()
                     if (!safeRelativePath(path, allowEmpty = name == "file_list")) return "RECUSADO: caminho inválido; use somente um caminho relativo dentro do workspace."
                     val result = bridge.fileOp(if (name == "file_list") "list" else "read", path, null)
-                    (if (result.ok) "OK: " else "ERRO: ") + result.text.take(MAX_TOOL_RESULT_CHARS)
+                    (if (result.ok) "OK: " else "ERRO: ") + result.text.take(BridgeSecurity.MAX_OUTPUT_CHARS)
                 }
                 "file_write" -> {
                     if (!bridge.granted(Capabilities.FILES)) return "RECUSADO: a autorização de arquivos foi revogada ou não foi concedida."
@@ -161,7 +169,7 @@ class ConnectorTaskAgent(
                     if (content == null) return "ERRO: content deve ser texto."
                     if (content.length > MAX_WRITE_CHARS) return "ERRO: arquivo excede $MAX_WRITE_CHARS caracteres."
                     val result = bridge.fileOp("write", path, content)
-                    (if (result.ok) "OK: " else "ERRO: ") + result.text.take(MAX_TOOL_RESULT_CHARS)
+                    (if (result.ok) "OK: " else "ERRO: ") + result.text.take(BridgeSecurity.MAX_OUTPUT_CHARS)
                 }
                 "file_edit" -> {
                     if (!bridge.granted(Capabilities.FILES)) return "RECUSADO: a autorização de arquivos foi revogada ou não foi concedida."
@@ -170,7 +178,7 @@ class ConnectorTaskAgent(
                     if (old.isNullOrEmpty() || new == null) return "ERRO: old_text e new_text devem ser texto e old_text não pode ser vazio."
                     if (old.length > MAX_WRITE_CHARS || new.length > MAX_WRITE_CHARS) return "ERRO: trecho excede o limite local."
                     val result = bridge.replaceFile(path, old, new, allowMultiple = false)
-                    (if (result.ok) "OK: " else "ERRO: ") + result.text.take(MAX_TOOL_RESULT_CHARS)
+                    (if (result.ok) "OK: " else "ERRO: ") + result.text.take(BridgeSecurity.MAX_OUTPUT_CHARS)
                 }
                 else -> "RECUSADO: ferramenta não permitida nesta tarefa delegada."
             }
@@ -188,18 +196,30 @@ class ConnectorTaskAgent(
         return path.split('/').none { it == ".." }
     }
 
+    /** Remove turnos antigos de ferramentas em pares, preservando o pedido original e a execução recente. */
+    private fun compactHistory(messages: MutableList<LlmMessage>, tools: JsonArray, maxPromptTokens: Long?) {
+        if (maxPromptTokens == null) return
+        var noteInserted = false
+        while (estimatePrompt(messages, tools) > maxPromptTokens) {
+            val start = (2 until messages.size).firstOrNull { index ->
+                messages[index].role == "assistant" && !messages[index].toolCallsJson.isNullOrBlank()
+            } ?: return
+            val end = (start + 1 until messages.size).firstOrNull { index ->
+                messages[index].role == "assistant" && !messages[index].toolCallsJson.isNullOrBlank()
+            } ?: messages.size
+            messages.subList(start, end).clear()
+            if (!noteInserted) {
+                messages.add(start, LlmMessage("assistant", "Histórico antigo de ferramentas compactado para caber na janela do modelo; consulte os arquivos do workspace para o estado persistente."))
+                noteInserted = true
+            }
+        }
+    }
+
     /** Conta tokens de entrada (histórico + schemas) mesmo quando o provedor não reporta usage.prompt. */
     private fun estimatePrompt(messages: List<LlmMessage>, tools: JsonArray): Long {
         val chars = messages.sumOf { (it.role.length + (it.name?.length ?: 0) + (it.content?.length ?: 0) + (it.toolCallsJson?.length ?: 0)).toLong() } + tools.toString().length
         return ((chars + 2) / 3 + messages.size * 4L).coerceAtLeast(1L)
     }
-
-    private fun estimateCompletion(reply: LlmReply): Long {
-        val chars = reply.content.orEmpty().length + reply.rawToolCallsJson.orEmpty().length
-        return ((chars.toLong() + 2) / 3 + reply.toolCalls.size * 4L).coerceAtLeast(1L)
-    }
-
-    private fun saturatedAdd(a: Long, b: Long): Long = if (Long.MAX_VALUE - a < b) Long.MAX_VALUE else a + b
 
     private fun progressSuffix(text: String): String = if (text.isBlank()) "" else "\nÚltima saída parcial: ${text.take(1_000)}"
 

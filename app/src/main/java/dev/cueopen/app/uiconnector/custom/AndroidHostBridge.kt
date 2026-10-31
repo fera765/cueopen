@@ -116,7 +116,7 @@ class AndroidHostBridge(
         }
     }
 
-    override suspend fun runAgentTask(task: String, model: String?, maxSteps: Int, budgetTokens: Int, timeoutSec: Int): BridgeResult {
+    override suspend fun runAgentTask(task: String, model: String?, maxSteps: Int, timeoutSec: Int): BridgeResult {
         if (!granted(Capabilities.AGENT)) return BridgeResult(false, "delegação LLM não autorizada para este conector")
         if (task.isBlank()) return BridgeResult(false, "a tarefa delegada está vazia")
         val lock = taskLocks.computeIfAbsent(def.id) { Mutex() }
@@ -129,7 +129,8 @@ class AndroidHostBridge(
             val runner = ConnectorTaskAgent(def.id, taskModel, this)
             try {
                 withTimeout(timeoutSec.coerceIn(15, 900) * 1_000L) {
-                    runner.run(task, model, maxSteps, budgetTokens)
+                    val modelLimits = app.llm.modelLimits(model)
+                    runner.run(task, model, maxSteps, modelLimits?.contextTokens, modelLimits?.maxCompletionTokens)
                 }
             } catch (_: TimeoutCancellationException) {
                 BridgeResult(false, "tarefa LLM excedeu o limite de ${timeoutSec.coerceIn(15, 900)} segundos")

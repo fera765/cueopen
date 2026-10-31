@@ -27,7 +27,8 @@ class ConnectorTaskAgentTest {
         assertEquals("fluwyopendev", def.id)
         assertEquals(setOf(Capabilities.AGENT, Capabilities.TERMINAL, Capabilities.FILES), def.capabilities)
         assertEquals(3, def.tools.size)
-        assertTrue(def.tools.all { it.agent != null && it.agent!!.maxSteps in 1..12 && it.agent!!.budgetTokens <= 12_000 })
+        assertTrue(def.tools.all { it.agent != null && it.agent!!.maxSteps in 1..12 })
+        assertFalse(LocalDevStudioTemplate.YAML.contains("budgetTokens:"))
         assertTrue(ConnectorGuardrails.staticCheck(def).none { it.level == ConnectorGuardrails.Level.ERROR })
     }
 
@@ -39,7 +40,7 @@ class ConnectorTaskAgentTest {
         assertTrue(CustomDefParser.parse(base.replace("\"agent\"],", "\"terminal\"],")).errors.any { it.contains("agent") })
         assertTrue(CustomDefParser.parse(base.replace("\"risky\":true", "\"risky\":false")).errors.any { it.contains("risky") })
         assertTrue(CustomDefParser.parse(base.replace("\"maxSteps\":4", "\"maxSteps\":99")).errors.any { it.contains("maxSteps") })
-        assertTrue(CustomDefParser.parse(base.replace("\"budgetTokens\":2000", "\"budgetTokens\":10")).errors.any { it.contains("budgetTokens") })
+        assertTrue(CustomDefParser.parse(base.replace("\"budgetTokens\":2000", "\"budgetTokens\":10")).errors.isEmpty())
         assertTrue(CustomDefParser.parse(base.replace("{{pedido}}", "{{password}}")).errors.any { it.contains("variável desconhecida") })
     }
 
@@ -92,7 +93,7 @@ class ConnectorTaskAgentTest {
                 LlmReply("Criado index.html e verificado com ls.", emptyList(), null)
             }
         }
-        val result = ConnectorTaskAgent("demo", model, bridge).run("Crie uma página", "test/model", 4, 6_000)
+        val result = ConnectorTaskAgent("demo", model, bridge).run("Crie uma página", "test/model", 4)
         assertTrue(result.text, result.ok)
         assertEquals("<main>Open Dev</main>", bridge.files["index.html"])
         assertTrue(bridge.commands.contains("ls -la"))
@@ -109,7 +110,7 @@ class ConnectorTaskAgentTest {
                 LlmReply("Recusei o caminho fora do workspace.", emptyList(), null)
             }
         }
-        val result = ConnectorTaskAgent("demo", model, bridge).run("Crie um arquivo", null, 3, 4_000)
+        val result = ConnectorTaskAgent("demo", model, bridge).run("Crie um arquivo", null, 3)
         assertTrue(result.ok)
         assertTrue(bridge.files.isEmpty())
         assertEquals(0, bridge.fileCalls)
@@ -126,7 +127,7 @@ class ConnectorTaskAgentTest {
                 LlmReply("Não fiz alterações porque a permissão foi revogada.", emptyList(), null)
             }
         }
-        val result = ConnectorTaskAgent("demo", model, bridge).run("Crie uma página", null, 3, 4_000)
+        val result = ConnectorTaskAgent("demo", model, bridge).run("Crie uma página", null, 3)
         assertTrue(result.ok)
         assertTrue(bridge.files.isEmpty())
         assertEquals(0, bridge.fileCalls)
@@ -145,7 +146,7 @@ class ConnectorTaskAgentTest {
             assertTrue(tools.isEmpty())
             LlmReply("Revisão sem ferramentas concluída.", emptyList(), null)
         }
-        val result = ConnectorTaskAgent("demo", model, bridge).run("Revise a especificação", null, 2, 1_000)
+        val result = ConnectorTaskAgent("demo", model, bridge).run("Revise a especificação", null, 2)
         assertTrue(result.text, result.ok)
         assertEquals(listOf(emptySet<String>()), model.observedToolSets)
         assertTrue(bridge.commands.isEmpty())
@@ -161,7 +162,7 @@ class ConnectorTaskAgentTest {
                 LlmReply("Nenhum browser foi aberto.", emptyList(), null)
             }
         }
-        val result = ConnectorTaskAgent("demo", model, bridge).run("Abra uma página", null, 3, 4_000)
+        val result = ConnectorTaskAgent("demo", model, bridge).run("Abra uma página", null, 3)
         assertTrue(result.ok)
         assertTrue(bridge.commands.isEmpty())
         assertEquals(0, bridge.fileCalls)
@@ -179,33 +180,56 @@ class ConnectorTaskAgentTest {
                     LlmReply("Caminho recusado.", emptyList(), null)
                 }
             }
-            val result = ConnectorTaskAgent("demo", model, bridge).run("Crie um arquivo", null, 3, 4_000)
+            val result = ConnectorTaskAgent("demo", model, bridge).run("Crie um arquivo", null, 3)
             assertTrue("path=$badPath; ${result.text}", result.ok)
             assertEquals("path=$badPath", 0, bridge.fileCalls)
             assertTrue("path=$badPath", bridge.files.isEmpty())
         }
     }
 
-    @Test fun `step and token budgets stop the delegated loop`() = runBlocking {
+    @Test fun `step limit remains while usage is not capped by an internal token budget`() = runBlocking {
         val bridge = FakeBridge(mutableSetOf(Capabilities.TERMINAL))
         val stepModel = ScriptedModel { _, _, _ ->
             LlmReply(null, listOf(ToolCall("cmd", "shell", """{"command":"pwd","timeout_sec":5}""")), rawCalls("cmd", "shell"))
         }
-        val stepResult = ConnectorTaskAgent("demo", stepModel, bridge).run("Verifique", null, 1, 4_000)
+        val stepResult = ConnectorTaskAgent("demo", stepModel, bridge).run("Verifique", null, 1)
         assertFalse(stepResult.ok)
         assertTrue(stepResult.text.contains("limite de 1 passos"))
         assertEquals(1, stepModel.calls)
         assertEquals(listOf("pwd"), bridge.commands)
 
-        val tokenModel = ScriptedModel { _, _, _ -> LlmReply("x".repeat(2_200), emptyList(), null) }
-        val tokenResult = ConnectorTaskAgent("demo", tokenModel, FakeBridge(mutableSetOf())).run("Resuma", null, 2, 1_000)
-        assertFalse(tokenResult.ok)
-        assertTrue(tokenResult.text.contains("orçamento total de tokens do agente excedido"))
+        val usageModel = ScriptedModel { _, _, _ -> LlmReply("OK", emptyList(), null, Usage(prompt = 900_000, completion = 200_000)) }
+        val usageResult = ConnectorTaskAgent("demo", usageModel, FakeBridge(mutableSetOf())).run("Resuma", null, 2)
+        assertTrue(usageResult.text, usageResult.ok)
+        assertEquals(listOf(null), usageModel.maxTokenRequests)
+    }
 
-        val reportedUsageModel = ScriptedModel { _, _, _ -> LlmReply("OK", emptyList(), null, Usage(prompt = 900, completion = 200)) }
-        val reportedUsage = ConnectorTaskAgent("demo", reportedUsageModel, FakeBridge(mutableSetOf())).run("Resuma", null, 2, 1_000)
-        assertFalse(reportedUsage.ok)
-        assertTrue(reportedUsage.text.contains("orçamento total de tokens do agente excedido"))
+    @Test fun `known native context and completion limits determine per-call max tokens`() = runBlocking {
+        val model = ScriptedModel { _, _, _ -> LlmReply("Concluído", emptyList(), null) }
+        val result = ConnectorTaskAgent("demo", model, FakeBridge(mutableSetOf()))
+            .run("Resuma", null, 2, modelContextTokens = 4_096, modelMaxCompletionTokens = 12_000)
+        assertTrue(result.text, result.ok)
+        val requested = model.maxTokenRequests.single()!!
+        assertTrue("não deve haver o antigo teto baixo de 2k: $requested", requested > 2_048)
+        assertTrue(requested < 4_096)
+    }
+
+    @Test fun `old tool history is compacted only to fit a known native context window`() = runBlocking {
+        val bridge = FakeBridge(mutableSetOf(Capabilities.FILES))
+        bridge.files["large.txt"] = "x".repeat(30_000)
+        val model = ScriptedModel { turn, _, messages ->
+            if (turn == 1) LlmReply(null, listOf(ToolCall("read", "file_read", """{"path":"large.txt"}""")), rawCalls("read", "file_read"))
+            else {
+                val history = messages.joinToString("\n") { it.content.orEmpty() }
+                assertTrue(history.contains("Histórico antigo de ferramentas compactado"))
+                assertFalse(history.contains("x".repeat(100)))
+                LlmReply("Concluído", emptyList(), null)
+            }
+        }
+        val result = ConnectorTaskAgent("demo", model, bridge)
+            .run("Inspecione o arquivo", null, 3, modelContextTokens = 4_096, modelMaxCompletionTokens = 8_000)
+        assertTrue(result.text, result.ok)
+        assertEquals(2, model.calls)
     }
 
     private fun toolNames(tools: JsonArray): Set<String> = tools.mapNotNull { (it as? JsonObject)?.get("function")?.let { f -> (f as? JsonObject)?.get("name") as? JsonPrimitive }?.content }.toSet()
@@ -228,7 +252,7 @@ class ConnectorTaskAgentTest {
         override suspend fun shell(command: String, timeoutSec: Int) = BridgeResult(true, "shell")
         override suspend fun fileOp(op: String, path: String, content: String?) = BridgeResult(true, "file")
         override suspend fun fetch(url: String, waitSec: Int) = BridgeResult(false, "no browser")
-        override suspend fun runAgentTask(task: String, model: String?, maxSteps: Int, budgetTokens: Int, timeoutSec: Int): BridgeResult {
+        override suspend fun runAgentTask(task: String, model: String?, maxSteps: Int, timeoutSec: Int): BridgeResult {
             this.task = task; this.model = model
             return BridgeResult(true, "Concluído localmente")
         }
@@ -261,11 +285,13 @@ class ConnectorTaskAgentTest {
     ) : ConnectorTaskModel {
         var calls = 0
         val models = arrayListOf<String?>()
+        val maxTokenRequests = arrayListOf<Int?>()
         val observedToolSets = arrayListOf<Set<String>>()
         var turnMessages: String = ""
-        override suspend fun chat(messages: List<LlmMessage>, tools: JsonArray, model: String?, maxTokens: Int, conversationId: String): LlmReply {
+        override suspend fun chat(messages: List<LlmMessage>, tools: JsonArray, model: String?, maxTokens: Int?, conversationId: String): LlmReply {
             calls++
             models += model
+            maxTokenRequests += maxTokens
             observedToolSets += tools.mapNotNull { (it as? JsonObject)?.get("function")?.let { f -> (f as? JsonObject)?.get("name") as? JsonPrimitive }?.content }.toSet()
             turnMessages = messages.joinToString("\n") { it.content.orEmpty() }
             return next(calls, tools, messages)

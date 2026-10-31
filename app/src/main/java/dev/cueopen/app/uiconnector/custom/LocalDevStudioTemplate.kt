@@ -33,7 +33,6 @@ object LocalDevStudioTemplate {
                 {{pedido}}
                 Ao concluir, liste os arquivos alterados e os comandos/testes executados, com os resultados.
               maxSteps: 8
-              budgetTokens: 6000
               timeoutSec: 600
           - name: revisar_ui
             description: "Analisa o frontend existente, identifica problemas de responsividade, acessibilidade e consistência, e aplica as correções solicitadas."
@@ -50,7 +49,6 @@ object LocalDevStudioTemplate {
                 Pedido do usuário:
                 {{pedido}}
               maxSteps: 8
-              budgetTokens: 5000
               timeoutSec: 600
           - name: verificar_projeto
             description: "Executa verificações locais disponíveis no projeto frontend e resume erros e avisos sem afirmar validação visual."
@@ -65,7 +63,6 @@ object LocalDevStudioTemplate {
                 Pedido do usuário:
                 {{pedido}}
               maxSteps: 6
-              budgetTokens: 4000
               timeoutSec: 600
         """.trimIndent()
 }

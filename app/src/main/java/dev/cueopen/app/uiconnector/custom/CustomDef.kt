@@ -74,8 +74,8 @@ data class VslOutputPolicy(
     val forbiddenTermsParam: String = "",
 )
 
-/** Instrução delegada ao agente LLM, limitada por passos, tokens e tempo total. */
-data class AgentTaskStep(val task: String, val maxSteps: Int, val budgetTokens: Int, val timeoutSec: Int)
+/** Instrução delegada ao agente LLM, limitada por passos, janela nativa do modelo e tempo. */
+data class AgentTaskStep(val task: String, val maxSteps: Int, val timeoutSec: Int)
 
 data class ToolDef(
     val name: String, val description: String, val params: List<ParamSpec>, val risky: Boolean, val requiresSignal: Boolean,
@@ -699,17 +699,15 @@ object CustomDefParser {
             if (o == null) return null
             if (Capabilities.AGENT !in caps) errors.add("$path exige \"agent\" na lista capabilities do conector.")
             if (!risky) errors.add("$path: delegação LLM exige \"risky\": true para sinalizar a alteração potencial de arquivos/execução.")
+            // budgetTokens é aceito como campo legado, mas ignorado para manter YAMLs instalados compatíveis.
             known(o, path, setOf("task", "maxSteps", "budgetTokens", "timeoutSec"))
             val task = str(o, "task", path, required = true)
-            if (task.length > ConnectorTaskAgent.MAX_TASK_CHARS) errors.add("$path.task excede ${ConnectorTaskAgent.MAX_TASK_CHARS} caracteres.")
             tpl(task, "$path.task", params, false)
             val steps = str(o, "maxSteps", path, def = "6").toIntOrNull()
             if (steps == null || steps !in 1..ConnectorTaskAgent.MAX_STEPS) errors.add("$path.maxSteps deve estar entre 1 e ${ConnectorTaskAgent.MAX_STEPS}.")
-            val budget = str(o, "budgetTokens", path, def = "6000").toIntOrNull()
-            if (budget == null || budget !in 512..ConnectorTaskAgent.MAX_BUDGET_TOKENS) errors.add("$path.budgetTokens deve estar entre 512 e ${ConnectorTaskAgent.MAX_BUDGET_TOKENS}.")
             val timeout = str(o, "timeoutSec", path, def = "300").toIntOrNull()
             if (timeout == null || timeout !in 15..900) errors.add("$path.timeoutSec deve estar entre 15 e 900 segundos.")
-            return AgentTaskStep(task, (steps ?: 6).coerceIn(1, ConnectorTaskAgent.MAX_STEPS), (budget ?: 6000).coerceIn(512, ConnectorTaskAgent.MAX_BUDGET_TOKENS), (timeout ?: 300).coerceIn(15, 900))
+            return AgentTaskStep(task, (steps ?: 6).coerceIn(1, ConnectorTaskAgent.MAX_STEPS), (timeout ?: 300).coerceIn(15, 900))
         }
 
         /** Bloco "compute": {nome: expressão}. Valida sintaxe, funções, identificadores e referências c.x. */

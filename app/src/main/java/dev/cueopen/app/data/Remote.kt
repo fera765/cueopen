@@ -37,6 +37,7 @@ object ProviderModels {
         val id: String,
         val name: String,
         val context: Int = 0,
+        val maxCompletionTokens: Int = 0,
         val promptPrice: Double? = null,
         val completionPrice: Double? = null,
         val supportedParameters: Set<String> = emptySet(),
@@ -94,13 +95,21 @@ object ProviderModels {
     private fun fingerprint(key: String): String = MessageDigest.getInstance("SHA-256")
         .digest(key.toByteArray(Charsets.UTF_8)).take(8).joinToString("") { "%02x".format(it) }
 
-    suspend fun all(baseUrl: String, apiKey: String, forceRefresh: Boolean = false, includeSystemOne: Boolean = false): List<Model> {
+    suspend fun all(
+        baseUrl: String,
+        apiKey: String,
+        forceRefresh: Boolean = false,
+        includeSystemOne: Boolean = false,
+        httpClient: OkHttpClient = http,
+        cacheScope: String = "",
+    ): List<Model> {
         val endpoint = modelsEndpoint(baseUrl)
-        val cacheKey = "$endpoint|${fingerprint(apiKey)}|systemone=$includeSystemOne"
+        val cacheKey = "$endpoint|${fingerprint(apiKey)}|systemone=$includeSystemOne|scope=$cacheScope"
         val now = System.currentTimeMillis()
         if (!forceRefresh) cache[cacheKey]?.takeIf { now - it.loadedAt < CACHE_MS }?.let { return it.models }
         val requestedAt = now
         return withContext(Dispatchers.IO) {
+            val catalogClient = httpClient.newBuilder().callTimeout(25, java.util.concurrent.TimeUnit.SECONDS).build()
             val lock = fetchLocks.computeIfAbsent(cacheKey) { Mutex() }
             lock.withLock {
                 val beforeFetch = System.currentTimeMillis()
@@ -115,7 +124,7 @@ object ProviderModels {
                     if (parsedUrl.host.equals("opencode.ai", ignoreCase = true)) header("User-Agent", "CueOpen/${BuildConfig.VERSION_NAME}")
                     if (apiKey.isNotBlank()) header("Authorization", "Bearer ${apiKey.trim()}")
                 }.get().build()
-                val body = http.newCall(request).execute().use { response ->
+                val body = catalogClient.newCall(request).execute().use { response ->
                     if (!response.isSuccessful) throw IOException("Catálogo do provedor respondeu HTTP ${response.code}.")
                     response.body?.string().orEmpty()
                 }
@@ -154,14 +163,19 @@ object ProviderModels {
             val o = element as? JsonObject ?: return@mapNotNull null
             val id = o.text("id") ?: return@mapNotNull null
             val pricing = o["pricing"] as? JsonObject
+            val topProvider = o["top_provider"] as? JsonObject
             val context = o["context_length"]?.let { (it as? JsonPrimitive)?.intOrNull }
-                ?: (o["top_provider"] as? JsonObject)?.get("context_length")?.let { (it as? JsonPrimitive)?.intOrNull }
+                ?: topProvider?.get("context_length")?.let { (it as? JsonPrimitive)?.intOrNull }
+                ?: 0
+            val maxCompletion = o["max_completion_tokens"]?.let { (it as? JsonPrimitive)?.intOrNull }
+                ?: topProvider?.get("max_completion_tokens")?.let { (it as? JsonPrimitive)?.intOrNull }
                 ?: 0
             val parameters = (o["supported_parameters"] as? JsonArray)?.mapNotNull { (it as? JsonPrimitive)?.contentOrNull?.lowercase() }?.toSet().orEmpty()
             Model(
                 id = id,
                 name = o.text("name") ?: id,
                 context = context,
+                maxCompletionTokens = maxCompletion,
                 promptPrice = pricing?.number("prompt")?.times(1_000_000.0),
                 completionPrice = pricing?.number("completion")?.times(1_000_000.0),
                 supportedParameters = parameters,
