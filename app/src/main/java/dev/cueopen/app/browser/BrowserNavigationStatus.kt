@@ -51,6 +51,16 @@ internal class BrowserNavigationStatus {
 
     fun pageFinished(): String = mainFrameError ?: "OK"
 
+    /** Primeiro quadro visível prova que houve resposta, não que a aplicação esteja pronta. */
+    fun pageCommitted(url: String): String = mainFrameError
+        ?: "PARTIAL: o WebView exibiu o primeiro quadro, mas ainda não confirmou o fim do carregamento. URL: $url. Verifique DOM e estado funcional antes de agir."
+
+    fun incompleteMessage(targetUrl: String, currentUrl: String, readyState: String, bodyChars: Int): String {
+        val current = currentUrl.ifBlank { "indisponível" }
+        val ready = readyState.ifBlank { "indisponível" }
+        return "PARTIAL: a navegação principal respondeu, mas o DOM não chegou a complete. URL solicitada: $targetUrl; URL atual: $current; document.readyState=$ready; texto visível=$bodyChars caracteres. Inspecione o DOM/console e confirme a aplicação antes de agir."
+    }
+
     fun preserveHttpError(result: String): String = mainFrameError ?: result
 
     fun httpError(): String? = mainFrameError

@@ -265,6 +265,12 @@ class BrowserHost(private val appCtx: Context) {
         if (android.os.Build.VERSION.SDK_INT >= 23) v.settings.offscreenPreRaster = true
         v.webViewClient = object : WebViewClient() {
             override fun onPageStarted(view: WebView, url: String, favicon: Bitmap?) { sync(view, loading = true) }
+            override fun onPageCommitVisible(view: WebView, url: String) {
+                // Algumas SPAs mantêm requisições abertas e nunca disparam onPageFinished. Um
+                // primeiro quadro visível permite inspecionar o DOM sem esperar 45 s, mas não é
+                // tratado como prontidão funcional.
+                pageDone?.complete(navigationStatus.pageCommitted(url))
+            }
             override fun onPageFinished(view: WebView, url: String) {
                 sync(view, loading = false)
                 pageDone?.complete(navigationStatus.pageFinished())
@@ -517,7 +523,15 @@ class BrowserHost(private val appCtx: Context) {
         kotlinx.coroutines.delay(500)
         status.httpError()?.let { return it }
         return if (ready == "complete") "OK: página carregada ($target)"
-        else "OK: carregamento principal concluído; DOM=${ready.ifBlank { "indisponível" }} ($target)"
+        else {
+            _ui.value = _ui.value.copy(loading = false)
+            val raw = runCatching {
+                eval("JSON.stringify({chars:document.body?document.body.innerText.length:0,url:location.href})", timeoutMillis = 1_500)
+            }.getOrDefault("")
+            val state = runCatching { JSONObject(raw) }.getOrNull()
+            status.incompleteMessage(target, state?.optString("url").orEmpty().ifBlank { _ui.value.url }, ready,
+                state?.optInt("chars", 0) ?: 0)
+        }
     }
 
     suspend fun cancelNavigation() = onMain {

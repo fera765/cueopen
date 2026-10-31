@@ -57,11 +57,15 @@ class ConnectorTaskAgent(
         )
         var toolCalls = 0
         var lastProgress = ""
+        var lastFailedToolFingerprint: String? = null
+        var repeatedFailedToolCount = 0
+        var lastTruncatedResponse: String? = null
 
         var step = 0
         while (stepLimit == null || step < stepLimit) {
             step++
-            val tools = availableTools()
+            // Depois do orçamento de ferramentas já existente, o modelo ainda pode sintetizar sem ações locais.
+            val tools = if (toolCalls >= MAX_TOOL_CALLS) JsonArray(emptyList()) else availableTools()
             val maxPromptTokens = contextWindow
             compactHistory(messages, tools, maxPromptTokens)
             val estimatedPrompt = estimatePrompt(messages, tools)
@@ -81,33 +85,57 @@ class ConnectorTaskAgent(
             }
             if (!reply.content.isNullOrBlank()) lastProgress = reply.content.trim()
 
+            if (toolCalls >= MAX_TOOL_CALLS && reply.toolCalls.isNotEmpty())
+                return BridgeResult(false, "limite total de $MAX_TOOL_CALLS chamadas de ferramenta atingido${progressSuffix(lastProgress)}")
+
             if (reply.toolCalls.isEmpty()) {
                 val answer = reply.content?.trim().orEmpty()
                 if (reply.truncated) {
                     if (stepLimit != null && step >= stepLimit)
                         return BridgeResult(false, "resposta truncada pela janela/limite nativo de saída do modelo e o limite de passos foi atingido${progressSuffix(answer)}")
+                    if (answer == lastTruncatedResponse)
+                        return BridgeResult(false, "interrompi porque a resposta truncada se repetiu sem progresso${progressSuffix(answer)}")
+                    lastTruncatedResponse = answer
                     messages += LlmMessage("assistant", answer)
                     messages += LlmMessage("user", "A resposta anterior foi cortada pelo limite de saída. Continue do ponto exato em que parou, sem repetir o texto concluído, e termine a tarefa.")
                     lastProgress = answer
                     continue
                 }
+                lastTruncatedResponse = null
                 return if (answer.isBlank()) BridgeResult(false, "o modelo encerrou sem resposta${progressSuffix(lastProgress)}")
                 else BridgeResult(true, "Concluído em $step passo(s) do agente.\n$answer".take(BridgeSecurity.MAX_OUTPUT_CHARS))
             }
 
+            lastTruncatedResponse = null
             messages += LlmMessage("assistant", reply.content, toolCallsJson = reply.rawToolCallsJson)
+            if (toolCalls + reply.toolCalls.size > MAX_TOOL_CALLS)
+                return BridgeResult(false, "limite total de $MAX_TOOL_CALLS chamadas de ferramenta atingido${progressSuffix(lastProgress)}")
             val currentCalls = reply.toolCalls.take(4)
             for (call in currentCalls) {
                 toolCalls++
-                val result = if (toolCalls > MAX_TOOL_CALLS) {
-                    "ERRO: limite total de $MAX_TOOL_CALLS chamadas de ferramenta atingido."
-                } else executeTool(call.name, call.argsJson)
+                val result = executeTool(call.name, call.argsJson)
+                val failed = result.startsWith("ERRO:") || result.startsWith("ERROR:") ||
+                    result.startsWith("TIMEOUT:") || result.startsWith("RECUSADO:")
+                if (failed) {
+                    val canonicalArgs = runCatching { kotlinx.serialization.json.Json.parseToJsonElement(call.argsJson).toString() }
+                        .getOrDefault(call.argsJson.trim())
+                    val fingerprint = "${call.name}|$canonicalArgs|${result.take(1_000)}"
+                    repeatedFailedToolCount = if (fingerprint == lastFailedToolFingerprint) repeatedFailedToolCount + 1 else 1
+                    lastFailedToolFingerprint = fingerprint
+                    if (repeatedFailedToolCount >= 2)
+                        return BridgeResult(false, "interrompi um ciclo sem progresso: a mesma ferramenta repetiu o mesmo erro duas vezes${progressSuffix(result)}")
+                } else {
+                    lastFailedToolFingerprint = null
+                    repeatedFailedToolCount = 0
+                }
                 messages += LlmMessage("tool", result.take(BridgeSecurity.MAX_OUTPUT_CHARS), toolCallId = call.id, name = call.name)
             }
             reply.toolCalls.drop(4).forEach { call ->
+                toolCalls++
                 messages += LlmMessage("tool", "ERRO: máximo de quatro chamadas por resposta do agente.", toolCallId = call.id, name = call.name)
             }
-            if (stepLimit != null && step >= stepLimit) return BridgeResult(false, "limite de $stepLimit passos do agente atingido${progressSuffix(lastProgress)}")
+            if (stepLimit != null && step >= stepLimit)
+                return BridgeResult(false, "limite de $stepLimit passos do agente atingido${progressSuffix(lastProgress)}")
         }
         return BridgeResult(false, "a tarefa delegada foi interrompida${progressSuffix(lastProgress)}")
     }

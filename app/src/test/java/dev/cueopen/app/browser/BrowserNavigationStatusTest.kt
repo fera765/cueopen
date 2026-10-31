@@ -41,6 +41,31 @@ class BrowserNavigationStatusTest {
     }
 
     @Test
+    fun firstVisibleFrameIsPartialUntilDomReadinessIsConfirmed() {
+        val status = BrowserNavigationStatus()
+
+        val committed = status.pageCommitted("http://localhost:4174/")
+        val incomplete = status.incompleteMessage("http://localhost:4174/", "http://localhost:4174/", "interactive", 120)
+
+        assertTrue(committed, committed.startsWith("PARTIAL:"))
+        assertTrue(committed, committed.contains("primeiro quadro"))
+        assertTrue(incomplete, incomplete.startsWith("PARTIAL:"))
+        assertTrue(incomplete, incomplete.contains("document.readyState=interactive"))
+        assertTrue(incomplete, incomplete.contains("120 caracteres"))
+    }
+
+    @Test
+    fun mainFrameHttpErrorOverridesAnEarlierPartialCommit() {
+        val status = BrowserNavigationStatus()
+        val partial = status.pageCommitted("https://example.test/")
+
+        val error = status.recordHttpError(isMainFrame = true, statusCode = 503)
+
+        assertTrue(partial, partial.startsWith("PARTIAL:"))
+        assertTrue(error.orEmpty(), status.preserveHttpError(partial).startsWith("ERROR: HTTP 503"))
+    }
+
+    @Test
     fun localConnectionRefusalExplainsThatLocalhostBelongsToTheWebViewDevice() {
         val status = BrowserNavigationStatus()
 

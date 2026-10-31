@@ -33,14 +33,14 @@ class ConnectorTaskAgentTest {
         assertTrue(ConnectorGuardrails.staticCheck(def).none { it.level == ConnectorGuardrails.Level.ERROR })
     }
 
-    @Test fun `all exact Fluwy Open Dev agent flows are unbounded and retain configured timeout`() = runBlocking {
+    @Test fun `all exact Fluwy Open Dev agent flows remain unbounded and retain configured timeout`() = runBlocking {
         val def = CustomDefParser.parse(LocalDevStudioTemplate.YAML).def!!
         val bridge = CaptureBridge(setOf(Capabilities.AGENT))
         val connector = CustomConnector(def, bridge = bridge)
 
         for (toolName in LocalDevStudioTemplate.UNBOUNDED_AGENT_TOOLS) {
             connector.callTool(toolName, mapOf("pedido" to "Execute $toolName"), settings)
-            assertTrue("$toolName deve ser ilimitado", bridge.maxSteps == null)
+            assertEquals("$toolName deve permanecer ilimitado", null, bridge.maxSteps)
             assertTrue("$toolName deve preservar o timeout", bridge.timeoutSec == 600)
         }
 
@@ -51,7 +51,7 @@ class ConnectorTaskAgentTest {
 
         val renamed = CustomDefParser.parse(LocalDevStudioTemplate.YAML.replace("id: fluwyopendev", "id: fluwyopendevclone")).def!!
         for (toolName in LocalDevStudioTemplate.UNBOUNDED_AGENT_TOOLS) {
-            assertEquals("$toolName no clone deve continuar limitado", 6, renamed.tools.first { it.name == toolName }.agent!!.maxSteps)
+            assertEquals("$toolName no clone deve manter o padrão geral", 6, renamed.tools.first { it.name == toolName }.agent!!.maxSteps)
         }
     }
 
@@ -245,6 +245,59 @@ class ConnectorTaskAgentTest {
         assertEquals(iterations, bridge.commands.size)
     }
 
+    @Test fun `tool-call ceiling forces a no-tools final response instead of looping`() = runBlocking {
+        val bridge = FakeBridge(mutableSetOf(Capabilities.TERMINAL))
+        val model = ScriptedModel { turn, tools, _ ->
+            if (tools.isEmpty()) LlmReply("Resumo final após o limite local.", emptyList(), null)
+            else {
+                val id = "cmd$turn"
+                LlmReply(null, listOf(ToolCall(id, "shell", """{"command":"pwd","timeout_sec":5}""")), rawCalls(id, "shell"))
+            }
+        }
+
+        val result = ConnectorTaskAgent("fluwyopendev", model, bridge).run("Execute verificações", null, maxSteps = null)
+
+        assertTrue(result.text, result.ok)
+        assertTrue(result.text, result.text.contains("Resumo final"))
+        assertEquals(ConnectorTaskAgent.MAX_TOOL_CALLS, bridge.commands.size)
+        assertEquals(ConnectorTaskAgent.MAX_TOOL_CALLS + 1, model.calls)
+        assertTrue(model.observedToolSets.last().isEmpty())
+    }
+
+    @Test fun `repeated identical tool failure stops as a no-progress cycle without capping steps`() = runBlocking {
+        val bridge = FakeBridge(mutableSetOf(Capabilities.TERMINAL)).apply {
+            shellResult = BridgeResult(false, "runner exit code 1")
+        }
+        val model = ScriptedModel { turn, _, _ ->
+            val id = "cmd$turn"
+            LlmReply(null, listOf(ToolCall(id, "shell", """{"command":"pwd","timeout_sec":5}""")), rawCalls(id, "shell"))
+        }
+
+        val result = ConnectorTaskAgent("fluwyopendev", model, bridge).run("Investigue a revisão", null, maxSteps = null)
+
+        assertFalse(result.ok)
+        assertTrue(result.text, result.text.contains("ciclo sem progresso"))
+        assertEquals(2, model.calls)
+        assertEquals(2, bridge.commands.size)
+    }
+
+    @Test fun `identical truncated response is stopped but distinct continuation can continue indefinitely`() = runBlocking {
+        val stalled = ScriptedModel { _, _, _ -> LlmReply("mesmo trecho", emptyList(), null, truncated = true) }
+        val stalledResult = ConnectorTaskAgent("fluwyopendev", stalled, FakeBridge(mutableSetOf())).run("Resuma", null, maxSteps = null)
+        assertFalse(stalledResult.ok)
+        assertTrue(stalledResult.text, stalledResult.text.contains("se repetiu sem progresso"))
+        assertEquals(2, stalled.calls)
+
+        val continuations = 48
+        val progressing = ScriptedModel { turn, _, _ ->
+            if (turn <= continuations) LlmReply("parte $turn", emptyList(), null, truncated = true)
+            else LlmReply("Resumo concluído após $continuations continuações.", emptyList(), null)
+        }
+        val completed = ConnectorTaskAgent("fluwyopendev", progressing, FakeBridge(mutableSetOf())).run("Continue", null, maxSteps = null)
+        assertTrue(completed.text, completed.ok)
+        assertEquals(continuations + 1, progressing.calls)
+    }
+
     @Test fun `known native context and completion limits determine per-call max tokens`() = runBlocking {
         val model = ScriptedModel { _, _, _ -> LlmReply("Concluído", emptyList(), null) }
         val result = ConnectorTaskAgent("demo", model, FakeBridge(mutableSetOf()))
@@ -305,11 +358,12 @@ class ConnectorTaskAgentTest {
         val files = linkedMapOf<String, String>()
         val commands = arrayListOf<String>()
         var fileCalls = 0
+        var shellResult = BridgeResult(true, "checks passed")
         override fun granted(capability: String) = capability in grants
         override suspend fun shell(command: String, timeoutSec: Int) = BridgeResult(true, "shell")
         override suspend fun agentShell(command: String, timeoutSec: Int): BridgeResult {
             commands += command
-            return BridgeResult(true, "checks passed")
+            return shellResult
         }
         override suspend fun fileOp(op: String, path: String, content: String?): BridgeResult {
             fileCalls++
