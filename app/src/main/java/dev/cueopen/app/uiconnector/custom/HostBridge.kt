@@ -37,7 +37,13 @@ interface HostBridge {
     suspend fun agentShell(command: String, timeoutSec: Int): BridgeResult = shell(command, timeoutSec)
 
     /** Executa tarefa LLM limitada ao conector; bridges sem implementação negam por padrão. */
-    suspend fun runAgentTask(task: String, model: String?, maxSteps: Int?, timeoutSec: Int): BridgeResult =
+    suspend fun runAgentTask(
+        task: String,
+        model: String?,
+        maxSteps: Int?,
+        timeoutSec: Int,
+        toolName: String? = null,
+    ): BridgeResult =
         BridgeResult(false, "delegação LLM indisponível neste contexto")
 
     /** Operação de arquivo dentro do workspace do conector: read | write | list | delete. */

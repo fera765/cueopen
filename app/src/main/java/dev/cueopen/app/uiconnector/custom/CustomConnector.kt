@@ -372,7 +372,7 @@ class CustomConnector(
                     // settings e variáveis de sessão nunca são expandidas no prompt delegado.
                     val taskArgs = t.params.associate { it.name to args[it.name].orEmpty() }
                     val task = Template.render(t.agent.task, Template.Ctx(taskArgs))
-                    val r = bridge.runAgentTask(task, delegatedModel, t.agent.maxSteps, t.agent.timeoutSec)
+                    val r = bridge.runAgentTask(task, delegatedModel, t.agent.maxSteps, t.agent.timeoutSec, toolName = t.name)
                     lastStepRaw = r.text
                     if (!r.ok) return "ERRO: " + Redactor.redact(r.text.take(2_000), secrets())
                     Reply(200, r.text, ResponseTree.parse(r.text, null), emptyMap())

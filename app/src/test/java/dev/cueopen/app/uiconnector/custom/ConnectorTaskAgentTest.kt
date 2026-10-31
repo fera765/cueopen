@@ -42,6 +42,7 @@ class ConnectorTaskAgentTest {
             connector.callTool(toolName, mapOf("pedido" to "Execute $toolName"), settings)
             assertEquals("$toolName deve permanecer ilimitado", null, bridge.maxSteps)
             assertTrue("$toolName deve preservar o timeout", bridge.timeoutSec == 600)
+            assertEquals("o nome exato do fluxo precisa chegar ao executor", toolName, bridge.toolName)
         }
 
         val legacyYaml = LocalDevStudioTemplate.YAML.replaceFirst("timeoutSec: 600", "maxSteps: 8\n      timeoutSec: 600")
@@ -239,29 +240,54 @@ class ConnectorTaskAgentTest {
                 LlmReply("Concluído após $iterations verificações.", emptyList(), null)
             }
         }
-        val result = ConnectorTaskAgent("fluwyopendev", model, bridge).run("Desenvolva e verifique", null, maxSteps = null)
+        val result = ConnectorTaskAgent("fluwyopendev", model, bridge, LocalDevStudioTemplate.UNBOUNDED_TOOL)
+            .run("Desenvolva e verifique", null, maxSteps = null)
         assertTrue(result.text, result.ok)
         assertEquals(iterations + 1, model.calls)
         assertEquals(iterations, bridge.commands.size)
     }
 
-    @Test fun `tool-call ceiling forces a no-tools final response instead of looping`() = runBlocking {
-        val bridge = FakeBridge(mutableSetOf(Capabilities.TERMINAL))
-        val model = ScriptedModel { turn, tools, _ ->
-            if (tools.isEmpty()) LlmReply("Resumo final após o limite local.", emptyList(), null)
-            else {
-                val id = "cmd$turn"
-                LlmReply(null, listOf(ToolCall(id, "shell", """{"command":"pwd","timeout_sec":5}""")), rawCalls(id, "shell"))
+    @Test fun `each exact Open Dev flow can progress beyond 24 tool calls`() = runBlocking {
+        val callCount = ConnectorTaskAgent.MAX_TOOL_CALLS + 6
+        for (toolName in LocalDevStudioTemplate.UNBOUNDED_AGENT_TOOLS) {
+            val bridge = FakeBridge(mutableSetOf(Capabilities.TERMINAL))
+            val model = ScriptedModel { turn, _, _ ->
+                if (turn <= callCount) {
+                    val id = "cmd$turn"
+                    LlmReply("Progresso $turn", listOf(ToolCall(id, "shell", """{"command":"echo $turn","timeout_sec":5}""")), rawCalls(id, "shell"))
+                } else LlmReply("Concluído após $callCount chamadas de ferramenta.", emptyList(), null)
             }
+
+            val result = ConnectorTaskAgent(LocalDevStudioTemplate.ID, model, bridge, toolName)
+                .run("Execute as verificações em progresso", null, maxSteps = null)
+
+            assertTrue("$toolName: ${result.text}", result.ok)
+            assertEquals("$toolName executou as chamadas além do teto antigo", callCount, bridge.commands.size)
+            assertEquals(callCount + 1, model.calls)
+            assertTrue("$toolName deve manter as ferramentas disponíveis após 24 chamadas", model.observedToolSets[24].contains("shell"))
         }
+    }
 
-        val result = ConnectorTaskAgent("fluwyopendev", model, bridge).run("Execute verificações", null, maxSteps = null)
+    @Test fun `24-call ceiling remains for other connectors and non-Open-Dev tool names`() = runBlocking {
+        for ((connectorId, toolName) in listOf("demo" to null, LocalDevStudioTemplate.ID to "outra_ferramenta")) {
+            val bridge = FakeBridge(mutableSetOf(Capabilities.TERMINAL))
+            val model = ScriptedModel { turn, tools, _ ->
+                if (tools.isEmpty()) LlmReply("Resumo final após o limite local.", emptyList(), null)
+                else {
+                    val id = "cmd$turn"
+                    LlmReply("Progresso $turn", listOf(ToolCall(id, "shell", """{"command":"pwd","timeout_sec":5}""")), rawCalls(id, "shell"))
+                }
+            }
 
-        assertTrue(result.text, result.ok)
-        assertTrue(result.text, result.text.contains("Resumo final"))
-        assertEquals(ConnectorTaskAgent.MAX_TOOL_CALLS, bridge.commands.size)
-        assertEquals(ConnectorTaskAgent.MAX_TOOL_CALLS + 1, model.calls)
-        assertTrue(model.observedToolSets.last().isEmpty())
+            val result = ConnectorTaskAgent(connectorId, model, bridge, toolName)
+                .run("Execute verificações", null, maxSteps = null)
+
+            assertTrue(result.text, result.ok)
+            assertTrue(result.text, result.text.contains("Resumo final"))
+            assertEquals(ConnectorTaskAgent.MAX_TOOL_CALLS, bridge.commands.size)
+            assertEquals(ConnectorTaskAgent.MAX_TOOL_CALLS + 1, model.calls)
+            assertTrue(model.observedToolSets.last().isEmpty())
+        }
     }
 
     @Test fun `repeated identical tool failure stops as a no-progress cycle without capping steps`() = runBlocking {
@@ -344,12 +370,13 @@ class ConnectorTaskAgentTest {
         var model: String? = null
         var maxSteps: Int? = -1
         var timeoutSec: Int? = null
+        var toolName: String? = null
         override fun granted(capability: String) = capability in grants
         override suspend fun shell(command: String, timeoutSec: Int) = BridgeResult(true, "shell")
         override suspend fun fileOp(op: String, path: String, content: String?) = BridgeResult(true, "file")
         override suspend fun fetch(url: String, waitSec: Int) = BridgeResult(false, "no browser")
-        override suspend fun runAgentTask(task: String, model: String?, maxSteps: Int?, timeoutSec: Int): BridgeResult {
-            this.task = task; this.model = model; this.maxSteps = maxSteps; this.timeoutSec = timeoutSec
+        override suspend fun runAgentTask(task: String, model: String?, maxSteps: Int?, timeoutSec: Int, toolName: String?): BridgeResult {
+            this.task = task; this.model = model; this.maxSteps = maxSteps; this.timeoutSec = timeoutSec; this.toolName = toolName
             return BridgeResult(true, "Concluído localmente")
         }
     }

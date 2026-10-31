@@ -31,6 +31,7 @@ class ConnectorTaskAgent(
     private val connectorId: String,
     private val model: ConnectorTaskModel,
     private val bridge: HostBridge,
+    private val toolName: String? = null,
 ) {
     companion object {
         const val MAX_STEPS = 12
@@ -48,6 +49,10 @@ class ConnectorTaskAgent(
         val cleanTask = task.trim()
         if (cleanTask.isEmpty()) return BridgeResult(false, "a tarefa delegada está vazia")
         val stepLimit = maxSteps?.coerceIn(1, MAX_STEPS)
+        val toolCallLimit = if (
+            connectorId == LocalDevStudioTemplate.ID &&
+            toolName != null && toolName in LocalDevStudioTemplate.UNBOUNDED_AGENT_TOOLS
+        ) null else MAX_TOOL_CALLS
         val contextWindow = modelContextTokens?.takeIf { it > 0 }?.toLong()
         val providerOutputLimit = modelMaxCompletionTokens?.takeIf { it > 0 }?.toLong()
         val conversationId = "uic-$connectorId-${UUID.randomUUID()}"
@@ -64,8 +69,8 @@ class ConnectorTaskAgent(
         var step = 0
         while (stepLimit == null || step < stepLimit) {
             step++
-            // Depois do orçamento de ferramentas já existente, o modelo ainda pode sintetizar sem ações locais.
-            val tools = if (toolCalls >= MAX_TOOL_CALLS) JsonArray(emptyList()) else availableTools()
+            // Nos fluxos com teto, o modelo ainda pode sintetizar sem ações locais após o limite.
+            val tools = if (toolCallLimit != null && toolCalls >= toolCallLimit) JsonArray(emptyList()) else availableTools()
             val maxPromptTokens = contextWindow
             compactHistory(messages, tools, maxPromptTokens)
             val estimatedPrompt = estimatePrompt(messages, tools)
@@ -85,8 +90,8 @@ class ConnectorTaskAgent(
             }
             if (!reply.content.isNullOrBlank()) lastProgress = reply.content.trim()
 
-            if (toolCalls >= MAX_TOOL_CALLS && reply.toolCalls.isNotEmpty())
-                return BridgeResult(false, "limite total de $MAX_TOOL_CALLS chamadas de ferramenta atingido${progressSuffix(lastProgress)}")
+            if (toolCallLimit != null && toolCalls >= toolCallLimit && reply.toolCalls.isNotEmpty())
+                return BridgeResult(false, "limite total de $toolCallLimit chamadas de ferramenta atingido${progressSuffix(lastProgress)}")
 
             if (reply.toolCalls.isEmpty()) {
                 val answer = reply.content?.trim().orEmpty()
@@ -108,8 +113,8 @@ class ConnectorTaskAgent(
 
             lastTruncatedResponse = null
             messages += LlmMessage("assistant", reply.content, toolCallsJson = reply.rawToolCallsJson)
-            if (toolCalls + reply.toolCalls.size > MAX_TOOL_CALLS)
-                return BridgeResult(false, "limite total de $MAX_TOOL_CALLS chamadas de ferramenta atingido${progressSuffix(lastProgress)}")
+            if (toolCallLimit != null && toolCalls + reply.toolCalls.size > toolCallLimit)
+                return BridgeResult(false, "limite total de $toolCallLimit chamadas de ferramenta atingido${progressSuffix(lastProgress)}")
             val currentCalls = reply.toolCalls.take(4)
             for (call in currentCalls) {
                 toolCalls++

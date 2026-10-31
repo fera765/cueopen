@@ -24,8 +24,8 @@ android {
         // do sandbox a partir de filesDir. Os .so do proot também vêm em jniLibs.
         targetSdk = 28
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
-        versionCode = 70
-        versionName = "4.17.18"
+        versionCode = 71
+        versionName = "4.17.19"
         ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64") }
     }
     signingConfigs {
