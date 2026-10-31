@@ -32,6 +32,12 @@ class ToolContextPlannerTest {
         assertFalse(p.keepTool("uic_eduzz_vendas", connOf, mcpOf))
     }
 
+    @Test fun polymarketAnalysisRequestLoadsReadOnlyWalletToolGroup() {
+        val p = ToolContextPlanner.plan(input("analise carteiras lucrativas da Polymarket nos últimos 90 dias"))
+        assertTrue(p.groups.contains("wallet"))
+        assertTrue(p.keepTool("wallet_polymarket_insights", connOf, mcpOf))
+    }
+
     @Test fun contactAddressBookBluetoothAndCallsLoadDeviceTools() {
         listOf(
             "liste meus contatos" to "device_contacts",

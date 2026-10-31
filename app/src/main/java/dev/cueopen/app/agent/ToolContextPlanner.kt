@@ -28,7 +28,7 @@ object ToolContextPlanner {
         "agents" to setOf("multi_agents"),
         "schedule" to setOf("sleep", "set_schedule"),
         "skills_admin" to setOf("create_skill"),
-        "wallet" to setOf("wallet_get_address", "wallet_get_balance", "wallet_list_tokens", "wallet_swap",
+        "wallet" to setOf("wallet_get_address", "wallet_get_balance", "wallet_list_tokens", "wallet_swap", "wallet_polymarket_insights",
             "market_price", "market_candles", "market_liquidity", "market_discover", "market_token_info",
             "trade_set_rule", "trade_list", "trade_cancel", "trade_update_rule"),
         "device" to setOf(
@@ -52,7 +52,7 @@ object ToolContextPlanner {
         "agents" to listOf("subagente", "sub-agente", "multi agente", "multiagente", "paralel", "em paralelo", "varios agentes", "workers", "pesquisa ampla", "wide research"),
         "schedule" to listOf("monitor", "acompanh", "a cada", "agend", "todo dia", "toda hora", "de hora em hora", "continu", "periodic", "lembr", "aguard", "espera", "minutos", "vela"),
         "skills_admin" to listOf("crie uma skill", "criar skill", "nova skill", "salve como skill"),
-        "wallet" to listOf("carteira", "wallet", "solana", "sol ", "token", "swap", "saldo", "comprar", "vender", "day trade", "daytrade", "trade", "cripto", "crypto", "memecoin", "stop loss", "take profit", "liquidez", "pump", "jupiter", "usdc"),
+        "wallet" to listOf("carteira", "wallet", "solana", "sol ", "token", "swap", "saldo", "comprar", "vender", "day trade", "daytrade", "trade", "cripto", "crypto", "memecoin", "stop loss", "take profit", "liquidez", "pump", "jupiter", "usdc", "polymarket", "mercado preditivo", "prediction market"),
         "device" to listOf("notifica", "print da tela", "captura de tela", "screenshot", "balao", "overlay", "celular", "aparelho", "bluetooth", "dispositivo pareado", "dispositivos pareados", "dispositivos proximos", "calendario", "ligaçao", "ligacao", "chamada", "contato", "contacts", "contact list", "address book", "agenda telefonica", "agenda de contatos", "telefone", "numero do contato", "localizaçao", "localizacao", "microfone", "navegar no aplicativo", "navegar nos apps", "abrir aplicativo", "abrir app", "acessar app", "acessar aplicativo", "outro aplicativo", "instagram", "whatsapp", "spotify"),
         "connector_builder" to listOf("conector", "connector"),
     )

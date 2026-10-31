@@ -90,7 +90,7 @@ fun WalletMoreScreen(nav: NavController) {
             // Agent access
             SectionLabel("Acesso dos agentes")
             Text(
-                "Cada permissão é salva neste aparelho e começa desativada. Leitura consulta endereço/saldo; transferência cria pedidos tipados. A frase de recuperação e a chave privada nunca são expostas ao agente.",
+                "Cada permissão é salva neste aparelho e começa desativada. Insights Polymarket consultam somente dados públicos; leitura de carteira consulta endereço/saldo; transferência cria pedidos tipados. A frase de recuperação e a chave privada nunca são expostas ao agente.",
                 color = c.ink2, fontSize = 13.sp
             )
             if (st.agents.isEmpty()) {
@@ -163,6 +163,15 @@ fun WalletMoreScreen(nav: NavController) {
                             }
                             if (dayTrade) Text(
                                 "Dados de mercado reais (preço, velas, liquidez), trocas e regras de stop-loss/take-profit. Entradas em SOL respeitam o limite por operação acima. Não concede envio de SOL a terceiros.",
+                                color = c.ink2, fontSize = 12.sp
+                            )
+                            var polymarketInsights by remember(agent.id, permissionRefresh) { mutableStateOf(policyStore.canAgentReadPolymarketInsights(agent.id)) }
+                            PermissionRow("Insights públicos Polymarket (somente leitura)", polymarketInsights) {
+                                runCatching { policyStore.setAgentReadPolymarketInsights(agent.id, it); polymarketInsights = it; permissionRefresh++ }
+                                    .onFailure { e -> error = e.message }
+                            }
+                            if (polymarketInsights) Text(
+                                "Consulta até 10 carteiras de cada leaderboard público e mede PnL realizado de posições fechadas selecionadas. Não habilita operações, cópia de ordens ou acesso à carteira Solana.",
                                 color = c.ink2, fontSize = 12.sp
                             )
                         }

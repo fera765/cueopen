@@ -120,6 +120,23 @@ class WalletAgentPolicyStoreTest {
     }
 
     @Test
+    fun polymarketInsightsGrantIsIndependentAndDefaultsToDenied() {
+        val agent = "agent-polymarket-read-only"
+        assertFalse(store.canAgentReadPolymarketInsights(agent))
+        assertFalse(store.canAgentDayTrade(agent))
+        assertFalse(store.canAgentRequestTransfer(agent))
+
+        store.setAgentReadPolymarketInsights(agent, true)
+        val recreated = WalletAgentPolicyStore(context)
+        assertTrue(recreated.canAgentReadPolymarketInsights(agent))
+        assertFalse(recreated.canAgentDayTrade(agent))
+        assertFalse(recreated.canAgentRequestTransfer(agent))
+
+        recreated.setAgentReadPolymarketInsights(agent, false)
+        assertFalse(WalletAgentPolicyStore(context).canAgentReadPolymarketInsights(agent))
+    }
+
+    @Test
     fun agentReadGrantsRejectBlankAgentIdentity() {
         org.junit.Assert.assertThrows(IllegalArgumentException::class.java) {
             store.setAgentReadAddress(" ", true)

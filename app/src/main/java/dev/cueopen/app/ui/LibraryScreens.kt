@@ -97,9 +97,10 @@ fun AgentEditScreen(nav: NavController, id: String) {
     val walletPolicies = remember { WalletAgentPolicyStore(app.applicationContext) }
     var walletAccess by remember(a.id) {
         mutableStateOf(
-            walletPolicies.canAgentReadAddress(a.id) ||
+                walletPolicies.canAgentReadAddress(a.id) ||
                 walletPolicies.canAgentReadBalance(a.id) ||
-                walletPolicies.canAgentRequestTransfer(a.id)
+                walletPolicies.canAgentRequestTransfer(a.id) ||
+                walletPolicies.canAgentDayTrade(a.id)
         )
     }
     var walletReadAddress by remember(a.id) { mutableStateOf(walletPolicies.canAgentReadAddress(a.id)) }
@@ -107,6 +108,7 @@ fun AgentEditScreen(nav: NavController, id: String) {
     var walletRequestTransfer by remember(a.id) { mutableStateOf(walletPolicies.canAgentRequestTransfer(a.id)) }
     var walletAutonomousTransfer by remember(a.id) { mutableStateOf(walletPolicies.canAgentAutonomousTransfer(a.id)) }
     var walletDayTrade by remember(a.id) { mutableStateOf(walletPolicies.canAgentDayTrade(a.id)) }
+    var walletPolymarketInsights by remember(a.id) { mutableStateOf(walletPolicies.canAgentReadPolymarketInsights(a.id)) }
     Scaffold(containerColor = c.bg, topBar = {
         CueTopBar(if (existing == null) "Criar Agent" else a.name, { nav.popBackStack() }) {
             if (existing != null) IconButton({ app.store.deleteAgent(id); nav.popBackStack() }) { Icon(Icons.Rounded.Delete, "Excluir", tint = c.err) }
@@ -230,6 +232,11 @@ fun AgentEditScreen(nav: NavController, id: String) {
                             )
                         }
                     }
+                    ToggleRow(
+                        "Insights públicos da Polymarket (somente leitura)",
+                        "Permite consultar uma amostra de carteiras e posições encerradas nos últimos 90 dias via API pública, sem API key. Não habilita acesso à carteira Solana, trading nem cópia de ordens.",
+                        walletPolymarketInsights
+                    ) { walletPolymarketInsights = it }
 
                 }
             }
@@ -263,7 +270,8 @@ fun AgentEditScreen(nav: NavController, id: String) {
                     readBalance = walletAccess && walletReadBalance,
                     requestTransfer = walletAccess && walletRequestTransfer,
                     autonomousTransfer = walletAccess && walletRequestTransfer && walletAutonomousTransfer,
-                    dayTrade = walletAccess && walletDayTrade
+                    dayTrade = walletAccess && walletDayTrade,
+                    polymarketInsights = walletPolymarketInsights
                 )
                 if (a.autonomous) app.agent.startAutonomy()
                 nav.popBackStack()
