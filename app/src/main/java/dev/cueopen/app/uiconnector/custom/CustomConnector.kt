@@ -527,7 +527,7 @@ class CustomConnector(
                     out.startsWith("ERRO") || out.startsWith("RECUSAD") -> { passedAll = false; fail("ferramenta ${t.name}$tag: " + out.take(1500) + hint(out)) }
                     out.isBlank() -> { passedAll = false; fail("ferramenta ${t.name}$tag: resposta vazia") }
                     out.startsWith(NO_RESULTS) -> { passedAll = false; fail("ferramenta ${t.name}$tag: os exemplos de args_yaml não trouxeram nenhum item — use exemplos REAIS que retornem dados, para provar que o modelo de cada item funciona") }
-                    hidden != null -> { passedAll = false; fail("ferramenta ${t.name}$tag: terminou, mas a saída mostra falha: \"$hidden\"" + hint(hidden) + "\nSaída:\n" + raw.takeLast(1200)) }
+                    hidden != null -> { passedAll = false; fail("ferramenta ${t.name}$tag: terminou, mas a saída mostra falha: \"$hidden\"" + hint(raw) + "\nSaída:\n" + raw.takeLast(1200)) }
                     else -> if (n == 1) sb.appendLine("✓ ferramenta ${t.name} (${secs}s): " + out.replace("\n", " ⏎ ").take(300))
                         else sb.appendLine("✓ ferramenta ${t.name}: 2ª execução também passou")
                 }
@@ -546,6 +546,7 @@ class CustomConnector(
     private fun hint(text: String): String = when {
         text.contains("not found") -> "\n→ comando inexistente no sandbox: instale no \"setup\" (apk add --no-cache <pacote> ou pip install --break-system-packages <pacote>)."
         text.contains("No such file") -> "\n→ arquivo/pasta inexistente: crie com \"files\" (ou mkdir -p) e use caminhos relativos ao workspace."
+        Regex("No module named ['\"]yaml['\"]").containsMatchIn(text) -> "\n→ para `import yaml`, o pacote Alpine é `py3-yaml`: instale no setup com `apk add --no-cache py3-yaml` e valide o import antes de repetir o comando."
         text.contains("ModuleNotFoundError") || text.contains("ImportError") -> "\n→ módulo Python ausente: instale no \"setup\" com pip install --break-system-packages <módulo>."
         text.contains("SyntaxError") -> "\n→ erro de sintaxe no script gravado em \"files\": corrija o conteúdo (\\n para quebras de linha)."
         text.contains("timeout") -> "\n→ passou do tempo-limite: aumente shell.timeoutSec ou reduza o trabalho."

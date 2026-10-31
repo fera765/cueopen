@@ -55,6 +55,7 @@ class Store(context: Context) {
                 st.copy(
                     deviceBackgroundConsentMigrated = true,
                     maxSteps = if (st.maxSteps <= 120) 1000 else st.maxSteps,
+                    sandboxPackages = SandboxPackageDefaults.migrate(st.sandboxPackages),
                     model = if (st.model == "anthropic/claude-sonnet-4.5") "deepseek/deepseek-v4-flash" else st.model,
                     fastModel = if (st.fastModel == "google/gemini-2.5-flash") "deepseek/deepseek-v4-flash" else st.fastModel,
                 )

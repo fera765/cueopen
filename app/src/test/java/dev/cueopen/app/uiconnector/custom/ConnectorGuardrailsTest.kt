@@ -164,6 +164,14 @@ class ConnectorGuardrailsTest {
         assertTrue(report, report.contains("ModuleNotFoundError") || report.contains("Traceback"))
     }
 
+    @Test fun missingYamlModuleRecommendsAlpinePackage() = runBlocking {
+        val b = ValidationBridge(toolOutput = { BridgeResult(true, "Traceback (most recent call last):\nModuleNotFoundError: No module named 'yaml'\n[exit 0]") })
+        val (ok, report) = CustomConnector(slides(), http = NoHttp, bridge = b).selfTest(noSettings, slidesArgs)
+        assertFalse(report, ok)
+        assertTrue(report, report.contains("apk add --no-cache py3-yaml"))
+        assertTrue(report, report.contains("import yaml"))
+    }
+
     @Test fun secondRunFailureBlocks() = runBlocking {
         var n = 0
         val b = ValidationBridge(toolOutput = { n++; if (n == 1) BridgeResult(true, "ok") else BridgeResult(false, "mkdir: can't create directory 'out': File exists\n[exit 1]") })

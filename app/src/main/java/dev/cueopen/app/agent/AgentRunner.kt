@@ -789,7 +789,7 @@ class AgentRunner(
      * ciclo infinito: ler a saída truncada gerava outra saída truncada em outro arquivo) e diz onde continuar.
      */
     private fun readFileChunk(f: java.io.File, shown: String, offset: Int, limit: Int): String {
-        if (!f.exists()) return "ERRO: arquivo não existe: $shown. Use file_list para ver o diretório."
+        if (!f.exists()) return "ERRO: arquivo não existe neste workspace: $shown. Liste o diretório pai com file_list uma vez; não repita este caminho. Se o arquivo não aparecer, peça ao usuário para enviá-lo ou informe que está ausente."
         if (f.isDirectory) return "ERRO: $shown é um diretório. Use file_list."
         val head = f.inputStream().use { ins -> ByteArray(4096).let { b -> val n = ins.read(b); if (n <= 0) ByteArray(0) else b.copyOf(n) } }
         if (head.any { it == 0.toByte() }) return "Arquivo binário (${f.length()} bytes): $shown — não dá para ler como texto."
@@ -1143,6 +1143,7 @@ class AgentRunner(
             appendLine()
             appendLine("Você tem um COMPUTADOR próprio:")
             appendLine("- Terminal Linux (Alpine, via proot) — ferramenta `shell`. Workspace da tarefa: ${sandbox.guestPath(sessionId)}. Instale pacotes com `apk add`, `pip install`, `npm i`. O usuário vê cada comando ao vivo.")
+            appendLine("- Python: se `import yaml` falhar com ModuleNotFoundError, o módulo vem do pacote Alpine `py3-yaml`; instale com `apk add --no-cache py3-yaml` e valide com `python3 -c 'import yaml'` antes de retomar. Não repita o import/comando sem corrigir a dependência.")
             appendLine("- Browser real (WebView) — ferramentas browser_* (inclui browser_network e browser_console para depurar).")
             appendLine("- Arquivos — file_read / file_write / file_edit / file_list.")
             appendLine()
@@ -1154,7 +1155,7 @@ class AgentRunner(
             appendLine("2b. ERRO: se uma ferramenta falhar, leia a mensagem, diagnostique e MUDE a abordagem (outro caminho/comando/argumento). Nunca repita a mesma chamada que falhou. Se ficar bloqueado, finalize explicando o motivo em vez de entrar em loop.")
             appendLine("3. Economize contexto: leia só o necessário (head/grep), mande saídas longas para arquivo.")
             appendLine("3a. Trabalhe APENAS no seu workspace (${sandbox.guestPath(sessionId)}); não leia /root/workspace de outras tarefas.")
-            appendLine("3b. Arquivos: para alterar um trecho de arquivo existente, prefira file_edit com old_text e new_text; exige correspondência única e não faz substituição aproximada. Use allow_multiple só quando todas as ocorrências devam mudar. Use file_write para criar/sobrescrever arquivo inteiro; arquivos grandes em partes com append=true. Depois confira com file_read.")
+            appendLine("3b. Arquivos: use caminhos relativos ao workspace da tarefa ou o alias explícito /root/workspace/.... Nunca passe caminhos Android (/data/user/...), /storage, /sdcard ou outros absolutos. file_write/file_edit só alteram o workspace da tarefa; file_read/file_list também aceitam /root/connectors/<id>/workspace/... em leitura. Se um arquivo não existir, liste o diretório pai uma vez; não repita o mesmo caminho. Se não estiver disponível, peça o arquivo ao usuário. Para alterar trecho existente, prefira file_edit com old_text/new_text; exige correspondência única. Use file_write para criar/sobrescrever arquivo inteiro e append=true para partes grandes; confira depois com file_read.")
             appendLine("3c. Ao gerar imagem/SVG/HTML/PDF, mostre ao usuário com `show_file`.")
             appendLine("3d. Com plano ativo, chame `complete_step` ao concluir CADA fase, antes de seguir para a próxima.")
             appendLine("3e. EFICIÊNCIA DE CONTEXTO: busque primeiro símbolos/termos e leia apenas trechos necessários; limite saídas; não despeje arquivos/logs inteiros no contexto. Preserve requisitos, decisões, evidências, caminhos, erros e pendências. Não alegue economia percentual sem medir uso real.")
@@ -1249,7 +1250,17 @@ class AgentRunner(
                         appendLine("- Solana day trade e conectores de trading têm capital e posições independentes: não use um para cobrir o outro. Se a resposta disser que outro agente está operando o ativo, aguarde ou escolha outro; faça uma ordem por vez.")
                     }
                     appendLine("- A sessão e as credenciais são gerenciadas pelo app; você nunca vê nem pede senha. Se uma ferramenta responder que é preciso fazer login, avise o usuário.")
-                    appendLine("- ARQUIVOS DE CONECTORES: um conector que usa terminal/arquivos guarda o que gera numa pasta própria visível para você em /root/connectors/<id do conector>/workspace (ex.: /root/connectors/ytbaixar/workspace). Você PODE ler, listar e copiar de lá: ex. `ls /root/connectors/ytbaixar/workspace` e `cp /root/connectors/ytbaixar/workspace/<arquivo> /root/workspace/` para trazer ao seu workspace e entregar ao usuário. Se uma capacidade (terminal/arquivos/browser) do conector não estiver autorizada, a ferramenta responde pedindo para o usuário ativar em Conectores → (conector) → Permissões.")
+                    val connectorWorkspaces = runCatching {
+                        sandbox.connectorsDir.listFiles().orEmpty()
+                            .filter { it.isDirectory && File(it, "workspace").isDirectory }
+                            .map { "/root/connectors/${it.name}/workspace" }
+                            .sorted()
+                    }.getOrDefault(emptyList())
+                    appendLine("- WORKSPACES DE CONECTORES: no terminal do chat, use o path completo `/root/connectors/<id>/workspace` (ID real + segmento final `workspace`). Nunca omita o ID nem use `/root/connectors/workspace`. Esses workspaces são somente leitura por file_read/file_list; copie arquivos para `/root/workspace/` antes de editar.")
+                    if (connectorWorkspaces.isEmpty()) appendLine("  Nenhum workspace de conector está disponível ainda; confira `ls -la /root/connectors` e não invente um caminho/arquivo.")
+                    else connectorWorkspaces.forEach { appendLine("  Disponível: $it") }
+                    appendLine("  Para copiar um arquivo existente: `cp /root/connectors/<id>/workspace/<arquivo> /root/workspace/`; confirme primeiro com file_list/ls. Se faltar arquivo de entrada, peça ao usuário para enviá-lo.")
+                    appendLine("  Se uma capacidade (terminal/arquivos/browser) não estiver autorizada, peça ao usuário para ativá-la em Conectores → (conector) → Permissões.")
                     appendLine("- Respostas começando com RECUSADO são limites de segurança definidos pelo usuário: respeite-os, não tente contornar (nem trocar de conta/valor para burlar) e explique ao usuário. Operar envolve risco de perda; nunca prometa lucro.")
                 }
             }
@@ -1319,11 +1330,11 @@ class AgentRunner(
                 put("background", bool("Rodar em segundo plano (servidores)"))
             }, listOf("command")))
         }
-        add(tool("file_write", "Cria/sobrescreve um arquivo de texto (cria as pastas). Arquivos grandes: escreva em partes com append=true (~150 linhas por chamada).", buildJsonObject {
-            put("path", str("Caminho do ARQUIVO (relativo ao workspace ou absoluto)")); put("content", str("Conteúdo")); put("append", bool("true = acrescenta ao final"))
+        add(tool("file_write", "Cria/sobrescreve texto somente no workspace da tarefa (cria as pastas). Use caminho relativo ou /root/workspace/...; caminhos Android e outros absolutos são recusados.", buildJsonObject {
+            put("path", str("Caminho relativo ao workspace (ou /root/workspace/arquivo); não use caminho Android/absoluto")); put("content", str("Conteúdo")); put("append", bool("true = acrescenta ao final"))
         }, listOf("path", "content")))
         add(tool("file_edit", "Substitui um trecho literal em arquivo existente dentro do workspace da tarefa. old_text/new_text são texto cru; a ferramenta tenta literal primeiro e aceita apenas diferenças de whitespace como fallback. Recusa se não houver match único, se houver ambiguidade ou se o arquivo exceder 8 MB. allow_multiple=false por padrão; true altera todas as ocorrências. A gravação é atômica.", buildJsonObject {
-            put("path", str("Arquivo existente, relativo ao workspace (ou /root/workspace/...)"))
+            put("path", str("Arquivo existente, relativo ao workspace ou /root/workspace/...; sem paths Android ou outros absolutos"))
             put("old_text", str("Trecho exato a localizar; use \\n para quebras de linha no argumento JSON"))
             put("new_text", str("Texto de substituição; pode ser vazio para remover o trecho"))
             put("allow_multiple", bool("true somente se quiser substituir todas as ocorrências; padrão false"))
@@ -1332,10 +1343,10 @@ class AgentRunner(
         add(tool("show_file", "Mostra um arquivo gerado (imagem, SVG, HTML, PDF, código) direto no chat para o usuário.", buildJsonObject {
             put("path", str("Caminho do arquivo")); put("caption", str("Legenda curta"))
         }, listOf("path")))
-        add(tool("file_read", "Lê um arquivo de texto POR PARTES, com números de linha. Arquivos grandes: leia em sequência usando offset (o resultado diz a próxima linha). Não releia trechos que você já leu.", buildJsonObject {
+        add(tool("file_read", "Lê arquivo de texto POR PARTES no workspace da tarefa; aceita /root/workspace/... e /root/connectors/<id>/workspace/... somente para leitura. Se não existir, liste o diretório pai; não repita o mesmo path.", buildJsonObject {
             put("path", str("Caminho")); put("offset", int("Linha inicial (1 = início; padrão 1)")); put("limit", int("Quantidade de linhas (padrão 250, máx. 1000)"))
         }, listOf("path")))
-        add(tool("file_list", "Lista arquivos de um diretório.", buildJsonObject { put("path", str("Diretório (padrão: workspace)")) }))
+        add(tool("file_list", "Lista diretórios do workspace da tarefa ou, somente para leitura, de /root/connectors/<id>/workspace/.", buildJsonObject { put("path", str("Diretório relativo ao workspace; ou /root/workspace/ ou /root/connectors/<id>/workspace/")) }))
         if (web) {
             add(tool("browser_navigate", "Abre uma URL (ou termos de busca) no browser. Erro HTTP 4xx/5xx na página principal é falha: não use o conteúdo nem repita a mesma URL; localize um endereço válido.", buildJsonObject { put("url", str("URL ou busca")) }, listOf("url")))
             add(tool("browser_snapshot", "Gera snapshot semântico da página atual com headings, conteúdo, links e controles nomeados; refs/índices expiram após navegação.", buildJsonObject { put("max_chars", int("Limite de caracteres (padrão 9000)")) }))
@@ -1955,8 +1966,11 @@ class AgentRunner(
                 return ToolResult("Fase ${idx + 1}/${plan.phases.size} concluída." + (next?.let { " Próxima: $it" } ?: " Plano completo."))
             }
             "show_file" -> {
-                val f = sandbox.hostFile(s("path"), sessionId)
-                if (!f.exists() || f.isDirectory) return ToolResult("ERRO: arquivo não encontrado: ${s("path")}")
+                val path = s("path").trim()
+                val f = AgentFilePathPolicy.readableWorkspace(
+                    sandbox.workspaceFor(sessionId), sandbox.connectorsDir, path,
+                ) ?: return ToolResult("ERRO: caminho fora dos workspaces permitidos. Use um caminho relativo ao workspace ou /root/workspace/...; arquivos de conectores são somente leitura em /root/connectors/<id>/workspace/....")
+                if (!f.exists() || f.isDirectory) return ToolResult("ERRO: arquivo não encontrado: $path. Confirme com file_list; não repita o mesmo caminho se não existir.")
                 store.addItem(sessionId, ChatItem.Media(path = f.absolutePath, caption = s("caption")))
                 return ToolResult("Arquivo exibido no chat.")
             }
@@ -2463,9 +2477,11 @@ class AgentRunner(
                 }
                 "file_write" -> {
                     val path = s("path").trim()
-                    val f = sandbox.hostFile(path, sessionId)
+                    val root = sandbox.workspaceFor(sessionId)
+                    val f = AgentFilePathPolicy.taskWorkspace(root, path)
                     when {
                         path.isBlank() -> "ERRO: informe path."
+                        f == null -> "ERRO: caminho fora do workspace da tarefa. Use um caminho relativo (ex.: output/index.html) ou /root/workspace/output/index.html; caminhos Android e absolutos externos não são aceitos."
                         f.isDirectory -> "ERRO: $path é um diretório. Use um caminho de arquivo, ex.: $path/index.html"
                         else -> {
                             var p = f.parentFile
@@ -2473,12 +2489,16 @@ class AgentRunner(
                             if (p != null && p.isFile) "ERRO: ${p.name} existe como arquivo e não pode ser usado como pasta."
                             else {
                                 f.parentFile?.mkdirs()
-                                val append = a["append"]?.jsonPrimitive?.booleanOrNull == true
-                                val content = SecretVault.resolve(sessionId, s("content"))
-                                if (append && f.exists()) f.appendText(content) else f.writeText(content)
-                                val lines = f.useLines { it.count() }
-                                val preview = runCatching { f.useLines { seq -> seq.take(10).joinToString("\n") } }.getOrDefault("")
-                                "OK: ${if (append) "conteúdo acrescentado" else "arquivo salvo"} (${f.name}) — ${f.length()} bytes, $lines linhas.\n[Prévia das primeiras 10 linhas]\n$preview"
+                                val target = AgentFilePathPolicy.taskWorkspace(root, path)
+                                if (target == null) "ERRO: o destino deixou de estar confinado ao workspace; nada foi gravado."
+                                else {
+                                    val append = a["append"]?.jsonPrimitive?.booleanOrNull == true
+                                    val content = SecretVault.resolve(sessionId, s("content"))
+                                    if (append && target.exists()) target.appendText(content) else target.writeText(content)
+                                    val lines = target.useLines { it.count() }
+                                    val preview = runCatching { target.useLines { seq -> seq.take(10).joinToString("\n") } }.getOrDefault("")
+                                    "OK: ${if (append) "conteúdo acrescentado" else "arquivo salvo"} (${target.relativeTo(root.canonicalFile).path}) — ${target.length()} bytes, $lines linhas.\n[Prévia das primeiras 10 linhas]\n$preview"
+                                }
                             }
                         }
                     }
@@ -2488,12 +2508,10 @@ class AgentRunner(
                     if (path.isBlank()) "ERRO: informe path."
                     else {
                         val workspace = sandbox.workspaceFor(sessionId).canonicalFile
-                        val target = runCatching { sandbox.hostFile(path, sessionId).canonicalFile }.getOrNull()
+                        val target = AgentFilePathPolicy.taskWorkspace(workspace, path)
                         when {
-                            target == null -> "ERRO: caminho inválido."
-                            target.path != workspace.path && !target.path.startsWith(workspace.path + File.separator) ->
-                                "ERRO: file_edit só pode modificar arquivos dentro do workspace desta tarefa."
-                            !target.isFile -> "ERRO: arquivo existente não encontrado: $path. Use file_list/file_read antes de editar."
+                            target == null -> "ERRO: file_edit só aceita caminhos dentro do workspace da tarefa; caminhos Android e absolutos externos são recusados."
+                            !target.isFile -> "ERRO: arquivo existente não encontrado: $path. Use file_list/file_read para conferir uma vez antes de editar."
                             else -> {
                                 val oldText = SecretVault.resolve(sessionId, s("old_text"))
                                 val newText = SecretVault.resolve(sessionId, s("new_text"))
@@ -2507,12 +2525,27 @@ class AgentRunner(
                         }
                     }
                 }
-                "file_read" -> readFileChunk(sandbox.hostFile(s("path"), sessionId), s("path"), i("offset") ?: 1, i("limit") ?: 250)
+                "file_read" -> {
+                    val path = s("path").trim()
+                    val target = AgentFilePathPolicy.readableWorkspace(
+                        sandbox.workspaceFor(sessionId), sandbox.connectorsDir, path,
+                    )
+                    if (target == null) "ERRO: caminho inválido. Use um caminho relativo ao workspace ou /root/workspace/...; para leitura de conector use /root/connectors/<id>/workspace/...."
+                    else readFileChunk(target, path, i("offset") ?: 1, i("limit") ?: 250)
+                }
                 "file_list" -> {
-                    val d = if (s("path").isBlank()) sandbox.workspaceFor(sessionId) else sandbox.hostFile(s("path"), sessionId)
-                    d.walkTopDown().maxDepth(3).filter { it != d }.take(300)
-                        .joinToString("\n") { (if (it.isDirectory) "📁 " else "📄 ") + it.relativeTo(d).path + if (it.isFile) " (${it.length()}b)" else "" }
-                        .ifBlank { "(vazio)" }
+                    val path = s("path").trim()
+                    val root = sandbox.workspaceFor(sessionId)
+                    val d = if (path.isBlank()) root else AgentFilePathPolicy.readableWorkspace(
+                        root, sandbox.connectorsDir, path, allowRoot = true,
+                    )
+                    when {
+                        d == null -> "ERRO: caminho inválido. Use o workspace da tarefa ou /root/connectors/<id>/workspace/ para listar outro conector."
+                        !d.exists() || !d.isDirectory -> "ERRO: diretório não existe: $path. Confira o ID e use o segmento `/workspace` completo; não repita o path inexistente."
+                        else -> d.walkTopDown().maxDepth(3).filter { it != d }.take(300)
+                            .joinToString("\n") { (if (it.isDirectory) "📁 " else "📄 ") + it.relativeTo(d).path + if (it.isFile) " (${it.length()}b)" else "" }
+                            .ifBlank { "(vazio)" }
+                    }
                 }
                 "browser_navigate" -> {
                     // Caminhos do sandbox (/root, /public, /home ou file:///root/…) viram o arquivo real do aparelho:

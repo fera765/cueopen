@@ -294,6 +294,17 @@ data class KnowledgeItem(
 @Serializable
 enum class ThemeMode { SYSTEM, LIGHT, DARK }
 
+/** Pacotes da instalação base do sandbox; migra apenas o default antigo, sem tocar em listas personalizadas. */
+object SandboxPackageDefaults {
+    const val DEFAULT = "bash curl wget git python3 py3-pip py3-yaml nodejs npm"
+    private const val PREVIOUS_DEFAULT = "bash curl wget git python3 py3-pip nodejs npm"
+
+    fun migrate(packages: String): String {
+        fun normalized(value: String) = value.trim().split(Regex("\\s+")).filter { it.isNotEmpty() }.sorted()
+        return if (normalized(packages) == normalized(PREVIOUS_DEFAULT)) DEFAULT else packages
+    }
+}
+
 @Serializable
 data class Settings(
     val apiKey: String = "",
@@ -306,7 +317,7 @@ data class Settings(
     val maxSteps: Int = 1000,
     val theme: ThemeMode = ThemeMode.SYSTEM,
     val autoApproveCommands: Boolean = true,
-    val sandboxPackages: String = "bash curl wget git python3 py3-pip nodejs npm",
+    val sandboxPackages: String = SandboxPackageDefaults.DEFAULT,
     val userName: String = "",
     val notifyOnDone: Boolean = true,
     /** TypeSafe Jev: envia só as ferramentas/conectores relevantes a cada passo e ajusta orçamentos de contexto. */
