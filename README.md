@@ -35,6 +35,7 @@ O código Dart está compilado/ofuscado (AOT), então o mapeamento foi feito por
 | Card "computador do agente" ao vivo | ✅ abre o Computador e segue a ferramenta ativa |
 | Cloud computer: Terminal / Browser / Arquivos | ✅ **local**: xterm.js + axs, WebView compartilhado, gerenciador + editor |
 | Agents (nome, avatar/cor, instruções, skills, memória) | ✅ + modelo por Agent e ferramentas on/off |
+| UI Connectors YAML | ✅ + delegação limitada ao Agent configurado com terminal/arquivos autorizados e exemplo local instalável Fluwy Open Dev |
 | Skills + Skill creator | ✅ 7 nativas + criação manual ou conversando (`create_skill`) |
 | Scheduled tasks | ✅ WorkManager (uma vez / hora / dia / semana) + notificação |
 | Knowledge | ✅ injetado no contexto do agente |

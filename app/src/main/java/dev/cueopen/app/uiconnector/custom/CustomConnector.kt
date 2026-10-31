@@ -292,7 +292,11 @@ class CustomConnector(
         "RECUSADO: o conector \"${def.name}\" precisa da sua autorização para usar ${Capabilities.label(cap)}. " +
             "Ative em Conectores → ${def.name} → Permissões."
 
-    override suspend fun callTool(name: String, args: Map<String, String>, settings: ConnectorSettings): String {
+    override suspend fun callTool(name: String, args: Map<String, String>, settings: ConnectorSettings): String =
+        callTool(name, args, settings, delegatedModel = null)
+
+    /** Agent-specific model is passed by Hub; direct editor/tests retain the app-default model. */
+    suspend fun callTool(name: String, args: Map<String, String>, settings: ConnectorSettings, delegatedModel: String?): String {
         val t = def.tools.firstOrNull { it.name == name } ?: return "Ferramenta desconhecida: $name"
         checkArgs(t, args)?.let { return "ERRO: $it" }
         for (l in t.limits) {
@@ -360,6 +364,17 @@ class CustomConnector(
                     val r = bridge.fetch(url, t.fetch.waitSec)
                     lastStepRaw = r.text
                     if (!r.ok) return "ERRO: " + Redactor.redact(r.text.take(2000), secrets())
+                    Reply(200, r.text, ResponseTree.parse(r.text, null), emptyMap())
+                }
+                t.agent != null -> {
+                    if (!bridge.granted(Capabilities.AGENT)) return capDenied(Capabilities.AGENT)
+                    // Só os parâmetros declarados para esta ferramenta chegam ao subagente. Credenciais,
+                    // settings e variáveis de sessão nunca são expandidas no prompt delegado.
+                    val taskArgs = t.params.associate { it.name to args[it.name].orEmpty() }
+                    val task = Template.render(t.agent.task, Template.Ctx(taskArgs))
+                    val r = bridge.runAgentTask(task, delegatedModel, t.agent.maxSteps, t.agent.budgetTokens, t.agent.timeoutSec)
+                    lastStepRaw = r.text
+                    if (!r.ok) return "ERRO: " + Redactor.redact(r.text.take(2_000), secrets())
                     Reply(200, r.text, ResponseTree.parse(r.text, null), emptyMap())
                 }
                 else -> null

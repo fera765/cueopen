@@ -185,6 +185,7 @@ object ConnectorDryRunValidator {
             if (def.tools.any { it.file != null || it.shell != null || it.fetch != null }) {
                 report.appendLine("✓ capacidades: filesystem virtual e transporte de browser substituto; nenhum comando/código ou página real foi executado")
             } else report.appendLine("✓ capacidades: nenhuma capacidade de aparelho declarada")
+            if (def.tools.any { it.agent != null }) report.appendLine("✓ delegação LLM: contrato/prompt exercitados com resposta simulada; nenhum modelo, terminal ou arquivo real foi chamado pelo subagente")
             report.appendLine("✓ rede externa: nenhuma chamada externa foi feita; respostas exclusivamente mock local")
             report.appendLine("✓ efeitos externos: ações, ordens e envios não foram executados")
             warnings.forEach { report.appendLine("Aviso (não bloqueante): $it") }
@@ -321,6 +322,9 @@ object ConnectorDryRunValidator {
             BridgeResult(true, "dry-run: setup registrado, comando não executado")
         override suspend fun shell(command: String, timeoutSec: Int): BridgeResult =
             BridgeResult(true, "dry-run: shell não executado; fixture local de saída")
+        override suspend fun runAgentTask(task: String, model: String?, maxSteps: Int, budgetTokens: Int, timeoutSec: Int): BridgeResult =
+            if (Capabilities.AGENT in capabilities && task.isNotBlank()) BridgeResult(true, "dry-run: agente LLM não executado; saída mock local")
+            else BridgeResult(false, "delegação LLM bloqueada no mock")
         override suspend fun fileOp(op: String, path: String, content: String?): BridgeResult {
             val root = File("/connector-validation")
             val target = BridgeSecurity.confine(root, path) ?: return BridgeResult(false, "caminho fora do workspace")

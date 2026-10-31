@@ -317,7 +317,8 @@ class UiConnectorHub(context: Context) {
                 // mas mantém a coordenação (uma ordem por vez, reserva do ativo). Sem a setting = sempre exige (padrão seguro).
                 val requireJev = c.spec.settings.none { it.id == "require_jev" } || settings(c).bool("require_jev")
                 guardedCall(c, tool, agentKey, strArgs, requireJev)
-            } else c.callTool(tool, strArgs, settings(c))
+            } else if (c is CustomConnector) c.callTool(tool, strArgs, settings(c), delegatedModel = agent?.model)
+            else c.callTool(tool, strArgs, settings(c))
         } catch (t: kotlinx.coroutines.CancellationException) {
             throw t
         } catch (t: Throwable) {

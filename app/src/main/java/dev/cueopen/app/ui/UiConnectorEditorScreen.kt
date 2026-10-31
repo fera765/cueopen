@@ -89,9 +89,15 @@ fun UiConnectorEditorScreen(nav: NavController, id: String) {
         LazyColumn(Modifier.padding(pad), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             item {
                 Text(
-                    "Descreva o conector em YAML (login, painéis, ações e ferramentas do agente). Só requisições HTTPS ao host declarado — nada mais roda no aparelho. Toque em Doc para baixar a especificação do SDK, ou em Criar com a IA para o chat criar, validar e instalar.",
+                    "Descreva o conector em YAML (login, painéis, ações e ferramentas do agente). Capacidades locais como terminal, arquivos e delegação LLM são opcionais, separadas e exigem autorização. Toque em Doc para baixar a especificação do SDK, ou em Criar com a IA para o chat criar, validar e instalar.",
                     fontSize = 13.sp, color = c.ink2,
                 )
+            }
+            if (!editing) item {
+                OutlinedButton(
+                    onClick = { text = dev.cueopen.app.uiconnector.custom.LocalDevStudioTemplate.YAML; message = "Modelo Fluwy Open Dev carregado. Revise as permissões e o YAML antes de criar." },
+                    modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(12.dp),
+                ) { Icon(Icons.Rounded.Code, null, Modifier.size(18.dp)); Spacer(Modifier.width(8.dp)); Text("Carregar modelo Fluwy Open Dev") }
             }
             item {
                 OutlinedTextField(
@@ -161,8 +167,9 @@ fun UiConnectorEditorScreen(nav: NavController, id: String) {
             title = { Text("Salvar \"${def.name}\"?") },
             text = {
                 Text(
-                    "Este conector só falará com ${def.host} (HTTPS)." +
+                    (if (def.host.isBlank()) "Este conector não declara host de rede." else "Este conector só falará com ${def.host} (HTTPS).") +
                         (if (risky.isNotEmpty()) "\n\nFerramentas sensíveis para o agente: " + risky.joinToString { it.name + if (it.requiresSignal) " (exige validação Jev)" else "" } + "." else "") +
+                        (if (dev.cueopen.app.uiconnector.custom.Capabilities.AGENT in def.capabilities) "\n\nA delegação envia a tarefa e leituras autorizadas ao modelo configurado, pode consumir cota/custo e fica desligada até você autorizá-la." else "") +
                         "\n\nO agente só usa o conector se você ativar nele (\"Agent required ?\" e perfil do agente). Confirme só se você confia nesta definição.",
                 )
             },

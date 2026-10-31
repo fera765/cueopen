@@ -12,7 +12,7 @@ object SdkPrompt {
 
 Você cria UI Connectors declarativos para o CueOpen. Produza uma única definição YAML com um mapa na raiz. Não inclua código executável fora dos campos declarativos permitidos, não invente endpoints e não insira segredos. O app valida a definição com o parser real; erros de sintaxe, campos ausentes ou valores fora das regras impedem a instalação.
 
-O editor começa vazio e não inclui presets. Esta especificação descreve o contrato, não substitui pesquisa na documentação oficial do serviço.
+O editor começa vazio e oferece o modelo local Fluwy Open Dev como exemplo. Esta especificação descreve o contrato, não substitui pesquisa na documentação oficial do serviço.
 
 ## YAML aceito
 
@@ -38,7 +38,7 @@ Definições JSON já existentes também podem ser lidas como legado; ao salvar,
 | `actions` | lista | Até 10 ações que o usuário toca. |
 | `tools` | lista | Até 30 ferramentas do agente. |
 | `realtime` | mapa | Opcional; conexão WebSocket `wss://`. |
-| `capabilities` | lista de texto | Opcional; `terminal`, `files` e/ou `browser`. Cada capacidade fica desligada até autorização do usuário. |
+| `capabilities` | lista de texto | Opcional; `agent`, `terminal`, `files` e/ou `browser`. Cada capacidade fica desligada até autorização do usuário. |
 | `setup` | mapa | Opcional; preparação única do terminal, com `run` e `timeoutSec` de 1–900; exige `terminal`. |
 
 Toda chamada de rede é restrita ao host de `baseUrl` e aos de `allowedHosts`. HTTPS/WSS apenas, porta 443, sem redirecionamento, sem endereço privado. Limites de resposta: HTTP até 2 MB/20 s e mensagem realtime até 1 MB.
@@ -65,7 +65,11 @@ Ação do usuário exige `id`, `label` e `request`; pode ter `risky`, `message` 
 
 Cada ferramenta exige `name` em snake_case (regex `^[a-z][a-z0-9_]{1,31}${'$'}`) e `description`. `params` aceita até 12 parâmetros; cada um requer `name` e `description`, com `type` opcional (`string`, `integer`, `number`, `boolean`), `required` padrão true e `enum` opcional.
 
-Uma ferramenta usa no máximo uma fonte entre `request`, `send`, `source`, `shell`, `file` e `fetch`. Sem fonte, só é válida com `realtime` e `response` para ler o estado. `response` modela o texto devolvido; `list` transforma linhas com `rows`, `item` e `max` de 1–200. `compute` pode acompanhar painéis e ferramentas.
+Uma ferramenta usa no máximo uma fonte entre `request`, `send`, `source`, `shell`, `file`, `fetch` e `agent`. Sem fonte, só é válida com `realtime` e `response` para ler o estado. `response` modela o texto devolvido; `list` transforma linhas com `rows`, `item` e `max` de 1–200. `compute` pode acompanhar painéis e ferramentas.
+
+`agent` delega uma tarefa à LLM configurada para o agente selecionado (ou ao modelo padrão do app). O bloco aceita `task` (texto de até 8.000 caracteres), `maxSteps` (1–12, padrão 6), `budgetTokens` (512–12.000, padrão 6000) e `timeoutSec` (15–900, padrão 300). O orçamento conta tokens de entrada e saída reportados pelo provedor, com estimativa conservadora se faltarem métricas. O prompt aceita somente os parâmetros declarados nessa ferramenta; não interpolar credenciais de login ou settings. A ferramenta precisa de `risky: true`, que é somente uma marcação e não uma confirmação humana.
+
+A capability `agent` exige autorização separada. O subagente recebe apenas `shell` se `terminal` também foi declarado e autorizado, e `file_list`, `file_read`, `file_write`, `file_edit` se `files` também foi declarado e autorizado. O runtime revalida permissões antes de cada chamada; paths de arquivos são relativos e confinados ao workspace. Não há browser, ferramentas do aparelho, carteira, outros conectores, `multi_agents` ou herança das ferramentas gerais do agente pai. A tarefa e o conteúdo que o subagente ler são enviados ao provedor LLM configurado e podem consumir cota/custo. Não inclua segredos no pedido.
 
 `limits` liga um parâmetro numérico a uma setting do tipo number; no conector YAML, valores acima do teto ou menores/iguais a zero são recusados quando a ferramenta é executada. O parser não exige `limits` para toda ferramenta `risky`, e `risky` não ativa confirmação genérica. Operações que enviam ordem, compra, venda, saque, transferência ou publicação devem ser marcadas `risky: true`. Ordens usam `requiresSignal: true`, `orderIntent.asset` e `orderIntent.direction` derivados somente dos parâmetros da ferramenta, além dos limites que a definição declarar; a direção final precisa resultar em `buy`, `sell`, `call` ou `put`. O Hub exige validação TypeSafe Jev se `require_jev` estiver ausente ou ligado; com `require_jev: false`, pula esse gate, mantendo a coordenação da ordem. Nunca descreva um mecanismo de proteção como garantia contra perdas.
 
@@ -89,15 +93,16 @@ Filtros encadeáveis: `url`, `json`, `num`/`num:N` (N 0–8), `int`, `upper`, `l
 
 Funções incluem matemática/conversão (`abs`, `round`, `sqrt`, `num`, `int`, `str`, `bool`, `coalesce`); texto (`upper`, `lower`, `trim`, `replace`, `split`, `join`, `regex`, `date`, `now`); listas/séries (`map`, `filter`, `reduce`, `sort_by`, `zip_rows`, `group_by`, `rolling`, `crossover`, `crossunder`, entre outras); e indicadores técnicos (`sma`, `ema`, `rsi`, `macd`, `bollinger`, `stoch`, `adx`, `ichimoku`, `supertrend`, `psar`, `vwap` e demais funções do motor do app). `indicators(...)` prepara um resumo técnico. Não invente funções: use somente as funções implementadas no SDK.
 
-## Capacidades do aparelho
+## Capacidades do conector
 
 As capacidades exigem declaração na raiz e autorização do usuário na tela do conector; ficam desativadas por padrão. Cada conector tem workspace isolado. O dry-run não autoriza nem executa capacidade real.
 
-- `terminal`: cada ferramenta usa `shell.run`, opcionalmente `timeoutSec` de 1–300 e `files` para gravar arquivos antes do comando. Argumentos `{{...}}` entram com escape/aspas; isso não torna scripts arbitrários seguros. Não use heredoc, nem echo/printf multilinha; para scripts use arquivos declarativos. `setup` roda uma vez ou após mudança de comando.
+- `terminal`: cada ferramenta usa `shell.run`, opcionalmente `timeoutSec` de 1–300 e `files` para gravar arquivos antes do comando. Argumentos `{{...}}` entram com escape/aspas; isso não torna scripts arbitrários seguros. O terminal dedicado não monta armazenamento Android nem outros chats/conectores, mas pode ler o próprio sistema Alpine e acessar a internet; não é um sandbox de shell restrito só ao workspace. Não use heredoc, nem echo/printf multilinha; para scripts use arquivos declarativos. `setup` roda uma vez ou após mudança de comando.
 - `files`: `file.op` aceita `read`, `write`, `list`, `delete` e `replace`. Caminhos são relativos ao workspace, sem `/` inicial ou `..`. `write`, `delete` e `replace` precisam de `risky: true` na definição, mas esse flag não é uma confirmação. `replace` usa `oldText`, `newText` e `allowMultiple`; sem correspondência única, não altera. A atualização é atômica. No DSL do conector, a edição declarativa é somente `file.op: replace`; `file_edit` é uma ferramenta interna do agente no workspace da tarefa e não faz parte deste esquema.
 - `browser`: `fetch` abre HTTPS de host permitido, espera 0–10 s e retorna texto renderizado. Não contorna login, captcha ou controles de acesso.
+- `agent`: a tarefa passa pelo modelo configurado e pode consumir cota/custo; o dry-run simula a resposta, sem chamar a LLM real ou executar terminal/arquivos. O prompt não é uma barreira de segurança; autorize apenas projetos confiáveis.
 
-Uma ferramenta usa apenas uma fonte operacional por vez. `shell`, `file` e `fetch` não rodam no teste offline do criador.
+Uma ferramenta usa apenas uma fonte operacional por vez. `shell`, `file` e `fetch` não rodam no teste offline do criador; `agent` usa resposta simulada e não valida qualidade do modelo ou a execução real do projeto.
 
 ## Política de saída VSL/copy
 

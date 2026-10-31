@@ -29,7 +29,7 @@ Ações de UI (`onAction`) são chamadas reais do conector e não herdam os limi
 
 O Hub redige o texto devolvido por chamadas de ferramenta substituindo valores literais retornados por `connector.secrets()` (somente valores com pelo menos quatro caracteres); o `SecretVault` também redige segredos resolvidos por `ask_secure` no fluxo normal do agente. Isso **não** é uma garantia universal para todos os logs e telas: `ErrorLog` pode receber a mensagem original de uma exceção antes da redação da saída, e falhas de login/ação podem ser exibidas pela UI conforme retornadas pelo conector. Não coloque credenciais em mensagens de erro ou resultados; os implementadores devem sanitizar cada rota e não presumir que `Redactor` seja um detector genérico de segredos.
 
-Permissões de `terminal`, `files` e `browser` são separadas e precisam ser autorizadas pelo usuário. O dry-run do criador não concede essas capacidades.
+Permissões de `agent`, `terminal`, `files` e `browser` são separadas e precisam ser autorizadas pelo usuário. O dry-run do criador não concede essas capacidades.
 
 ## Conectores nativos em Kotlin
 
@@ -60,7 +60,7 @@ Campos opcionais da raiz: `version`, `accent`, `headers`, `login`, `settings`, `
 - **Settings:** até 20 opções do usuário do tipo `number`, `switch` ou `text`, com valor padrão e, quando necessário, teto de risco.
 - **Panels:** até 10 blocos `header`, `stats`, `table` ou `note`. Tabelas têm até 8 colunas e 100 linhas, e leem uma resposta ou coleção realtime.
 - **Actions:** até 10 botões explícitos do usuário. Método diferente de GET requer `risky: true` na validação do YAML. Isso não implementa uma confirmação genérica: a ação da tela instalada chama `onAction` e pode enviar a requisição real.
-- **Tools:** até 30 ferramentas com nome snake_case, descrição e até 12 parâmetros tipados. Cada ferramenta usa no máximo uma fonte operacional: `request`, `send`, `source`, `shell`, `file` ou `fetch`. `response` e `list` modelam a saída.
+- **Tools:** até 30 ferramentas com nome snake_case, descrição e até 12 parâmetros tipados. Cada ferramenta usa no máximo uma fonte operacional: `request`, `send`, `source`, `shell`, `file`, `fetch` ou `agent`. `response` e `list` modelam a saída.
 - **Limites e ordens:** `limits` vincula parâmetros numéricos a settings numéricas; os limites declarados são verificados na chamada da ferramenta YAML. O parser não exige `limits` para toda ferramenta `risky`, e `risky` não é uma confirmação. Ordens marcadas com `requiresSignal` precisam de `orderIntent` válido; o gate TypeSafe Jev do Hub só é obrigatório se `require_jev` estiver ausente ou ligado. Com `require_jev: false`, esse gate é pulado, embora a coordenação de ordens do Hub continue ativa.
 
 ### Templates e cálculo
@@ -73,18 +73,23 @@ Modelos `{{...}}` acessam somente variáveis disponíveis no contexto da defini�
 
 `realtime` suporta WebSocket `wss://` em host autorizado, mensagens `onOpen`, heartbeat e regras `match`, `set` e `push`. As regras atualizam estado e coleções consultáveis por painéis e ferramentas. `rid` é disponibilizado aos templates, mas não é automaticamente inserido como campo de correlação em toda mensagem. Para aguardar uma resposta correlacionada, a definição deve enviar o valor de `{{rid}}` em um campo que o servidor devolva e configurar `await.match` para esse caminho. O runtime entrega a primeira mensagem que corresponder ao filtro declarado; não faz uma correlação implícita por ID.
 
-`capabilities` declara recursos opcionais do aparelho. Cada recurso fica desabilitado até autorização do usuário:
+`capabilities` declara recursos opcionais do conector. Cada recurso fica desabilitado até autorização do usuário:
 
-- `terminal`: comando isolado e limitado por tempo; `setup` prepara dependências uma vez. Argumentos templated são escapados, mas isso não torna seguro código arbitrário.
+- `terminal`: comando no ambiente Alpine/proot exclusivo do conector, com tempo/saída limitados; `setup` prepara dependências uma vez. O ambiente não monta o armazenamento Android nem outros chats/conectores, mas comandos podem ler o próprio sistema Alpine e acessar a internet: não é um sandbox de shell restrito a uma pasta. Argumentos templated são escapados, mas isso não torna seguro código arbitrário.
 - `files`: operações `read`, `write`, `list`, `delete` e `replace` no workspace isolado. O parser exige `risky` para escrita, exclusão e substituição; esse flag não é uma confirmação. `replace` altera somente a correspondência esperada; a gravação é atômica. No DSL do conector a edição declarativa é `file.op: replace`; `file_edit` continua como ferramenta interna do agente no workspace da tarefa, fora do esquema do conector.
 - `browser`: busca HTTPS de host autorizado e leitura do texto renderizado; não contorna autenticação, CAPTCHA ou controle de acesso.
+- `agent`: `tools[].agent` delega `task` ao modelo do agente selecionado (ou ao modelo padrão configurado). `maxSteps` é 1–12, `budgetTokens` 512–12.000 e `timeoutSec` 15–900. O orçamento total conta tokens de entrada e saída quando informados pelo provedor e faz estimativa conservadora se faltarem. A tarefa pode interpolar **somente parâmetros declarados na ferramenta**; credenciais de login e settings não são adicionadas ao prompt. O subagente recebe schemas internos `shell`, `file_list`, `file_read`, `file_write` e `file_edit` somente quando `terminal`/`files` também estiverem declarados e autorizados. Cada operação revalida a autorização e o filesystem limita os arquivos ao workspace. Não há browser, ferramentas Android, carteira, outros conectores, `multi_agents` ou herança de ferramentas do agente pai. A tarefa e os dados lidos são enviados ao provedor/modelo configurado e podem consumir cota/custo; não inclua segredos no parâmetro da tarefa.
+
+`agent` precisa de `risky: true`, mas essa marca só sinaliza a operação — não abre confirmação por chamada. Autorize `agent`, terminal e arquivos separadamente; revogue qualquer uma dessas permissões para bloquear os próximos usos. O fluxo padrão serializa tarefas por conector para evitar duas edições simultâneas no mesmo workspace.
+
+O botão **Carregar modelo Fluwy Open Dev** no editor inclui um gerador local de interfaces para criar, revisar e testar projetos frontend. Ele é uma definição SDK comum: não acessa serviço, conta, código ou assets proprietários de terceiros. A geração usa o modelo LLM configurado; arquivos ficam no workspace do conector. O modelo demonstra geração/iteração por arquivos e terminal, não uma prévia visual embutida no app.
 
 ## Validação, teste e instalação
 
 O fluxo do criador de IA é `connector_spec` → `connector_validate` → `connector_test` → `connector_propose`, mas essas etapas têm escopos diferentes:
 
 - `connector_validate` faz parsing e validação estrutural/DSL (campos, tipos, templates e regras do formato). Não executa o conector e não roda `ConnectorGuardrails.staticCheck`.
-- `connector_test` executa o dry-run offline do SDK e aí sim aplica os guardrails estáticos. Usa fixtures HTTP/WebSocket, filesystem virtual e respostas simuladas de browser/shell; login usa valores sintéticos. Não abre rede externa, não resolve credenciais reais, não abre páginas, não executa `setup`/shell/código gerado e não envia mensagens, ordens, publicações ou pagamentos. Ferramentas que dependem de shell/setup falham fechadas nesse dry-run.
+- `connector_test` executa o dry-run offline do SDK e aí sim aplica os guardrails estáticos. Usa fixtures HTTP/WebSocket, filesystem virtual e respostas simuladas de browser/shell/agent; login usa valores sintéticos. Não abre rede externa, não resolve credenciais reais, não abre páginas, não executa `setup`/shell/código gerado, não chama um modelo real e não envia mensagens, ordens, publicações ou pagamentos. Ferramentas que dependem de shell/setup falham fechadas; uma ferramenta `agent` só valida a estrutura e o contrato com uma resposta mock, sem validar qualidade da LLM nem build real.
 - `connector_propose` só cria o cartão **Instalar conector** quando o mesmo YAML passou no dry-run e tem atestado válido. O cartão revalida o atestado/digest antes de permitir o salvamento; a proposta não instala sozinha.
 - O botão **Salvar/Criar conector** do editor manual é outro caminho: aceita uma definição estruturalmente válida sem atestado de dry-run. O painel manual **Testar** também não é o `connector_test`: executa login real, consulta painéis e executa ferramentas contra integrações reais. Para uma ferramenta `risky`, a UI mostra um aviso, mas permite executar a chamada real. Esse painel chama `CustomConnector` diretamente, sem passar pelo gate TypeSafe Jev do Hub. O painel não executa `actions`; ações podem ser acionadas na tela normal do conector e também fazem chamadas reais.
 
@@ -104,6 +109,7 @@ Os pontos abaixo descrevem o comportamento atual; documentação não os transfo
 4. O caminho manual **Testar** executa operações reais fora do Hub; o salvamento manual não exige atestado.
 5. A redação não cobre universalmente logs e mensagens da UI: `ErrorLog` pode receber mensagens de exceção sem sanitização central.
 6. O parser YAML de login não exige um campo senha nem pelo menos um campo, ao contrário da validação de specs nativos.
+7. O terminal Alpine/proot é separado do armazenamento Android e de outros workspaces, mas pode acessar arquivos do próprio sistema Alpine e a internet; o prompt do subagente não é uma barreira de segurança. Use somente conectores/código confiáveis e não confunda a permissão existente de terminal com isolamento por diretório.
 
 Não invente endpoints, não use scraping nem contorne login/CAPTCHA. Serviços sem API pública/autorizada estável devem ser explicados como indisponíveis para este formato. OAuth de consentimento/PKCE, WebSocket binário, mTLS, CAPTCHA e 2FA interativo podem exigir implementação nativa.
 

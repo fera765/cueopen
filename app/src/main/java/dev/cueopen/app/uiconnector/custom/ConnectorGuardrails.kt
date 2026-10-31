@@ -193,6 +193,7 @@ object ConnectorGuardrails {
      */
     fun executableInValidation(t: ToolDef): Boolean = when {
         hasExternalEffect(t) -> false
+        t.agent != null -> false
         t.shell != null || t.file != null || t.fetch != null -> true
         else -> !t.risky
     }
@@ -209,6 +210,7 @@ object ConnectorGuardrails {
         val writtenByAnyTool = def.tools.flatMap { t -> t.shell?.files.orEmpty().map { it.path.trim().removePrefix("./") } + listOfNotNull(t.file?.takeIf { it.op == "write" }?.path) }.toSet()
         def.tools.forEach { t ->
             val where = "ferramenta ${t.name}"
+            if (t.agent != null) out += Finding(Level.WARN, "$where.agent", "a tarefa delegada só roda quando o conector estiver instalado e a capacidade agent for autorizada; connector_test usa resposta mock, sem chamada LLM real.")
             val sh = t.shell
             if (sh != null) {
                 commandRules(sh.run, "$where.shell.run", Mode.RUN, out)

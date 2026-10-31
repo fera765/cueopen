@@ -301,7 +301,7 @@ fun UiConnectorScreen(nav: NavController, id: String) {
             }
             val caps = hub.declaredCapabilities(id)
             if (caps.isNotEmpty()) {
-                item { SectionLabel("Permissões do aparelho") }
+                item { SectionLabel("Permissões do conector") }
                 item {
                     Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).background(c.surface).border(1.dp, c.line, RoundedCornerShape(16.dp)).padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                         Text("Este conector pede acesso a recursos do aparelho. Autorize só o necessário — fica desligado por padrão.", fontSize = 12.sp, color = c.ink3)

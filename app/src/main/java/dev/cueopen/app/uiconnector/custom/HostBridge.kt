@@ -18,7 +18,7 @@ import java.io.File
  * O contrato é Kotlin puro para permitir testes na JVM com uma implementação falsa.
  */
 interface HostBridge {
-    /** O usuário autorizou esta capacidade para este conector? (terminal | files | browser) */
+    /** O usuário autorizou esta capacidade para este conector? (terminal | files | browser | agent) */
     fun granted(capability: String): Boolean
 
     /**
@@ -32,6 +32,13 @@ interface HostBridge {
 
     /** Roda um comando no sandbox do conector (cwd = workspace do conector). */
     suspend fun shell(command: String, timeoutSec: Int): BridgeResult
+
+    /** Saída de terminal para subagente; padrão mantém compatibilidade com bridges de teste. */
+    suspend fun agentShell(command: String, timeoutSec: Int): BridgeResult = shell(command, timeoutSec)
+
+    /** Executa tarefa LLM limitada ao conector; bridges sem implementação negam por padrão. */
+    suspend fun runAgentTask(task: String, model: String?, maxSteps: Int, budgetTokens: Int, timeoutSec: Int): BridgeResult =
+        BridgeResult(false, "delegação LLM indisponível neste contexto")
 
     /** Operação de arquivo dentro do workspace do conector: read | write | list | delete. */
     suspend fun fileOp(op: String, path: String, content: String?): BridgeResult
@@ -71,20 +78,23 @@ object Capabilities {
     const val TERMINAL = "terminal"
     const val FILES = "files"
     const val BROWSER = "browser"
-    val ALL = setOf(TERMINAL, FILES, BROWSER)
+    const val AGENT = "agent"
+    val ALL = setOf(TERMINAL, FILES, BROWSER, AGENT)
 
     fun label(cap: String): String = when (cap) {
         TERMINAL -> "Terminal (Linux/Alpine)"
         FILES -> "Arquivos (workspace do conector)"
         BROWSER -> "Browser (abrir páginas)"
+        AGENT -> "Delegação ao agente LLM"
         else -> cap
     }
 
     /** Aviso mostrado ao usuário ao autorizar a capacidade. */
     fun warning(cap: String): String = when (cap) {
-        TERMINAL -> "Executa comandos Linux no sandbox isolado deste conector, com acesso à internet. Autorize apenas conectores em que você confia."
+        TERMINAL -> "Executa comandos Linux no ambiente Alpine/proot exclusivo deste conector; não monta o armazenamento Android nem os chats/outros conectores, mas comandos podem ler o próprio sistema Alpine e acessar a internet. Não é um sandbox de shell restrito só a uma pasta. Autorize apenas código confiável."
         FILES -> "Lê e grava arquivos apenas na pasta (workspace) deste conector — nunca fora dela."
         BROWSER -> "Abre páginas https dos sites declarados pelo conector para ler o conteúdo."
+        AGENT -> "Envia a tarefa e as leituras autorizadas ao modelo LLM configurado (ou ao modelo do agente selecionado); pode consumir a cota/custo do provedor. O subagente só recebe terminal/arquivos se também autorizados para este conector; não recebe browser, carteira, ferramentas do aparelho ou outros conectores."
         else -> ""
     }
 }

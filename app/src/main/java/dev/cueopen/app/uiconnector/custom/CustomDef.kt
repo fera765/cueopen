@@ -74,6 +74,9 @@ data class VslOutputPolicy(
     val forbiddenTermsParam: String = "",
 )
 
+/** Instrução delegada ao agente LLM, limitada por passos, tokens e tempo total. */
+data class AgentTaskStep(val task: String, val maxSteps: Int, val budgetTokens: Int, val timeoutSec: Int)
+
 data class ToolDef(
     val name: String, val description: String, val params: List<ParamSpec>, val risky: Boolean, val requiresSignal: Boolean,
     val intent: IntentDef?, val limits: List<LimitDef>, val request: ReqDef?, val response: String,
@@ -88,6 +91,7 @@ data class ToolDef(
     val file: FileStep? = null,
     val fetch: FetchStep? = null,
     val vslOutputPolicy: VslOutputPolicy? = null,
+    val agent: AgentTaskStep? = null,
 )
 data class LoginDef(val fields: List<LoginField>, val request: ReqDef?, val extract: Map<String, String>, val verify: ReqDef?)
 
@@ -323,7 +327,7 @@ object CustomDefParser {
             }
             hosts = (listOf(host) + allowed).filter { it.isNotEmpty() }.toSet()
 
-            // capacidades do aparelho (terminal | files | browser)
+            // capacidades do conector (inclui delegação LLM, separada de terminal/arquivos)
             val capabilities = LinkedHashSet<String>()
             val capEl = o["capabilities"]
             if (capEl != null && capEl !is JsonNull) {
@@ -331,7 +335,7 @@ object CustomDefParser {
                 if (arrC == null) errors.add("$.capabilities deve ser uma lista (ex.: [\"terminal\",\"files\"]).")
                 else arrC.forEachIndexed { i, el ->
                     val cv = (el as? JsonPrimitive)?.content?.trim()?.lowercase().orEmpty()
-                    if (cv !in Capabilities.ALL) errors.add("$.capabilities[$i]: '$cv' inválido (use terminal, files ou browser).")
+                    if (cv !in Capabilities.ALL) errors.add("$.capabilities[$i]: '$cv' inválido (use terminal, files, browser ou agent).")
                     else capabilities.add(cv)
                 }
             }
@@ -500,7 +504,7 @@ object CustomDefParser {
             val tools = ArrayList<ToolDef>()
             arr(o, "tools", "$", 30).forEachIndexed { i, to ->
                 val p = "$.tools[$i]"
-                known(to, p, setOf("name", "description", "params", "risky", "requiresSignal", "orderIntent", "limits", "request", "response", "list", "send", "source", "compute", "shell", "file", "fetch", "outputPolicy"))
+                known(to, p, setOf("name", "description", "params", "risky", "requiresSignal", "orderIntent", "limits", "request", "response", "list", "send", "source", "compute", "shell", "file", "fetch", "agent", "outputPolicy"))
                 val params = ArrayList<ParamSpec>()
                 arr(to, "params", p, 12).forEachIndexed { j, pa ->
                     val pp = "$p.params[$j]"
@@ -529,12 +533,13 @@ object CustomDefParser {
                 val tshell = shellStep(obj(to, "shell", p), "$p.shell", vars, capabilities, risky)
                 val tfile = fileStep(obj(to, "file", p), "$p.file", vars, capabilities, risky)
                 val tfetch = fetchStep(obj(to, "fetch", p), "$p.fetch", vars, capabilities)
+                val tagent = agentStep(obj(to, "agent", p), "$p.agent", paramVars, capabilities, risky)
                 val modes = listOfNotNull(
                     treq?.let { "request" }, tsend?.let { "send" }, tsource.ifEmpty { null }?.let { "source" },
-                    tshell?.let { "shell" }, tfile?.let { "file" }, tfetch?.let { "fetch" },
+                    tshell?.let { "shell" }, tfile?.let { "file" }, tfetch?.let { "fetch" }, tagent?.let { "agent" },
                 )
-                if (modes.size > 1) errors.add("$p: use só um entre request, send, source, shell, file e fetch (encontrado: ${modes.joinToString()}).")
-                if (modes.isEmpty() && rt == null && to["send"] == null && tcomp.isEmpty()) errors.add("$p.request é obrigatório (ou send/source/shell/file/fetch).")
+                if (modes.size > 1) errors.add("$p: use só um entre request, send, source, shell, file, fetch e agent (encontrado: ${modes.joinToString()}).")
+                if (modes.isEmpty() && rt == null && to["send"] == null && tcomp.isEmpty()) errors.add("$p.request é obrigatório (ou send/source/shell/file/fetch/agent).")
                 if (modes.isEmpty() && (rt != null || tcomp.isNotEmpty()) && str(to, "response", p).isBlank() && to["list"] == null) errors.add("$p: sem request/send/source, a ferramenta precisa de \"response\" lendo o estado (ex.: {{rt.saldo}}).")
                 if (tsend != null && !risky && ORDER_WORDS.containsMatchIn(str(to, "name", p) + " " + str(to, "description", p))) errors.add("$p: ferramenta que envia ordem/operação pelo tempo real exige \"risky\": true.")
                 val limits = ArrayList<LimitDef>()
@@ -550,7 +555,7 @@ object CustomDefParser {
                     if (st == null || st.type != SettingType.NUMBER) errors.add("$lp.maxSetting '$ms' deve ser uma setting do tipo number.")
                     limits.add(LimitDef(lpn, ms))
                 }
-                if (risky && limits.isEmpty() && !requiresSignal) warnings.add("$p: ferramenta sensível sem \"limits\" — o agente não terá teto de valor definido por você.")
+                if (risky && limits.isEmpty() && !requiresSignal && tagent == null) warnings.add("$p: ferramenta sensível sem \"limits\" — o agente não terá teto de valor definido por você.")
                 var intent: IntentDef? = null
                 val io = obj(to, "orderIntent", p)
                 if (io != null) {
@@ -616,7 +621,7 @@ object CustomDefParser {
                 }
                 val tname = str(to, "name", p, required = true)
                 val tdesc = str(to, "description", p, required = true)
-                tools.add(ToolDef(tname, tdesc, params, risky, requiresSignal, intent, limits, treq, response, list, tsend, tsource, tcomp, tshell, tfile, tfetch, vslPolicy))
+                tools.add(ToolDef(tname, tdesc, params, risky, requiresSignal, intent, limits, treq, response, list, tsend, tsource, tcomp, tshell, tfile, tfetch, vslPolicy, tagent))
             }
             if (baseUrl.isEmpty() && (usesNetwork || rt != null)) errors.add("$.baseUrl é obrigatório quando o conector faz requisições ou usa tempo real.")
             return CustomDef(id, name, description, version, accent, baseUrl, host, headers, login, settings, panels, actions, tools, allowed, rt, capabilities, setup)
@@ -687,6 +692,24 @@ object CustomDefParser {
             val w = str(o, "waitSec", path, def = "2").toIntOrNull()
             if (w == null || w !in 0..10) errors.add("$path.waitSec deve ser de 0 a 10.")
             return FetchStep(url, (w ?: 2).coerceIn(0, 10))
+        }
+
+        /** A tarefa recebe só os parâmetros da ferramenta, nunca variáveis de login ou segredos do conector. */
+        fun agentStep(o: JsonObject?, path: String, params: Set<String>, caps: Set<String>, risky: Boolean): AgentTaskStep? {
+            if (o == null) return null
+            if (Capabilities.AGENT !in caps) errors.add("$path exige \"agent\" na lista capabilities do conector.")
+            if (!risky) errors.add("$path: delegação LLM exige \"risky\": true para sinalizar a alteração potencial de arquivos/execução.")
+            known(o, path, setOf("task", "maxSteps", "budgetTokens", "timeoutSec"))
+            val task = str(o, "task", path, required = true)
+            if (task.length > ConnectorTaskAgent.MAX_TASK_CHARS) errors.add("$path.task excede ${ConnectorTaskAgent.MAX_TASK_CHARS} caracteres.")
+            tpl(task, "$path.task", params, false)
+            val steps = str(o, "maxSteps", path, def = "6").toIntOrNull()
+            if (steps == null || steps !in 1..ConnectorTaskAgent.MAX_STEPS) errors.add("$path.maxSteps deve estar entre 1 e ${ConnectorTaskAgent.MAX_STEPS}.")
+            val budget = str(o, "budgetTokens", path, def = "6000").toIntOrNull()
+            if (budget == null || budget !in 512..ConnectorTaskAgent.MAX_BUDGET_TOKENS) errors.add("$path.budgetTokens deve estar entre 512 e ${ConnectorTaskAgent.MAX_BUDGET_TOKENS}.")
+            val timeout = str(o, "timeoutSec", path, def = "300").toIntOrNull()
+            if (timeout == null || timeout !in 15..900) errors.add("$path.timeoutSec deve estar entre 15 e 900 segundos.")
+            return AgentTaskStep(task, (steps ?: 6).coerceIn(1, ConnectorTaskAgent.MAX_STEPS), (budget ?: 6000).coerceIn(512, ConnectorTaskAgent.MAX_BUDGET_TOKENS), (timeout ?: 300).coerceIn(15, 900))
         }
 
         /** Bloco "compute": {nome: expressão}. Valida sintaxe, funções, identificadores e referências c.x. */

@@ -3,6 +3,12 @@ package dev.cueopen.app.uiconnector.custom
 import dev.cueopen.app.CueApp
 import dev.cueopen.app.files.AtomicTextFile
 import java.io.File
+import java.util.concurrent.ConcurrentHashMap
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withTimeout
 
 /**
  * Implementação Android da [HostBridge]. Dá a um UI Connector acesso SEGURO e ISOLADO a:
@@ -22,6 +28,8 @@ class AndroidHostBridge(
 ) : HostBridge {
 
     companion object {
+        private val taskLocks = ConcurrentHashMap<String, Mutex>()
+
         /** Nombre reservado para limpiar entornos de validación creados por versiones anteriores. */
         private fun legacyValidationSession(id: String) = "__uic__${id}__v"
 
@@ -77,7 +85,13 @@ class AndroidHostBridge(
     }
 
     // ------------------------------------------------------------------ terminal
-    override suspend fun shell(command: String, timeoutSec: Int): BridgeResult {
+    override suspend fun shell(command: String, timeoutSec: Int): BridgeResult =
+        runShell(command, timeoutSec, rewriteArtifactPaths = true)
+
+    override suspend fun agentShell(command: String, timeoutSec: Int): BridgeResult =
+        runShell(command, timeoutSec, rewriteArtifactPaths = false)
+
+    private suspend fun runShell(command: String, timeoutSec: Int, rewriteArtifactPaths: Boolean): BridgeResult {
         val cmd = command.take(BridgeSecurity.MAX_CMD_CHARS)
         val sandbox = app.sandbox
         if (!sandbox.isInstalled()) return BridgeResult(false, "O sandbox Linux não está instalado. Abra Configurações → Sandbox para instalar o terminal.")
@@ -88,7 +102,8 @@ class AndroidHostBridge(
             val r = app.terminals.get(sessionId).runAgentCommand(ConnectorGuardrails.isolate(cmd), BridgeSecurity.clampTimeout(timeoutSec).toLong(), background = false)
             val failedQuiet = !r.timedOut && r.exitCode != 0 && r.output.isBlank()
             val body = buildString {
-                append(agentPaths(dev.cueopen.app.agent.ShellOutput.compact(r.output)).ifBlank { "(sem saída)" })
+                val output = dev.cueopen.app.agent.ShellOutput.compact(r.output)
+                append((if (rewriteArtifactPaths) agentPaths(output) else output).ifBlank { "(sem saída)" })
                 if (r.timedOut) append("\n[timeout após ${BridgeSecurity.clampTimeout(timeoutSec)}s]")
                 append("\n[exit ${r.exitCode}]")
                 if (failedQuiet) append("\nDica: o comando falhou sem imprimir nada. Confirme se as dependências foram instaladas (use o bloco setup) e rode o comando com '2>&1' para ver o erro; evite '>/dev/null' ao diagnosticar.")
@@ -98,6 +113,31 @@ class AndroidHostBridge(
             throw c
         } catch (t: Throwable) {
             BridgeResult(false, t.message ?: t.javaClass.simpleName)
+        }
+    }
+
+    override suspend fun runAgentTask(task: String, model: String?, maxSteps: Int, budgetTokens: Int, timeoutSec: Int): BridgeResult {
+        if (!granted(Capabilities.AGENT)) return BridgeResult(false, "delegação LLM não autorizada para este conector")
+        if (task.isBlank()) return BridgeResult(false, "a tarefa delegada está vazia")
+        val lock = taskLocks.computeIfAbsent(def.id) { Mutex() }
+        return lock.withLock {
+            if (!granted(Capabilities.AGENT)) return@withLock BridgeResult(false, "autorização de delegação revogada")
+            val app = app
+            val taskModel = ConnectorTaskModel { messages, tools, modelId, maxTokens, conversationId ->
+                app.llm.chat(messages, tools, modelId, maxTokens, conversationId = conversationId)
+            }
+            val runner = ConnectorTaskAgent(def.id, taskModel, this)
+            try {
+                withTimeout(timeoutSec.coerceIn(15, 900) * 1_000L) {
+                    runner.run(task, model, maxSteps, budgetTokens)
+                }
+            } catch (_: TimeoutCancellationException) {
+                BridgeResult(false, "tarefa LLM excedeu o limite de ${timeoutSec.coerceIn(15, 900)} segundos")
+            } catch (cancel: CancellationException) {
+                throw cancel
+            } catch (t: Throwable) {
+                BridgeResult(false, "falha na tarefa delegada (${t.javaClass.simpleName})")
+            }
         }
     }
 
