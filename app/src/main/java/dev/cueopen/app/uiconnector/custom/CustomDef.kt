@@ -74,8 +74,8 @@ data class VslOutputPolicy(
     val forbiddenTermsParam: String = "",
 )
 
-/** Instrução delegada ao agente LLM, limitada por passos, janela nativa do modelo e tempo. */
-data class AgentTaskStep(val task: String, val maxSteps: Int, val timeoutSec: Int)
+/** Instrução delegada ao agente LLM; maxSteps nulo é reservado ao gerador do Fluwy Open Dev. */
+data class AgentTaskStep(val task: String, val maxSteps: Int?, val timeoutSec: Int)
 
 data class ToolDef(
     val name: String, val description: String, val params: List<ParamSpec>, val risky: Boolean, val requiresSignal: Boolean,
@@ -533,7 +533,8 @@ object CustomDefParser {
                 val tshell = shellStep(obj(to, "shell", p), "$p.shell", vars, capabilities, risky)
                 val tfile = fileStep(obj(to, "file", p), "$p.file", vars, capabilities, risky)
                 val tfetch = fetchStep(obj(to, "fetch", p), "$p.fetch", vars, capabilities)
-                val tagent = agentStep(obj(to, "agent", p), "$p.agent", paramVars, capabilities, risky)
+                val unboundedSteps = id == LocalDevStudioTemplate.ID && str(to, "name", p) == LocalDevStudioTemplate.UNBOUNDED_TOOL
+                val tagent = agentStep(obj(to, "agent", p), "$p.agent", paramVars, capabilities, risky, unboundedSteps)
                 val modes = listOfNotNull(
                     treq?.let { "request" }, tsend?.let { "send" }, tsource.ifEmpty { null }?.let { "source" },
                     tshell?.let { "shell" }, tfile?.let { "file" }, tfetch?.let { "fetch" }, tagent?.let { "agent" },
@@ -695,7 +696,7 @@ object CustomDefParser {
         }
 
         /** A tarefa recebe só os parâmetros da ferramenta, nunca variáveis de login ou segredos do conector. */
-        fun agentStep(o: JsonObject?, path: String, params: Set<String>, caps: Set<String>, risky: Boolean): AgentTaskStep? {
+        fun agentStep(o: JsonObject?, path: String, params: Set<String>, caps: Set<String>, risky: Boolean, unboundedSteps: Boolean): AgentTaskStep? {
             if (o == null) return null
             if (Capabilities.AGENT !in caps) errors.add("$path exige \"agent\" na lista capabilities do conector.")
             if (!risky) errors.add("$path: delegação LLM exige \"risky\": true para sinalizar a alteração potencial de arquivos/execução.")
@@ -703,11 +704,21 @@ object CustomDefParser {
             known(o, path, setOf("task", "maxSteps", "budgetTokens", "timeoutSec"))
             val task = str(o, "task", path, required = true)
             tpl(task, "$path.task", params, false)
-            val steps = str(o, "maxSteps", path, def = "6").toIntOrNull()
-            if (steps == null || steps !in 1..ConnectorTaskAgent.MAX_STEPS) errors.add("$path.maxSteps deve estar entre 1 e ${ConnectorTaskAgent.MAX_STEPS}.")
+            val rawSteps = str(o, "maxSteps", path, def = if (unboundedSteps) "" else "6")
+            val steps = rawSteps.toIntOrNull()
+            if (unboundedSteps) {
+                if (o["maxSteps"] != null) {
+                    if (steps == null || steps !in 1..ConnectorTaskAgent.MAX_STEPS)
+                        errors.add("$path.maxSteps deve estar entre 1 e ${ConnectorTaskAgent.MAX_STEPS} quando informado.")
+                    warnings.add("$path.maxSteps é ignorado no gerador Fluwy Open Dev; a execução continua sujeita ao timeout.")
+                }
+            } else if (steps == null || steps !in 1..ConnectorTaskAgent.MAX_STEPS) {
+                errors.add("$path.maxSteps deve estar entre 1 e ${ConnectorTaskAgent.MAX_STEPS}.")
+            }
             val timeout = str(o, "timeoutSec", path, def = "300").toIntOrNull()
             if (timeout == null || timeout !in 15..900) errors.add("$path.timeoutSec deve estar entre 15 e 900 segundos.")
-            return AgentTaskStep(task, (steps ?: 6).coerceIn(1, ConnectorTaskAgent.MAX_STEPS), (timeout ?: 300).coerceIn(15, 900))
+            val stepLimit = if (unboundedSteps) null else (steps ?: 6).coerceIn(1, ConnectorTaskAgent.MAX_STEPS)
+            return AgentTaskStep(task, stepLimit, (timeout ?: 300).coerceIn(15, 900))
         }
 
         /** Bloco "compute": {nome: expressão}. Valida sintaxe, funções, identificadores e referências c.x. */

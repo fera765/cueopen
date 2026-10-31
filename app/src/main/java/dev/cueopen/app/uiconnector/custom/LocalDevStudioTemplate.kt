@@ -2,8 +2,11 @@ package dev.cueopen.app.uiconnector.custom
 
 /** Exemplo de SDK local: usa o Agent configurado no Fluwy e o workspace isolado do conector. */
 object LocalDevStudioTemplate {
+    const val ID = "fluwyopendev"
+    const val UNBOUNDED_TOOL = "desenvolver_ui"
+
     val YAML = """
-        id: fluwyopendev
+        id: $ID
         name: Fluwy Open Dev
         description: "Cria, revisa e testa interfaces web no workspace local deste conector usando o agente LLM configurado."
         version: "1.0"
@@ -17,7 +20,7 @@ object LocalDevStudioTemplate {
             text: "Projetos e dependências ficam no workspace do conector. A autorização de terminal pode permitir acesso à internet no sandbox existente."
             tone: neutral
         tools:
-          - name: desenvolver_ui
+          - name: $UNBOUNDED_TOOL
             description: "Cria ou atualiza um projeto frontend responsivo a partir do pedido, salva os arquivos e executa verificações disponíveis."
             risky: true
             params:
@@ -32,7 +35,6 @@ object LocalDevStudioTemplate {
                 Pedido do usuário:
                 {{pedido}}
                 Ao concluir, liste os arquivos alterados e os comandos/testes executados, com os resultados.
-              maxSteps: 8
               timeoutSec: 600
           - name: revisar_ui
             description: "Analisa o frontend existente, identifica problemas de responsividade, acessibilidade e consistência, e aplica as correções solicitadas."

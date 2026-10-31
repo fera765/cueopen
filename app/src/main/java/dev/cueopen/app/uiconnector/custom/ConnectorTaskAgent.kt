@@ -41,13 +41,13 @@ class ConnectorTaskAgent(
     suspend fun run(
         task: String,
         modelId: String?,
-        maxSteps: Int,
+        maxSteps: Int?,
         modelContextTokens: Int? = null,
         modelMaxCompletionTokens: Int? = null,
     ): BridgeResult {
         val cleanTask = task.trim()
         if (cleanTask.isEmpty()) return BridgeResult(false, "a tarefa delegada está vazia")
-        val stepLimit = maxSteps.coerceIn(1, MAX_STEPS)
+        val stepLimit = maxSteps?.coerceIn(1, MAX_STEPS)
         val contextWindow = modelContextTokens?.takeIf { it > 0 }?.toLong()
         val providerOutputLimit = modelMaxCompletionTokens?.takeIf { it > 0 }?.toLong()
         val conversationId = "uic-$connectorId-${UUID.randomUUID()}"
@@ -58,7 +58,9 @@ class ConnectorTaskAgent(
         var toolCalls = 0
         var lastProgress = ""
 
-        for (step in 1..stepLimit) {
+        var step = 0
+        while (stepLimit == null || step < stepLimit) {
+            step++
             val tools = availableTools()
             val maxPromptTokens = contextWindow
             compactHistory(messages, tools, maxPromptTokens)
@@ -82,7 +84,7 @@ class ConnectorTaskAgent(
             if (reply.toolCalls.isEmpty()) {
                 val answer = reply.content?.trim().orEmpty()
                 if (reply.truncated) {
-                    if (step >= stepLimit)
+                    if (stepLimit != null && step >= stepLimit)
                         return BridgeResult(false, "resposta truncada pela janela/limite nativo de saída do modelo e o limite de passos foi atingido${progressSuffix(answer)}")
                     messages += LlmMessage("assistant", answer)
                     messages += LlmMessage("user", "A resposta anterior foi cortada pelo limite de saída. Continue do ponto exato em que parou, sem repetir o texto concluído, e termine a tarefa.")
@@ -105,7 +107,7 @@ class ConnectorTaskAgent(
             reply.toolCalls.drop(4).forEach { call ->
                 messages += LlmMessage("tool", "ERRO: máximo de quatro chamadas por resposta do agente.", toolCallId = call.id, name = call.name)
             }
-            if (step == stepLimit) return BridgeResult(false, "limite de $stepLimit passos do agente atingido${progressSuffix(lastProgress)}")
+            if (stepLimit != null && step >= stepLimit) return BridgeResult(false, "limite de $stepLimit passos do agente atingido${progressSuffix(lastProgress)}")
         }
         return BridgeResult(false, "a tarefa delegada foi interrompida${progressSuffix(lastProgress)}")
     }

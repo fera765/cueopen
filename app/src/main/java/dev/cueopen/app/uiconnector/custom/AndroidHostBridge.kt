@@ -116,7 +116,7 @@ class AndroidHostBridge(
         }
     }
 
-    override suspend fun runAgentTask(task: String, model: String?, maxSteps: Int, timeoutSec: Int): BridgeResult {
+    override suspend fun runAgentTask(task: String, model: String?, maxSteps: Int?, timeoutSec: Int): BridgeResult {
         if (!granted(Capabilities.AGENT)) return BridgeResult(false, "delegação LLM não autorizada para este conector")
         if (task.isBlank()) return BridgeResult(false, "a tarefa delegada está vazia")
         val lock = taskLocks.computeIfAbsent(def.id) { Mutex() }

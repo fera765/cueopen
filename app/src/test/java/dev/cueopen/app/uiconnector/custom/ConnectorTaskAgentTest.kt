@@ -20,16 +20,41 @@ import org.junit.Test
 class ConnectorTaskAgentTest {
     private val settings = ConnectorSettings { null }
 
-    @Test fun `local dev studio template parses with bounded agent tasks`() {
+    @Test fun `local dev studio template leaves only UI generation without a step cap`() {
         val parsed = CustomDefParser.parse(LocalDevStudioTemplate.YAML)
         assertEquals(parsed.errors.toString(), emptyList<String>(), parsed.errors)
         val def = parsed.def!!
         assertEquals("fluwyopendev", def.id)
         assertEquals(setOf(Capabilities.AGENT, Capabilities.TERMINAL, Capabilities.FILES), def.capabilities)
         assertEquals(3, def.tools.size)
-        assertTrue(def.tools.all { it.agent != null && it.agent!!.maxSteps in 1..12 })
+        assertTrue(def.tools.first { it.name == "desenvolver_ui" }.agent!!.maxSteps == null)
+        assertTrue(def.tools.first { it.name == "revisar_ui" }.agent!!.maxSteps == 8)
+        assertTrue(def.tools.first { it.name == "verificar_projeto" }.agent!!.maxSteps == 6)
         assertFalse(LocalDevStudioTemplate.YAML.contains("budgetTokens:"))
         assertTrue(ConnectorGuardrails.staticCheck(def).none { it.level == ConnectorGuardrails.Level.ERROR })
+    }
+
+    @Test fun `only exact Fluwy Open Dev generation tool is unbounded and configured timeout is retained`() = runBlocking {
+        val def = CustomDefParser.parse(LocalDevStudioTemplate.YAML).def!!
+        val bridge = CaptureBridge(setOf(Capabilities.AGENT))
+        val connector = CustomConnector(def, bridge = bridge)
+
+        connector.callTool("desenvolver_ui", mapOf("pedido" to "Crie uma interface"), settings)
+        assertTrue(bridge.maxSteps == null)
+        assertTrue(bridge.timeoutSec == 600)
+
+        connector.callTool("revisar_ui", mapOf("pedido" to "Revise o layout"), settings)
+        assertTrue(bridge.maxSteps == 8)
+        connector.callTool("verificar_projeto", mapOf("pedido" to "Rode os testes"), settings)
+        assertTrue(bridge.maxSteps == 6)
+
+        val legacyYaml = LocalDevStudioTemplate.YAML.replaceFirst("timeoutSec: 600", "maxSteps: 8\n      timeoutSec: 600")
+        val legacy = CustomDefParser.parse(legacyYaml)
+        assertEquals(legacy.errors.toString(), emptyList<String>(), legacy.errors)
+        assertTrue(legacy.def!!.tools.first { it.name == "desenvolver_ui" }.agent!!.maxSteps == null)
+
+        val renamed = CustomDefParser.parse(LocalDevStudioTemplate.YAML.replace("id: fluwyopendev", "id: fluwyopendevclone")).def!!
+        assertTrue(renamed.tools.first { it.name == "desenvolver_ui" }.agent!!.maxSteps == 6)
     }
 
     @Test fun `agent task requires opt-in risky declaration and bounded values`() {
@@ -70,6 +95,7 @@ class ConnectorTaskAgentTest {
         assertTrue(out, out.contains("Concluído"))
         assertEquals("Faça: Crie uma landing page", bridge.task)
         assertEquals("provider/model", bridge.model)
+        assertTrue(bridge.maxSteps == 2)
 
         val denied = CaptureBridge(emptySet())
         val noGrant = CustomConnector(def, bridge = denied).callTool("run_task", mapOf("pedido" to "x"), settings)
@@ -204,6 +230,23 @@ class ConnectorTaskAgentTest {
         assertEquals(listOf(null), usageModel.maxTokenRequests)
     }
 
+    @Test fun `unbounded task continues past the former twelve step ceiling`() = runBlocking {
+        val bridge = FakeBridge(mutableSetOf(Capabilities.TERMINAL))
+        val iterations = ConnectorTaskAgent.MAX_STEPS + 1
+        val model = ScriptedModel { turn, _, _ ->
+            if (turn <= iterations) {
+                val id = "cmd$turn"
+                LlmReply(null, listOf(ToolCall(id, "shell", """{"command":"pwd","timeout_sec":5}""")), rawCalls(id, "shell"))
+            } else {
+                LlmReply("Concluído após $iterations verificações.", emptyList(), null)
+            }
+        }
+        val result = ConnectorTaskAgent("fluwyopendev", model, bridge).run("Desenvolva e verifique", null, maxSteps = null)
+        assertTrue(result.text, result.ok)
+        assertEquals(iterations + 1, model.calls)
+        assertEquals(iterations, bridge.commands.size)
+    }
+
     @Test fun `known native context and completion limits determine per-call max tokens`() = runBlocking {
         val model = ScriptedModel { _, _, _ -> LlmReply("Concluído", emptyList(), null) }
         val result = ConnectorTaskAgent("demo", model, FakeBridge(mutableSetOf()))
@@ -248,12 +291,14 @@ class ConnectorTaskAgentTest {
     private class CaptureBridge(private val grants: Set<String>) : HostBridge {
         var task: String? = null
         var model: String? = null
+        var maxSteps: Int? = -1
+        var timeoutSec: Int? = null
         override fun granted(capability: String) = capability in grants
         override suspend fun shell(command: String, timeoutSec: Int) = BridgeResult(true, "shell")
         override suspend fun fileOp(op: String, path: String, content: String?) = BridgeResult(true, "file")
         override suspend fun fetch(url: String, waitSec: Int) = BridgeResult(false, "no browser")
-        override suspend fun runAgentTask(task: String, model: String?, maxSteps: Int, timeoutSec: Int): BridgeResult {
-            this.task = task; this.model = model
+        override suspend fun runAgentTask(task: String, model: String?, maxSteps: Int?, timeoutSec: Int): BridgeResult {
+            this.task = task; this.model = model; this.maxSteps = maxSteps; this.timeoutSec = timeoutSec
             return BridgeResult(true, "Concluído localmente")
         }
     }
