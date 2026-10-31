@@ -4,8 +4,6 @@ import android.content.Context
 import android.os.SystemClock
 import dev.cueopen.app.data.AgentProfile
 import dev.cueopen.app.diag.ErrorLog
-import dev.cueopen.app.trading.Side
-import dev.cueopen.app.trading.SignalGate
 import dev.cueopen.app.trading.TradeCoordinator
 import dev.cueopen.app.uiconnector.custom.CustomConnector
 import dev.cueopen.app.uiconnector.custom.CustomConnectorStore
@@ -35,8 +33,7 @@ import java.util.concurrent.ConcurrentHashMap
  * Na chamada, o Hub repete a checagem e tenta login com credenciais lembradas. O texto retornado
  * passa por [Redactor], mas ErrorLog registra a exceção antes dessa redação; não é sanitização universal.
  *
- * Ferramentas `requiresSignal` passam pelo gate TypeSafe Jev quando `require_jev` está ausente ou ligado;
- * desligado, o gate é pulado, mas a coordenação de ordens continua ativa.
+ * Ferramentas `opensOrder` passam pela validação de intent e coordenação local por venue/ativo.
  */
 class UiConnectorHub(context: Context) {
     companion object { const val BACKUP_FORMAT = "cueopen-uiconnectors-backup" }
@@ -66,6 +63,13 @@ class UiConnectorHub(context: Context) {
         val problems = SpecValidator.validate(c.spec)
         if (problems.isNotEmpty()) ErrorLog.log("uiconnector", "spec inválido (${c.spec.id}): " + problems.joinToString("; "))
         problems.isEmpty()
+    }
+
+    init {
+        val activeSettingKeys = builtin.firstOrNull { it.spec.id == "iqoption" }?.spec?.settings.orEmpty()
+            .map { "set_iqoption_${it.id}" }.toSet()
+        val obsoleteKeys = prefs.all.keys.filter { it.startsWith("set_iqoption_") && it !in activeSettingKeys }
+        if (obsoleteKeys.isNotEmpty()) prefs.edit().also { editor -> obsoleteKeys.forEach { editor.remove(it) } }.apply()
     }
 
     @Volatile private var custom: List<UiConnector> = loadCustom(emptyList())
@@ -426,14 +430,9 @@ class UiConnectorHub(context: Context) {
         return agentOptedIn || !agentRequired(id)
     }
 
-    /** Este agente tem algum conector que abre ordens (precisa do avaliador de acurácia)? */
-    fun hasTradingTools(agent: AgentProfile?): Boolean =
-        connectors.any { c -> usableBy(c, agent) && c.spec.tools.any { it.requiresSignal } }
-
-    /** Algum conector de ordem usável por este agente EXIGE o TypeSafe Jev? (setting require_jev on, ou conector sem essa setting). */
-    fun jevRequiredBy(agent: AgentProfile?): Boolean =
-        connectors.any { c -> usableBy(c, agent) && c.spec.tools.any { it.requiresSignal } &&
-            (c.spec.settings.none { it.id == "require_jev" } || settings(c).bool("require_jev")) }
+    /** Este agente tem algum conector que abre ordens? */
+    fun hasOrderTools(agent: AgentProfile?): Boolean =
+        connectors.any { c -> usableBy(c, agent) && c.spec.tools.any { it.opensOrder } }
 
     /** Definições de ferramenta (formato OpenAI/OpenRouter) dos conectores que este agente pode usar. */
     fun toolDefinitions(agent: AgentProfile?): List<JsonObject> =
@@ -466,7 +465,7 @@ class UiConnectorHub(context: Context) {
 
     /**
      * Executa a ferramenta `uic_<id>_<tool>` para o agente. Nunca lança: devolve texto (erros viram texto).
-     * [agentKey] identifica quem opera (id do agente, ou da sessão) — base do portão e das reservas.
+     * [agentKey] identifica quem opera (id do agente, ou da sessão) — base da coordenação e das reservas.
      */
     suspend fun callTool(agent: AgentProfile?, agentKey: String, fullName: String, args: JsonObject): String {
         val (id, tool) = SpecValidator.parseToolName(fullName) ?: return "Ferramenta inválida: $fullName"
@@ -476,11 +475,8 @@ class UiConnectorHub(context: Context) {
         val strArgs = args.entries.associate { (k, v) -> k to ((v as? JsonPrimitive)?.contentOrNull ?: v.toString()) }
         val out = try {
             ensureLoggedIn(id).getOrThrow()
-            if (ts.requiresSignal) {
-                // "require_jev": se o conector tem a setting e ela está OFF, pula o filtro TypeSafe Jev,
-                // mas mantém a coordenação (uma ordem por vez, reserva do ativo). Sem a setting = sempre exige (padrão seguro).
-                val requireJev = c.spec.settings.none { it.id == "require_jev" } || settings(c).bool("require_jev")
-                guardedCall(c, tool, agentKey, strArgs, requireJev)
+            if (ts.opensOrder) {
+                guardedCall(c, tool, agentKey, strArgs)
             } else if (c is CustomConnector) c.callTool(tool, strArgs, settings(c), delegatedModel = agent?.model)
             else c.callTool(tool, strArgs, settings(c))
         } catch (t: kotlinx.coroutines.CancellationException) {
@@ -493,54 +489,30 @@ class UiConnectorHub(context: Context) {
         return Redactor.redact(out, c.secrets())
     }
 
-    /**
-     * Portão de uma ordem: (1) uma ordem por vez neste conector (evita estourar "máx. de operações
-     * abertas" com agentes concorrentes); (2) exige validação prévia do avaliador para CADA ativo/lado;
-     * (3) reserva o ativo para este agente (outro agente não opera o mesmo ativo ao mesmo tempo);
-     * (4) se a ordem não saiu (recusada/erro), devolve a aprovação para não gastar uma validação à toa.
-     */
-    private suspend fun guardedCall(c: UiConnector, tool: String, agentKey: String, args: Map<String, String>, requireValidation: Boolean = true): String {
+    /** Serializa ordens por venue, identifica intent e impede dois agentes de operar o mesmo ativo juntos. */
+    private suspend fun guardedCall(c: UiConnector, tool: String, agentKey: String, args: Map<String, String>): String {
         val venue = c.spec.id
         val intents = c.orderIntents(tool, args)
         if (intents.isEmpty()) return "RECUSADO: não foi possível identificar o ativo e o lado (compra/venda) da ordem. Confira os argumentos."
         return TradeCoordinator.venueLock(venue).withLock {
-            val gate = TradeCoordinator.gate
-            val consumed = ArrayList<SignalGate.Approval>()
-            fun undo() { consumed.forEach { gate.restore(it) } }
+            val reserved = ArrayList<OrderIntent>()
+            fun releaseClaims() = reserved.forEach { TradeCoordinator.release(venue, it.asset, agentKey) }
             for (intent in intents) {
-                if (requireValidation) {
-                    val approval = gate.consume(agentKey, venue, setOf(intent.asset), intent.side)
-                    if (approval == null) {
-                        undo()
-                        return@withLock missingValidation(venue, intent, gate)
-                    }
-                    consumed.add(approval)
-                }
                 val holder = TradeCoordinator.claim(venue, intent.asset, agentKey)
                 if (holder != null) {
-                    undo()
+                    releaseClaims()
                     return@withLock "RECUSADO: outro agente já está operando ${intent.asset} agora. Aguarde ou escolha outro ativo."
                 }
+                reserved.add(intent)
             }
             val out = try {
                 c.callTool(tool, args, settings(c))
             } catch (t: Throwable) {
-                undo()
-                intents.forEach { TradeCoordinator.release(venue, it.asset, agentKey) }
+                releaseClaims()
                 throw t
             }
-            if (out.startsWith("RECUSAD") || out.startsWith("ERRO")) {
-                undo()
-                intents.forEach { TradeCoordinator.release(venue, it.asset, agentKey) }
-            }
+            if (out.startsWith("RECUSAD") || out.startsWith("ERRO")) releaseClaims()
             out
         }
-    }
-
-    private fun missingValidation(venue: String, intent: OrderIntent, gate: SignalGate): String {
-        val dir = if (intent.side == Side.BUY) "buy" else "sell"
-        return "RECUSADO: falta a validação TypeSafe Jev para ${intent.side} ${intent.asset}. Antes de qualquer ordem chame typesafe_jev_check com " +
-            "signals_json=[{\"id\":\"${intent.asset}\",\"venue\":\"$venue\",\"direction\":\"$dir\",\"data\":\"<dados reais: velas, preço, tendência>\"}] " +
-            "e opere somente se vier ✅ OPERAR (acurácia ≥ ${gate.floor}%). A aprovação vale ${gate.ttlSeconds / 60} min e serve para UMA ordem."
     }
 }

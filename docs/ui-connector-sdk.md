@@ -19,11 +19,11 @@ O SDK oferece conectores com interface própria: login, painéis, ações do usu
 
 O schema das ferramentas é exposto quando o conector está habilitado e o agente tem o conector selecionado no perfil. Se **Agent required?** estiver desligado, qualquer agente pode usar um conector habilitado. O estado de login e a existência de credenciais salvas não são pré-requisitos para expor o schema.
 
-Ao receber uma chamada `uic_*`, o Hub verifica novamente a habilitação/seleção e então tenta garantir o login. Se a sessão não estiver ativa, credenciais lembradas podem ser usadas para reconectar; sem credenciais salvas, a chamada falha pedindo login. `tools_load` e o filtro do contexto Jev podem adiar quais schemas aparecem no contexto para economizar tokens, mas não concedem acesso nem substituem a checagem feita pelo Hub.
+Ao receber uma chamada `uic_*`, o Hub verifica novamente a habilitação/seleção e então tenta garantir o login. Se a sessão não estiver ativa, credenciais lembradas podem ser usadas para reconectar; sem credenciais salvas, a chamada falha pedindo login. `tools_load` e o planejador contextual do agente podem adiar quais schemas aparecem para economizar tokens, mas não concedem acesso nem substituem a checagem feita pelo Hub.
 
 ## Segurança e limites atuais
 
-`risky` é uma marcação de operação sensível e, em alguns casos, um requisito de validação do YAML. **Não é uma confirmação humana automática, não ativa por si só um bloqueio geral de execução e não garante que exista um limite numérico.** Um `ToolSpec.risky` sem limites declarados e sem `requiresSignal` não recebe um gate genérico de confirmação no Hub. Limites só existem quando a implementação do conector os aplica; no conector YAML, os limites declarados para ferramentas são verificados em `CustomConnector.callTool`.
+`risky` é uma marcação de operação sensível e, em alguns casos, um requisito de validação do YAML. **Não é uma confirmação humana automática, não ativa por si só um bloqueio geral de execução e não garante que exista um limite numérico.** Um `ToolSpec.risky` sem limites declarados e sem `opensOrder` não recebe um gate genérico de confirmação no Hub. Limites só existem quando a implementação do conector os aplica; no conector YAML, os limites declarados para ferramentas são verificados em `CustomConnector.callTool`.
 
 Ações de UI (`onAction`) são chamadas reais do conector e não herdam os limites do agente. No renderizador genérico, a confirmação existe para valores de `UiBlock.Segmented.confirmValues`; `UiBlock.Button.risky` altera a apresentação do botão, mas não abre uma confirmação. Para ações HTTP, o parser exige `risky: true` quando o método não é GET, porém isso não acrescenta uma confirmação antes do envio.
 
@@ -35,7 +35,7 @@ Permissões de `agent`, `terminal`, `files` e `browser` são separadas e precisa
 
 Conectores nativos implementam `UiConnector`, declaram o contrato em `UiConnectorSpec` e são registrados em `UiConnectorHub.connectors`. A especificação inclui `id`, nome, descrição, versão, campos de login, configurações e ferramentas. `SpecValidator.validate(spec)` valida os specs nativos; se houver campos de login, exige ao menos um campo `PASSWORD`. Testes devem cobrir os handlers e as proteções implementadas por cada conector.
 
-O diretório `uiconnector/iqoption/` implementa um cliente não oficial da IQ Option; o protocolo pode mudar sem aviso. O conector possui limites próprios. As ferramentas de abertura têm `requiresSignal`, mas a setting `require_jev` vem desligada por padrão: nesse estado o Hub pula a validação TypeSafe Jev, mantendo a coordenação e as salvaguardas implementadas pelo conector. A marcação `risky`, isoladamente, não significa confirmação humana.
+O diretório `uiconnector/iqoption/` implementa um cliente não oficial da IQ Option; o protocolo pode mudar sem aviso. O conector possui limites próprios. As ferramentas de abertura têm `opensOrder`, e o Hub valida o intent e coordena as chamadas por venue e ativo. A marcação `risky`, isoladamente, não significa confirmação humana.
 
 O diretório `uiconnector/gmail/` usa a API oficial do Gmail, OAuth 2.0 com PKCE e redirect loopback. O usuário configura o próprio projeto Google Cloud e o app pode manter o refresh token no cofre cifrado. A marcação `risky` de uma ferramenta de envio não cria, por si só, uma confirmação humana antes de cada envio.
 
@@ -61,7 +61,7 @@ Campos opcionais da raiz: `version`, `accent`, `headers`, `login`, `settings`, `
 - **Panels:** até 10 blocos `header`, `stats`, `table` ou `note`. Tabelas têm até 8 colunas e 100 linhas, e leem uma resposta ou coleção realtime.
 - **Actions:** até 10 botões explícitos do usuário. Método diferente de GET requer `risky: true` na validação do YAML. Isso não implementa uma confirmação genérica: a ação da tela instalada chama `onAction` e pode enviar a requisição real.
 - **Tools:** até 30 ferramentas com nome snake_case, descrição e até 12 parâmetros tipados. Cada ferramenta usa no máximo uma fonte operacional: `request`, `send`, `source`, `shell`, `file`, `fetch` ou `agent`. `response` e `list` modelam a saída.
-- **Limites e ordens:** `limits` vincula parâmetros numéricos a settings numéricas; os limites declarados são verificados na chamada da ferramenta YAML. O parser não exige `limits` para toda ferramenta `risky`, e `risky` não é uma confirmação. Ordens marcadas com `requiresSignal` precisam de `orderIntent` válido; o gate TypeSafe Jev do Hub só é obrigatório se `require_jev` estiver ausente ou ligado. Com `require_jev: false`, esse gate é pulado, embora a coordenação de ordens do Hub continue ativa.
+- **Limites e ordens:** `limits` vincula parâmetros numéricos a settings numéricas; os limites declarados são verificados na chamada da ferramenta YAML. O parser não exige `limits` para toda ferramenta `risky`, e `risky` não é uma confirmação. Ordens marcadas com `opensOrder` precisam de `orderIntent` válido; o Hub verifica ativo e lado e aplica serialização por venue e reserva temporária por ativo.
 
 ### Templates e cálculo
 
@@ -91,7 +91,7 @@ O fluxo do criador de IA é `connector_spec` → `connector_validate` → `conne
 - `connector_validate` faz parsing e validação estrutural/DSL (campos, tipos, templates e regras do formato). Não executa o conector e não roda `ConnectorGuardrails.staticCheck`.
 - `connector_test` executa o dry-run offline do SDK e aí sim aplica os guardrails estáticos. Usa fixtures HTTP/WebSocket, filesystem virtual e respostas simuladas de browser/shell/agent; login usa valores sintéticos. Não abre rede externa, não resolve credenciais reais, não abre páginas, não executa `setup`/shell/código gerado, não chama um modelo real e não envia mensagens, ordens, publicações ou pagamentos. Ferramentas que dependem de shell/setup falham fechadas; uma ferramenta `agent` só valida a estrutura e o contrato com uma resposta mock, sem validar qualidade da LLM nem build real.
 - `connector_propose` só cria o cartão **Instalar conector** quando o mesmo YAML passou no dry-run e tem atestado válido. O cartão revalida o atestado/digest antes de permitir o salvamento; a proposta não instala sozinha.
-- O botão **Salvar/Criar conector** do editor manual é outro caminho: aceita uma definição estruturalmente válida sem atestado de dry-run. O painel manual **Testar** também não é o `connector_test`: executa login real, consulta painéis e executa ferramentas contra integrações reais. Para uma ferramenta `risky`, a UI mostra um aviso, mas permite executar a chamada real. Esse painel chama `CustomConnector` diretamente, sem passar pelo gate TypeSafe Jev do Hub. O painel não executa `actions`; ações podem ser acionadas na tela normal do conector e também fazem chamadas reais.
+- O botão **Salvar/Criar conector** do editor manual é outro caminho: aceita uma definição estruturalmente válida sem atestado de dry-run. O painel manual **Testar** também não é o `connector_test`: executa login real, consulta painéis e executa ferramentas contra integrações reais. Para uma ferramenta `risky`, a UI mostra um aviso, mas permite executar a chamada real. Esse painel chama `CustomConnector` diretamente, sem passar pela coordenação de ordens do Hub. O painel não executa `actions`; ações podem ser acionadas na tela normal do conector e também fazem chamadas reais.
 
 O atestado do fluxo de IA é vinculado ao SHA-256 canônico do YAML e à versão da política. O mesmo YAML precisa passar no dry-run para ser proposto; alterar a definição exige novo teste. Ele comprova apenas os contratos exercitados localmente — não confirma endpoint ativo, autenticação, permissão ou disponibilidade real do serviço. Essa exigência não se aplica ao salvamento manual descrito acima.
 
@@ -104,15 +104,18 @@ A política de saída `outputPolicy` do tipo `vsl` pode conferir duração estim
 Os pontos abaixo descrevem o comportamento atual; documentação não os transforma em proteções. Se o produto exigir qualquer proteção mais forte, ela precisa de implementação e testes específicos:
 
 1. `risky` em ferramenta/ação não produz confirmação humana genérica; um botão `risky` só muda a aparência, e `limits` não é obrigatório para toda ferramenta sensível.
-2. Ações da UI não passam pelos limites do agente nem por um gate central de risco.
-3. `require_jev: false` desliga o gate TypeSafe Jev para ferramentas `requiresSignal`; no conector IQ Option esse é o valor padrão.
-4. O caminho manual **Testar** executa operações reais fora do Hub; o salvamento manual não exige atestado.
-5. A redação não cobre universalmente logs e mensagens da UI: `ErrorLog` pode receber mensagens de exceção sem sanitização central.
-6. O parser YAML de login não exige um campo senha nem pelo menos um campo, ao contrário da validação de specs nativos.
-7. O terminal Alpine/proot é separado do armazenamento Android e de outros workspaces, mas pode acessar arquivos do próprio sistema Alpine e a internet; o prompt do subagente não é uma barreira de segurança. Use somente conectores/código confiáveis e não confunda a permissão existente de terminal com isolamento por diretório.
+2. Ações da UI não passam pelos limites do agente nem por uma coordenação central de ordens.
+3. O caminho manual **Testar** executa operações reais fora do Hub; o salvamento manual não exige atestado.
+4. A redação não cobre universalmente logs e mensagens da UI: `ErrorLog` pode receber mensagens de exceção sem sanitização central.
+5. O parser YAML de login não exige um campo senha nem pelo menos um campo, ao contrário da validação de specs nativos.
+6. O terminal Alpine/proot é separado do armazenamento Android e de outros workspaces, mas pode acessar arquivos do próprio sistema Alpine e a internet; o prompt do subagente não é uma barreira de segurança. Use somente conectores/código confiáveis e não confunda a permissão existente de terminal com isolamento por diretório.
 
 Não invente endpoints, não use scraping nem contorne login/CAPTCHA. Serviços sem API pública/autorizada estável devem ser explicados como indisponíveis para este formato. OAuth de consentimento/PKCE, WebSocket binário, mTLS, CAPTCHA e 2FA interativo podem exigir implementação nativa.
 
-## TypeSafe Jev e coordenação de ordens
+## Coordenação de ordens
 
-`typesafe_jev_check` grava aprovações com piso 70, uso único e validade de 5 minutos, por agente/venue/ativo/lado. Ferramentas `requiresSignal` passam pelo gate do Hub: exigem a aprovação quando `require_jev` está ausente ou ligado; quando essa setting existe e está desligada, a aprovação Jev não é exigida. O Hub ainda valida o intent da ordem e aplica coordenação por venue/ativo. Essa aprovação é um gate do agente, não uma confirmação humana nem garantia de resultado financeiro. Regras automáticas de saída, como SL/TP e trailing stop, seguem as próprias proteções. Execuções na carteira Solana são serializadas por `walletMutex`, cada venue usa `venueLock` e um ativo não é operado por dois agentes ao mesmo tempo. Solana e IQ Option têm capital independente.
+Ferramentas marcadas com `opensOrder: true` declaram `orderIntent` com o ativo e o lado que a chamada abrirá, além de `risky: true`. O Hub recusa intents inválidos, serializa chamadas no mesmo venue e reserva temporariamente cada ativo para impedir que agentes diferentes operem simultaneamente o mesmo instrumento. Falhas ou recusas liberam as reservas adquiridas; após uma chamada bem-sucedida, elas expiram automaticamente. Isso é coordenação de execução, não confirmação humana, recomendação financeira ou garantia contra perdas.
+
+Execuções da carteira Solana usam `walletMutex`; cada venue tem seu próprio `venueLock`, e Solana e IQ Option mantêm capital e posições independentes. Regras automáticas de saída, como SL/TP e trailing stop, seguem as proteções implementadas pelo respectivo conector.
+
+Não há compatibilidade universal: OAuth com tela de consentimento/PKCE, WebSocket binário, mTLS, CAPTCHA e 2FA interativo podem exigir implementação nativa no SDK. Seja explícito sobre limites e falhas; nunca prometa ausência de bugs ou de perdas.

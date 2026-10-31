@@ -183,7 +183,7 @@ object ConnectorGuardrails {
     }
 
     /** Ferramenta de terminal com efeito externo (enviar/pagar/publicar) ou ordem: nunca roda no teste. */
-    fun hasExternalEffect(t: ToolDef): Boolean = t.intent != null || t.requiresSignal || t.limits.isNotEmpty() ||
+    fun hasExternalEffect(t: ToolDef): Boolean = t.intent != null || t.opensOrder || t.limits.isNotEmpty() ||
         (t.shell != null && SIDE_EFFECT.containsMatchIn(t.name + " " + t.description))
 
     /**

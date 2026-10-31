@@ -78,7 +78,7 @@ data class VslOutputPolicy(
 data class AgentTaskStep(val task: String, val maxSteps: Int?, val timeoutSec: Int)
 
 data class ToolDef(
-    val name: String, val description: String, val params: List<ParamSpec>, val risky: Boolean, val requiresSignal: Boolean,
+    val name: String, val description: String, val params: List<ParamSpec>, val risky: Boolean, val opensOrder: Boolean,
     val intent: IntentDef?, val limits: List<LimitDef>, val request: ReqDef?, val response: String,
     val list: ListDef? = null,
     /** Envio de mensagem pelo tempo real (com espera opcional da resposta). */
@@ -112,7 +112,7 @@ data class CustomDef(
     fun toSpec() = UiConnectorSpec(
         id = id, name = name, description = description, version = version,
         loginFields = login.fields, settings = settings,
-        tools = tools.map { ToolSpec(it.name, it.description, it.params, it.risky, it.requiresSignal) },
+        tools = tools.map { ToolSpec(it.name, it.description, it.params, it.risky, it.opensOrder) },
         accent = accent,
     )
 }
@@ -504,7 +504,7 @@ object CustomDefParser {
             val tools = ArrayList<ToolDef>()
             arr(o, "tools", "$", 30).forEachIndexed { i, to ->
                 val p = "$.tools[$i]"
-                known(to, p, setOf("name", "description", "params", "risky", "requiresSignal", "orderIntent", "limits", "request", "response", "list", "send", "source", "compute", "shell", "file", "fetch", "agent", "outputPolicy"))
+                known(to, p, setOf("name", "description", "params", "risky", "opensOrder", "orderIntent", "limits", "request", "response", "list", "send", "source", "compute", "shell", "file", "fetch", "agent", "outputPolicy"))
                 val params = ArrayList<ParamSpec>()
                 arr(to, "params", p, 12).forEachIndexed { j, pa ->
                     val pp = "$p.params[$j]"
@@ -519,7 +519,6 @@ object CustomDefParser {
                 val vars = reqVars + paramVars
                 val outVars = vars + tcomp.map { "c.${it.first}" }
                 val risky = bool(to, "risky", p, false)
-                val requiresSignal = bool(to, "requiresSignal", p, false)
                 val treq = req(obj(to, "request", p), "$p.request")
                 tplReq(treq, "$p.request", vars)
                 if (treq != null && treq.method != "GET" && !risky) errors.add("$p: ferramenta com método ${treq.method} exige \"risky\": true.")
@@ -556,7 +555,6 @@ object CustomDefParser {
                     if (st == null || st.type != SettingType.NUMBER) errors.add("$lp.maxSetting '$ms' deve ser uma setting do tipo number.")
                     limits.add(LimitDef(lpn, ms))
                 }
-                if (risky && limits.isEmpty() && !requiresSignal && tagent == null) warnings.add("$p: ferramenta sensível sem \"limits\" — o agente não terá teto de valor definido por você.")
                 var intent: IntentDef? = null
                 val io = obj(to, "orderIntent", p)
                 if (io != null) {
@@ -567,8 +565,11 @@ object CustomDefParser {
                     tpl(dir, "$p.orderIntent.direction", paramVars, false)
                     intent = IntentDef(asset, dir)
                 }
-                if (requiresSignal && intent == null) errors.add("$p: requiresSignal exige orderIntent {asset, direction}.")
-                if (requiresSignal && !risky) errors.add("$p: requiresSignal exige risky = true.")
+                // orderIntent identifica uma operação de ordem mesmo em definições antigas sem opensOrder.
+                val opensOrder = bool(to, "opensOrder", p, false) || intent != null
+                if (risky && limits.isEmpty() && !opensOrder && tagent == null) warnings.add("$p: ferramenta sensível sem \"limits\" — o agente não terá teto de valor definido por você.")
+                if (opensOrder && intent == null) errors.add("$p: opensOrder exige orderIntent {asset, direction}.")
+                if (opensOrder && !risky) errors.add("$p: opensOrder exige risky = true.")
                 val response = str(to, "response", p)
                 tpl(response, "$p.response", outVars, true)
                 var vslPolicy: VslOutputPolicy? = null
@@ -622,7 +623,7 @@ object CustomDefParser {
                 }
                 val tname = str(to, "name", p, required = true)
                 val tdesc = str(to, "description", p, required = true)
-                tools.add(ToolDef(tname, tdesc, params, risky, requiresSignal, intent, limits, treq, response, list, tsend, tsource, tcomp, tshell, tfile, tfetch, vslPolicy, tagent))
+                tools.add(ToolDef(tname, tdesc, params, risky, opensOrder, intent, limits, treq, response, list, tsend, tsource, tcomp, tshell, tfile, tfetch, vslPolicy, tagent))
             }
             if (baseUrl.isEmpty() && (usesNetwork || rt != null)) errors.add("$.baseUrl é obrigatório quando o conector faz requisições ou usa tempo real.")
             return CustomDef(id, name, description, version, accent, baseUrl, host, headers, login, settings, panels, actions, tools, allowed, rt, capabilities, setup)

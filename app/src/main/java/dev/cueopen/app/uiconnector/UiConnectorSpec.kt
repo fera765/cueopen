@@ -58,15 +58,11 @@ data class ToolSpec(
     val params: List<ParamSpec> = emptyList(),
     /** Marca uma ferramenta sensível; não cria confirmação ou limite numérico genérico. */
     val risky: Boolean = false,
-    /**
-     * Ferramenta que abre uma ordem. O Hub exige TypeSafe Jev somente se `require_jev` estiver
-     * ausente ou ligado; desligado, pula esse gate e mantém a coordenação. Exige [risky] e que o
-     * conector implemente [UiConnector.orderIntents].
-     */
-    val requiresSignal: Boolean = false,
+    /** Ferramenta que abre uma ordem; exige [risky] e que o conector implemente [UiConnector.orderIntents]. */
+    val opensOrder: Boolean = false,
 )
 
-/** Ativo + lado de uma ordem que uma ferramenta vai abrir (para o portão de validação). */
+/** Ativo + lado de uma ordem que uma ferramenta vai abrir (para validação do intent e coordenação). */
 data class OrderIntent(val asset: String, val side: dev.cueopen.app.trading.Side)
 
 data class UiConnectorSpec(
@@ -136,12 +132,12 @@ interface UiConnector {
     /** Ação disparada pelo USUÁRIO na UI; não herda limites/gates das chamadas do agente. */
     suspend fun onAction(actionId: String, args: Map<String, String>, settings: ConnectorSettings): Result<String>
 
-    /** Ferramenta chamada pelo agente; só recebe os limites/gates implementados no conector e no Hub. */
+    /** Ferramenta chamada pelo agente; só recebe limites e coordenação implementados no conector e no Hub. */
     suspend fun callTool(name: String, args: Map<String, String>, settings: ConnectorSettings): String
 
     /**
-     * Para ferramentas com `requiresSignal`: quais ordens (ativo + lado) a chamada abriria.
-     * Lista vazia = argumentos inválidos (o hub recusa). Padrão: nenhuma.
+     * Para ferramentas com `opensOrder`: quais ordens (ativo + lado) a chamada abriria.
+     * Lista vazia = intent inválido (o Hub recusa). Padrão: nenhuma.
      */
     fun orderIntents(tool: String, args: Map<String, String>): List<OrderIntent> = emptyList()
 
@@ -201,7 +197,7 @@ object SpecValidator {
             if (!NAME.matches(t.name)) p += "ferramenta '${t.name}' com nome inválido."
             if ("uic_${s.id}_${t.name}".length > 64) p += "ferramenta '${t.name}': nome completo excede 64 caracteres."
             if (t.description.isBlank()) p += "ferramenta '${t.name}' sem description (o LLM precisa dela)."
-            if (t.requiresSignal && !t.risky) p += "ferramenta '${t.name}': requiresSignal exige risky = true."
+            if (t.opensOrder && !t.risky) p += "ferramenta '${t.name}': opensOrder exige risky = true."
             t.params.groupBy { it.name }.filter { it.value.size > 1 }.keys.forEach { p += "ferramenta '${t.name}': parâmetro duplicado $it" }
             t.params.forEach { a ->
                 if (a.name.isBlank()) p += "ferramenta '${t.name}': parâmetro sem nome."

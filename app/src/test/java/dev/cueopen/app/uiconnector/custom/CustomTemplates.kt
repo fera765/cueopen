@@ -236,8 +236,8 @@ object CustomTemplates {
       "send": { "message": { "type": "candles", "symbol": "{{ativo}}", "size": "{{minutos|int}}", "request_id": "{{rid}}" },
         "await": { "match": { "${'$'}.request_id": "{{rid}}" }, "timeoutSec": 10 } },
       "list": { "rows": "${'$'}.data[*]", "item": "{{${'$'}.time|date}} abre {{${'$'}.open}} fecha {{${'$'}.close}}", "max": 60 } },
-    { "name": "enviar_ordem", "description": "Envia uma ordem de compra ou venda (exige validação TypeSafe Jev).",
-      "risky": true, "requiresSignal": true,
+    { "name": "enviar_ordem", "description": "Envia uma ordem de compra ou venda.",
+      "risky": true, "opensOrder": true,
       "params": [
         { "name": "ativo", "description": "Símbolo do ativo" },
         { "name": "lado", "description": "buy ou sell", "enum": [ "buy", "sell" ] },

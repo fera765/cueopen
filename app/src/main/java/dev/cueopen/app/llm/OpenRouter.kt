@@ -45,7 +45,7 @@ class LlmRequestFailure(
     val retryAfterMillis: Long? = null,
 ) : IOException(message, cause)
 
-/** Transporte OpenAI-compatible (OpenRouter por padrão), com suporte opcional ao System One do Jev. */
+/** Transporte OpenAI-compatible (OpenRouter por padrão). */
 class OpenRouter(private val settings: () -> Settings) {
     private val json = Json { ignoreUnknownKeys = true }
     private val baseHttp = OkHttpClient.Builder().connectTimeout(30, TimeUnit.SECONDS).readTimeout(5, TimeUnit.MINUTES).build()
@@ -328,36 +328,10 @@ class OpenRouter(private val settings: () -> Settings) {
         }
     }
 
-    /** Chamada nativa System One para Jev: não passa pelo endpoint de geração de texto. */
-    suspend fun systemOne(model: String, body: JsonObject, conversationId: String? = null): String = withContext(Dispatchers.IO) {
-        val s = settings()
-        require(body["model"]?.jsonPrimitive?.content == model) { "O modelo do pedido System One não corresponde ao selecionado." }
-        val systemOneUrl = OpenCodeProtocol.systemOneEndpoint(s.baseUrl) ?: endpoint(s.baseUrl, "systemone")
-        val openCodeSession = OpenCodeProtocol.sessionHeader(s.baseUrl, conversationId)
-        val openCodeUserAgent = OpenCodeProtocol.userAgent(s.baseUrl)
-        val request = Request.Builder()
-            .url(systemOneUrl)
-            .apply {
-                if (s.apiKey.isNotBlank()) header("Authorization", "Bearer ${s.apiKey}")
-                openCodeSession?.let { header("x-opencode-session", it) }
-                openCodeUserAgent?.let { header("User-Agent", it) }
-            }
-            .post(body.toString().toRequestBody("application/json".toMediaType()))
-            .build()
-        http().newCall(request).execute().use { response ->
-            val text = response.body?.string().orEmpty()
-            if (!response.isSuccessful) {
-                val message = runCatching { json.parseToJsonElement(text).jsonObject["error"]?.jsonObject?.get("message")?.jsonPrimitive?.content }.getOrNull()
-                throw IOException("System One respondeu HTTP ${response.code} — ${message ?: text.take(160)}")
-            }
-            text
-        }
-    }
-
     /** Pedido simples sem ferramentas (títulos, resumos), no modelo rápido. */
     suspend fun quick(prompt: String, maxTokens: Int = 200, conversationId: String? = null): String =
         chat(listOf(LlmMessage("user", prompt)), maxTokens = maxTokens,
-            model = settings().let { dev.cueopen.app.agent.JevOrchestrator.auxModel(it.fastModel, it.jevRouting, it.baseUrl.contains("openrouter", true)) },
+            model = settings().fastModel,
             conversationId = conversationId,
         ).content.orEmpty().trim()
 

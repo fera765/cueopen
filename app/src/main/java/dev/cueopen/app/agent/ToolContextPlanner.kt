@@ -4,7 +4,7 @@ import java.text.Normalizer
 import java.util.concurrent.ConcurrentHashMap
 
 /**
- * TypeSafe Jev — orquestração de contexto do agente (Kotlin puro, testável na JVM).
+ * Seleção contextual de ferramentas e ajuste do orçamento de contexto do agente.
  *
  * Antes, TODA chamada ao modelo levava o esquema de TODAS as ferramentas (carteira, trading, aparelho,
  * devtools, criador de conectores, cada ferramenta de cada conector e MCP), além de knowledge/memórias
@@ -17,12 +17,8 @@ import java.util.concurrent.ConcurrentHashMap
  *  - CONECTORES (uic_*) e servidores MCP (mcp_*): só os relevantes ao pedido/já usados; o resto no índice.
  *  - SKILLS: o índice mostra as mais relevantes primeiro, com teto.
  *  - ORÇAMENTOS de knowledge/memória encolhem conforme o histórico cresce (o total cabe no orçamento).
- *  - MODELO: com o roteamento Jev ligado, passos usam `typesafe/jev-router`, que escolhe modelo e
- *    esforço de raciocínio por requisição (qualidade × velocidade × custo).
  */
-object JevOrchestrator {
-    const val JEV_ROUTER = "typesafe/jev-router"
-
+object ToolContextPlanner {
     /** Grupos de ferramentas nativas (o nome do grupo é o que o modelo passa em tools_load). */
     val GROUPS: Map<String, Set<String>> = linkedMapOf(
         "core" to setOf("update_plan", "shell", "file_write", "file_edit", "file_read", "file_list", "complete_step", "show_file",
@@ -34,7 +30,7 @@ object JevOrchestrator {
         "skills_admin" to setOf("create_skill"),
         "wallet" to setOf("wallet_get_address", "wallet_get_balance", "wallet_list_tokens", "wallet_swap",
             "market_price", "market_candles", "market_liquidity", "market_discover", "market_token_info",
-            "trade_set_rule", "trade_list", "trade_cancel", "trade_update_rule", "typesafe_jev_check"),
+            "trade_set_rule", "trade_list", "trade_cancel", "trade_update_rule"),
         "device" to setOf(
             "device_notifications", "device_notify", "device_screenshot", "device_overlay",
             "device_bluetooth", "device_bluetooth_pair", "device_calendar_read", "device_calendar_create",
@@ -77,8 +73,6 @@ object JevOrchestrator {
         /** Tokens estimados do histórico atual e orçamento de contexto. */
         val historyTokens: Int = 0,
         val contextBudget: Int = 24_000,
-        /** Desligado = comportamento antigo (manda tudo). */
-        val enabled: Boolean = true,
     )
 
     data class Plan(
@@ -137,7 +131,6 @@ object JevOrchestrator {
     fun plan(i: Input): Plan {
         val all = GROUPS.keys
         val allowed = i.allowedGroups?.plus("core") ?: all
-        if (!i.enabled) return Plan(all.intersect(allowed), i.connectors.keys, i.mcpServers.keys, emptyList(), emptyList(), emptyList(), 4500, 2400, 40)
         val q = " " + norm(i.query) + " "
         val sticky = loadedFor(i.sessionId)
         val groups = LinkedHashSet<String>().apply { add("core") }
@@ -200,15 +193,4 @@ object JevOrchestrator {
         }
         return ok to bad
     }
-
-    /** Modelo efetivo do passo: modelo do agente > roteamento Jev (se ligado) > modelo padrão. */
-    fun routeModel(agentModel: String?, defaultModel: String, jevRouting: Boolean, openRouter: Boolean): String = when {
-        !agentModel.isNullOrBlank() -> agentModel
-        jevRouting && openRouter -> JEV_ROUTER
-        else -> defaultModel
-    }
-
-    /** Modelo para chamadas auxiliares (títulos, resumos de contexto, memórias). */
-    fun auxModel(fastModel: String, jevRouting: Boolean, openRouter: Boolean): String =
-        if (jevRouting && openRouter) JEV_ROUTER else fastModel
 }

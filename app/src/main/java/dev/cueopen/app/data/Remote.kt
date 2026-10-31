@@ -1,9 +1,7 @@
 package dev.cueopen.app.data
 
 import dev.cueopen.app.BuildConfig
-import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.async
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
@@ -57,20 +55,13 @@ object ProviderModels {
     )
 
     fun supportsChatCompletions(baseUrl: String, modelId: String): Boolean {
-        if (isSystemOneId(modelId)) return false
         val host = runCatching { validatedBase(baseUrl).host.lowercase() }.getOrNull() ?: return true
         return host != "opencode.ai" || modelId.lowercase() !in openCodeNonChatCompletions
     }
 
-    private fun isSystemOneId(modelId: String): Boolean =
-        modelId.startsWith("jev-", ignoreCase = true) || modelId.startsWith("typesafe/jev", ignoreCase = true)
-
-    private fun isSystemOneModel(model: Model): Boolean =
-        isSystemOneId(model.id) || model.apiFamily?.contains("systemone", ignoreCase = true) == true
-
     /**
-     * OpenAI-compatible providers normally expose GET {baseUrl}/models. OpenCode Console lists
-     * Go models on the sibling /inference/go/v1/models route (the OpenAI chat base URL ends in
+     * OpenAI-compatible providers normally expose GET {baseUrl}/models. OpenCode Go lists
+     * models on the sibling /inference/go/v1/models route (the chat base URL ends in
      * /inference/go/openai/v1), as documented at opencode.ai/v2/docs/console/go/.
      */
     fun modelsEndpoint(baseUrl: String): String {
@@ -99,12 +90,11 @@ object ProviderModels {
         baseUrl: String,
         apiKey: String,
         forceRefresh: Boolean = false,
-        includeSystemOne: Boolean = false,
         httpClient: OkHttpClient = http,
         cacheScope: String = "",
     ): List<Model> {
         val endpoint = modelsEndpoint(baseUrl)
-        val cacheKey = "$endpoint|${fingerprint(apiKey)}|systemone=$includeSystemOne|scope=$cacheScope"
+        val cacheKey = "$endpoint|${fingerprint(apiKey)}|scope=$cacheScope"
         val now = System.currentTimeMillis()
         if (!forceRefresh) cache[cacheKey]?.takeIf { now - it.loadedAt < CACHE_MS }?.let { return it.models }
         val requestedAt = now
@@ -130,18 +120,8 @@ object ProviderModels {
                 }
                 return parseCatalog(body)
             }
-            val base = validatedBase(baseUrl)
-            val consoleEndpoint = if (includeSystemOne && base.host.equals("opencode.ai", ignoreCase = true))
-                base.newBuilder().encodedPath("/inference/v1/models").build().toString() else null
-            val consoleModels = consoleEndpoint?.let { url -> async {
-                try { fetch(url).filter(::isSystemOneModel).map { it.copy(apiFamily = "systemone") } }
-                catch (cancel: CancellationException) { throw cancel }
-                catch (_: Exception) { emptyList() }
-            } }
             val primary = fetch(endpoint)
-            val models = primary.filter { supportsChatCompletions(baseUrl, it.id) || (includeSystemOne && isSystemOneModel(it)) }.toMutableList()
-            consoleModels?.await()?.let(models::addAll)
-            val distinctModels = models.distinctBy { it.id }
+            val distinctModels = primary.filter { supportsChatCompletions(baseUrl, it.id) }.distinctBy { it.id }
             if (distinctModels.isEmpty()) throw IOException("O endpoint respondeu, mas não retornou modelos compatíveis.")
             cache[cacheKey] = Entry(System.currentTimeMillis(), distinctModels)
             distinctModels

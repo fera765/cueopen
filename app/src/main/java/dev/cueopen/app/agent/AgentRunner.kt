@@ -271,10 +271,10 @@ class AgentRunner(
                 setActivity(sessionId, Activity(Activity.Kind.THINKING, "Compactando contexto"))
                 s = ctxMgr.compactIfNeeded(s)
             }
-            // TypeSafe Jev: decide quais ferramentas/conectores e quanto knowledge/memória entram neste passo
+            // Planejamento contextual: decide quais ferramentas/conectores e quanto conhecimento/memória entram neste passo
             val allTools = tools(agent, allowMultiAgent = tokenBudgetOverride == null, builder = s.connectorBuilder, connectorEditId = s.connectorEditId)
-            val (jplan, stepTools) = jevPlan(sessionId, s, allTools)
-            val sys = LlmMessage("system", systemPrompt(sessionId, agent, s, jplan, allowDeviceTools = tokenBudgetOverride == null))
+            val (contextPlan, stepTools) = toolContextPlan(sessionId, s, allTools)
+            val sys = LlmMessage("system", systemPrompt(sessionId, agent, s, contextPlan, allowDeviceTools = tokenBudgetOverride == null))
             val activeHistory = s.llm.map { AccessibilityToolHistory.forActiveModel(it, transientAccessibilityOutputs) }
             var history = ctxMgr.microCompact(activeHistory, sessionId)
             if (history.firstOrNull()?.role != "user") history = listOf(LlmMessage("user", "[Contexto anterior compactado no resumo da sessão. Continue de onde parou.]")) + history
@@ -1080,23 +1080,21 @@ class AgentRunner(
         }
     }
 
-    // ------------------------------------------------------------------ TypeSafe Jev (orquestração)
-    private fun openRouterBase() = store.settings.baseUrl.contains("openrouter", true)
-
-    /** Modelo do passo: o do Agent; senão Jev Router (se ligado); senão o padrão. */
+    // ------------------------------------------------------------------ planejamento de contexto
+    /** Usa o modelo do agente quando definido; caso contrário, o modelo padrão. */
     private fun stepModel(agent: AgentProfile?): String =
-        JevOrchestrator.routeModel(agent?.model, store.settings.model, store.settings.jevRouting, openRouterBase())
+        agent?.model?.takeIf { it.isNotBlank() } ?: store.settings.model
 
     private fun toolName(o: kotlinx.serialization.json.JsonElement): String =
         runCatching { o.jsonObject["function"]!!.jsonObject["name"]!!.jsonPrimitive.content }.getOrDefault("")
 
-    private fun jevQuery(session: Session): String {
+    private fun contextQuery(session: Session): String {
         val users = session.llm.filter { it.role == "user" && it.content?.startsWith("[Sistema]") != true }.takeLast(3)
         return users.joinToString(" ") { it.content.orEmpty().take(1500) } + " " + session.summary.take(800) + " " + session.title
     }
 
     /** Plano do passo + esquema de ferramentas já filtrado. */
-    private fun jevPlan(sessionId: String, s: Session, all: kotlinx.serialization.json.JsonArray): Pair<JevOrchestrator.Plan, kotlinx.serialization.json.JsonArray> {
+    private fun toolContextPlan(sessionId: String, s: Session, all: kotlinx.serialization.json.JsonArray): Pair<ToolContextPlanner.Plan, kotlinx.serialization.json.JsonArray> {
         val names = all.map { toolName(it) }
         val hub = runCatching { dev.cueopen.app.CueApp.instance.uiConnectors }.getOrNull()
         val conns = hub?.connectors.orEmpty().filter { c -> names.any { it.startsWith("uic_${c.spec.id}_") } }
@@ -1104,11 +1102,11 @@ class AgentRunner(
         val mcp = names.filter { it.startsWith("mcp_") && it.contains("__") }.map { it.substringBefore("__") }.distinct()
             .associateWith { it.removePrefix("mcp_") }
         val used = s.items.filterIsInstance<ChatItem.Step>().map { it.tool }.toSet()
-        val plan = JevOrchestrator.plan(JevOrchestrator.Input(
-            sessionId = sessionId, query = jevQuery(s), usedTools = used, builder = s.connectorBuilder || s.connectorEditId != null,
+        val plan = ToolContextPlanner.plan(ToolContextPlanner.Input(
+            sessionId = sessionId, query = contextQuery(s), usedTools = used, builder = s.connectorBuilder || s.connectorEditId != null,
             connectors = conns, mcpServers = mcp,
             historyTokens = ctxMgr.estimateTokens(s.llm) + ctxMgr.estimateTokens(s.summary),
-            contextBudget = store.settings.contextBudget, enabled = store.settings.jevOrchestration,
+            contextBudget = store.settings.contextBudget,
         ))
         val connIdOf = { n: String -> conns.keys.firstOrNull { n.startsWith("uic_${it}_") } }
         val mcpOf = { n: String -> n.substringBefore("__").takeIf { n.contains("__") } }
@@ -1120,7 +1118,7 @@ class AgentRunner(
         sessionId: String,
         agent: AgentProfile?,
         session: Session,
-        jplan: JevOrchestrator.Plan? = null,
+        contextPlan: ToolContextPlanner.Plan? = null,
         allowDeviceTools: Boolean = true,
     ): String {
         if (session.connectorEditId != null) return connectorEditSystemPrompt(session)
@@ -1128,13 +1126,13 @@ class AgentRunner(
         val lastUser = session.llm.lastOrNull { it.role == "user" }?.content.orEmpty()
         val query = lastUser + " " + session.summary.take(1500)
         // Skills: as mais relevantes ao pedido primeiro, com teto (o índice inteiro não precisa ir em todo passo)
-        val qWords = JevOrchestrator.norm(query).split(Regex("[^a-z0-9]+")).filter { it.length >= 4 }.toSet()
+        val qWords = ToolContextPlanner.norm(query).split(Regex("[^a-z0-9]+")).filter { it.length >= 4 }.toSet()
         val skills: List<Skill> = st.skills.filter { sk ->
             sk.enabled && (agent == null || agent.skillIds.isEmpty() || sk.id in agent.skillIds)
-        }.sortedByDescending { sk -> JevOrchestrator.norm(sk.name + " " + sk.description).split(Regex("[^a-z0-9]+")).count { it in qWords } }
-            .take(jplan?.skillsShown ?: Int.MAX_VALUE)
-        val memories = ctxMgr.relevantMemories(query, agent?.id, maxChars = jplan?.memoryChars ?: 2400).also { ctxMgr.touch(it) }
-        val knowledge = ctxMgr.relevantKnowledge(query, maxChars = jplan?.knowledgeChars ?: 4500)
+        }.sortedByDescending { sk -> ToolContextPlanner.norm(sk.name + " " + sk.description).split(Regex("[^a-z0-9]+")).count { it in qWords } }
+            .take(contextPlan?.skillsShown ?: Int.MAX_VALUE)
+        val memories = ctxMgr.relevantMemories(query, agent?.id, maxChars = contextPlan?.memoryChars ?: 2400).also { ctxMgr.touch(it) }
+        val knowledge = ctxMgr.relevantKnowledge(query, maxChars = contextPlan?.knowledgeChars ?: 4500)
         val notes = ctxMgr.readNotes(sessionId)
         val date = SimpleDateFormat("EEEE, d 'de' MMMM 'de' yyyy", Locale("pt", "BR")).format(Date())
         return buildString {
@@ -1170,7 +1168,7 @@ class AgentRunner(
             val requestedCaps = if (allowDeviceTools) agent?.deviceCaps.orEmpty() else emptyList()
             val grantedCaps = requestedCaps.filter { dev.cueopen.app.device.DeviceCaps.granted(ctx, it) }
             val allDeviceTools = dev.cueopen.app.device.DeviceCapPolicy.availableTools(requestedCaps, grantedCaps)
-            val deviceGroupInContext = jplan == null || "device" in jplan.groups
+            val deviceGroupInContext = contextPlan == null || "device" in contextPlan.groups
             val promptDeviceTools = if (deviceGroupInContext) allDeviceTools else emptySet()
             dev.cueopen.app.device.DeviceCapPolicy.agentGuidance(promptDeviceTools).forEach { appendLine("6c. $it") }
             if (deviceGroupInContext) {
@@ -1215,8 +1213,8 @@ class AgentRunner(
                     appendLine()
                     appendLine("## Day trade (capacidade habilitada)")
                     appendLine("- Dados de mercado são 100% reais (sem API key): market_discover (tokens de todo o ecossistema Solana, novos→velhos ou em alta, com liquidez e volume), market_token_info (preço/liquidez/volume/market cap de um token), market_price (preço USD ao vivo), market_candles (OHLCV real do pool de maior liquidez), market_liquidity (impacto real por tamanho — AMM não tem order book central). Nunca invente preços, velas ou profundidade; se uma ferramenta retornar MARKET_ERROR, relate o erro e não contorne com shell/curl.")
-                    appendLine("- FLUXO OBRIGATÓRIO: (1) descubra oportunidades com market_discover e cheque market_token_info; (2) analise preço/tendência com market_candles; (3) meça liquidez/impacto com market_liquidity (confirme que dá para comprar E vender); (4) SEMPRE chame typesafe_jev_check (venue solana, direction buy ou sell) com os dados reais ANTES de CADA compra e CADA venda e entre APENAS nos sinais ✅ OPERAR; (5) execute com wallet_swap — o app RECUSA qualquer swap sem aprovação válida (uso único, 5 min, mesmo lado); (6) proteja a posição com trade_set_rule (stop-loss price_below e/ou take-profit price_above: regras automáticas são só de SAÍDA); (7) a cada ciclo chame trade_list para avaliar e disparar os gatilhos no preço real.")
-                    appendLine("- A validação typesafe_jev_check é IMPOSTA pelo app (não é opcional) para compra e venda manuais via wallet_swap. As saídas automáticas de stop-loss/take-profit e o trailing stop (trade_update_rule) são proteção e dispensam nova validação. A acurácia vem de dados reais; não invente probabilidades.")
+                    appendLine("- Antes de qualquer decisão, consulte preços, candles e liquidez reais; não invente dados nem trate uma estimativa como garantia. Execute somente operações compatíveis com as permissões e limites configurados para este agente.")
+                    appendLine("- wallet_swap executa trocas reais e assinadas localmente; revise ativo, lado, valor e impacto antes de operar. As regras automáticas de stop-loss/take-profit são somente de saída; nunca as use para abrir uma posição.")
                     appendLine("- Se market_candles retornar 'tendência real alternativa' (DexScreener: variações m5/h1/h6/h24, volume, fluxo compra/venda), isso é dado REAL e suficiente para analisar a tendência — use-o normalmente, não repita a chamada em loop.")
                     appendLine("- STOP-LOSS / TAKE-PROFIT são AUTOMÁTICOS: ao abrir uma posição, arme imediatamente trade_set_rule para o stop-loss (price_below) e para o take-profit (price_above). O sistema monitora o preço real sozinho (a cada ~20s) e FECHA a operação automaticamente quando o alvo é atingido — mesmo entre os seus ciclos. Você NÃO precisa ficar acordando para fechar; só arme as regras uma vez.")
                     appendLine("- TRAILING STOP: a cada ciclo, se o preço subiu bem acima da sua entrada, use trade_update_rule para MOVER o stop-loss (regra price_below) para cima e travar lucro. Ex.: entrada US$ 0,55, preço foi a US$ 0,58 → mova o stop-loss para US$ 0,56; se cair, a operação fecha sozinha no lucro. Nunca mova o stop-loss para baixo (isso aumenta a perda). Vale para uma ou várias posições abertas.")
@@ -1229,7 +1227,7 @@ class AgentRunner(
             if (session.connectorBuilder) appendLine()
             if (session.connectorBuilder) appendLine("## Criar UI Connectors (esta conversa é o criador de conectores)")
             if (session.connectorBuilder) appendLine("- Fluxo obrigatório: chame connector_spec, escreva uma definição YAML, use connector_validate até zero erros, depois connector_test e só então connector_propose. `yaml` é a definição; `settings_yaml` e `args_yaml` são opcionais e só carregam amostras não secretas. connector_test é um DRY-RUN OFFLINE com fixtures HTTP/WebSocket e filesystem virtual; nunca usa rede externa, credenciais reais, browser real, setup/comandos gerados ou código arbitrário. Operações file declarativas podem ser testadas no filesystem em memória; conector que dependa de shell/setup falha fechado. Segredos/marcadores não são necessários e nunca devem ser pedidos para validar. O relatório distingue mocks de verificações estruturais; nunca diga que API, permissão, login ou execução real foram verificados. Corrija erros alterando o YAML; não repita uma chamada idêntica após a mesma falha. connector_propose fica bloqueado até o mesmo YAML passar no teste. Se faltar URL/esquema, pesquise documentação oficial ou pergunte; não proponha scraping nem contorno de login/CAPTCHA.")
-            if (session.connectorBuilder) appendLine("- Tempo real e ações externas: realtime/HTTP são conferidos estruturalmente e por transporte simulado; nenhuma mensagem, ordem, publicação ou compra é enviada no teste. Use apenas protocolo documentado oficialmente, risky/limits/requiresSignal quando aplicável, e deixe claro que o handshake real ainda precisa de autorização.")
+            if (session.connectorBuilder) appendLine("- Tempo real e ações externas: realtime/HTTP são conferidos estruturalmente e por transporte simulado; nenhuma mensagem, ordem, publicação ou compra é enviada no teste. Use apenas protocolo documentado oficialmente, risky/limits/opensOrder quando aplicável, e deixe claro que o handshake real ainda precisa de autorização.")
             if (session.connectorBuilder) appendLine("- CAPACIDADES DO APARELHO (terminal, arquivos, browser): o dry-run usa filesystem e browser substitutos; comandos, scripts, setup e páginas reais NÃO são executados/abertos antes da instalação. Prefira APIs oficiais e compute/file declarativo; declare os limites e não afirme que código de shell ou artefatos gerados dinamicamente passaram em execução real. Scraping de Facebook/Meta Ads Library é bloqueado; somente uma API oficial autorizada poderia ser considerada, e o dry-run offline não comprova token/permissões, portanto não proponha sem validação autorizada posterior.")
             if (session.connectorBuilder) appendLine("- Geradores de copy/VSL: se o conector chamar uma API de geração textual, use outputPolicy.type=vsl; envie duração, idioma e guardrails na requisição, declare 3–12 seções obrigatórias e, quando o usuário der termos proibidos, use forbiddenTermsParam. A validação verifica contagem estimada (WPM × minutos com tolerância), idioma por heurística local (PT/EN/ES/FR), seções e termos proibidos; não é uma garantia de duração falada nem uma revisão semântica de fatos/alegações.")
             if (session.connectorBuilder) appendLine("- CÁLCULOS (indicadores técnicos, estatística, sinais, tabelas derivadas, conversões): use o bloco compute do SDK — expressões com a biblioteca de funções do app (sma, ema, rsi, macd, bollinger, stoch, adx, ichimoku, supertrend, psar, vwap… e map/filter/reduce/zip_rows). Busque os dados reais com request/source e calcule no compute; nunca peça ao usuário para calcular nem invente valores. Declare em YAML somente os cálculos necessários e valide o resultado no dry-run.")
@@ -1243,12 +1241,8 @@ class AgentRunner(
                         val st = if (uc.isLoggedIn || hub.hasSavedCredentials(uc.spec.id)) "conectado" else "sem login — peça ao usuário para entrar em Conectores → ${uc.spec.name}"
                         appendLine("- ${uc.spec.name} (${st}): ferramentas uic_${uc.spec.id}_* — ${uc.spec.description}. Use-as sempre que o pedido envolver este serviço.")
                     }
-                    if (hub.hasTradingTools(agent)) {
-                        // conectores de ordem que dispensam o Jev (setting require_jev OFF) vs. os que exigem
-                        val noJev = usable.filter { it.spec.tools.any { t -> t.requiresSignal } && it.spec.settings.any { s2 -> s2.id == "require_jev" } && !hub.settings(it).bool("require_jev") }.map { it.spec.name }
-                        val needJev = usable.filter { it.spec.tools.any { t -> t.requiresSignal } && (it.spec.settings.none { s2 -> s2.id == "require_jev" } || hub.settings(it).bool("require_jev")) }.map { it.spec.name }
-                        if (needJev.isNotEmpty()) appendLine("- ORDENS em ${needJev.joinToString()}: ANTES de CADA nova ordem chame typesafe_jev_check (venue = id do conector, id = ticker, direction call/put para opções ou buy/sell para Forex) e só opere com ✅ OPERAR; o app recusa ordens sem validação (uso único, 5 min). Siga o lado permitido pela ferramenta e não aplique call/put a Forex.")
-                        if (noJev.isNotEmpty()) appendLine("- ORDENS em ${noJev.joinToString()}: TypeSafe Jev está desligado — não chame typesafe_jev_check. Use somente as ferramentas manuais expostas e respeite todas as salvaguardas e limites do conector; isso não ativa estratégia nem execução automática.")
+                    if (hub.hasOrderTools(agent)) {
+                        appendLine("- Ferramentas de ordem dos conectores passam pela coordenação local do app: informe o ativo e o lado válidos, respeite os limites do conector e aguarde o resultado real antes de relatar execução.")
                         appendLine("- Solana day trade e conectores de trading têm capital e posições independentes: não use um para cobrir o outro. Se a resposta disser que outro agente está operando o ativo, aguarde ou escolha outro; faça uma ordem por vez.")
                     }
                     appendLine("- A sessão e as credenciais são gerenciadas pelo app; você nunca vê nem pede senha. Se uma ferramenta responder que é preciso fazer login, avise o usuário.")
@@ -1282,7 +1276,7 @@ class AgentRunner(
                 appendLine(); appendLine("## Knowledge do usuário (relevante)")
                 knowledge.forEach { appendLine("### ${it.title}\n${it.content.take(1500)}\n") }
             }
-            jplan?.let { p ->
+            contextPlan?.let { p ->
                 val names = runCatching { dev.cueopen.app.CueApp.instance.uiConnectors.connectors.associate { it.spec.id to it.spec.name } }.getOrDefault(emptyMap())
                 p.index(names, emptyMap()).takeIf { it.isNotBlank() }?.let { appendLine(); appendLine(it) }
             }
@@ -1547,15 +1541,6 @@ class AgentRunner(
                 }, listOf("rule_id", "target_price_usd")))
             }
         }
-        // Validação TypeSafe Jev: obrigatória antes de QUALQUER ordem (day trade Solana e conectores de trading).
-        // Só oferece a ferramenta quando ela é realmente exigida: day trade Solana, ou um conector de ordem com o Jev LIGADO.
-        if (allowMultiAgent && (agent?.let { WalletAgentPolicyStore(ctx.applicationContext).canAgentDayTrade(it.id) } == true ||
-                runCatching { dev.cueopen.app.CueApp.instance.uiConnectors.jevRequiredBy(agent) }.getOrDefault(false))) {
-            add(tool("typesafe_jev_check", "OBRIGATÓRIO antes de QUALQUER ordem de COMPRA ou VENDA (Solana day trade e IQ Option): avalia cada sinal com o avaliador de acurácia configurado. Jev usa System One; modelo de chat comum usa adapter JSON estrito e NÃO tem a calibração do Jev. Só se os pisos locais de acurácia e confiança forem atingidos o app cria autorização de uso único (5 min). Sem ela, wallet_swap e as ferramentas de ordem dos conectores são RECUSADOS. Envie dados REAIS (preço, candles fechados, tendência, liquidez). Não invente números. Para venue=iqoption o app anexa automaticamente candles fechados, resumo técnico, Price Action e gerenciamento — basta id, venue, direction e horizon_minutes.", buildJsonObject {
-                put("signals_json", str("JSON array de sinais: {\"id\":\"<mint Solana ou ticker, ex.: EURUSD>\",\"venue\":\"solana|iqoption\",\"direction\":\"buy|sell (Solana) ou call|put (IQ Option)\",\"horizon_minutes\":5,\"data\":\"resumo com preço, velas OHLCV, tendência, liquidez\"}"))
-                put("min_accuracy", int("Acurácia mínima (0-100); o piso de 70 não pode ser rebaixado"))
-            }, listOf("signals_json")))
-        }
         // Cada ferramenta exige opt-in do agente; leituras/recursos protegidos também exigem grant Android.
         val caps = if (allowMultiAgent) agent?.deviceCaps.orEmpty() else emptyList()
         val grantedCaps = caps.filter { dev.cueopen.app.device.DeviceCaps.granted(ctx, it) }
@@ -1737,65 +1722,6 @@ class AgentRunner(
         toolName.startsWith("mcp_") -> "connector"
         toolName.startsWith("uic_") -> "uiconnector"
         else -> "tool"
-    }
-
-    /** Avalia pelo System One nativo quando for Jev; outros modelos recebem contrato JSON e validação determinística. */
-    private suspend fun jevAccuracyCheck(sessionId: String, signalsJson: String, minAccuracy: Int, agentKey: String): String {
-        if (signalsJson.isBlank()) return "Informe 'signals_json' com os sinais e seus dados reais."
-        val inputs = dev.cueopen.app.trading.SignalIO.parseInputsStrict(signalsJson)
-            ?: return "signals_json inválido: envie um array JSON com sinais distintos, id e direction válidos. Nenhuma ordem foi liberada."
-        if (inputs.any { dev.cueopen.app.trading.Sides.parse(it.direction) == null })
-            return "Direção inválida em um ou mais sinais (use buy/sell ou call/put). Nenhuma ordem foi liberada."
-        val s = store.settings
-        val model = dev.cueopen.app.trading.SignalEvaluationAdapter.resolveModel(
-            s.accuracyModel.ifBlank { "typesafe/jev-router" }, s.baseUrl,
-        )
-        val effective = maxOf(minAccuracy, TradeCoordinator.gate.floor)
-        // Não buscar nem calcular contexto automático da IQ Option: o Jev recebe apenas evidências fornecidas na chamada.
-        val missing = inputs.filter { !it.hasEvidence }
-        if (missing.isNotEmpty()) return "Dados reais ausentes para: ${missing.joinToString { it.id }}. Nenhuma ordem foi liberada. Envie candles/cotações e o contexto necessário explicitamente."
-        val ctxText = ""
-        val useSystemOne = dev.cueopen.app.trading.SignalEvaluationAdapter.usesSystemOne(model, s.baseUrl)
-        val results = try {
-            TradeCoordinator.validationMutex.withLock {
-                if (useSystemOne) {
-                    val request = dev.cueopen.app.trading.SignalEvaluationAdapter.systemOneRequest(model, signalsJson, ctxText, inputs)
-                        ?: throw IllegalArgumentException("não foi possível construir a requisição tipada System One")
-                    val raw = llm.systemOne(model, request, conversationId = sessionId)
-                    dev.cueopen.app.trading.SignalEvaluationAdapter.parseSystemOneResponse(raw, inputs)
-                        ?: throw IllegalArgumentException("System One retornou respostas ausentes ou fora do schema Noul")
-                } else {
-                    val prompt = dev.cueopen.app.trading.SignalEvaluationAdapter.genericPrompt(signalsJson, ctxText, inputs.map { it.id })
-                    val system = LlmMessage("system", "Avalie evidências de forma conservadora. Esta é apenas uma estimativa JSON; não reproduz a calibração de Jev e não executa ordens.")
-                    val reply = llm.chat(listOf(system, LlmMessage("user", prompt)), tools = null, model = model, maxTokens = 1200, jsonResponse = true, conversationId = sessionId)
-                    dev.cueopen.app.trading.SignalEvaluationAdapter.parseGenericResponse(reply.content.orEmpty(), inputs)
-                        ?: throw IllegalArgumentException("resposta JSON inválida, incompleta, duplicada ou fora dos limites")
-                }
-            }
-        } catch (c: kotlinx.coroutines.CancellationException) {
-            throw c
-        } catch (t: Throwable) {
-            val route = if (useSystemOne) "System One" else "adapter JSON"
-            return "ACCURACY_ERROR no $route ($model): ${(t.message ?: t.javaClass.simpleName).take(200)}. Nenhuma ordem foi liberada. Verifique o endpoint, a chave e o modelo avaliador."
-        }
-        val byId = results.associateBy { dev.cueopen.app.trading.AssetKeys.norm(it.id) }
-        return buildString {
-            appendLine("Acurácia dos sinais (modelo $model${if (useSystemOne) "; System One" else "; estimativa JSON não calibrada"}; opere só ≥ $effective% e confiança ≥ ${TradeCoordinator.gate.confidenceFloor}%):")
-            var approved = 0
-            inputs.forEach { sig ->
-                val r = byId[dev.cueopen.app.trading.AssetKeys.norm(sig.id)]
-                val side = dev.cueopen.app.trading.Sides.parse(sig.direction)
-                if (r == null) { appendLine("${sig.id}: sem avaliação do modelo · ⛔ PULAR"); return@forEach }
-                if (side == null) { appendLine("${sig.id}: direção inválida (use buy/sell ou call/put) · ⛔ PULAR"); return@forEach }
-                val ok = TradeCoordinator.gate.approve(agentKey, sig.venue, sig.id, side, r.accuracy, minAccuracy, confidence = r.confidence)
-                if (ok) approved++
-                val reason = if (!ok && r.confidence < TradeCoordinator.gate.confidenceFloor) "confiança abaixo do piso local" else r.reason
-                appendLine("${sig.id} ${side.name}: acurácia ${r.accuracy.toInt()}% · confiança ${r.confidence.toInt()}% · ${if (ok) "✅ OPERAR" else "⛔ PULAR"}${if (reason.isNotBlank()) " — $reason" else ""}")
-            }
-            appendLine("Sinais autorizados: $approved/${inputs.size}.")
-            appendLine()
-            append("Regra local: só sinais acima dos pisos de acurácia e confiança recebem autorização de uso único por ${TradeCoordinator.gate.ttlSeconds / 60} min, no mesmo agente/venue/ativo/lado. Esta checagem apenas avalia; nenhuma ordem é executada por ela.")
-        }.trim()
     }
 
     /** Ferramentas do criador de UI Connectors (só em sessões abertas pelo editor de conectores). */
@@ -2140,8 +2066,8 @@ class AgentRunner(
                 val hub = runCatching { dev.cueopen.app.CueApp.instance.uiConnectors }.getOrNull()
                 val connIds = hub?.connectors.orEmpty().map { it.spec.id }.toSet()
                 val mcpNames = dev.cueopen.app.connectors.Connectors.toolDefinitions(store).mapNotNull { d -> toolName(d).takeIf { it.contains("__") }?.substringBefore("__")?.removePrefix("mcp_") }.toSet()
-                val (ok, bad) = JevOrchestrator.resolveLoad(sl("names"), connIds, mcpNames)
-                JevOrchestrator.load(sessionId, ok)
+                val (ok, bad) = ToolContextPlanner.resolveLoad(sl("names"), connIds, mcpNames)
+                ToolContextPlanner.load(sessionId, ok)
                 return ToolResult((if (ok.isNotEmpty()) "Carregado: ${ok.joinToString()}. As ferramentas aparecem na sua próxima resposta." else "Nada carregado.") +
                     (if (bad.isNotEmpty()) " Desconhecidos: ${bad.joinToString()} — use os nomes do índice 'Ferramentas sob demanda'." else ""))
             }
@@ -2413,13 +2339,6 @@ class AgentRunner(
                         }
                     }
                 }
-                "typesafe_jev_check" -> {
-                    val ag = store.agent(store.session(sessionId)?.agentId)
-                    val allowed = ag != null && (WalletAgentPolicyStore(ctx.applicationContext).canAgentDayTrade(ag.id) ||
-                        dev.cueopen.app.CueApp.instance.uiConnectors.jevRequiredBy(ag))
-                    if (!allowed) "Indisponível: a validação TypeSafe Jev não é exigida por nenhum recurso deste agente (day trade Solana desligado e conectores com 'Exigir TypeSafe Jev' off). Opere direto pelas ferramentas do conector."
-                    else jevAccuracyCheck(sessionId, s("signals_json"), i("min_accuracy") ?: 70, ag!!.id)
-                }
                 "market_price", "market_candles", "market_liquidity", "market_discover", "market_token_info",
                 "wallet_list_tokens", "wallet_swap", "trade_set_rule", "trade_list", "trade_cancel", "trade_update_rule" -> {
                     val agentId = store.session(sessionId)?.agentId
@@ -2538,24 +2457,14 @@ class AgentRunner(
                                             "Recusado: entrada de ${String.format(Locale.US, "%.9f", amount / 1e9)} SOL excede o limite autorizado por operação (${String.format(Locale.US, "%.9f", cap / 1e9)} SOL). Reduza o valor ou ajuste o limite na tela Carteira."
                                         } else {
                                             val legs = dev.cueopen.app.trading.SwapLegs.legs(input, output)
-                                            val symbols = runCatching { market.tokenDisplays(legs.map { it.mint }) }.getOrDefault(emptyMap())
-                                            val consumed = ArrayList<dev.cueopen.app.trading.SignalGate.Approval>()
                                             var refusal: String? = null
                                             if (legs.isEmpty()) {
                                                 refusal = "Recusado: troca entre moedas-base (SOL/USDC/USDT) sem ativo de risco não é uma operação de trade."
                                             } else for (leg in legs) {
-                                                val keys = setOf(leg.mint, SolanaRpcClient.knownSymbol(leg.mint).orEmpty(), symbols[leg.mint]?.symbol.orEmpty())
-                                                val ap = TradeCoordinator.gate.consume(agentId, "solana", keys, leg.side)
-                                                if (ap == null) {
-                                                    refusal = "RECUSADO: falta a validação TypeSafe Jev para ${leg.side} de ${symbols[leg.mint]?.symbol ?: leg.mint}. Chame typesafe_jev_check com signals_json=[{\"id\":\"${leg.mint}\",\"venue\":\"solana\",\"direction\":\"${if (leg.side == dev.cueopen.app.trading.Side.BUY) "buy" else "sell"}\",\"data\":\"<dados reais>\"}] e execute só se vier ✅ OPERAR. A aprovação vale ${TradeCoordinator.gate.ttlSeconds / 60} min e serve para UMA ordem."
-                                                    break
-                                                }
-                                                consumed.add(ap)
                                                 val holder = TradeCoordinator.claim("solana", leg.mint, agentId)
                                                 if (holder != null) { refusal = "RECUSADO: outro agente já está operando este token agora. Aguarde ou escolha outro."; break }
                                             }
                                             if (refusal != null) {
-                                                consumed.forEach { TradeCoordinator.gate.restore(it) }
                                                 legs.forEach { TradeCoordinator.release("solana", it.mint, agentId) }
                                                 refusal!!
                                             } else {
@@ -2565,7 +2474,6 @@ class AgentRunner(
                                                     is dev.cueopen.app.wallet.SwapResult.Submitted ->
                                                         "Swap ENVIADO na ${network.displayName}. Saída estimada: ${r.outAmountRaw} (unidades mínimas). Impacto: ${r.priceImpactPct}%. Rota: ${r.routeLabels.joinToString("+").ifBlank { "direta" }}. Assinatura: ${r.signature}. Explorer: ${network.transactionExplorerUrl(r.signature)}"
                                                     is dev.cueopen.app.wallet.SwapResult.Rejected -> {
-                                                        consumed.forEach { TradeCoordinator.gate.restore(it) }
                                                         legs.forEach { TradeCoordinator.release("solana", it.mint, agentId) }
                                                         "Swap recusado: ${r.reason}"
                                                     }
@@ -2588,7 +2496,7 @@ class AgentRunner(
                                         amount == null || amount <= 0L -> "amount_raw deve ser inteiro positivo em unidades mínimas."
                                         target == null || target <= 0.0 -> "target_price_usd deve ser um decimal positivo."
                                         dev.cueopen.app.trading.SwapLegs.legs(s("input_mint"), s("output_mint")).any { it.side == dev.cueopen.app.trading.Side.BUY } ->
-                                            "Recusado: regras automáticas só podem ser de SAÍDA (stop-loss/take-profit: vender o token para SOL/USDC). Para COMPRAR, valide com typesafe_jev_check e use wallet_swap."
+                                            "Recusado: regras automáticas só podem ser de SAÍDA (stop-loss/take-profit: vender o token para SOL/USDC). Use wallet_swap para executar uma troca autorizada."
                                         !dev.cueopen.app.wallet.SolanaAddressValidator.isValidAddress(s("input_mint")) -> "input_mint inválido."
                                         !dev.cueopen.app.wallet.SolanaAddressValidator.isValidAddress(s("output_mint")) -> "output_mint inválido."
                                         !dev.cueopen.app.wallet.SolanaAddressValidator.isValidAddress(s("watch_mint")) -> "watch_mint inválido."

@@ -109,12 +109,20 @@ class CustomEngineTest {
         assertTrue(p.errors.isEmpty()); assertTrue(p.warnings.any { it.contains("bogus") })
     }
 
-    @Test fun `requiresSignal exige orderIntent`() {
-        val j = mod(base, "\"risky\": true,\n      \"params\"", "\"risky\": true, \"requiresSignal\": true,\n      \"params\"")
+    @Test fun `opensOrder exige orderIntent`() {
+        val j = mod(base, "\"risky\": true,\n      \"params\"", "\"risky\": true, \"opensOrder\": true,\n      \"params\"")
         assertTrue(CustomDefParser.parse(j).errors.any { it.contains("orderIntent") })
         val ok = mod(j, "\"limits\"", "\"orderIntent\": {\"asset\":\"{{destino}}\",\"direction\":\"buy\"}, \"limits\"")
         val p = CustomDefParser.parse(ok)
         assertEquals(emptyList<String>(), p.errors)
+    }
+
+    @Test fun `orderIntent identifica ordem sem opensOrder`() {
+        val existing = mod(CustomTemplates.BROKER_WS.json, "\"risky\": true, \"opensOrder\": true,", "\"risky\": true,")
+        val parsed = CustomDefParser.parse(existing)
+        assertEquals(emptyList<String>(), parsed.errors)
+        val tools = parsed.def!!.tools.map { it.name to it.opensOrder }
+        assertTrue("tools inferred from orderIntent: $tools", tools.any { it.second })
     }
 
     // ---- conector com HTTP falso
@@ -185,11 +193,11 @@ class CustomEngineTest {
 
     @Test fun `bloqueia host diferente e orderIntents`() = runBlocking {
         val def = CustomDefParser.parse(
-            mod(mod(base, "\"risky\": true,\n      \"params\"", "\"risky\": true, \"requiresSignal\": true,\n      \"params\""), "\"limits\"", "\"orderIntent\": {\"asset\":\"{{destino}}\",\"direction\":\"{{valor}}\"}, \"limits\"")
+            mod(mod(base, "\"risky\": true,\n      \"params\"", "\"risky\": true, \"opensOrder\": true,\n      \"params\""), "\"limits\"", "\"orderIntent\": {\"asset\":\"{{destino}}\",\"direction\":\"{{valor}}\"}, \"limits\"")
         ).def!!
         val c = CustomConnector(def, fake(), permissive = true)
         assertTrue(c.orderIntents("enviar", mapOf("destino" to "EURUSD", "valor" to "5")).isEmpty()) // direction invalida
-        val def2 = CustomDefParser.parse(mod(mod(base, "\"risky\": true,\n      \"params\"", "\"risky\": true, \"requiresSignal\": true,\n      \"params\""), "\"limits\"", "\"orderIntent\": {\"asset\":\"{{destino}}\",\"direction\":\"buy\"}, \"limits\"")).def!!
+        val def2 = CustomDefParser.parse(mod(mod(base, "\"risky\": true,\n      \"params\"", "\"risky\": true, \"opensOrder\": true,\n      \"params\""), "\"limits\"", "\"orderIntent\": {\"asset\":\"{{destino}}\",\"direction\":\"buy\"}, \"limits\"")).def!!
         val i = CustomConnector(def2, fake(), permissive = true).orderIntents("enviar", mapOf("destino" to "EURUSD", "valor" to "5"))
         assertEquals(1, i.size); assertEquals(Side.BUY, i[0].side); assertEquals("EURUSD", i[0].asset)
     }

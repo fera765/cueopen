@@ -78,11 +78,6 @@ fun SettingsScreen(nav: NavController) {
             CueField(s.baseUrl, { v -> app.store.updateSettings { it.copy(baseUrl = v.trim()) } }, "Base URL (compatível OpenAI)")
             ModelPicker(s.model, { v -> app.store.updateSettings { it.copy(model = v) } }, "Modelo do agente", baseUrl = s.baseUrl, apiKey = s.apiKey)
             ModelPicker(s.fastModel, { v -> app.store.updateSettings { it.copy(fastModel = v) } }, "Modelo rápido (títulos e resumos de contexto)", baseUrl = s.baseUrl, apiKey = s.apiKey)
-            ModelPicker(dev.cueopen.app.trading.SignalEvaluationAdapter.resolveModel(s.accuracyModel.ifBlank { "typesafe/jev-router" }, s.baseUrl), { v -> app.store.updateSettings { it.copy(accuracyModel = v) } }, "Modelo avaliador de acurácia (day trade)", baseUrl = s.baseUrl, apiKey = s.apiKey, includeSystemOne = true)
-            Text("Jev usa a API System One de decisões tipadas. No OpenCode, Jev 1.13 pertence ao catálogo Console, não ao Go, e pode exigir créditos; Jev Free depende da política de privacidade da conta. Outros modelos recebem um pedido JSON estruturado, sem equivalência de calibração. Dados ausentes, resposta inválida ou confiança abaixo de 70% não liberam uma ordem.", fontSize = 12.sp, color = Cue.c.ink2)
-            SectionLabel("TypeSafe Jev")
-            ToggleRow("Orquestração Jev", "Cada passo leva só as ferramentas, conectores, skills, memórias e knowledge relevantes — menos tokens de entrada", s.jevOrchestration) { v -> app.store.updateSettings { it.copy(jevOrchestration = v) } }
-            ToggleRow("Roteamento Jev Router", "O Jev Router escolhe o modelo e o esforço de raciocínio de cada passo (qualidade × custo). Só OpenRouter; o modelo definido no Agent tem prioridade", s.jevRouting) { v -> app.store.updateSettings { it.copy(jevRouting = v) } }
             ToggleRow("Desativar thinking", "Zero raciocínio estendido — respostas mais rápidas", s.disableThinking) { v -> app.store.updateSettings { it.copy(disableThinking = v) } }
             Text("Passos máximos por execução: ${s.maxSteps}", fontSize = 14.sp)
             Slider(s.maxSteps.toFloat(), { v -> app.store.updateSettings { it.copy(maxSteps = v.toInt()) } }, valueRange = 10f..1000f,

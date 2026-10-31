@@ -333,8 +333,6 @@ data class Settings(
     val baseUrl: String = "https://openrouter.ai/api/v1",
     val model: String = "deepseek/deepseek-v4-flash",
     val fastModel: String = "deepseek/deepseek-v4-flash",
-    /** Modelo avaliador de acurácia para day trade (TypeSafe Jev por padrão; roteia p/ o melhor/mais barato). */
-    val accuracyModel: String = "typesafe/jev-router",
     val disableThinking: Boolean = true,
     val maxSteps: Int = 1000,
     val theme: ThemeMode = ThemeMode.SYSTEM,
@@ -342,10 +340,6 @@ data class Settings(
     val sandboxPackages: String = SandboxPackageDefaults.DEFAULT,
     val userName: String = "",
     val notifyOnDone: Boolean = true,
-    /** TypeSafe Jev: envia só as ferramentas/conectores relevantes a cada passo e ajusta orçamentos de contexto. */
-    val jevOrchestration: Boolean = true,
-    /** TypeSafe Jev Router: o modelo é escolhido por requisição (qualidade × custo) — só OpenRouter. */
-    val jevRouting: Boolean = false,
     /** Orçamento de contexto (tokens estimados) antes de compactar. */
     val contextBudget: Int = 24_000,
     val keepRecentMessages: Int = 10,

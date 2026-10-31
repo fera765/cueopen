@@ -36,24 +36,23 @@ fun ModelPicker(
     allowEmpty: Boolean = false,
     baseUrl: String = "https://openrouter.ai/api/v1",
     apiKey: String = "",
-    includeSystemOne: Boolean = false,
 ) {
     val c = Cue.c
     var query by remember(value) { mutableStateOf(value) }
     var open by remember { mutableStateOf(false) }
     var refresh by remember { mutableIntStateOf(0) }
-    var loading by remember(baseUrl, apiKey, includeSystemOne) { mutableStateOf(false) }
-    var loaded by remember(baseUrl, apiKey, includeSystemOne) { mutableStateOf(false) }
-    var loadedRefresh by remember(baseUrl, apiKey, includeSystemOne) { mutableIntStateOf(-1) }
-    var models by remember(baseUrl, apiKey, includeSystemOne) { mutableStateOf<List<ProviderModels.Model>>(emptyList()) }
-    var error by remember(baseUrl, apiKey, includeSystemOne) { mutableStateOf<String?>(null) }
+    var loading by remember(baseUrl, apiKey) { mutableStateOf(false) }
+    var loaded by remember(baseUrl, apiKey) { mutableStateOf(false) }
+    var loadedRefresh by remember(baseUrl, apiKey) { mutableIntStateOf(-1) }
+    var models by remember(baseUrl, apiKey) { mutableStateOf<List<ProviderModels.Model>>(emptyList()) }
+    var error by remember(baseUrl, apiKey) { mutableStateOf<String?>(null) }
 
-    LaunchedEffect(open, baseUrl, apiKey, refresh, includeSystemOne) {
+    LaunchedEffect(open, baseUrl, apiKey, refresh) {
         if (open && (!loaded || refresh != loadedRefresh)) {
             loading = true
             error = null
             try {
-                models = ProviderModels.all(baseUrl, apiKey, forceRefresh = loadedRefresh >= 0 && refresh != loadedRefresh, includeSystemOne = includeSystemOne)
+                models = ProviderModels.all(baseUrl, apiKey, forceRefresh = loadedRefresh >= 0 && refresh != loadedRefresh)
                 loaded = true
                 loadedRefresh = refresh
             } catch (e: kotlinx.coroutines.CancellationException) {

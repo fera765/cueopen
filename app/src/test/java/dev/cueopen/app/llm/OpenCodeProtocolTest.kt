@@ -23,12 +23,4 @@ class OpenCodeProtocolTest {
         assertNull(OpenCodeProtocol.sessionHeader("https://openrouter.ai/api/v1", null))
         assertNull(OpenCodeProtocol.userAgent("https://openrouter.ai/api/v1"))
     }
-
-    @Test fun `Jev usa endpoint System One documentado pelo OpenCode Console`() {
-        assertEquals(
-            "https://opencode.ai/inference/systemone/v1/systemone",
-            OpenCodeProtocol.systemOneEndpoint(goUrl),
-        )
-        assertNull(OpenCodeProtocol.systemOneEndpoint("https://api.typesafe.ai/v1"))
-    }
 }

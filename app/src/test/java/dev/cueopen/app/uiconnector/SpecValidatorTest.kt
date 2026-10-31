@@ -22,11 +22,11 @@ class SpecValidatorTest {
     @Test fun `o spec real da IQ Option e valido`() =
         assertEquals(emptyList<String>(), SpecValidator.validate(IqOptionConnector().spec))
 
-    @Test fun `settings legados mantem IDs e novos critérios ficam separados`() {
+    @Test fun `settings do conector preservam permissoes e limites`() {
         val settings = IqOptionConnector().spec.settings.associateBy { it.id }
         assertEquals(setOf(
             "allow_real_agent", "max_amount", "max_open", "daily_stop_loss", "daily_take_profit",
-            "max_consec_losses", "cooldown_min", "require_jev", "allow_margin_agent",
+            "max_consec_losses", "cooldown_min", "allow_margin_agent",
             "max_margin_amount", "max_forex_open", "max_leverage", "max_stop_loss_pct", "max_take_profit_pct",
             "forex_monitor_interval_sec",
         ), settings.keys)

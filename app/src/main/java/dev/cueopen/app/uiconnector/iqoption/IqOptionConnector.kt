@@ -85,7 +85,6 @@ class IqOptionConnector(
             SettingSpec("daily_take_profit", "Meta diária", "Lucro diário nas opções acompanhadas que bloqueia novas operações até amanhã. 0 = sem limite.", SettingType.NUMBER, "10"),
             SettingSpec("max_consec_losses", "Perdas seguidas para pausar", "Após N perdas seguidas em opções, o agente pausa pelo tempo abaixo.", SettingType.NUMBER, "3"),
             SettingSpec("cooldown_min", "Pausa após perdas seguidas (min)", "Tempo de pausa depois de atingir o limite de perdas seguidas.", SettingType.NUMBER, "30"),
-            SettingSpec("require_jev", "Exigir aprovação TypeSafe Jev", "Ligado: cada abertura exige aprovação prévia do gate genérico de ordens. Desligado: permanecem ativos os limites de conta e risco deste conector.", SettingType.SWITCH, "false", risky = true),
             SettingSpec("allow_margin_agent", "Agente pode operar Forex", "Desligado por padrão. Ligado: permite abrir Forex com stop loss e take profit obrigatórios.", SettingType.SWITCH, "false", risky = true),
             SettingSpec("max_margin_amount", "Valor máximo por posição Forex", "Teto do valor investido por posição Forex aberta pelo agente.", SettingType.NUMBER, "1"),
             SettingSpec("max_forex_open", "Máx. de posições Forex abertas", "Limite de posições Forex abertas pelo agente.", SettingType.NUMBER, "3"),
@@ -109,7 +108,7 @@ class IqOptionConnector(
                 ParamSpec("direction", "call (alta) ou put (baixa)", allowed = listOf("call", "put")),
                 ParamSpec("amount", "Valor da operação na moeda da conta", "number"),
                 ParamSpec("minutes", "Expiração em minutos (1–60). Até 5 min é Turbo.", "integer", required = false),
-            ), risky = true, requiresSignal = true),
+            ), risky = true, opensOrder = true),
             ToolSpec("open_forex", "Abre uma posição Forex a mercado com stop loss e take profit obrigatórios. Só atua em Forex, não CFD nem cripto.", listOf(
                 ParamSpec("asset", "Ticker Forex aberto (ex.: EURUSD)"),
                 ParamSpec("side", "buy ou sell", allowed = listOf("buy", "sell")),
@@ -117,7 +116,7 @@ class IqOptionConnector(
                 ParamSpec("leverage", "Alavancagem de 1 até o limite configurado", "integer"),
                 ParamSpec("stop_loss_pct", "Stop loss obrigatório em % do valor investido", "number"),
                 ParamSpec("take_profit_pct", "Take profit obrigatório em % do valor investido", "number"),
-            ), risky = true, requiresSignal = true),
+            ), risky = true, opensOrder = true),
             ToolSpec("close_position", "Solicita o fechamento de uma posição Forex aberta, informando seu id. Não fecha opções binárias.", listOf(
                 ParamSpec("id", "Id da posição Forex aberta", "integer"),
             ), risky = true),

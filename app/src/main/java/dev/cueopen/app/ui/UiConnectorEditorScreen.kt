@@ -168,7 +168,7 @@ fun UiConnectorEditorScreen(nav: NavController, id: String) {
             text = {
                 Text(
                     (if (def.host.isBlank()) "Este conector não declara host de rede." else "Este conector só falará com ${def.host} (HTTPS).") +
-                        (if (risky.isNotEmpty()) "\n\nFerramentas sensíveis para o agente: " + risky.joinToString { it.name + if (it.requiresSignal) " (exige validação Jev)" else "" } + "." else "") +
+                        (if (risky.isNotEmpty()) "\n\nFerramentas sensíveis para o agente: " + risky.joinToString { it.name + if (it.opensOrder) " (abre ordens)" else "" } + "." else "") +
                         (if (dev.cueopen.app.uiconnector.custom.Capabilities.AGENT in def.capabilities) "\n\nA delegação envia a tarefa e leituras autorizadas ao modelo configurado, pode consumir cota/custo e fica desligada até você autorizá-la." else "") +
                         "\n\nO agente só usa o conector se você ativar nele (\"Agent required ?\" e perfil do agente). Confirme só se você confia nesta definição.",
                 )

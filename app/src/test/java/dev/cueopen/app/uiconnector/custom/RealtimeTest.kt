@@ -143,7 +143,7 @@ class RealtimeTest {
         assertTrue(errs(base.replace("wss://ws.suacorretora.com/stream", "wss://evil.com/stream")).contains("evil.com"))
         assertTrue(errs(base.replace("wss://ws.suacorretora.com/stream", "wss://ws.suacorretora.com:8443/stream")).contains("443"))
         assertTrue(errs(base.replace("\"source\": \"cotacoes\", \"rows\"", "\"source\": \"naoexiste\", \"rows\"")).contains("naoexiste"))
-        assertTrue(errs(base.replace("\"risky\": true, \"requiresSignal\": true,", "")).contains("risky"))
+        assertTrue(errs(base.replace("\"risky\": true, \"opensOrder\": true,", "")).contains("risky"))
         assertTrue(errs(base.replace("{{rt.moeda}}\" }", "{{rt.inexistente}}\" }")).contains("rt.inexistente"))
         assertTrue(errs(base.replace("\"everySec\": 20", "\"everySec\": 1")).contains("everySec"))
         // send sem realtime

@@ -66,16 +66,12 @@ seria preciso targetSdk 34+, que bloqueia exec de binários fora de `nativeLibra
 (texto + elementos numerados), `browser_click`, `browser_type`, `browser_scroll`, `browser_back`,
 `browser_js`, `remember`, `create_skill`, `ask_user`, `finish`.
 
-## TypeSafe Jev — orquestração de contexto e tokens
-`agent/JevOrchestrator.kt` decide, a cada passo do agente, o que entra no contexto:
-- **Ferramentas por grupos**: núcleo sempre; `wallet`, `device`, `web_dev`, `agents`, `schedule`, `skills_admin`,
-  `connector_builder` só quando o pedido indica, quando já foram usados (fixos daí em diante, prefixo estável para cache)
-  ou quando o modelo chama `tools_load`. O resto aparece num índice de uma linha.
-- **Conectores (`uic_*`) e MCP (`mcp_*`)**: só os relevantes ao pedido ou já usados; demais via `tools_load connector:<id>`.
-- **Skills**: índice ordenado por relevância, com teto. **Knowledge/memória**: orçamento encolhe conforme o histórico cresce.
-- **Roteamento Jev Router** (opcional, OpenRouter): `typesafe/jev-router` escolhe modelo e esforço de raciocínio por passo;
-  também usado nas chamadas auxiliares (títulos, resumos, memórias). O modelo definido no Agent tem prioridade.
-Ambos se ligam/desligam em Configurações → TypeSafe Jev.
+## Planejamento contextual do agente
+`agent/ToolContextPlanner.kt` decide, a cada passo, quais ferramentas e conectores entram no contexto:
+- **Ferramentas por grupos**: núcleo sempre; `wallet`, `device`, `web_dev`, `agents`, `schedule`, `skills_admin` e
+  `connector_builder` entram quando o pedido indica, quando já foram usados ou quando o modelo chama `tools_load`.
+- **Conectores (`uic_*`) e MCP (`mcp_*`)**: seleção por relevância e uso, com índice para carregar itens adicionais sob demanda.
+- **Skills, knowledge e memória**: ordenação por relevância e orçamento ajustado conforme o histórico cresce.
 
 ## Estrutura
 ```
