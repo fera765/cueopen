@@ -138,9 +138,7 @@ class SolanaMarketDataClient(
             }
         }.getOrNull() ?: return@withContext null
         val pairs = runCatching { json.parseToJsonElement(body).jsonObject["pairs"]?.jsonArray }.getOrNull() ?: return@withContext null
-        pairs.filter { (it.jsonObject["chainId"]?.jsonPrimitive?.contentOrNull) == "solana" }
-            .maxByOrNull { (it.jsonObject["liquidity"] as? JsonObject)?.get("usd")?.jsonPrimitive?.doubleOrNull ?: 0.0 }
-            ?.jsonObject
+        selectBestSolanaDexPair(pairs, mint)
     }
 
     private suspend fun dexScreenerToken(mint: String): TokenMarket? {
@@ -479,3 +477,14 @@ data class DepthPoint(
     val priceImpactPct: String,
     val routeLabels: List<String>
 )
+
+internal fun selectBestSolanaDexPair(
+    pairs: Iterable<kotlinx.serialization.json.JsonElement>,
+    mint: String,
+): JsonObject? = pairs.filter {
+    val pair = it.jsonObject
+    pair["chainId"]?.jsonPrimitive?.contentOrNull == "solana" &&
+        pair["baseToken"]?.jsonObject?.get("address")?.jsonPrimitive?.contentOrNull == mint
+}.maxByOrNull {
+    (it.jsonObject["liquidity"] as? JsonObject)?.get("usd")?.jsonPrimitive?.doubleOrNull ?: 0.0
+}?.jsonObject

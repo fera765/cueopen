@@ -24,8 +24,8 @@ android {
         // do sandbox a partir de filesDir. Os .so do proot também vêm em jniLibs.
         targetSdk = 28
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
-        versionCode = 77
-        versionName = "4.17.25"
+        versionCode = 78
+        versionName = "4.17.26"
         ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64") }
     }
     signingConfigs {
@@ -49,9 +49,8 @@ android {
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
-            // Recusa qualquer release sem a chave externa aprovada; a antiga keystore versionada é ignorada.
-            if (cueopenSigningStore == null) throw GradleException("Defina CUEOPEN_KEYSTORE_PATH para assinar o release com a chave aprovada.")
-            signingConfig = signingConfigs.getByName("cueopen")
+            // Só configura assinatura quando a chave externa aprovada está disponível.
+            if (cueopenSigningStore != null) signingConfig = signingConfigs.getByName("cueopen")
         }
     }
     packaging { jniLibs { useLegacyPackaging = true } } // extrai .so para nativeLibraryDir
@@ -62,6 +61,19 @@ android {
     kotlin { compilerOptions { jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17) } }
     buildFeatures { compose = true; buildConfig = true }
     lint { abortOnError = false; checkReleaseBuilds = false }
+}
+
+val requireCueOpenReleaseSigning by tasks.registering {
+    doLast {
+        if (cueopenSigningStore == null) {
+            throw GradleException("Defina CUEOPEN_KEYSTORE_PATH para empacotar o release com a chave aprovada.")
+        }
+    }
+}
+tasks.configureEach {
+    if (name == "assembleRelease" || name == "packageRelease" || name == "bundleRelease") {
+        dependsOn(requireCueOpenReleaseSigning)
+    }
 }
 
 dependencies {

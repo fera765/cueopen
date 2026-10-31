@@ -13,6 +13,7 @@ import dev.cueopen.app.data.StepStatus
 import dev.cueopen.app.data.Store
 import dev.cueopen.app.files.AtomicTextFile
 import dev.cueopen.app.llm.OpenRouter
+import dev.cueopen.app.llm.LlmTruncationPolicy
 import dev.cueopen.app.llm.ToolCall
 import dev.cueopen.app.llm.bool
 import dev.cueopen.app.llm.int
@@ -249,6 +250,8 @@ class AgentRunner(
         val transientAccessibilityOutputs = linkedMapOf<String, String>()
         var toolLoopNudges = 0
         var cleanRounds = 0
+        val truncatedOutput = LlmTruncationPolicy(maxFragments = if (tokenBudgetOverride == null) 3 else 1)
+        val fileToolFailureGuard = AgentFileToolFailureGuard()
         val controlTools = setOf("tools_load", "sleep", "set_schedule", "ask_user", "ask_question", "ask_secure", "finish", "complete_step", "notes_write", "notes_read")
         while (scope.isActive) {
             val workerUsed = if (tokenBudgetOverride != null) {
@@ -300,8 +303,8 @@ class AgentRunner(
                 while (true) {
                     try {
                         val response = llm.chat(listOf(sys) + history, tools = stepTools, model = stepModel(agent), maxTokens = currentReplyTokenLimit, conversationId = sessionId)
-                        if (response.truncated) throw dev.cueopen.app.llm.LlmRequestFailure(
-                            "A resposta do provedor foi cortada no limite de saída; ela não foi gravada no histórico.",
+                        if (response.truncated && (response.toolCalls.isNotEmpty() || response.content.isNullOrBlank())) throw dev.cueopen.app.llm.LlmRequestFailure(
+                            "A resposta foi cortada sem texto recuperável ou com chamadas de ferramenta incompletas; nenhuma ferramenta foi executada.",
                             retryable = true,
                             responseTruncated = true,
                         )
@@ -343,11 +346,34 @@ class AgentRunner(
                 val cost = runCatching { llm.estimateCostUsd(modelId, reply.usage) }.getOrNull()?.takeIf { it > 0.0 } ?: return@launch
                 store.editSession(sessionId) { it.copy(costUsd = it.costUsd + cost, hasPricedUsage = true) }
             }
+            if (reply.truncated && reply.toolCalls.isEmpty()) {
+                val decision = truncatedOutput.accept(reply.content)
+                if (decision == LlmTruncationPolicy.Decision.CONTINUE) {
+                    store.editSession(sessionId) { it.copy(llm = it.llm + LlmMessage("user",
+                        "[Sistema] A resposta anterior foi cortada pelo limite de saída. Continue exatamente do ponto em que parou, sem repetir o texto já concluído, e finalize a tarefa se ela estiver pronta.")) }
+                    setActivity(sessionId, Activity(Activity.Kind.THINKING, "Continuando resposta cortada"))
+                    if (++steps >= maxSteps) {
+                        val partial = truncatedOutput.partialText().trim()
+                        if (partial.isNotBlank()) store.addItem(sessionId, ChatItem.Assistant(text = partial, final = false))
+                        store.addItemUnique(sessionId, ChatItem.Error(text = "A resposta foi cortada e o limite de passos foi atingido. Preservei o trecho parcial; envie continuar para retomar."))
+                        store.editSession(sessionId) { it.copy(status = SessionStatus.WAITING_USER) }
+                        return
+                    }
+                    continue
+                }
+                val partial = truncatedOutput.partialText().trim()
+                if (partial.isNotBlank()) store.addItem(sessionId, ChatItem.Assistant(text = partial, final = false))
+                runCatching { dev.cueopen.app.diag.ErrorLog.log("agent", "Texto LLM truncado sem continuação útil; trecho parcial preservado.", sessionId, "llm") }
+                store.addItemUnique(sessionId, ChatItem.Error(text = "O modelo repetiu o trecho truncado ou atingiu o limite seguro de continuação. Preservei o texto parcial; envie continuar ou reduza o pedido."))
+                store.editSession(sessionId) { it.copy(status = SessionStatus.WAITING_USER) }
+                return
+            }
+            val displayContent = truncatedOutput.complete(reply.content)
             // Anti-repetição: se o modelo repetir quase o mesmo texto várias vezes, interrompe.
             // Só é repetição real se o texto for quase igual E as ações também forem as mesmas
             // (mesmas ferramentas com os mesmos argumentos). Mesma ferramenta com argumentos
             // diferentes (ex.: navegar em URLs distintas) é progresso, não loop.
-            val cNow = reply.content?.trim().orEmpty()
+            val cNow = displayContent.trim()
             val curToolSig = reply.toolCalls.joinToString(";") { it.name + "|" + normArgs(it.argsJson) }
             val sameActions = reply.toolCalls.isEmpty() || curToolSig == lastToolSig
             lastToolSig = curToolSig
@@ -364,8 +390,8 @@ class AgentRunner(
             } else repeats = 0
             if (cNow.isNotEmpty()) { recentTexts.addLast(cNow); while (recentTexts.size > 3) recentTexts.removeFirst() }
             lastContent = cNow
-            if (!reply.content.isNullOrBlank()) {
-                val txt = reply.content.trim()
+            if (displayContent.isNotBlank()) {
+                val txt = displayContent.trim()
                 val isFinal = reply.toolCalls.isEmpty()
                 // Evita bolhas repetidas: se a última mensagem do assistente foi uma narração (não-final) quase
                 // igual a esta, substitui em vez de empilhar outra igual ("Vou aguardar e verificar…" repetido).
@@ -411,6 +437,7 @@ class AgentRunner(
             val tradeCallCache = HashMap<String, ToolResult>()
             val resultHashes = HashMap<String, Int>()
             val resultLong = HashSet<String>()
+            var repeatedFileFailure: String? = null
             val staleSnapshotRecoveryCache = HashMap<String?, String>()
             for (call in reply.toolCalls) {
                 val callWasExposed = ToolCallExecutionPolicy.isExposed(call.name, exposedToolNames)
@@ -523,11 +550,20 @@ class AgentRunner(
                 store.editSession(sessionId) {
                     it.copy(llm = it.llm + LlmMessage("tool", durableToolOutput, toolCallId = call.id, name = call.name))
                 }
+                if (call.name == "file_read" || call.name == "file_list") {
+                    repeatedFileFailure = fileToolFailureGuard.record(call.name, normArgs(call.argsJson), rawResult.output)
+                }
                 if (result.stop != null) stopLoop = result.stop
                 if (result.sleepSeconds != null) {
                     val current = sleepReq
                     if (current == null || result.sleepSeconds > current.first) sleepReq = result.sleepSeconds to result.output
                 }
+            }
+            if (repeatedFileFailure != null) {
+                runCatching { dev.cueopen.app.diag.ErrorLog.log("agent", "Falhas determinísticas de arquivo repetidas; loop interrompido.", sessionId, "file") }
+                store.addItemUnique(sessionId, ChatItem.Error(text = "Interrompi novas tentativas de arquivo após falhas repetidas sem progresso. Liste um diretório válido ou forneça o arquivo ausente e envie continuar."))
+                store.editSession(sessionId) { it.copy(status = SessionStatus.WAITING_USER) }
+                return
             }
             // Loop de ferramentas: mesma ação repetida SEM progresso → avisa o modelo e, só se insistir muito, interrompe.
             // Ferramentas de ambiente (browser, aparelho, shell, conectores) mudam de estado entre chamadas — rolar,
@@ -1174,6 +1210,7 @@ class AgentRunner(
             appendLine("2z. AÇÃO OBRIGATÓRIA: NUNCA anuncie um passo (\"vou pesquisar/verificar/testar/abrir/rodar…\") sem, na MESMA resposta, emitir a chamada de ferramenta correspondente. Anúncio sem ferramenta = desperdício e vira loop. Se não vai usar ferramenta, entregue a resposta final direto (sem anunciar) ou chame finish. Não repita a mesma frase de intenção.")
             appendLine("2a. ENTREGA: nunca diga que algo foi feito/funciona sem evidência real da ferramenta (saída, arquivo, status). Antes de `finish`, confira o resultado (ls/file_read/execução). Se não conseguiu validar, diga isso claramente em vez de afirmar sucesso.")
             appendLine("2b. ERRO: se uma ferramenta falhar, leia a mensagem, diagnostique e MUDE a abordagem (outro caminho/comando/argumento). Nunca repita a mesma chamada que falhou. Se ficar bloqueado, finalize explicando o motivo em vez de entrar em loop.")
+            appendLine("2b1. PERMISSÕES DO SISTEMA: `Permission denied` em `/vendor`, `/system`, `/proc`, `/sys` ou `/dev` é um limite do ambiente, não falha do `find`; não use `sudo`, não repita a varredura nem tente contornar permissões. Restrinja buscas ao workspace autorizado e relate o limite se os dados necessários estiverem fora dele.")
             appendLine("2c. BROWSER/PRONTIDÃO: `localhost`/`127.0.0.1` apontam para o ambiente que hospeda o WebView; não presuma que shell, navegador, emulador e computador remoto compartilham a mesma rede. Antes de abrir um servidor local, identifique no projeto o comando e a porta, verifique processo/listener e faça uma sonda HTTP curta no mesmo ambiente de rede do navegador. Se o serviço não estiver pronto, inicie-o em segundo plano pelo comando correto e aguarde uma resposta HTTP saudável com tentativas limitadas (sem `sleep` fixo); confirme também que o WebView consegue alcançar esse endereço. `CONNECTION_REFUSED` significa listener/porta/ambiente incorreto: não repita `browser_navigate` até corrigir. Após navegação, diferencie resposta HTTP, DOM carregado e prontidão funcional; `PARTIAL` ou texto visível não prova hydration/estado pronto. Em timeout, inspecione URL, estado do DOM, console, requisições e logs do servidor e só então escolha uma recuperação específica; não aumente prazo nem faça retry cego.")
             appendLine("3. Economize contexto: leia só o necessário (head/grep), mande saídas longas para arquivo.")
             appendLine("3a. Trabalhe APENAS no seu workspace (${sandbox.guestPath(sessionId)}); não leia /root/workspace de outras tarefas.")
@@ -2697,7 +2734,7 @@ class AgentRunner(
                     val target = AgentFilePathPolicy.readableWorkspace(
                         sandbox.workspaceFor(sessionId), sandbox.connectorsDir, path,
                     )
-                    if (target == null) "ERRO: caminho inválido. Use um caminho relativo ao workspace ou /root/workspace/...; para leitura de conector use /root/connectors/<id>/workspace/...."
+                    if (target == null) "ERRO: caminho inválido. Use caminho relativo ao workspace ou /root/workspace/...; para conector, informe o ID completo em /root/connectors/<id>/workspace/.... Não tente caminhos absolutos Android ou caminhos alternativos fora dessas raízes."
                     else readFileChunk(target, path, i("offset") ?: 1, i("limit") ?: 250)
                 }
                 "file_list" -> {
@@ -2707,7 +2744,7 @@ class AgentRunner(
                         root, sandbox.connectorsDir, path, allowRoot = true,
                     )
                     when {
-                        d == null -> "ERRO: caminho inválido. Use o workspace da tarefa ou /root/connectors/<id>/workspace/ para listar outro conector."
+                        d == null -> "ERRO: caminho inválido. Para listar a raiz do workspace, deixe path vazio; senão use caminho relativo ou /root/workspace/.... Para conector, use o ID completo em /root/connectors/<id>/workspace/.... Não tente outros caminhos absolutos."
                         !d.exists() || !d.isDirectory -> "ERRO: diretório não existe: $path. Confira o ID e use o segmento `/workspace` completo; não repita o path inexistente."
                         else -> d.walkTopDown().maxDepth(3).filter { it != d }.take(300)
                             .joinToString("\n") { (if (it.isDirectory) "📁 " else "📄 ") + it.relativeTo(d).path + if (it.isFile) " (${it.length()}b)" else "" }
@@ -2726,8 +2763,7 @@ class AgentRunner(
                     } else {
                         val url = hostF?.let { "file://" + it.absolutePath } ?: raw
                         val navigation = browserFor(sessionId).navigate(url)
-                        if (navigation.startsWith("ERROR:") || navigation.startsWith("TIMEOUT:")) navigation +
-                            (if (navigation.contains("ERR_NAME_NOT_RESOLVED")) "\nO domínio não existe/não resolveu: confira a URL (não invente endereços) ou pesquise o site oficial." else "")
+                        if (navigation.startsWith("ERROR:") || navigation.startsWith("TIMEOUT:")) navigation
                         else {
                             val page = browserFor(sessionId).read(4000)
                             val notFound = Regex("(?i)(t[ií]tulo:[^\\n]*(404|not found|n[aã]o encontrad)|this page doesn.t exist|page not found|p[aá]gina n[aã]o encontrada)").containsMatchIn(page.take(600))

@@ -87,6 +87,18 @@ class BrowserNavigationStatusTest {
     }
 
     @Test
+    fun unresolvedDnsDoesNotClaimThatTheDomainDoesNotExist() {
+        val status = BrowserNavigationStatus()
+
+        val error = status.recordNetworkError(true, "https://docs.polymarket.com/", "net::ERR_NAME_NOT_RESOLVED")
+
+        assertTrue(error.orEmpty(), error.orEmpty().startsWith("ERROR:"))
+        assertTrue(error.orEmpty(), error.orEmpty().contains("não conseguiu resolver"))
+        assertTrue(error.orEmpty(), error.orEmpty().contains("não confirma que o domínio não exista"))
+        assertFalse(error.orEmpty(), error.orEmpty().contains("O domínio não existe"))
+    }
+
+    @Test
     fun timeoutDoesNotCallVisibleTextReadyAndIncludesNavigationDiagnostics() {
         val status = BrowserNavigationStatus()
 

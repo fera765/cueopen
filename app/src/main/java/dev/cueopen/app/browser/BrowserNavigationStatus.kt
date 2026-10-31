@@ -26,7 +26,7 @@ internal class BrowserNavigationStatus {
             code.contains("TIMED_OUT") || code.contains("TIMEOUT") ->
                 "A conexão com o servidor expirou. Verifique alcance, processo e logs; não repita a mesma navegação sem diagnosticar a causa."
             code.contains("NAME_NOT_RESOLVED") ->
-                "O nome do host não foi resolvido. Confira a URL ou localize o endereço oficial antes de tentar novamente."
+                "O DNS do WebView não conseguiu resolver o nome do host; isso não confirma que o domínio não exista. Confira a URL e a conectividade/DNS; se necessário, valide o endereço em uma fonte oficial antes de tentar novamente."
             code.contains("INTERNET_DISCONNECTED") || code.contains("NETWORK_CHANGED") ->
                 "A rede foi desconectada ou mudou durante a navegação. Confirme a conectividade antes de tentar novamente."
             code.contains("ADDRESS_UNREACHABLE") ->
