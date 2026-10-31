@@ -141,6 +141,33 @@ class SolanaMarketDataClient(
         selectBestSolanaDexPair(pairs, mint)
     }
 
+    /** Strict lookup used by OHLCV: network/provider failures must not be reported as "no pool". */
+    private suspend fun bestDexPairForPool(mint: String): JsonObject? = withContext(Dispatchers.IO) {
+        val cacheKey = "dex:$mint"
+        val body = cacheGet(cacheKey) ?: run {
+            val request = Request.Builder().url("$DEXSCREENER_BASE/latest/dex/tokens/$mint")
+                .header("Accept", "application/json").get().build()
+            client.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) throw IOException("DexScreener HTTP ${response.code}")
+                val responseBody = response.body?.string().orEmpty()
+                if (responseBody.isBlank()) throw IOException("Resposta vazia do DexScreener")
+                if (responseBody.length > MAX_RESPONSE_CHARS) throw IOException("Resposta DexScreener excede o limite")
+                cachePut(cacheKey, responseBody)
+                responseBody
+            }
+        }
+        val pairs = try {
+            json.parseToJsonElement(body).jsonObject["pairs"]?.jsonArray
+        } catch (failure: Exception) {
+            throw IOException("Resposta DexScreener inválida", failure)
+        } ?: throw IOException("Resposta DexScreener sem lista de pares")
+        try {
+            selectBestSolanaDexPair(pairs, mint)
+        } catch (failure: Exception) {
+            throw IOException("Lista de pares DexScreener inválida", failure)
+        }
+    }
+
     private suspend fun dexScreenerToken(mint: String): TokenMarket? {
         val o = bestDexPair(mint) ?: return null
         val baseTok = o["baseToken"]?.jsonObject
@@ -158,17 +185,46 @@ class SolanaMarketDataClient(
         )
     }
 
-    /**
-     * Endereço do pool do token, descoberto de forma confiável pelo DexScreener (keyless) e só
-     * então pelo GeckoTerminal. Resultado em cache longo (pools não mudam) — remove as falhas
-     * "Nenhum pool" e tira uma chamada do GeckoTerminal por consulta de velas.
-     */
+    /** A valid empty response means no indexed pool; provider failures remain typed and recoverable. */
     private suspend fun poolForMint(mint: String): String? {
         cacheGet("pool:$mint")?.let { return it }
-        val fromDex = runCatching { bestDexPair(mint)?.get("pairAddress")?.jsonPrimitive?.contentOrNull }.getOrNull()
-        val pool = fromDex ?: runCatching { topPoolFor(mint) }.getOrNull()
-        if (!pool.isNullOrBlank()) cachePut("pool:$mint", pool)
-        return pool
+        var dexFailure: IOException? = null
+        val fromDex = try {
+            bestDexPairForPool(mint)?.let { pair ->
+                pair["pairAddress"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
+                    ?: throw IOException("Par DexScreener sem endereço de pool")
+            }
+        } catch (failure: IOException) {
+            dexFailure = failure
+            null
+        }
+        if (!fromDex.isNullOrBlank()) {
+            cachePut("pool:$mint", fromDex)
+            return fromDex
+        }
+
+        var geckoFailure: IOException? = null
+        val fromGecko = try {
+            topPoolFor(mint)
+        } catch (failure: IOException) {
+            geckoFailure = failure
+            null
+        }
+        if (!fromGecko.isNullOrBlank()) {
+            cachePut("pool:$mint", fromGecko)
+            return fromGecko
+        }
+        if (dexFailure != null || geckoFailure != null) {
+            val details = listOfNotNull(
+                dexFailure?.let { "DexScreener: ${it.message?.take(120) ?: "falha"}" },
+                geckoFailure?.let { "GeckoTerminal: ${it.message?.take(120) ?: "falha"}" },
+            ).joinToString("; ")
+            throw MarketPoolProviderException(
+                "Não foi possível confirmar se existe pool de liquidez porque um ou mais provedores falharam: $details",
+                dexFailure ?: geckoFailure,
+            )
+        }
+        return null
     }
 
     /**
@@ -270,7 +326,7 @@ class SolanaMarketDataClient(
         require(SolanaAddressValidator.isValidAddress(mint)) { "Mint inválido" }
         require(timeframe in setOf("day", "hour", "minute")) { "timeframe deve ser day, hour ou minute" }
         val safeLimit = limit.coerceIn(1, 1000)
-        val pool = poolForMint(mint) ?: throw IOException("Nenhum pool de liquidez encontrado para este token na Solana")
+        val pool = poolForMint(mint) ?: throw NoIndexedSolanaPoolException()
         val body = geckoGet("/networks/solana/pools/$pool/ohlcv/$timeframe?aggregate=${aggregate.coerceAtLeast(1)}&limit=$safeLimit&currency=usd")
         run {
             val list = json.parseToJsonElement(body).jsonObject["data"]?.jsonObject
@@ -293,14 +349,26 @@ class SolanaMarketDataClient(
 
     /** Address of the deepest (reserve-ranked) Solana pool for a token, without the "solana_" prefix. */
     private suspend fun topPoolFor(mint: String): String? {
-        val body = runCatching { geckoGet("/networks/solana/tokens/$mint/pools?page=1") }.getOrNull() ?: return null
-        val data = runCatching { json.parseToJsonElement(body).jsonObject["data"]?.jsonArray }.getOrNull()
-            ?: return null
-        val best = data.maxByOrNull {
-            it.jsonObject["attributes"]?.jsonObject?.get("reserve_in_usd")
-                ?.jsonPrimitive?.doubleOrNull ?: 0.0
-        } ?: data.firstOrNull() ?: return null
-        return best.jsonObject["id"]?.jsonPrimitive?.content?.removePrefix("solana_")
+        val body = geckoGet("/networks/solana/tokens/$mint/pools?page=1")
+        val data = try {
+            json.parseToJsonElement(body).jsonObject["data"]?.jsonArray
+        } catch (failure: Exception) {
+            throw IOException("Resposta GeckoTerminal de pools inválida", failure)
+        } ?: throw IOException("Resposta GeckoTerminal sem lista de pools")
+        if (data.isEmpty()) return null
+        return try {
+            val best = data.maxByOrNull {
+                it.jsonObject["attributes"]?.jsonObject?.get("reserve_in_usd")
+                    ?.jsonPrimitive?.doubleOrNull ?: 0.0
+            } ?: throw IOException("Resposta GeckoTerminal não trouxe um pool utilizável")
+            best.jsonObject["id"]?.jsonPrimitive?.contentOrNull?.removePrefix("solana_")
+                ?.takeIf { it.isNotBlank() }
+                ?: throw IOException("Pool GeckoTerminal sem identificador")
+        } catch (failure: IOException) {
+            throw failure
+        } catch (failure: Exception) {
+            throw IOException("Resposta GeckoTerminal de pools inválida", failure)
+        }
     }
 
     /**
@@ -488,3 +556,9 @@ internal fun selectBestSolanaDexPair(
 }.maxByOrNull {
     (it.jsonObject["liquidity"] as? JsonObject)?.get("usd")?.jsonPrimitive?.doubleOrNull ?: 0.0
 }?.jsonObject
+
+internal class NoIndexedSolanaPoolException : IOException(
+    "Nenhum pool de liquidez foi retornado pelos indexadores para este token na Solana; pode haver ausência de listagem ou atraso de indexação"
+)
+
+internal class MarketPoolProviderException(message: String, cause: Throwable?) : IOException(message, cause)

@@ -57,6 +57,48 @@ class SolanaMarketDataClientTest {
     }
 
     @Test
+    fun providerFailuresAreNotReportedAsAnAbsentPool() {
+        val unavailableHttp = OkHttpClient.Builder().addInterceptor { chain ->
+            Response.Builder()
+                .request(chain.request())
+                .protocol(Protocol.HTTP_1_1)
+                .code(503)
+                .message("Service Unavailable")
+                .body("{}".toResponseBody("application/json".toMediaType()))
+                .build()
+        }.build()
+        val market = SolanaMarketDataClient(client = unavailableHttp)
+
+        val failure = runCatching { runBlocking { market.candles(SolanaSwapClient.USDC_MINT) } }
+            .exceptionOrNull()
+
+        assertTrue(failure is MarketPoolProviderException)
+        assertTrue(failure?.message.orEmpty().contains("Não foi possível confirmar"))
+    }
+
+    @Test
+    fun validEmptyProviderResponsesAreReportedAsNoIndexedPool() {
+        val emptyMarketHttp = OkHttpClient.Builder().addInterceptor { chain ->
+            val body = if (chain.request().url.host == "api.dexscreener.com") """{"pairs":[]}"""
+                else """{"data":[]}"""
+            Response.Builder()
+                .request(chain.request())
+                .protocol(Protocol.HTTP_1_1)
+                .code(200)
+                .message("OK")
+                .body(body.toResponseBody("application/json".toMediaType()))
+                .build()
+        }.build()
+        val market = SolanaMarketDataClient(client = emptyMarketHttp)
+
+        val failure = runCatching { runBlocking { market.candles("So11111111111111111111111111111111111111112") } }
+            .exceptionOrNull()
+
+        assertTrue(failure is NoIndexedSolanaPoolException)
+        assertTrue(failure?.message.orEmpty().contains("Nenhum pool de liquidez"))
+    }
+
+    @Test
     fun dexScreenerSelectionRequiresMintToBeTheBaseToken() {
         val mint = "So11111111111111111111111111111111111111112"
         val pairs = Json.parseToJsonElement(

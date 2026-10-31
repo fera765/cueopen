@@ -2492,8 +2492,18 @@ class AgentRunner(
                                         // Velas indisponíveis (429/timeout/sem pool): cai para a tendência REAL do
                                         // DexScreener (keyless) — o agente nunca fica sem dado de mercado.
                                         val trend = runCatching { market.dexTrend(mint) }.getOrNull()
-                                        if (trend != null) "Velas OHLCV indisponíveis agora (${(e.message ?: "erro").take(80)}). Usando tendência real alternativa:\n\n$trend"
-                                        else "MARKET_ERROR ao consultar velas: ${(e.message ?: e.javaClass.simpleName).take(200)}."
+                                        val detail = (e.message ?: e.javaClass.simpleName).take(180)
+                                        val reason = when (e) {
+                                            is dev.cueopen.app.wallet.NoIndexedSolanaPoolException -> "nenhum pool foi retornado pelos indexadores; pode haver ausência de listagem ou atraso de indexação"
+                                            is dev.cueopen.app.wallet.MarketPoolProviderException -> "falha ao consultar os provedores; ausência de pool não confirmada ($detail)"
+                                            else -> detail
+                                        }
+                                        if (trend != null) "Velas OHLCV indisponíveis ($reason). Usando tendência real alternativa, que não é OHLCV:\n\n$trend"
+                                        else when (e) {
+                                            is dev.cueopen.app.wallet.NoIndexedSolanaPoolException -> "MARKET_NO_POOL: $reason. Não invente velas nem repita imediatamente; relate que não há OHLCV disponível."
+                                            is dev.cueopen.app.wallet.MarketPoolProviderException -> "MARKET_PROVIDER_ERROR: $reason. Respeite o Retry-After se informado e não trate a falha como prova de que não existe pool."
+                                            else -> "MARKET_ERROR ao consultar velas: $detail."
+                                        }
                                     })
                                 }
                                 else -> { // market_liquidity
