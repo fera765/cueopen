@@ -291,7 +291,8 @@ class BrowserHost(private val appCtx: Context) {
                 if (request.isForMainFrame) {
                     sync(view, loading = false)
                     val desc = error.description?.toString() ?: "Falha ao carregar a página"
-                    pageDone?.complete("ERROR: $desc")
+                    val failure = navigationStatus.recordNetworkError(true, request.url.toString(), desc)
+                    pageDone?.complete(failure ?: "ERROR: $desc")
                     // Página de erro própria (substitui a tela padrão do Chrome/WebView).
                     val failing = request.url.toString()
                     view.loadDataWithBaseURL(null, errorPageHtml(failing, desc), "text/html", "UTF-8", failing)
@@ -458,12 +459,27 @@ class BrowserHost(private val appCtx: Context) {
     // ---------------- API usada pelo agente ----------------
 
     suspend fun navigate(url: String): String {
-        val target = onMain {
-            val normalized = when {
-                url.startsWith("http://", true) || url.startsWith("https://", true) || url.startsWith("file:") || url.startsWith("about:") -> url
-                url.contains(".") && !url.contains(" ") -> "https://$url"
-                else -> "https://www.google.com/search?q=" + java.net.URLEncoder.encode(url, "UTF-8")
+        val normalized = when {
+            url.startsWith("http://", true) || url.startsWith("https://", true) || url.startsWith("file:") || url.startsWith("about:") -> url
+            url.contains(".") && !url.contains(" ") -> "https://$url"
+            else -> "https://www.google.com/search?q=" + java.net.URLEncoder.encode(url, "UTF-8")
+        }
+        // Um teste TCP curto evita que um localhost sem servidor vire uma espera opaca de 45 s.
+        // É apenas uma sondagem de conexão; readiness HTTP/da aplicação continua sendo validada depois.
+        val localFailure = LoopbackEndpointProbe.failureIfUnavailable(normalized)
+        if (localFailure != null) {
+            return onMain {
+                navigationStatus = BrowserNavigationStatus()
+                val failure = navigationStatus.recordNetworkError(true, normalized, "net::ERR_CONNECTION_REFUSED")
+                    ?: localFailure
+                pageDone = CompletableDeferred<String>().also { it.complete(failure) }
+                val view = agentView().also { ensureSized(it) }
+                _ui.value = _ui.value.copy(loading = false, progress = 0)
+                view.loadDataWithBaseURL(normalized, errorPageHtml(normalized, "net::ERR_CONNECTION_REFUSED"), "text/html", "UTF-8", normalized)
+                failure
             }
+        }
+        val target = onMain {
             navigationStatus = BrowserNavigationStatus()
             pageDone = CompletableDeferred()
             _ui.value = _ui.value.copy(loading = true, progress = 0)
@@ -480,11 +496,15 @@ class BrowserHost(private val appCtx: Context) {
         val completed = withTimeoutOrNull(45_000) { deferred.await() }
         val result = completed?.let(status::preserveHttpError) ?: status.httpError() ?: run {
             _ui.value = _ui.value.copy(loading = false)
-            // Sites de documentação/SPA às vezes nunca disparam o fim do carregamento (scripts de
-            // analytics pendurados), mas o texto já está na tela: devolve o que existe em vez de falhar.
-            val chars = runCatching { eval("document.body ? document.body.innerText.length : 0").trim('"').toDoubleOrNull() ?: 0.0 }.getOrDefault(0.0)
-            if (chars >= 200) return "OK: conteúdo disponível (a página ainda carregava recursos após 45 s) ($target)"
-            return "TIMEOUT: a página não concluiu o carregamento em 45 segundos: $target"
+            // Diagnóstico curto e único: conteúdo visível não significa que a SPA/hydration esteja pronta.
+            val raw = runCatching {
+                eval("JSON.stringify({chars:document.body?document.body.innerText.length:0,ready:document.readyState,url:location.href})", timeoutMillis = 1_500)
+            }.getOrDefault("")
+            val state = runCatching { JSONObject(raw) }.getOrNull()
+            val chars = state?.optInt("chars", 0) ?: 0
+            val currentUrl = state?.optString("url").orEmpty().ifBlank { _ui.value.url }
+            val readyState = state?.optString("ready").orEmpty()
+            return status.timeoutMessage(target, currentUrl, readyState, chars)
         }
         if (result.startsWith("ERROR:")) return result
         val deadline = System.currentTimeMillis() + 8_000
@@ -586,10 +606,10 @@ class BrowserHost(private val appCtx: Context) {
         if (navigating) { onMain { pageDone = CompletableDeferred() }; awaitLoad() }
     }
 
-    private suspend fun eval(js: String): String {
+    private suspend fun eval(js: String, timeoutMillis: Long = 15_000): String {
         val d = CompletableDeferred<String>()
         onMain { agentView().evaluateJavascript(js) { d.complete(it ?: "null") } }
-        val raw = withTimeoutOrNull(15_000) { d.await() } ?: return "timeout: evaluateJavascript não respondeu em 15s"
+        val raw = withTimeoutOrNull(timeoutMillis) { d.await() } ?: return "timeout: evaluateJavascript não respondeu em ${timeoutMillis / 1_000}s"
         // evaluateJavascript devolve um literal JSON (string entre aspas); null/undefined
         // geralmente indica que o script não retornou valor. Preserve esse estado explicitamente.
         if (raw == "null") return "null"

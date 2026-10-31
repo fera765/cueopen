@@ -1153,6 +1153,7 @@ class AgentRunner(
             appendLine("2z. AÇÃO OBRIGATÓRIA: NUNCA anuncie um passo (\"vou pesquisar/verificar/testar/abrir/rodar…\") sem, na MESMA resposta, emitir a chamada de ferramenta correspondente. Anúncio sem ferramenta = desperdício e vira loop. Se não vai usar ferramenta, entregue a resposta final direto (sem anunciar) ou chame finish. Não repita a mesma frase de intenção.")
             appendLine("2a. ENTREGA: nunca diga que algo foi feito/funciona sem evidência real da ferramenta (saída, arquivo, status). Antes de `finish`, confira o resultado (ls/file_read/execução). Se não conseguiu validar, diga isso claramente em vez de afirmar sucesso.")
             appendLine("2b. ERRO: se uma ferramenta falhar, leia a mensagem, diagnostique e MUDE a abordagem (outro caminho/comando/argumento). Nunca repita a mesma chamada que falhou. Se ficar bloqueado, finalize explicando o motivo em vez de entrar em loop.")
+            appendLine("2c. BROWSER/PRONTIDÃO: `localhost`/`127.0.0.1` apontam para o ambiente que hospeda o WebView; não presuma que shell, navegador, emulador e computador remoto compartilham a mesma rede. Antes de abrir um servidor local, identifique no projeto o comando e a porta, verifique processo/listener e faça uma sonda HTTP curta no mesmo ambiente de rede do navegador. Se o serviço não estiver pronto, inicie-o em segundo plano pelo comando correto e aguarde uma resposta HTTP saudável com tentativas limitadas (sem `sleep` fixo); confirme também que o WebView consegue alcançar esse endereço. `CONNECTION_REFUSED` significa listener/porta/ambiente incorreto: não repita `browser_navigate` até corrigir. Após navegação, diferencie resposta HTTP, DOM carregado e prontidão funcional; `PARTIAL` ou texto visível não prova hydration/estado pronto. Em timeout, inspecione URL, estado do DOM, console, requisições e logs do servidor e só então escolha uma recuperação específica; não aumente prazo nem faça retry cego.")
             appendLine("3. Economize contexto: leia só o necessário (head/grep), mande saídas longas para arquivo.")
             appendLine("3a. Trabalhe APENAS no seu workspace (${sandbox.guestPath(sessionId)}); não leia /root/workspace de outras tarefas.")
             appendLine("3b. Arquivos: use caminhos relativos ao workspace da tarefa ou o alias explícito /root/workspace/.... Nunca passe caminhos Android (/data/user/...), /storage, /sdcard ou outros absolutos. file_write/file_edit só alteram o workspace da tarefa; file_read/file_list também aceitam /root/connectors/<id>/workspace/... em leitura. Se um arquivo não existir, liste o diretório pai uma vez; não repita o mesmo caminho. Se não estiver disponível, peça o arquivo ao usuário. Para alterar trecho existente, prefira file_edit com old_text/new_text; exige correspondência única. Use file_write para criar/sobrescrever arquivo inteiro e append=true para partes grandes; confira depois com file_read.")
@@ -1348,7 +1349,7 @@ class AgentRunner(
         }, listOf("path")))
         add(tool("file_list", "Lista diretórios do workspace da tarefa ou, somente para leitura, de /root/connectors/<id>/workspace/.", buildJsonObject { put("path", str("Diretório relativo ao workspace; ou /root/workspace/ ou /root/connectors/<id>/workspace/")) }))
         if (web) {
-            add(tool("browser_navigate", "Abre uma URL (ou termos de busca) no browser. Erro HTTP 4xx/5xx na página principal é falha: não use o conteúdo nem repita a mesma URL; localize um endereço válido.", buildJsonObject { put("url", str("URL ou busca")) }, listOf("url")))
+            add(tool("browser_navigate", "Abre uma URL (ou termos de busca) no browser. Erro HTTP 4xx/5xx e falhas de rede na página principal são erros, não conteúdo válido. Para localhost, valide processo, porta e health HTTP no mesmo ambiente de rede do WebView antes de navegar; CONNECTION_REFUSED exige corrigir listener/endereço, não repetir a chamada. PARTIAL significa que há texto mas o carregamento não foi confirmado, não que a aplicação esteja pronta; verifique DOM/console e um sinal funcional.", buildJsonObject { put("url", str("URL ou busca")) }, listOf("url")))
             add(tool("browser_snapshot", "Gera snapshot semântico da página atual com headings, conteúdo, links e controles nomeados; refs/índices expiram após navegação.", buildJsonObject { put("max_chars", int("Limite de caracteres (padrão 9000)")) }))
             add(tool("browser_read", "Compatibilidade: lê o snapshot e o texto da página atual.", buildJsonObject {}))
             add(tool("browser_click", "Clica no elemento [índice] de browser_read. Os índices expiram quando o DOM muda: leia a página imediatamente antes do clique; se o elemento não existir, releia e use um índice novo, sem repetir o antigo.", buildJsonObject { put("index", int("Índice")) }, listOf("index")))
@@ -2720,7 +2721,7 @@ class AgentRunner(
         }
         val out = SecretVault.redact(sessionId, out0)
         val commandFailed = Regex("""\[exit ([1-9]\d*)\]""").containsMatchIn(out)
-        val isError = out.startsWith("ERROR:") || out.startsWith("TIMEOUT:") || out.startsWith("ERRO:") || commandFailed
+        val isError = out.startsWith("ERROR:") || out.startsWith("TIMEOUT:") || out.startsWith("PARTIAL:") || out.startsWith("ERRO:") || commandFailed
         // Marcadores de falha específicos de ferramentas (não começam com ERRO:) também viram log.
         val markerError = Regex("""(MARKET_ERROR|WALLET_RPC_ERROR|GUARDRAIL|No such file|not found|não encontrad|Recusado|Acesso negado)""")
             .containsMatchIn(out.take(400))
@@ -2736,7 +2737,7 @@ class AgentRunner(
         val safeStepOutput = if (accessibilityTool)
             "Resultado de acessibilidade omitido do histórico por privacidade; conteúdo disponível apenas durante a tarefa ativa."
         else out.take(4000)
-        store.replaceItem(sessionId, step.copy(result = safeStepOutput, status = if (commandFailed || out.startsWith("ERROR:") || out.startsWith("TIMEOUT:") || out.startsWith("ERRO:")) StepStatus.ERROR else StepStatus.OK))
+        store.replaceItem(sessionId, step.copy(result = safeStepOutput, status = if (commandFailed || out.startsWith("ERROR:") || out.startsWith("TIMEOUT:") || out.startsWith("PARTIAL:") || out.startsWith("ERRO:")) StepStatus.ERROR else StepStatus.OK))
         return ToolResult(out)
     }
 

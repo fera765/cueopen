@@ -41,6 +41,41 @@ class BrowserNavigationStatusTest {
     }
 
     @Test
+    fun localConnectionRefusalExplainsThatLocalhostBelongsToTheWebViewDevice() {
+        val status = BrowserNavigationStatus()
+
+        val error = status.recordNetworkError(true, "http://localhost:4174/", "net::ERR_CONNECTION_REFUSED")
+
+        assertTrue(error.orEmpty(), error.orEmpty().startsWith("ERROR:"))
+        assertTrue(error.orEmpty(), error.orEmpty().contains("4174"))
+        assertTrue(error.orEmpty(), error.orEmpty().contains("próprio dispositivo/ambiente do WebView"))
+        assertTrue(error.orEmpty(), error.orEmpty().contains("Não repita"))
+        assertEquals(error, status.preserveHttpError("OK"))
+    }
+
+    @Test
+    fun subresourceNetworkErrorsDoNotFailTheMainPage() {
+        val status = BrowserNavigationStatus()
+
+        assertNull(status.recordNetworkError(false, "http://localhost:4174/assets/app.js", "net::ERR_CONNECTION_REFUSED"))
+        assertEquals("OK", status.pageFinished())
+    }
+
+    @Test
+    fun timeoutDoesNotCallVisibleTextReadyAndIncludesNavigationDiagnostics() {
+        val status = BrowserNavigationStatus()
+
+        val partial = status.timeoutMessage("http://localhost:4174/", "http://localhost:4174/", "interactive", 250)
+        val empty = status.timeoutMessage("http://localhost:4174/", "about:blank", "loading", 0)
+
+        assertTrue(partial, partial.startsWith("PARTIAL:"))
+        assertTrue(partial, partial.contains("não prova que o app esteja pronto"))
+        assertTrue(empty, empty.startsWith("TIMEOUT:"))
+        assertTrue(empty, empty.contains("logs do servidor"))
+        assertTrue(empty, empty.contains("document.readyState=loading"))
+    }
+
+    @Test
     fun lateMainFrameHttpErrorOverridesEarlierPageFinishedResult() {
         val status = BrowserNavigationStatus()
         assertEquals("OK", status.pageFinished())
