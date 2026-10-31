@@ -12,10 +12,10 @@ import kotlinx.coroutines.flow.emptyFlow
  *   1. descrever o conector num [UiConnectorSpec] (campos de login, configurações, ferramentas);
  *   2. implementar [UiConnector] (login/logout, snapshot() → [UiBlock]s, onAction, callTool);
  *   3. registrar a classe em UiConnectorHub.connectors.
- * O app cuida do resto: formulário de login, cofre cifrado das credenciais, renderização dos
- * painéis, toggles "Agent required?" e por-agente, exposição das ferramentas ao LLM, limites de
- * segurança, redação de segredos e registro de erros. Este arquivo é puro Kotlin (sem Android)
- * para ser validado por testes de unidade na JVM.
+ * O app fornece formulário de login, cofre cifrado, renderização dos painéis e toggles de acesso
+ * por agente. Login é verificado na chamada; limites, confirmações e sanitização dependem das rotas
+ * e implementações concretas, sem uma garantia genérica para todo erro ou ação. Este arquivo é
+ * puro Kotlin (sem Android) para ser validado por testes de unidade na JVM.
  */
 
 enum class FieldType { TEXT, EMAIL, PASSWORD, NUMBER }
@@ -56,11 +56,11 @@ data class ToolSpec(
     val name: String,
     val description: String,
     val params: List<ParamSpec> = emptyList(),
-    /** Ferramenta que move dinheiro/dados sensíveis; sempre passa pelos limites do conector. */
+    /** Marca uma ferramenta sensível; não cria confirmação ou limite numérico genérico. */
     val risky: Boolean = false,
     /**
-     * Ferramenta que ABRE uma ordem de compra/venda. O hub exige uma validação prévia do avaliador
-     * (typesafe_jev_check) para o ativo e o lado antes de executá-la. Exige [risky] e que o
+     * Ferramenta que abre uma ordem. O Hub exige TypeSafe Jev somente se `require_jev` estiver
+     * ausente ou ligado; desligado, pula esse gate e mantém a coordenação. Exige [risky] e que o
      * conector implemente [UiConnector.orderIntents].
      */
     val requiresSignal: Boolean = false,
@@ -101,6 +101,7 @@ sealed interface UiBlock {
         val confirmValues: Set<String> = emptySet(),
         val confirmText: String = "Confirmar a mudança?",
     ) : UiBlock
+    /** `risky` altera a apresentação do botão; não abre confirmação no renderizador genérico. */
     data class Button(val actionId: String, val label: String, val risky: Boolean = false, val args: Map<String, String> = emptyMap()) : UiBlock
     data class Note(val text: String, val tone: Tone = Tone.NEUTRAL) : UiBlock
 }
@@ -132,10 +133,10 @@ interface UiConnector {
     /** Estado atual para a UI (ao abrir, após evento ou por fallback limitado enquanto visível). */
     suspend fun snapshot(settings: ConnectorSettings): List<UiBlock>
 
-    /** Ação disparada pelo USUÁRIO na UI (botões/segmentados). Sem os limites do agente. */
+    /** Ação disparada pelo USUÁRIO na UI; não herda limites/gates das chamadas do agente. */
     suspend fun onAction(actionId: String, args: Map<String, String>, settings: ConnectorSettings): Result<String>
 
-    /** Ferramenta chamada pelo AGENTE: sempre sujeita aos limites de segurança do conector. */
+    /** Ferramenta chamada pelo agente; só recebe os limites/gates implementados no conector e no Hub. */
     suspend fun callTool(name: String, args: Map<String, String>, settings: ConnectorSettings): String
 
     /**
@@ -144,7 +145,7 @@ interface UiConnector {
      */
     fun orderIntents(tool: String, args: Map<String, String>): List<OrderIntent> = emptyList()
 
-    /** Valores sensíveis que NUNCA podem aparecer em saídas para o LLM (são redigidos pelo hub). */
+    /** Valores literais que o Hub tentará redigir no texto de retorno de ferramenta (mínimo 4 caracteres). */
     fun secrets(): List<String>
 
     /**
@@ -158,8 +159,8 @@ interface UiConnector {
 }
 
 /**
- * Valida um [UiConnectorSpec]. É o "validador do UI Kit": roda nos testes e no registro do conector,
- * recusando specs que quebrariam o app ou vazariam segredo (ex.: login sem campo de senha marcado).
+ * Valida um [UiConnectorSpec] nativo. Entre outras regras, se houver campos de login exige um campo
+ * PASSWORD; isso não é uma garantia de sanitização de logs, ações ou implementações executadas.
  */
 object SpecValidator {
     private val ID = Regex("^[a-z][a-z0-9]{1,19}$")
@@ -221,7 +222,7 @@ object SpecValidator {
     }
 }
 
-/** Remove segredos de um texto antes de ele chegar ao LLM/log. */
+/** Substitui ocorrências literais dos valores informados (com pelo menos 4 caracteres); não é detector genérico nem sanitizador de logs/UI. */
 object Redactor {
     fun redact(text: String, secrets: List<String>): String {
         var out = text

@@ -2,7 +2,7 @@ package dev.cueopen.app.uiconnector.custom
 
 /**
  * Especificação do formato YAML de UI Connectors, usada no botão Doc e pela ferramenta connector_spec.
- * Mantida sincronizada com CustomDefParser e com os guardrails do dry-run.
+ * Distingue as regras do parser, os guardrails do dry-run e as rotas de execução real.
  */
 object SdkPrompt {
     private const val D = "$"
@@ -45,13 +45,13 @@ Toda chamada de rede é restrita ao host de `baseUrl` e aos de `allowedHosts`. H
 
 ## Login e requisições
 
-`login.fields` contém de 1 a 8 campos; exija pelo menos um campo `type: password` para senha, token, chave API ou client secret. Cada campo tem `id`, `label` e `type` (`text`, `email`, `password`, `number`); `required` e `hint` são opcionais. O `id` segue `[a-z][a-zA-Z0-9_]{0,31}`.
+Quando `login` é declarado, `fields` precisa estar presente e o parser aceita até 8 campos com `id`, `label` e `type` (`text`, `email`, `password`, `number`); `required` e `hint` são opcionais. O parser atual aceita lista vazia e não exige um campo `password`. O Hub verifica `required` no login pela tela normal; o painel manual Testar chama o conector diretamente e não passa por essa checagem. O `id` segue `[a-z][a-zA-Z0-9_]{0,31}`.
 
 `login.request` e `login.verify` usam o mesmo contrato de requisição. `request` aceita `method` (GET, POST, PUT, PATCH, DELETE; padrão GET), e exatamente um entre `path` e `url`. `path` começa com `/` e é relativo a `baseUrl`; `url` deve ser HTTPS, fixa e em host permitido. `query`, `headers`, `body` e `form` são opcionais; `body` e `form` não podem coexistir. `form` envia `application/x-www-form-urlencoded`. `body` é dado JSON estruturado e pode conter modelos de texto; em GET é ignorado. Valores de query são codificados automaticamente.
 
 `login.extract` mapeia nomes para campos da resposta, `header:Nome` ou `cookie:Nome`, e só pode existir com `login.request`. `login.verify` é opcional e deve devolver 2xx. Chaves fixas de API podem usar um campo de senha sem `login.request`.
 
-Respostas HTTP reconhecidas: JSON; XML/RSS/Atom convertido em árvore (atributos como `@nome`, texto como `#text`, elementos repetidos como listas); JSONP; NDJSON como lista; CSV/TSV em `rows`; HTML com `body`, `title` e texto sem tags; texto puro em `body`. Um índice `[*]` em lista com um único item devolve esse próprio item.
+Respostas HTTP reconhecidas: JSON; XML/RSS/Atom convertido em árvore (atributos como `@nome`, texto como `#text`, elementos repetidos como listas); JSONP; NDJSON como lista; CSV/TSV em `rows` quando o `Content-Type` contém `csv` ou `tab-separated`; HTML com `body`, `title` e texto sem tags; texto puro em `body`. Sem esse header, CSV/TSV não é detectado pelo conteúdo e cai no tratamento de texto. Um índice `[*]` em lista com um único item devolve esse próprio item.
 
 ## Settings, painéis e ações
 
@@ -59,7 +59,7 @@ Uma setting exige `id` e `label`; aceita `description`, `type` (`number`, `switc
 
 Tipos de painel: `header`, `stats`, `table` e `note`. Textos leem resposta com modelos e estado realtime com `{{rt.nome}}`. `header` pode ter `title`, `subtitle`, `badge`, `tone` e requisição. `stats` exige até 20 itens com `label` e `value`. `table` exige `rows` e até 8 `columns`; limite de 100 linhas; a tabela precisa de `request` ou `source`, nunca os dois. `note` usa `text`. Tons aceitos: `neutral`, `good`, `bad`, `warn`.
 
-Ação do usuário exige `id`, `label` e `request`; pode ter `risky`, `message` e os outros campos suportados pelo contrato de requisição. Qualquer método diferente de GET exige `risky: true`.
+Ação do usuário exige `id`, `label` e `request`; pode ter `risky`, `message` e os outros campos suportados pelo contrato de requisição. Qualquer método diferente de GET exige `risky: true` na validação, mas essa marca não pede confirmação. A ação acionada na tela normal chama `onAction` e pode fazer uma requisição real.
 
 ## Ferramentas do agente
 
@@ -67,13 +67,13 @@ Cada ferramenta exige `name` em snake_case (regex `^[a-z][a-z0-9_]{1,31}${'$'}`)
 
 Uma ferramenta usa no máximo uma fonte entre `request`, `send`, `source`, `shell`, `file` e `fetch`. Sem fonte, só é válida com `realtime` e `response` para ler o estado. `response` modela o texto devolvido; `list` transforma linhas com `rows`, `item` e `max` de 1–200. `compute` pode acompanhar painéis e ferramentas.
 
-`limits` liga um parâmetro numérico a uma setting do tipo number; valor acima do teto ou menor/igual a zero é recusado. Operações que enviam ordem, compra, venda, saque, transferência ou publicação devem usar `risky: true`. Ordens usam `requiresSignal: true`, `orderIntent.asset` e `orderIntent.direction` derivados somente dos parâmetros da ferramenta, além de `limits`; a direção final precisa resultar em `buy`, `sell`, `call` ou `put`. A ordem só pode seguir após a validação TypeSafe Jev exigida pelo app. Nunca descreva um mecanismo de proteção como garantia contra perdas.
+`limits` liga um parâmetro numérico a uma setting do tipo number; no conector YAML, valores acima do teto ou menores/iguais a zero são recusados quando a ferramenta é executada. O parser não exige `limits` para toda ferramenta `risky`, e `risky` não ativa confirmação genérica. Operações que enviam ordem, compra, venda, saque, transferência ou publicação devem ser marcadas `risky: true`. Ordens usam `requiresSignal: true`, `orderIntent.asset` e `orderIntent.direction` derivados somente dos parâmetros da ferramenta, além dos limites que a definição declarar; a direção final precisa resultar em `buy`, `sell`, `call` ou `put`. O Hub exige validação TypeSafe Jev se `require_jev` estiver ausente ou ligado; com `require_jev: false`, pula esse gate, mantendo a coordenação da ordem. Nunca descreva um mecanismo de proteção como garantia contra perdas.
 
 ## Realtime / WebSocket
 
 `realtime.url` é `wss://` para host fixo permitido, porta 443. `headers`, `connect`, `onOpen`, `heartbeat` e `rules` são opcionais. `connect` aceita `login` (padrão) ou `auto` para fonte pública. `onOpen` aceita até 10 mensagens. Heartbeat aceita `everySec` entre 5 e 300 e uma `message`. Há até 30 regras.
 
-Cada regra pode combinar até 6 condições em `match` e deve incluir `set` e/ou `push`. `set` atualiza estado lido como `{{rt.nome}}`; `connected` e `messages` são reservados. `push` atualiza uma coleção com `to`, `item`, `key` e `max` de 1–500; a coleção mantém os itens recentes primeiro e substitui a mesma chave. Painéis/ferramentas consomem coleção por `source` e `rows`. Mensagens recebidas podem ser JSON, XML ou texto. Ferramentas `send` enviam mensagem JSON estruturada ou texto e podem aguardar a resposta por `await.match`, em 1–60 s. `{{rid}}` é único por chamada; `{{now}}` é epoch em milissegundos.
+Cada regra pode combinar até 6 condições em `match` e deve incluir `set` e/ou `push`. `set` atualiza estado lido como `{{rt.nome}}`; `connected` e `messages` são reservados. `push` atualiza uma coleção com `to`, `item`, `key` e `max` de 1–500; a coleção mantém os itens recentes primeiro e substitui a mesma chave. Painéis/ferramentas consomem coleção por `source` e `rows`. Mensagens recebidas podem ser JSON, XML ou texto. Ferramentas `send` enviam mensagem JSON estruturada ou texto e podem aguardar a primeira resposta que satisfaça `await.match`, em 1–60 s. `{{rid}}` é gerado e disponibilizado aos templates, mas não é injetado automaticamente como campo de correlação em toda mensagem. Para correlacionar, inclua `{{rid}}` no campo que o servidor ecoará e configure `await.match` para esse caminho. `{{now}}` é epoch em milissegundos.
 
 ## Templates `{{ }}`
 
@@ -94,7 +94,7 @@ Funções incluem matemática/conversão (`abs`, `round`, `sqrt`, `num`, `int`, 
 As capacidades exigem declaração na raiz e autorização do usuário na tela do conector; ficam desativadas por padrão. Cada conector tem workspace isolado. O dry-run não autoriza nem executa capacidade real.
 
 - `terminal`: cada ferramenta usa `shell.run`, opcionalmente `timeoutSec` de 1–300 e `files` para gravar arquivos antes do comando. Argumentos `{{...}}` entram com escape/aspas; isso não torna scripts arbitrários seguros. Não use heredoc, nem echo/printf multilinha; para scripts use arquivos declarativos. `setup` roda uma vez ou após mudança de comando.
-- `files`: `file.op` aceita `read`, `write`, `list`, `delete` e `replace`. Caminhos são relativos ao workspace, sem `/` inicial ou `..`. `write`, `delete` e `replace` precisam de `risky: true`. `replace` usa `oldText`, `newText` e `allowMultiple`; sem correspondência única, não altera. A atualização é atômica. No DSL do conector, a edição declarativa é somente `file.op: replace`; `file_edit` é uma ferramenta interna do agente no workspace da tarefa e não faz parte deste esquema.
+- `files`: `file.op` aceita `read`, `write`, `list`, `delete` e `replace`. Caminhos são relativos ao workspace, sem `/` inicial ou `..`. `write`, `delete` e `replace` precisam de `risky: true` na definição, mas esse flag não é uma confirmação. `replace` usa `oldText`, `newText` e `allowMultiple`; sem correspondência única, não altera. A atualização é atômica. No DSL do conector, a edição declarativa é somente `file.op: replace`; `file_edit` é uma ferramenta interna do agente no workspace da tarefa e não faz parte deste esquema.
 - `browser`: `fetch` abre HTTPS de host permitido, espera 0–10 s e retorna texto renderizado. Não contorna login, captcha ou controles de acesso.
 
 Uma ferramenta usa apenas uma fonte operacional por vez. `shell`, `file` e `fetch` não rodam no teste offline do criador.
@@ -105,9 +105,11 @@ Ferramentas podem declarar `outputPolicy` do tipo `vsl`, com parâmetros de dura
 
 ## Guardrails, validação e instalação
 
-`connector_validate` verifica sintaxe YAML, tipos, campos, templates, hosts e regras estáticas. `connector_test` executa um dry-run offline: usa respostas HTTP/WebSocket, filesystem e browser substitutos e valores sintéticos de login. Não abre rede, não resolve credenciais reais, não envia ações/ordens/publicações/pagamentos e não executa comandos, setup ou código gerado. O relatório comprova apenas os contratos exercitados localmente, não endpoint ativo, login, permissão ou comportamento ao vivo.
+`connector_validate` faz parsing e validação estrutural/DSL (campos, tipos, templates e regras do formato). Não executa o conector nem roda `ConnectorGuardrails.staticCheck`. `connector_test` executa o dry-run offline e aplica os guardrails estáticos: usa respostas HTTP/WebSocket, filesystem e browser substitutos e valores sintéticos de login. Não abre rede, não resolve credenciais reais, não abre páginas, não envia ações/ordens/publicações/pagamentos e não executa comandos, setup ou código gerado. Ferramentas que dependem de shell/setup falham fechadas. O relatório comprova apenas os contratos exercitados localmente, não endpoint ativo, login, permissão ou comportamento ao vivo.
 
-`connector_propose` só aceita o mesmo YAML que passou no teste e tem atestado da política atual. A validação é vinculada a SHA-256 canônico e versão de política; mudança no YAML exige novo teste. Não peça credenciais para validar, não passe segredos em `settings_yaml`/`args_yaml` e não afirme que o serviço foi conectado. Se um serviço não oferecer API pública/autorizada estável, não invente endpoint nem proponha scraping ou contorno de captcha/login. Em particular, mocks não comprovam autorização da Meta Ads Library.
+`connector_propose` só cria o cartão de instalação para o mesmo YAML aprovado no dry-run e com atestado válido; o cartão revalida esse atestado antes de permitir salvar. Isso vale para o fluxo do criador de IA. O botão Salvar/Criar do editor manual aceita YAML estruturalmente válido sem atestado. O painel manual Testar é diferente de `connector_test`: faz login real, consulta painéis e permite executar ferramentas em integrações reais; `risky` mostra aviso, mas não bloqueia a execução. Esse painel chama o conector diretamente, sem o gate TypeSafe Jev do Hub, e não executa as `actions` declaradas. Ações acionadas na tela instalada também podem fazer chamadas reais.
+
+O atestado do fluxo de IA é vinculado ao SHA-256 canônico do YAML e à versão da política; alteração da definição exige novo teste. Não peça credenciais para validar, não passe segredos em `settings_yaml`/`args_yaml` e não afirme que o serviço foi conectado. O `Redactor` substitui valores literais listados pelo conector na saída de ferramenta, mas não sanitiza universalmente `ErrorLog` nem mensagens de login/ação da UI; nunca inclua segredos em erros. Se um serviço não oferecer API pública/autorizada estável, não invente endpoint nem proponha scraping ou contorno de captcha/login. Mocks não comprovam autorização da Meta Ads Library.
 
 Não há compatibilidade universal: OAuth com tela de consentimento/PKCE, WebSocket binário, mTLS, captcha e 2FA interativo podem exigir implementação nativa no SDK. Seja explícito sobre limites e falhas; nunca prometa ausência de bugs ou de perdas.
 """.trimIndent()

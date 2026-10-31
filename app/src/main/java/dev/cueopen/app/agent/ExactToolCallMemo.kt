@@ -1,6 +1,6 @@
 package dev.cueopen.app.agent
 
-/** Memoiza resultados apenas pela assinatura exata do chamado; cada instância vive no loop de uma sessão. */
+/** Memoiza pela assinatura do chamado; cada instância vive somente durante uma invocação do loop do agente. */
 internal class ExactToolCallMemo<T> {
     private val values = HashMap<String, T>()
 

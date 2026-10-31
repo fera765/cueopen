@@ -241,7 +241,7 @@ class AgentRunner(
         // Detecção de loop de ferramentas: mesma chamada (nome+args) repetida sem progresso.
         val toolSigWindow = ArrayDeque<String>()
         val resultSigWindow = ArrayDeque<String>()
-        // Reutiliza o resultado de chamadas idênticas do builder durante esta sessão; evita dry-runs e cards duplicados.
+        // Reutiliza resultados idênticos do builder somente nesta invocação do loop; evita dry-runs/cards duplicados aqui.
         val connectorBuilderResults = ExactToolCallMemo<ToolResult>()
         val invalidAccessibilitySnapshots = dev.cueopen.app.device.InvalidAccessibilitySnapshotGuard()
         val visualInspectionUsed = mutableSetOf<String>()
@@ -1361,15 +1361,15 @@ class AgentRunner(
         add(tool("memory_search", "Busca na memória de longo prazo.", buildJsonObject { put("query", str("Busca")) }, listOf("query")))
         add(tool("skill_load", "Carrega as instruções completas de uma skill.", buildJsonObject { put("name", str("Nome da skill")) }, listOf("name")))
         if (builder) add(tool("connector_spec", "Retorna a especificação YAML completa do UI Connector SDK (campos, tipos, limites e guardrails), sem presets. Chame antes de escrever uma definição.", buildJsonObject {}))
-        if (builder) add(tool("connector_validate", "Valida uma definição YAML de UI Connector. Retorna OK ou erros acionáveis com caminho e motivo. Corrija o YAML antes de validar de novo.", buildJsonObject {
+        if (builder) add(tool("connector_validate", "Valida parsing e estrutura de uma definição YAML de UI Connector. Não executa o conector nem os guardrails estáticos do dry-run. Retorna OK ou erros acionáveis com caminho e motivo.", buildJsonObject {
             put("yaml", str("Definição YAML completa do conector"))
         }, listOf("yaml")))
-        if (builder) add(tool("connector_test", "Executa dry-run OFFLINE de uma definição YAML com transporte HTTP/WebSocket e filesystem em mocks; testa schema, guardrails, templates, renderização e políticas de saída. Nunca chama APIs reais, envia ações, abre browser ou executa setup/shell/código gerado. O resultado não comprova login, permissões ou disponibilidade real.", buildJsonObject {
+        if (builder) add(tool("connector_test", "Executa dry-run OFFLINE de uma definição YAML e aplica guardrails estáticos; usa transporte HTTP/WebSocket, filesystem e browser em mocks para testar schema, templates, renderização e políticas de saída. Nunca chama APIs/páginas reais, envia ações ou executa setup/shell/código gerado. O resultado não comprova login, permissões ou disponibilidade real.", buildJsonObject {
             put("yaml", str("Definição YAML completa do conector"))
             put("settings_yaml", str("Opcional: mapa YAML com valores de exemplo não secretos para settings"))
             put("args_yaml", str("Opcional: mapa YAML de argumentos de exemplo não secretos por ferramenta; sem isso, o teste usa valores sintéticos"))
         }, listOf("yaml")))
-        if (builder) add(tool("connector_propose", "Mostra ao usuário o card 'Instalar conector'. Só aceita o mesmo YAML que passou no dry-run offline e possui atestado válido; o card não alegará que o serviço real foi conectado.", buildJsonObject {
+        if (builder) add(tool("connector_propose", "No fluxo do criador de IA, mostra o card 'Instalar conector'. Só aceita o mesmo YAML que passou no dry-run offline e possui atestado válido; o card revalida antes de salvar. O salvamento manual do editor não usa esse gate; o card não alegará que o serviço real foi conectado.", buildJsonObject {
             put("yaml", str("Definição YAML completa e válida do conector"))
         }, listOf("yaml")))
         if (allowMultiAgent) add(tool("sleep", "Modo contínuo: pausa e depois retoma automaticamente. Use UM modo: minutes, seconds, ou align_candle_seconds. Use seconds para esperas curtas e minutes para verificações recorrentes.", buildJsonObject {

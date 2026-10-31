@@ -27,14 +27,15 @@ import java.util.concurrent.ConcurrentHashMap
 /**
  * Hub dos UI Connectors: registro, cofre de credenciais, toggles e ponte com o agente.
  *
- * Regras de acesso do agente a um conector (todas precisam valer):
- *  1. o conector está habilitado e conectado (ou tem credenciais no cofre para reconectar);
+ * Regras de exposição das ferramentas do agente:
+ *  1. o conector está habilitado (login/credenciais não são pré-requisito do schema);
  *  2. se "Agent required?" estiver LIGADO (padrão), só agentes com o conector ativado no perfil usam;
  *     se estiver DESLIGADO, qualquer conversa pode usar.
- * Toda saída de ferramenta passa por [Redactor] — segredos nunca chegam ao LLM.
+ * Na chamada, o Hub repete a checagem e tenta login com credenciais lembradas. O texto retornado
+ * passa por [Redactor], mas ErrorLog registra a exceção antes dessa redação; não é sanitização universal.
  *
- * Ferramentas que abrem ordens (`requiresSignal`) só executam com uma validação prévia do avaliador
- * (portão em [TradeCoordinator.gate]), uma ordem por vez por conector, sem colisão entre agentes.
+ * Ferramentas `requiresSignal` passam pelo gate TypeSafe Jev quando `require_jev` está ausente ou ligado;
+ * desligado, o gate é pulado, mas a coordenação de ordens continua ativa.
  */
 class UiConnectorHub(context: Context) {
     companion object { const val BACKUP_FORMAT = "cueopen-uiconnectors-backup" }
