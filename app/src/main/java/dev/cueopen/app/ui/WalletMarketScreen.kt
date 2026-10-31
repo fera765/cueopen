@@ -43,7 +43,7 @@ fun WalletMarketScreen(nav: NavController) {
                 .onSuccess { tokens = it; loading = false; if (it.isEmpty()) error = "Nenhum token retornado agora." }
                 .onFailure {
                     val msg = it.message ?: "Falha ao carregar o mercado."
-                    error = if (msg.contains("429")) "Limite de requisições atingido. Aguarde alguns segundos e toque em Atualizar — ou configure uma chave Demo gratuita da CoinGecko em Configurações." else msg
+                    error = if (msg.contains("429")) "$msg Configure opcionalmente uma chave Demo da CoinGecko em Configurações para usar uma quota maior." else msg
                     loading = false
                 }
         }

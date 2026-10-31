@@ -19,6 +19,7 @@ import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import java.io.IOException
+import java.net.UnknownHostException
 import java.util.Locale
 import java.util.concurrent.TimeUnit
 
@@ -255,7 +256,7 @@ class PolymarketInsightsClient(
                 .header("User-Agent", "FluwyBot-Polymarket-Insights/1.0")
                 .get()
                 .build()
-            val response = http.newCall(request).execute()
+            val response = executeWithDnsRetry(request)
             val code = response.code
             val retryAfterSeconds = response.header("Retry-After")?.toLongOrNull()
             val traceId = response.header("x-trace-id")
@@ -276,6 +277,24 @@ class PolymarketInsightsClient(
         }
     }
 
+    private suspend fun executeWithDnsRetry(request: Request): okhttp3.Response {
+        var retries = 0
+        while (true) {
+            try {
+                return http.newCall(request).execute()
+            } catch (e: UnknownHostException) {
+                if (retries >= DNS_MAX_RETRIES) {
+                    throw IOException(
+                        "Não foi possível resolver data-api.polymarket.com. Verifique a conexão, o DNS privado/VPN e tente novamente.",
+                        e
+                    )
+                }
+                delay(DNS_RETRY_BASE_DELAY_MS * (retries + 1))
+                retries++
+            }
+        }
+    }
+
     private suspend fun throttlePublicDataApi() {
         globalRequestMutex.withLock {
             val waitMs = (MIN_REQUEST_INTERVAL_MS - (System.currentTimeMillis() - lastRequestAtMs)).coerceAtLeast(0L)
@@ -289,6 +308,8 @@ class PolymarketInsightsClient(
     companion object {
         // /v2/positions is documented as a heavier route; pace all calls below 10 req/s per process.
         private const val MIN_REQUEST_INTERVAL_MS = 125L
+        private const val DNS_MAX_RETRIES = 2
+        private const val DNS_RETRY_BASE_DELAY_MS = 300L
         private val globalRequestMutex = Mutex()
         private var lastRequestAtMs = 0L
     }

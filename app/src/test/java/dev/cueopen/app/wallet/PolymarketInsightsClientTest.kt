@@ -1,8 +1,13 @@
 package dev.cueopen.app.wallet
 
+import kotlinx.coroutines.runBlocking
+import okhttp3.OkHttpClient
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.net.UnknownHostException
+import java.util.concurrent.atomic.AtomicInteger
 
 class PolymarketInsightsClientTest {
     private val candidate = PolymarketCandidate(
@@ -11,6 +16,24 @@ class PolymarketInsightsClientTest {
         monthlyRank = 2,
         monthlyBoardPnl = 100.0
     )
+
+    @Test
+    fun retriesTransientDnsFailureAndExplainsHowToRecover() {
+        val attempts = AtomicInteger()
+        val failingHttp = OkHttpClient.Builder()
+            .addInterceptor {
+                attempts.incrementAndGet()
+                throw UnknownHostException("Unable to resolve host")
+            }
+            .build()
+        val client = PolymarketInsightsClient(http = failingHttp)
+
+        val failure = runCatching { runBlocking { client.analyzeLast90Days(candidatesPerBoard = 1) } }
+            .exceptionOrNull()
+
+        assertEquals(3, attempts.get())
+        assertTrue(failure?.message.orEmpty().contains("DNS privado/VPN"))
+    }
 
     @Test
     fun summarizesOnlyClosedPositionsWhoseEntryAndLastEventFallInWindow() {

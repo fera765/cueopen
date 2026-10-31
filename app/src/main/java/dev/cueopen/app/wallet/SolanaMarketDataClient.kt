@@ -44,8 +44,9 @@ class SolanaMarketDataClient(
 
     /**
      * GET resiliente ao GeckoTerminal: cache curto (evita repetir chamadas), throttle global
-     * (respeita o limite de ~30 req/min keyless) e retry com backoff em HTTP 429. Se o usuário
-     * configurar uma chave Demo gratuita da CoinGecko, usa o endpoint onchain com quota dedicada.
+     * abaixo do limite público atual de 10 req/min sem chave. Em HTTP 429, não repete a chamada
+     * imediatamente; orienta o chamador a aguardar o Retry-After ou a janela pública de quota.
+     * Uma chave Demo opcional da CoinGecko habilita o endpoint onchain com quota dedicada.
      * [pathAndQuery] ex.: "/networks/solana/new_pools?page=1".
      */
     private suspend fun geckoGet(pathAndQuery: String): String = withContext(Dispatchers.IO) {
@@ -53,34 +54,19 @@ class SolanaMarketDataClient(
         val key = MarketApiConfig.geckoApiKey?.takeIf { it.isNotBlank() }
         val base = if (key != null) COINGECKO_ONCHAIN_BASE else geckoBase.trimEnd('/')
         val url = base + pathAndQuery
-        var attempt = 0
-        var lastErr = "limite de requisições (HTTP 429)"
-        // Poucas tentativas: em caso de 429/erro, falhamos rápido para o chamador cair na fonte
-        // alternativa confiável (DexScreener) em vez de prender o agente em backoffs longos.
-        while (attempt < 2) {
-            geckoThrottle(key != null)
-            val reqB = Request.Builder().url(url).header("Accept", "application/json").get()
-            if (key != null) reqB.header("x-cg-demo-api-key", key)
-            client.newCall(reqB.build()).execute().use { resp ->
-                when {
-                    resp.isSuccessful -> {
-                        val body = resp.body?.string().orEmpty()
-                        if (body.length > MAX_RESPONSE_CHARS) throw IOException("Resposta excede o limite")
-                        cachePut(pathAndQuery, body)
-                        return@withContext body
-                    }
-                    resp.code == 429 -> {
-                        lastErr = "limite de requisições (HTTP 429)"
-                        val retryMs = (resp.header("Retry-After")?.toLongOrNull()?.times(1000)
-                            ?: 1200L).coerceAtMost(2500L)
-                        delay(retryMs)
-                    }
-                    else -> throw IOException("HTTP ${resp.code}")
-                }
+        geckoThrottle(key != null)
+        val reqB = Request.Builder().url(url).header("Accept", "application/json").get()
+        if (key != null) reqB.header("x-cg-demo-api-key", key)
+        client.newCall(reqB.build()).execute().use { resp ->
+            if (resp.code == 429) {
+                throw IOException(geckoRateLimitMessage(resp.header("Retry-After")))
             }
-            attempt++
+            if (!resp.isSuccessful) throw IOException("HTTP ${resp.code}")
+            val body = resp.body?.string().orEmpty()
+            if (body.length > MAX_RESPONSE_CHARS) throw IOException("Resposta excede o limite")
+            cachePut(pathAndQuery, body)
+            body
         }
-        throw IOException(lastErr)
     }
 
     private suspend fun geckoThrottle(hasKey: Boolean) {
@@ -432,14 +418,21 @@ class SolanaMarketDataClient(
         const val COINGECKO_ONCHAIN_BASE = "https://api.coingecko.com/api/v3/onchain"
         const val DEXSCREENER_BASE = "https://api.dexscreener.com"
         private const val MAX_RESPONSE_CHARS = 2 * 1024 * 1024
-        private const val MIN_INTERVAL_MS = 2500L
+        private const val MIN_INTERVAL_MS = 8_000L
         private const val CACHE_TTL_MS = 90_000L
         private val geckoMutex = Mutex()
         @Volatile private var lastGeckoCallMs = 0L
         private val cache = java.util.concurrent.ConcurrentHashMap<String, Pair<Long, String>>()
     }
 }
-
+internal fun geckoRateLimitMessage(retryAfterHeader: String?): String {
+    val retryAfterSeconds = retryAfterHeader?.toLongOrNull()?.takeIf { it > 0L }
+    return if (retryAfterSeconds != null) {
+        "limite de requisições GeckoTerminal (HTTP 429). Aguarde $retryAfterSeconds s conforme Retry-After."
+    } else {
+        "limite de requisições GeckoTerminal (HTTP 429). A API pública permite 10 chamadas por minuto; aguarde pelo menos 60 s antes de tentar novamente."
+    }
+}
 /** Configuração opcional do mercado. Chave Demo gratuita da CoinGecko evita rate limit keyless. */
 object MarketApiConfig {
     @Volatile var geckoApiKey: String? = null
