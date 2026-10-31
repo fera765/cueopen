@@ -74,7 +74,7 @@ data class VslOutputPolicy(
     val forbiddenTermsParam: String = "",
 )
 
-/** Instrução delegada ao agente LLM; maxSteps nulo é reservado ao gerador do Fluwy Open Dev. */
+/** Instrução delegada ao agente LLM; maxSteps nulo é reservado aos agentes do Fluwy Open Dev. */
 data class AgentTaskStep(val task: String, val maxSteps: Int?, val timeoutSec: Int)
 
 data class ToolDef(
@@ -533,7 +533,7 @@ object CustomDefParser {
                 val tshell = shellStep(obj(to, "shell", p), "$p.shell", vars, capabilities, risky)
                 val tfile = fileStep(obj(to, "file", p), "$p.file", vars, capabilities, risky)
                 val tfetch = fetchStep(obj(to, "fetch", p), "$p.fetch", vars, capabilities)
-                val unboundedSteps = id == LocalDevStudioTemplate.ID && str(to, "name", p) == LocalDevStudioTemplate.UNBOUNDED_TOOL
+                val unboundedSteps = id == LocalDevStudioTemplate.ID && str(to, "name", p) in LocalDevStudioTemplate.UNBOUNDED_AGENT_TOOLS
                 val tagent = agentStep(obj(to, "agent", p), "$p.agent", paramVars, capabilities, risky, unboundedSteps)
                 val modes = listOfNotNull(
                     treq?.let { "request" }, tsend?.let { "send" }, tsource.ifEmpty { null }?.let { "source" },
@@ -710,7 +710,7 @@ object CustomDefParser {
                 if (o["maxSteps"] != null) {
                     if (steps == null || steps !in 1..ConnectorTaskAgent.MAX_STEPS)
                         errors.add("$path.maxSteps deve estar entre 1 e ${ConnectorTaskAgent.MAX_STEPS} quando informado.")
-                    warnings.add("$path.maxSteps é ignorado no gerador Fluwy Open Dev; a execução continua sujeita ao timeout.")
+                    warnings.add("$path.maxSteps é ignorado nos agentes do Fluwy Open Dev; a execução continua sujeita ao timeout.")
                 }
             } else if (steps == null || steps !in 1..ConnectorTaskAgent.MAX_STEPS) {
                 errors.add("$path.maxSteps deve estar entre 1 e ${ConnectorTaskAgent.MAX_STEPS}.")

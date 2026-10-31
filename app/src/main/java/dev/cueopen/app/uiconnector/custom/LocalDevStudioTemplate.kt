@@ -4,6 +4,9 @@ package dev.cueopen.app.uiconnector.custom
 object LocalDevStudioTemplate {
     const val ID = "fluwyopendev"
     const val UNBOUNDED_TOOL = "desenvolver_ui"
+    const val REVIEW_TOOL = "revisar_ui"
+    const val VALIDATION_TOOL = "verificar_projeto"
+    val UNBOUNDED_AGENT_TOOLS = setOf(UNBOUNDED_TOOL, REVIEW_TOOL, VALIDATION_TOOL)
 
     val YAML = """
         id: $ID
@@ -50,7 +53,6 @@ object LocalDevStudioTemplate {
                 Use somente caminhos relativos dentro do workspace, preserve arquivos não relacionados e reporte achados, arquivos alterados e testes realizados.
                 Pedido do usuário:
                 {{pedido}}
-              maxSteps: 8
               timeoutSec: 600
           - name: verificar_projeto
             description: "Executa verificações locais disponíveis no projeto frontend e resume erros e avisos sem afirmar validação visual."
@@ -64,7 +66,6 @@ object LocalDevStudioTemplate {
                 Não use browser, não envie código a serviços externos e não alegue que fez preview visual. Reporte os comandos, código de saída e mensagens principais.
                 Pedido do usuário:
                 {{pedido}}
-              maxSteps: 6
               timeoutSec: 600
         """.trimIndent()
 }

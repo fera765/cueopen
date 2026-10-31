@@ -20,33 +20,29 @@ import org.junit.Test
 class ConnectorTaskAgentTest {
     private val settings = ConnectorSettings { null }
 
-    @Test fun `local dev studio template leaves only UI generation without a step cap`() {
+    @Test fun `all local dev studio agent flows have no local step cap`() {
         val parsed = CustomDefParser.parse(LocalDevStudioTemplate.YAML)
         assertEquals(parsed.errors.toString(), emptyList<String>(), parsed.errors)
         val def = parsed.def!!
         assertEquals("fluwyopendev", def.id)
         assertEquals(setOf(Capabilities.AGENT, Capabilities.TERMINAL, Capabilities.FILES), def.capabilities)
         assertEquals(3, def.tools.size)
-        assertTrue(def.tools.first { it.name == "desenvolver_ui" }.agent!!.maxSteps == null)
-        assertTrue(def.tools.first { it.name == "revisar_ui" }.agent!!.maxSteps == 8)
-        assertTrue(def.tools.first { it.name == "verificar_projeto" }.agent!!.maxSteps == 6)
+        assertEquals(LocalDevStudioTemplate.UNBOUNDED_AGENT_TOOLS, def.tools.filter { it.agent != null }.map { it.name }.toSet())
+        assertTrue(def.tools.filter { it.name in LocalDevStudioTemplate.UNBOUNDED_AGENT_TOOLS }.all { it.agent!!.maxSteps == null })
         assertFalse(LocalDevStudioTemplate.YAML.contains("budgetTokens:"))
         assertTrue(ConnectorGuardrails.staticCheck(def).none { it.level == ConnectorGuardrails.Level.ERROR })
     }
 
-    @Test fun `only exact Fluwy Open Dev generation tool is unbounded and configured timeout is retained`() = runBlocking {
+    @Test fun `all exact Fluwy Open Dev agent flows are unbounded and retain configured timeout`() = runBlocking {
         val def = CustomDefParser.parse(LocalDevStudioTemplate.YAML).def!!
         val bridge = CaptureBridge(setOf(Capabilities.AGENT))
         val connector = CustomConnector(def, bridge = bridge)
 
-        connector.callTool("desenvolver_ui", mapOf("pedido" to "Crie uma interface"), settings)
-        assertTrue(bridge.maxSteps == null)
-        assertTrue(bridge.timeoutSec == 600)
-
-        connector.callTool("revisar_ui", mapOf("pedido" to "Revise o layout"), settings)
-        assertTrue(bridge.maxSteps == 8)
-        connector.callTool("verificar_projeto", mapOf("pedido" to "Rode os testes"), settings)
-        assertTrue(bridge.maxSteps == 6)
+        for (toolName in LocalDevStudioTemplate.UNBOUNDED_AGENT_TOOLS) {
+            connector.callTool(toolName, mapOf("pedido" to "Execute $toolName"), settings)
+            assertTrue("$toolName deve ser ilimitado", bridge.maxSteps == null)
+            assertTrue("$toolName deve preservar o timeout", bridge.timeoutSec == 600)
+        }
 
         val legacyYaml = LocalDevStudioTemplate.YAML.replaceFirst("timeoutSec: 600", "maxSteps: 8\n      timeoutSec: 600")
         val legacy = CustomDefParser.parse(legacyYaml)
@@ -54,7 +50,9 @@ class ConnectorTaskAgentTest {
         assertTrue(legacy.def!!.tools.first { it.name == "desenvolver_ui" }.agent!!.maxSteps == null)
 
         val renamed = CustomDefParser.parse(LocalDevStudioTemplate.YAML.replace("id: fluwyopendev", "id: fluwyopendevclone")).def!!
-        assertTrue(renamed.tools.first { it.name == "desenvolver_ui" }.agent!!.maxSteps == 6)
+        for (toolName in LocalDevStudioTemplate.UNBOUNDED_AGENT_TOOLS) {
+            assertEquals("$toolName no clone deve continuar limitado", 6, renamed.tools.first { it.name == toolName }.agent!!.maxSteps)
+        }
     }
 
     @Test fun `agent task requires opt-in risky declaration and bounded values`() {
