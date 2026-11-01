@@ -13,6 +13,8 @@ import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonPrimitive
+import dev.cueopen.app.net.await
+import dev.cueopen.app.util.runCatchingCancellable
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import java.io.IOException
@@ -57,7 +59,7 @@ class SolanaMarketDataClient(
         geckoThrottle(key != null)
         val reqB = Request.Builder().url(url).header("Accept", "application/json").get()
         if (key != null) reqB.header("x-cg-demo-api-key", key)
-        client.newCall(reqB.build()).execute().use { resp ->
+        client.newCall(reqB.build()).await().use { resp ->
             if (resp.code == 429) {
                 throw IOException(geckoRateLimitMessage(resp.header("Retry-After")))
             }
@@ -94,10 +96,10 @@ class SolanaMarketDataClient(
         // DexScreener aceita até 30 mints por chamada.
         ids.chunked(30).forEach { chunk ->
             val cacheKey = "disp:" + chunk.joinToString(",")
-            val body = cacheGet(cacheKey) ?: runCatching {
+            val body = cacheGet(cacheKey) ?: runCatchingCancellable {
                 val req = Request.Builder().url("$DEXSCREENER_BASE/latest/dex/tokens/" + chunk.joinToString(","))
                     .header("Accept", "application/json").get().build()
-                client.newCall(req).execute().use { resp ->
+                client.newCall(req).await().use { resp ->
                     if (!resp.isSuccessful) return@use null
                     val b = resp.body?.string().orEmpty()
                     if (b.isNotBlank() && b.length <= MAX_RESPONSE_CHARS) { cachePut(cacheKey, b); b } else null
@@ -128,10 +130,10 @@ class SolanaMarketDataClient(
     /** Melhor par (maior liquidez) do token na Solana via DexScreener, em cache. */
     private suspend fun bestDexPair(mint: String): JsonObject? = withContext(Dispatchers.IO) {
         val cacheKey = "dex:$mint"
-        val body = cacheGet(cacheKey) ?: runCatching {
+        val body = cacheGet(cacheKey) ?: runCatchingCancellable {
             val req = Request.Builder().url("$DEXSCREENER_BASE/latest/dex/tokens/$mint")
                 .header("Accept", "application/json").get().build()
-            client.newCall(req).execute().use { resp ->
+            client.newCall(req).await().use { resp ->
                 if (!resp.isSuccessful) return@use null
                 val b = resp.body?.string().orEmpty()
                 if (b.isNotBlank() && b.length <= MAX_RESPONSE_CHARS) { cachePut(cacheKey, b); b } else null
@@ -147,7 +149,7 @@ class SolanaMarketDataClient(
         val body = cacheGet(cacheKey) ?: run {
             val request = Request.Builder().url("$DEXSCREENER_BASE/latest/dex/tokens/$mint")
                 .header("Accept", "application/json").get().build()
-            client.newCall(request).execute().use { response ->
+            client.newCall(request).await().use { response ->
                 if (!response.isSuccessful) throw IOException("DexScreener HTTP ${response.code}")
                 val responseBody = response.body?.string().orEmpty()
                 if (responseBody.isBlank()) throw IOException("Resposta vazia do DexScreener")
@@ -269,10 +271,10 @@ class SolanaMarketDataClient(
         val ids = mints.filter { SolanaAddressValidator.isValidAddress(it) }.distinct()
         if (ids.isEmpty()) return@withContext emptyMap()
         val result = LinkedHashMap<String, Double>()
-        runCatching {
+        runCatchingCancellable {
             val url = priceBase.trimEnd('/') + "/price/v3?ids=" + ids.joinToString(",")
             val req = Request.Builder().url(url).header("Accept", "application/json").get().build()
-            client.newCall(req).execute().use { resp ->
+            client.newCall(req).await().use { resp ->
                 if (!resp.isSuccessful) throw IOException("Price HTTP ${resp.code}")
                 val body = resp.body?.string().orEmpty()
                 if (body.length > MAX_RESPONSE_CHARS) throw IOException("Resposta de preço excede o limite")
@@ -290,7 +292,7 @@ class SolanaMarketDataClient(
         // Fallback for any mint the price API did not return: derive from a real USDC quote.
         for (mint in ids) {
             if (result.containsKey(mint)) continue
-            runCatching { deriveUsdPriceViaQuote(mint) }.getOrNull()?.let { if (it > 0.0) result[mint] = it }
+            runCatchingCancellable { deriveUsdPriceViaQuote(mint) }.getOrNull()?.let { if (it > 0.0) result[mint] = it }
         }
         result
     }
@@ -303,12 +305,12 @@ class SolanaMarketDataClient(
      */
     private suspend fun deriveUsdPriceViaQuote(mint: String): Double? {
         if (mint == SolanaSwapClient.USDC_MINT || mint == SolanaSwapClient.USDT_MINT) return 1.0
-        val decimals = runCatching {
+        val decimals = runCatchingCancellable {
             SolanaRpcClient(endpoint = SolanaNetwork.MAINNET.rpcEndpoint, network = SolanaNetwork.MAINNET)
                 .getTokenDecimals(mint)
         }.getOrDefault(if (mint == SolanaSwapClient.SOL_MINT) 9 else 6)
         val oneToken = Math.pow(10.0, decimals.toDouble()).toLong().coerceAtLeast(1L)
-        val quote = runCatching { swapClient.quote(mint, SolanaSwapClient.USDC_MINT, oneToken, 100) }.getOrNull()
+        val quote = runCatchingCancellable { swapClient.quote(mint, SolanaSwapClient.USDC_MINT, oneToken, 100) }.getOrNull()
             ?: return null
         return quote.outAmountRaw / 1_000_000.0 // USDC has 6 decimals
     }
@@ -382,7 +384,7 @@ class SolanaMarketDataClient(
         slippageBps: Int = 100
     ): List<DepthPoint> = withContext(Dispatchers.IO) {
         probeAmountsRaw.filter { it > 0L }.mapNotNull { amount ->
-            val q = runCatching { swapClient.quote(inputMint, outputMint, amount, slippageBps) }.getOrNull()
+            val q = runCatchingCancellable { swapClient.quote(inputMint, outputMint, amount, slippageBps) }.getOrNull()
                 ?: return@mapNotNull null
             DepthPoint(amount, q.outAmountRaw, q.priceImpactPct, q.routeLabels)
         }
@@ -406,7 +408,7 @@ class SolanaMarketDataClient(
         while (out.size < safeLimit && page <= 5) {
             // Primeira página propaga erro (ex.: 429) para o chamador; páginas seguintes são best-effort.
             val body = if (page == 1) geckoGet("/networks/solana/$endpoint?page=$page")
-            else runCatching { geckoGet("/networks/solana/$endpoint?page=$page") }.getOrNull()
+            else runCatchingCancellable { geckoGet("/networks/solana/$endpoint?page=$page") }.getOrNull()
             val data = body?.let { runCatching { json.parseToJsonElement(it).jsonObject["data"]?.jsonArray }.getOrNull() }
             if (data.isNullOrEmpty()) break
             for (pool in data) {
@@ -450,9 +452,9 @@ class SolanaMarketDataClient(
         // 1) DexScreener (primário)
         dexScreenerToken(mint)?.let { return@withContext it }
         // 2) GeckoTerminal (fallback)
-        runCatching { geckoTokenInfo(mint) }.getOrNull()?.let { return@withContext it }
+        runCatchingCancellable { geckoTokenInfo(mint) }.getOrNull()?.let { return@withContext it }
         // 3) Último recurso: preço via Jupiter (sem liquidez/volume), para não voltar vazio
-        val price = runCatching { priceUsd(mint) }.getOrNull()
+        val price = runCatchingCancellable { priceUsd(mint) }.getOrNull()
         if (price != null && price > 0.0) TokenMarket(mint, mint.take(6), "", price, null, null, null, null, null, null) else null
     }
 

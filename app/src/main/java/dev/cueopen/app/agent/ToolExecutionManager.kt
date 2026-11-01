@@ -53,6 +53,7 @@ class ToolExecutionManager {
     private fun update(id: String, status: Status, output: String, error: String?) {
         synchronized(lock) {
             val old = records[id] ?: return
+            if (old.status !in setOf(Status.QUEUED, Status.RUNNING)) return
             records[id] = old.copy(status = status, updatedAt = System.currentTimeMillis(), output = output, error = error)
             publishLocked()
         }

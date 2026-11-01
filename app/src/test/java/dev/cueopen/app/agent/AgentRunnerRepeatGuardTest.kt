@@ -39,4 +39,14 @@ class AgentRunnerRepeatGuardTest {
         assertEquals(3, AgentRunner.repeatToolThreshold("file_read"))
         assertEquals(6, AgentRunner.repeatToolThreshold("shell"))
     }
+
+    @Test fun `leituras externas identicas interrompem retries antes de amplificar rate limits`() {
+        listOf(
+            "wallet_get_balance", "wallet_list_tokens", "market_discover", "market_token_info",
+            "market_price", "market_candles", "market_liquidity", "browser_navigate",
+        ).forEach { tool ->
+            assertEquals(tool, 3, AgentRunner.repeatToolThreshold(tool))
+        }
+        assertEquals(6, AgentRunner.repeatToolThreshold("wallet_swap"))
+    }
 }

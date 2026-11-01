@@ -20,6 +20,7 @@ import dev.cueopen.app.llm.int
 import dev.cueopen.app.llm.str
 import dev.cueopen.app.llm.strArray
 import dev.cueopen.app.llm.tool
+import dev.cueopen.app.util.runCatchingCancellable
 import dev.cueopen.app.sandbox.Sandbox
 import dev.cueopen.app.trading.TradeCoordinator
 import dev.cueopen.app.uiconnector.iqoption.IqTradeWaitDirective
@@ -92,6 +93,7 @@ class AgentRunner(
     /** Registro explícito do ciclo de vida de cada chamada de ferramenta. */
     val executions = ToolExecutionManager()
     private val jobs = java.util.concurrent.ConcurrentHashMap<String, Job>()
+    private val heartbeatDispatchGate = HeartbeatDispatchGate()
     private val childJobsByParent = mutableMapOf<String, MutableList<Job>>()
     private val _activity = MutableStateFlow<Map<String, Activity>>(emptyMap())
     val activity: StateFlow<Map<String, Activity>> = _activity
@@ -764,7 +766,7 @@ class AgentRunner(
         val engine = dev.cueopen.app.wallet.DayTradeEngine(ctx.applicationContext, wallet)
         for (agentId in agentIds) {
             if (!policies.canAgentDayTrade(agentId)) continue
-            val outcomes = runCatching {
+            val outcomes = runCatchingCancellable {
                 engine.evaluateAgentRules(agentId, network, policies.agentMaxTransferLamports(agentId))
             }.getOrDefault(emptyList())
             val executed = outcomes.filter { it.executed }
@@ -790,7 +792,7 @@ class AgentRunner(
         val a = store.agent(agentId) ?: return
         if (!a.autonomous || a.homeSessionId == null) return
         scope.launch {
-            runCatching { evaluateAllArmedRules() }.onFailure {
+            runCatchingCancellable { evaluateAllArmedRules() }.onFailure {
                 runCatching { dev.cueopen.app.diag.ErrorLog.log("scheduler", "evaluateAllArmedRules (alarme): ${it.message}", a.homeSessionId, "trade") }
             }
             // O alarme JÁ é o horário agendado → não exigimos "due" (evita perder o ciclo por arredondamento).
@@ -891,7 +893,11 @@ class AgentRunner(
     /** Detectores puros de loop/degeneração (sem Android) — testáveis na JVM. */
     companion object LoopGuards {
         private val STRICT_REPEAT_TOOLS = setOf("connector_validate", "connector_test", "connector_propose", "connector_edit_propose")
-        private val PURE_REPEAT_TOOLS = setOf("file_read", "file_list", "memory_search", "notes_read", "connector_spec", "skill_load")
+        private val PURE_REPEAT_TOOLS = setOf(
+            "file_read", "file_list", "memory_search", "notes_read", "connector_spec", "skill_load",
+            "wallet_get_balance", "wallet_list_tokens", "market_discover", "market_token_info",
+            "market_price", "market_candles", "market_liquidity", "browser_navigate",
+        )
 
         /** Duas chamadas idênticas de builder com o mesmo resultado já indicam ausência de progresso. */
         fun repeatToolThreshold(name: String): Int = when {
@@ -939,11 +945,21 @@ class AgentRunner(
      * usuário via set_schedule numa conversa — nunca cria sessão sozinho (evita auto-início ao criar).
      */
     fun heartbeat(agent: AgentProfile): Job {
+        val dispatched = heartbeatDispatchGate.dispatchIfIdle(
+            isBusy = {
+                val current = store.agent(agent.id) ?: agent
+                current.homeSessionId?.let { jobs[it]?.isActive == true } == true
+            },
+            dispatch = { startHeartbeatCycle(agent) },
+        )
+        if (dispatched != null) return dispatched
+        val current = store.agent(agent.id) ?: agent
+        return current.homeSessionId?.let { jobs[it]?.takeIf(Job::isActive) } ?: scope.launch { }
+    }
+
+    private fun startHeartbeatCycle(agent: AgentProfile): Job {
         var a = store.agent(agent.id) ?: agent
         if (!a.autonomous || a.homeSessionId == null) return scope.launch { }
-        val requestedHome = a.homeSessionId!!
-        // AlarmManager e ticker podem disparar juntos. Uma sessão só pode ter um ciclo ativo.
-        jobs[requestedHome]?.takeIf { it.isActive }?.let { return it }
         val home = a.homeSessionId?.let { store.session(it) } ?: Session(title = "🤖 ${a.name} · autônomo", agentId = a.id).also {
             store.upsertSession(it); a = a.copy(homeSessionId = it.id); store.upsertAgent(a)
         }
@@ -959,48 +975,73 @@ class AgentRunner(
         }
         dev.cueopen.app.sandbox.SandboxService.start(ctx, "${a.name}: heartbeat")
         val job = scope.launch {
+            var watchdogTimedOut = false
+            var cycleFailed = false
+            var cancelledByCaller = false
             try {
-                // Watchdog: um ciclo nunca pode travar para sempre e bloquear os próximos agendamentos.
-                kotlinx.coroutines.withTimeout(10 * 60_000L) { loop(sid) }
-            } catch (to: kotlinx.coroutines.TimeoutCancellationException) {
-                runCatching { dev.cueopen.app.diag.ErrorLog.log("heartbeat", "Ciclo excedeu 10 min e foi encerrado (watchdog).", sid, "heartbeat") }
-                store.addItem(sid, ChatItem.Error(text = "Ciclo excedeu o tempo máximo (10 min) e foi encerrado para liberar o próximo agendamento."))
-            } catch (c: kotlinx.coroutines.CancellationException) { throw c
+                // Distingue o watchdog do ciclo de timeouts lançados por uma ferramenta interna.
+                val completed = kotlinx.coroutines.withTimeoutOrNull(10 * 60_000L) { loop(sid); true } ?: false
+                if (!completed) {
+                    watchdogTimedOut = true
+                    executions.cancelSession(sid)
+                    terminals.get(sid).cancelAgentCommand()
+                    try {
+                        browserFor(sid).cancelNavigation()
+                    } catch (cancel: kotlinx.coroutines.CancellationException) {
+                        throw cancel
+                    } catch (_: Throwable) { }
+                    finalizeRunningSteps(sid, "Ferramenta interrompida pelo watchdog do heartbeat.")
+                    runCatching { dev.cueopen.app.diag.ErrorLog.log("heartbeat", "Ciclo excedeu 10 min e foi encerrado (watchdog).", sid, "heartbeat") }
+                    store.addItem(sid, ChatItem.Error(text = "Ciclo excedeu o tempo máximo (10 min) e foi encerrado para liberar o próximo agendamento."))
+                }
+            } catch (c: kotlinx.coroutines.CancellationException) {
+                cancelledByCaller = true
+                throw c
             } catch (t: Throwable) {
+                cycleFailed = true
                 runCatching { dev.cueopen.app.diag.ErrorLog.log("heartbeat", "${t.javaClass.simpleName}: ${t.message.orEmpty()}", sid, "heartbeat") }
                 store.addItem(sid, ChatItem.Error(text = "Heartbeat falhou: ${t.message}"))
             } finally {
                 val after = store.session(sid)
-                if (after != null) {
-                    val lastItem = after.items.lastOrNull { it is ChatItem.Assistant } as? ChatItem.Assistant
-                    val rawLast = lastItem?.text?.trim().orEmpty()
-                    // remove qualquer NO_REPLY do texto exibido (nunca mostrar cru)
-                    val cleaned = rawLast.replace(Regex("(?i)\\bNO_REPLY\\b"), "").trim()
-                    val quiet = rawLast.contains("NO_REPLY", true) && cleaned.length < 12
-                    val used = (after.tokensIn + after.tokensOut) - tokMark
-                    if (quiet) {
-                        // ciclo sem novidade: não gasta contexto; colapsa marcadores repetidos num só.
-                        store.editSession(sid) {
-                            var items = it.items.take(itemsMark)
-                            if ((items.lastOrNull() as? ChatItem.Step)?.tool == "cycle") items = items.dropLast(1)
-                            it.copy(llm = it.llm.take(llmMark),
-                                items = items + ChatItem.Step(tool = "cycle", title = "Ciclo $stamp — nada novo", args = "", result = "", status = StepStatus.OK),
-                                status = SessionStatus.IDLE)
-                        }
+                if (after != null && !cancelledByCaller) {
+                    val used = ((after.tokensIn + after.tokensOut) - tokMark).coerceAtLeast(0)
+                    var quiet = false
+                    if (watchdogTimedOut || cycleFailed) {
+                        store.editSession(sid) { it.copy(status = SessionStatus.ERROR, continuous = false) }
                     } else {
-                        // trabalhou: limpa o NO_REPLY do texto exibido e mantém o resto visível
-                        if (lastItem != null && cleaned != rawLast) store.replaceItem(sid, lastItem.copy(text = cleaned.ifBlank { rawLast }))
-                        store.editSession(sid) { it.copy(status = SessionStatus.IDLE) }
-                        if (a.notifyOnAction) notifyAgent(a, plainText(cleaned).take(220))
+                        val lastItem = after.items.lastOrNull { it is ChatItem.Assistant } as? ChatItem.Assistant
+                        val rawLast = lastItem?.text?.trim().orEmpty()
+                        // remove qualquer NO_REPLY do texto exibido (nunca mostrar cru)
+                        val cleaned = rawLast.replace(Regex("(?i)\\bNO_REPLY\\b"), "").trim()
+                        quiet = rawLast.contains("NO_REPLY", true) && cleaned.length < 12
+                        if (quiet) {
+                            // ciclo sem novidade: não gasta contexto; colapsa marcadores repetidos num só.
+                            store.editSession(sid) {
+                                var items = it.items.take(itemsMark)
+                                if ((items.lastOrNull() as? ChatItem.Step)?.tool == "cycle") items = items.dropLast(1)
+                                it.copy(llm = it.llm.take(llmMark),
+                                    items = items + ChatItem.Step(tool = "cycle", title = "Ciclo $stamp — nada novo", args = "", result = "", status = StepStatus.OK),
+                                    status = SessionStatus.IDLE)
+                            }
+                        } else {
+                            // trabalhou: limpa o NO_REPLY do texto exibido e mantém o resto visível
+                            if (lastItem != null && cleaned != rawLast) store.replaceItem(sid, lastItem.copy(text = cleaned.ifBlank { rawLast }))
+                            store.editSession(sid) { it.copy(status = SessionStatus.IDLE) }
+                            if (a.notifyOnAction) notifyAgent(a, plainText(cleaned).take(220))
+                        }
                     }
                     store.agent(a.id)?.let { cur ->
                         val day = today()
-                        store.upsertAgent(cur.copy(beats = cur.beats + 1, actions = cur.actions + if (quiet) 0 else 1,
+                        val successfulAction = !watchdogTimedOut && !cycleFailed && !quiet
+                        store.upsertAgent(cur.copy(beats = cur.beats + 1, actions = cur.actions + if (successfulAction) 1 else 0,
                             tokensDay = day, tokensToday = (if (cur.tokensDay == day) cur.tokensToday else 0) + used))
                     }
-                }
-                store.agent(a.id)?.takeIf { it.autonomous }?.let { current ->
-                    store.upsertAgent(current.copy(lastBeatAt = System.currentTimeMillis()))
+                    // Em falha, mantenha o lastBeatAt do início do ciclo para permitir recuperação após reinício.
+                    if (!watchdogTimedOut && !cycleFailed) {
+                        store.agent(a.id)?.takeIf { it.autonomous }?.let { current ->
+                            store.upsertAgent(current.copy(lastBeatAt = System.currentTimeMillis()))
+                        }
+                    }
                 }
                 setActivity(sid, Activity())
                 jobs.remove(sid, coroutineContext[Job])
@@ -2329,9 +2370,11 @@ class AgentRunner(
                                         "Endereço público indisponível."
                                     } else {
                                         try {
-                                            val lamports = SolanaRpcClient(endpoint = network.rpcEndpoint, network = network).getBalanceLamports(address)
+                                            val lamports = SolanaRpcClient.balanceWithFallback(network, address)
                                             "Saldo " + network.displayName + ": " + String.format(Locale.US, "%.9f SOL", lamports / 1_000_000_000.0) +
                                                 if (lamports == 0L) "\nSaldo RPC retornado como zero. Um endereço válido pode ainda não ter uma conta financiada nesta rede; isso não significa que a frase ou a chave local seja inválida." else ""
+                                        } catch (cancel: kotlinx.coroutines.CancellationException) {
+                                            throw cancel
                                         } catch (e: Exception) {
                                             "WALLET_RPC_ERROR: Não foi possível consultar o saldo em " + network.displayName +
                                                 ". Motivo: " + (e.message ?: e.javaClass.simpleName).take(240) +
@@ -2437,7 +2480,7 @@ class AgentRunner(
                             when (call.name) {
                                 "market_discover" -> {
                                     val sort = s("sort").ifBlank { "new" }
-                                    runCatching { market.discoverTokens(sort, i("limit") ?: 30) }.fold({ tokens ->
+                                    runCatchingCancellable { market.discoverTokens(sort, i("limit") ?: 30) }.fold({ tokens ->
                                         if (tokens.isEmpty()) "Nenhum token retornado agora para sort=$sort."
                                         else buildString {
                                             appendLine("Tokens Solana (${if (sort.lowercase().startsWith("trend") || sort.lowercase() == "hot" || sort.lowercase() == "gainers") "em alta" else "mais novos → mais velhos"}), dados reais:")
@@ -2453,7 +2496,7 @@ class AgentRunner(
                                 }
                                 "market_token_info" -> {
                                     val mint = s("mint")
-                                    runCatching { market.tokenInfo(mint) }.fold({ t ->
+                                    runCatchingCancellable { market.tokenInfo(mint) }.fold({ t ->
                                         if (t == null) "Sem informações para este mint."
                                         else buildString {
                                             appendLine("${t.symbol} — ${t.name} ($mint)")
@@ -2468,7 +2511,7 @@ class AgentRunner(
                                 "market_price" -> {
                                     val mints = sl("mints")
                                     if (mints.isEmpty()) "Informe ao menos um mint em 'mints'."
-                                    else runCatching { market.pricesUsd(mints) }.fold({ prices ->
+                                    else runCatchingCancellable { market.pricesUsd(mints) }.fold({ prices ->
                                         if (prices.isEmpty()) "Nenhum preço disponível agora para os mints informados."
                                         else prices.entries.joinToString("\n") { (m, p) ->
                                             val sym = SolanaRpcClient.knownSymbol(m) ?: m.take(6)
@@ -2478,7 +2521,7 @@ class AgentRunner(
                                 }
                                 "market_candles" -> {
                                     val mint = s("mint")
-                                    runCatching {
+                                    runCatchingCancellable {
                                         market.candles(mint, s("timeframe").ifBlank { "hour" }, i("aggregate") ?: 1, i("limit") ?: 60)
                                     }.fold({ candles ->
                                         if (candles.isEmpty()) "Sem velas disponíveis para este token."
@@ -2491,7 +2534,7 @@ class AgentRunner(
                                     }, { e ->
                                         // Velas indisponíveis (429/timeout/sem pool): cai para a tendência REAL do
                                         // DexScreener (keyless) — o agente nunca fica sem dado de mercado.
-                                        val trend = runCatching { market.dexTrend(mint) }.getOrNull()
+                                        val trend = runCatchingCancellable { market.dexTrend(mint) }.getOrNull()
                                         val detail = (e.message ?: e.javaClass.simpleName).take(180)
                                         val reason = when (e) {
                                             is dev.cueopen.app.wallet.NoIndexedSolanaPoolException -> "nenhum pool foi retornado pelos indexadores; pode haver ausência de listagem ou atraso de indexação"
@@ -2510,7 +2553,7 @@ class AgentRunner(
                                     val input = s("input_mint"); val output = s("output_mint")
                                     val probes = sl("probe_amounts_raw").mapNotNull { it.toLongOrNull() }
                                     if (probes.isEmpty()) "Informe 'probe_amounts_raw' com ao menos um tamanho em unidades mínimas."
-                                    else runCatching { market.depthCurve(input, output, probes) }.fold({ curve ->
+                                    else runCatchingCancellable { market.depthCurve(input, output, probes) }.fold({ curve ->
                                         if (curve.isEmpty()) "Nenhuma rota de liquidez retornada para este par."
                                         else buildString {
                                             appendLine("Profundidade real (impacto por tamanho; AMM, sem order book central):")
@@ -2530,7 +2573,7 @@ class AgentRunner(
                                 "wallet_list_tokens" -> {
                                     val address = wallet.publicAddress()
                                     if (address == null) "Endereço público indisponível."
-                                    else runCatching { SolanaRpcClient.tokenAccountsWithFallback(network, address) }.fold({ tokens ->
+                                    else runCatchingCancellable { SolanaRpcClient.tokenAccountsWithFallback(network, address) }.fold({ tokens ->
                                         if (tokens.isEmpty()) "Nenhum token SPL encontrado nesta carteira (${network.displayName})."
                                         else tokens.joinToString("\n") { t ->
                                             val sym = SolanaRpcClient.knownSymbol(t.mint) ?: t.mint.take(6)
@@ -2643,7 +2686,7 @@ class AgentRunner(
                                     val evaluate = a["evaluate"]?.jsonPrimitive?.booleanOrNull ?: true
                                     val evalLines = if (evaluate) {
                                         val engine = dev.cueopen.app.wallet.DayTradeEngine(ctx.applicationContext, wallet, market)
-                                        runCatching {
+                                        runCatchingCancellable {
                                             engine.evaluateAgentRules(agentId, network, policies.agentMaxTransferLamports(agentId))
                                         }.getOrDefault(emptyList()).map { it.message }
                                     } else emptyList()

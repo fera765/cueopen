@@ -1,6 +1,7 @@
 package dev.cueopen.app.wallet
 
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
@@ -12,6 +13,7 @@ import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
+import dev.cueopen.app.net.await
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
@@ -48,6 +50,15 @@ enum class SolanaNetwork(
         fun fromEndpoint(endpoint: String): SolanaNetwork? =
             entries.firstOrNull { it.rpcEndpoint == endpoint }
     }
+}
+
+internal class SolanaRpcHttpException(val statusCode: Int) : IOException("Solana RPC HTTP $statusCode")
+
+internal fun isReadEndpointFallbackAllowed(failure: Exception): Boolean = when (failure) {
+    is SolanaRpcHttpException -> failure.statusCode in 500..599
+    else -> failure is java.net.UnknownHostException ||
+        failure is java.net.SocketTimeoutException ||
+        failure is java.net.ConnectException
 }
 
 /**
@@ -284,8 +295,8 @@ class SolanaRpcClient(
                 .post(payload.toRequestBody(JSON_MEDIA_TYPE.toMediaType()))
                 .header("Accept", "application/json")
                 .build()
-            client.newCall(request).execute().use { response ->
-                if (!response.isSuccessful) throw IOException("Solana RPC HTTP ${response.code}")
+            client.newCall(request).await().use { response ->
+                if (!response.isSuccessful) throw SolanaRpcHttpException(response.code)
                 val body = response.body?.string() ?: throw IOException("Empty Solana RPC response")
                 if (body.length > MAX_RESPONSE_CHARS) throw IOException("Solana RPC response exceeds size limit")
                 val root = try {
@@ -323,24 +334,29 @@ class SolanaRpcClient(
             for (endpoint in network.readEndpoints) {
                 try {
                     return SolanaRpcClient(endpoint = endpoint, network = network).getTokenAccounts(owner)
-                } catch (e: Exception) { last = e }
+                } catch (cancel: CancellationException) {
+                    throw cancel
+                } catch (e: Exception) {
+                    if (!isReadEndpointFallbackAllowed(e)) throw e
+                    last = e
+                }
             }
             throw last ?: IOException("Tokens indisponíveis")
         }
 
         fun lamportsToSol(lamports: Long): Double = lamports / 1_000_000_000.0
 
-        /** Balance read with endpoint fallback + bounded retry, so a flaky primary RPC doesn't blank the UI. */
+        /** Balance read with bounded endpoint failover; rate limits and client errors are never retried. */
         suspend fun balanceWithFallback(network: SolanaNetwork, address: String): Long {
             var last: Exception? = null
             for (endpoint in network.readEndpoints) {
-                repeat(2) { attempt ->
-                    try {
-                        return SolanaRpcClient(endpoint = endpoint, network = network).getBalanceLamports(address)
-                    } catch (e: Exception) {
-                        last = e
-                        kotlinx.coroutines.delay(250L * (attempt + 1))
-                    }
+                try {
+                    return SolanaRpcClient(endpoint = endpoint, network = network).getBalanceLamports(address)
+                } catch (cancel: CancellationException) {
+                    throw cancel
+                } catch (e: Exception) {
+                    if (!isReadEndpointFallbackAllowed(e)) throw e
+                    last = e
                 }
             }
             throw last ?: IOException("Saldo indisponível")
@@ -352,7 +368,12 @@ class SolanaRpcClient(
             for (endpoint in network.readEndpoints) {
                 try {
                     return SolanaRpcClient(endpoint = endpoint, network = network).getRecentSignatures(address, limit)
-                } catch (e: Exception) { last = e }
+                } catch (cancel: CancellationException) {
+                    throw cancel
+                } catch (e: Exception) {
+                    if (!isReadEndpointFallbackAllowed(e)) throw e
+                    last = e
+                }
             }
             throw last ?: IOException("Histórico indisponível")
         }

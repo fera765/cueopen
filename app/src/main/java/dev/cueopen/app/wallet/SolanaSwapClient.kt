@@ -9,6 +9,7 @@ import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
+import dev.cueopen.app.net.await
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -43,7 +44,7 @@ class SolanaSwapClient(
             "/swap/v1/quote?inputMint=$inputMint&outputMint=$outputMint&amount=$amountRaw" +
             "&slippageBps=$slippageBps&restrictIntermediateTokens=true"
         val request = Request.Builder().url(url).header("Accept", "application/json").get().build()
-        client.newCall(request).execute().use { response ->
+        client.newCall(request).await().use { response ->
             if (!response.isSuccessful) throw IOException("Jupiter quote HTTP ${response.code}")
             val body = response.body?.string() ?: throw IOException("Resposta vazia da cotação")
             if (body.length > MAX_RESPONSE_CHARS) throw IOException("Resposta da cotação excede o limite")

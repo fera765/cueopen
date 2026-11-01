@@ -5,7 +5,6 @@ import dev.cueopen.app.data.ProviderModels
 import dev.cueopen.app.data.Settings
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
@@ -18,20 +17,17 @@ import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
-import okhttp3.Call
-import okhttp3.Callback
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
-import okhttp3.Response
 import java.io.IOException
 import java.net.URI
 import java.util.concurrent.TimeUnit
 import dev.cueopen.app.CueApp
 import dev.cueopen.app.proxy.ProxyScope
-import kotlin.coroutines.resume
-import kotlin.coroutines.resumeWithException
+import dev.cueopen.app.net.await
+import dev.cueopen.app.util.runCatchingCancellable
 
 data class ToolCall(val id: String, val name: String, val argsJson: String)
 data class Usage(val prompt: Long = 0, val completion: Long = 0, val cached: Long = 0)
@@ -109,11 +105,11 @@ class OpenRouter(private val settings: () -> Settings) {
         val s = settings()
         if (!isOpenRouter(s.baseUrl)) return@withContext null
         if (priceCache.isEmpty() || System.currentTimeMillis() - priceCacheAt > 6 * 60 * 60 * 1000L) {
-            runCatching {
+            runCatchingCancellable {
                 val request = Request.Builder().url(endpoint(s.baseUrl, "models")).apply {
                     if (s.apiKey.isNotBlank()) header("Authorization", "Bearer ${s.apiKey}")
                 }.get().build()
-                http().newCall(request).execute().use { response ->
+                http().newCall(request).await().use { response ->
                     if (!response.isSuccessful) return@use
                     val root = json.parseToJsonElement(response.body?.string().orEmpty()).jsonObject
                     val entries = root["data"]?.jsonArray ?: return@use
@@ -173,7 +169,7 @@ class OpenRouter(private val settings: () -> Settings) {
             // `reasoning` e headers abaixo são extensões da OpenRouter, não do protocolo OpenAI geral.
             if (openRouter && disableReasoning) put("reasoning", buildJsonObject { put("enabled", false); put("exclude", true) })
         }
-        fun once(disableReasoning: Boolean, structuredOutput: Boolean): HttpResult {
+        suspend fun once(disableReasoning: Boolean, structuredOutput: Boolean): HttpResult {
             val req = Request.Builder()
                 .url(endpoint(s.baseUrl, "chat/completions"))
                 .apply {
@@ -185,7 +181,7 @@ class OpenRouter(private val settings: () -> Settings) {
                 .post(buildBody(disableReasoning, structuredOutput).toString().toRequestBody("application/json".toMediaType()))
                 .build()
             return try {
-                http().newCall(req).execute().use { response ->
+                http().newCall(req).await().use { response ->
                     HttpResult(
                         code = response.code,
                         body = response.body?.string().orEmpty(),
@@ -311,7 +307,7 @@ class OpenRouter(private val settings: () -> Settings) {
                 }
                 .post(body.toString().toRequestBody("application/json".toMediaType()))
                 .build()
-            http().newCall(request).execute().use { response ->
+            http().newCall(request).await().use { response ->
                 val text = response.body?.string().orEmpty()
                 if (!response.isSuccessful) {
                     val detail = runCatching {
@@ -356,14 +352,6 @@ class OpenRouter(private val settings: () -> Settings) {
     private companion object {
         const val MAX_TRANSIENT_IMAGE_BYTES = 1_000_000
     }
-}
-
-suspend fun Call.await(): Response = suspendCancellableCoroutine { cont ->
-    enqueue(object : Callback {
-        override fun onFailure(call: Call, e: IOException) { if (!cont.isCancelled) cont.resumeWithException(e) }
-        override fun onResponse(call: Call, response: Response) { cont.resume(response) }
-    })
-    cont.invokeOnCancellation { runCatching { cancel() } }
 }
 
 /** Helper para declarar ferramentas no formato function-calling. */
