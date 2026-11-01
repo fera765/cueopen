@@ -46,9 +46,12 @@ class ContextManager(private val store: Store, private val sandbox: Sandbox, pri
         val dir = File(sandbox.workspaceFor(sessionId), ".cue/out").apply { mkdirs() }
         // nome pelo CONTEÚDO: a mesma saída sempre cai no mesmo arquivo (nada de cópias em cadeia)
         val f = File(dir, "o" + Integer.toHexString(output.hashCode()) + "_" + output.length + ".txt")
-        if (!f.exists()) f.writeText(output) else f.setLastModified(System.currentTimeMillis())
-        // limpeza: mantém só as 20 saídas mais recentes (evita acúmulo de arquivos quase iguais)
-        runCatching { dir.listFiles()?.sortedByDescending { it.lastModified() }?.drop(40)?.forEach { it.delete() } }
+        if (!persistArchive(f, output)) {
+            val head = output.take(limit / 2)
+            val tail = output.takeLast(limit / 2)
+            return "$head\n…[${output.length - limit} caracteres omitidos; a saída completa não pôde ser arquivada neste workspace]…\n$tail"
+        }
+        cleanupArchivedOutputs(sessionId, dir)
         val head = output.take(limit / 2)
         val tail = output.takeLast(limit / 2)
         val headLines = head.count { it == '\n' } + 1
@@ -75,9 +78,11 @@ class ContextManager(private val store: Store, private val sandbox: Sandbox, pri
                         m.copy(content = "[Saída antiga de acessibilidade omitida do contexto; releia a tela atual se precisar.]")
                     } else {
                         val ptr = if (sessionId != null) stash(sessionId, full) else null
-                        val head = full.take(200).trimEnd()
-                        m.copy(content = head + "\n…[resultado antigo recolhido para não inflar o contexto" +
-                            (if (ptr != null) " — recupere o conteúdo completo com file_read path=$ptr" else "") + "]")
+                        if (sessionId != null && ptr == null) m else {
+                            val head = full.take(200).trimEnd()
+                            m.copy(content = head + "\n…[resultado antigo recolhido para não inflar o contexto" +
+                                (if (ptr != null) " — recupere o conteúdo completo com file_read path=$ptr" else "") + "]")
+                        }
                     }
                 }
                 // narração antiga do assistente (sem ferramentas): só o começo basta como fio da meada
@@ -89,12 +94,35 @@ class ContextManager(private val store: Store, private val sandbox: Sandbox, pri
     }
 
     /** Salva um conteúdo (endereçado pelo hash) em .cue/out e devolve o caminho relativo para file_read. */
-    private fun stash(sessionId: String, content: String): String {
+    private fun stash(sessionId: String, content: String): String? {
         val dir = File(sandbox.workspaceFor(sessionId), ".cue/out").apply { mkdirs() }
         val f = File(dir, "o" + Integer.toHexString(content.hashCode()) + "_" + content.length + ".txt")
-        if (!f.exists()) runCatching { f.writeText(content) } else f.setLastModified(System.currentTimeMillis())
-        runCatching { dir.listFiles()?.sortedByDescending { it.lastModified() }?.drop(40)?.forEach { it.delete() } }
+        if (!persistArchive(f, content)) return null
+        cleanupArchivedOutputs(sessionId, dir)
         return ".cue/out/${f.name}"
+    }
+
+    private fun persistArchive(file: File, content: String): Boolean = runCatching {
+        if (!file.isFile || runCatching { file.readText() }.getOrNull() != content) file.writeText(content)
+        file.isFile && file.readText() == content
+    }.getOrDefault(false)
+
+    private fun cleanupArchivedOutputs(sessionId: String, dir: File) {
+        val files = dir.listFiles()?.toList() ?: return
+        val session = store.session(sessionId) ?: return
+        val referenced = mutableSetOf<String>()
+        fun collect(text: String?) {
+            if (text == null) return
+            OUTPUT_POINTER.findAll(text).forEach { match -> referenced += match.groupValues[1] }
+        }
+        collect(session.summary)
+        session.llm.forEach { collect(it.content); collect(it.toolCallsJson) }
+        session.items.forEach { collect(it.toString()) }
+        ContextOutputRetentionPolicy.filesToDelete(files, referenced).forEach { file -> runCatching { file.delete() } }
+    }
+
+    private companion object {
+        val OUTPUT_POINTER = Regex("""\.cue/out/(o[0-9a-f]+_\d+\.txt)""")
     }
 
     // ---------- Camada 2 ----------
