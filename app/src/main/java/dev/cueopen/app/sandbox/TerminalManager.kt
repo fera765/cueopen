@@ -6,6 +6,7 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.os.Handler
 import android.os.Looper
+import android.util.AtomicFile
 import com.termux.terminal.TerminalSession
 import com.termux.terminal.TerminalSessionClient
 import com.termux.view.TerminalView
@@ -29,8 +30,8 @@ import java.util.concurrent.ConcurrentHashMap
  * libtermux.so) rodando `sh init-sandbox.sh` → proot → Alpine → bash interativo.
  *
  * - Sem WebView: a renderização e o teclado são da TerminalView do Termux.
- * - As sessões vivem no processo do app, mantido vivo pelo SandboxService (foreground + wakelock),
- *   então continuam rodando com o app fechado / removido dos recentes.
+ * - O serviço foreground tenta manter sessões vivas em background. Se o processo Android for
+ *   encerrado, o PTY não sobrevive; o workspace, o cwd conhecido e o transcript são recuperados.
  * - O agente executa TUDO dentro desta mesma sessão: escreve o comando no PTY (o usuário vê em
  *   tempo real) e espera um marcador de fim com o código de saída.
  */
@@ -39,6 +40,12 @@ class TerminalManager(private val ctx: Context, private val sandbox: Sandbox) {
     private val scriptsLock = Mutex()
 
     inner class Session(val key: String, private val cwd: String) {
+        private val snapshotFile = File(sandbox.publicFor(key), ".cue/terminal_snapshot.txt")
+        private val savedTranscript = runCatching { snapshotFile.takeIf { it.isFile }?.readText().orEmpty() }
+            .getOrDefault("").takeLast(TerminalRecoveryPolicy.MAX_TRANSCRIPT_CHARS)
+        val restoredAfterPreviousProcess: Boolean = savedTranscript.isNotBlank()
+        private var snapshotJob: Job? = null
+        private val snapshotLock = Any()
         @Volatile var view: TerminalView? = null
         val agentLock = Mutex()
         private val _alive = MutableStateFlow(false)
@@ -46,11 +53,15 @@ class TerminalManager(private val ctx: Context, private val sandbox: Sandbox) {
         lateinit var term: TerminalSession; private set
 
         private val client = object : TerminalSessionClient {
-            override fun onTextChanged(changedSession: TerminalSession) { view?.onScreenUpdated() }
+            override fun onTextChanged(changedSession: TerminalSession) {
+                view?.onScreenUpdated()
+                queueTranscriptSnapshot(changedSession)
+            }
             override fun onTitleChanged(changedSession: TerminalSession) {}
             override fun onSessionFinished(finishedSession: TerminalSession) {
                 _alive.value = false
                 view?.onScreenUpdated()
+                persistTranscriptNow(finishedSession)
             }
             override fun onCopyTextToClipboard(session: TerminalSession, text: String?) {
                 ctx.getSystemService(ClipboardManager::class.java)?.setPrimaryClip(ClipData.newPlainText("terminal", text ?: ""))
@@ -99,9 +110,10 @@ class TerminalManager(private val ctx: Context, private val sandbox: Sandbox) {
                     return@launch
                 }
                 try {
+                    val launchCwd = savedWorkingDirectory()
                     withContext(Dispatchers.Main) {
                         if (!_alive.value) {
-                            val shell = "cd '$cwd' 2>/dev/null; if command -v bash >/dev/null 2>&1; then exec bash --rcfile /root/.bashrc -i; else exec sh -i; fi"
+                            val shell = "cd ${shQuote(launchCwd)} 2>/dev/null || cd ${shQuote(cwd)} 2>/dev/null; if command -v bash >/dev/null 2>&1; then exec bash --rcfile /root/.bashrc -i; else exec sh -i; fi"
                             term = TerminalSession(
                                 "/system/bin/sh", sandbox.prefix.absolutePath,
                                 arrayOf("sh", File(sandbox.prefix, "init-sandbox.sh").absolutePath, "/bin/sh", "-c", shell),
@@ -110,6 +122,7 @@ class TerminalManager(private val ctx: Context, private val sandbox: Sandbox) {
                             _alive.value = true
                             val v = view
                             if (v != null) v.attachSession(term) else term.updateSize(100, 36, 12, 24)
+                            restoreTranscript(term, savedTranscript)
                         }
                     }
                     result.complete(_alive.value)
@@ -138,9 +151,78 @@ class TerminalManager(private val ctx: Context, private val sandbox: Sandbox) {
         fun kill() {
             startJob?.cancel()
             if (!startResult.isCompleted) startResult.complete(false)
+            snapshotJob?.cancel()
+            if (_alive.value) persistTranscriptNow(term)
             cancelAgentCommand()
             if (_alive.value) runCatching { term.finishIfRunning() }
             _alive.value = false
+        }
+
+        val hasSavedTranscript: Boolean get() = snapshotFile.isFile && snapshotFile.length() > 0
+
+        fun persistNow() {
+            if (Looper.myLooper() == Looper.getMainLooper()) {
+                if (::term.isInitialized) persistTranscriptNow(term)
+            } else main.post { if (::term.isInitialized) persistTranscriptNow(term) }
+        }
+
+        private fun savedWorkingDirectory(): String {
+            val file = File(sandbox.publicFor(key), ".cue/terminal_cwd")
+            val saved = runCatching { file.readText().trim() }.getOrNull()
+            return TerminalRecoveryPolicy.safeWorkingDirectory(
+                savedPath = saved,
+                fallback = cwd,
+                sessionRoot = sandbox.publicFor(key),
+                resolveGuestPath = { sandbox.hostFile(it, key) },
+            )
+        }
+
+        private fun restoreTranscript(session: TerminalSession, snapshot: String) {
+            val bytes = TerminalRecoveryPolicy.transcriptBytes(snapshot) ?: return
+            runCatching { session.emulator?.append(bytes, bytes.size) }
+        }
+
+        private fun queueTranscriptSnapshot(session: TerminalSession) {
+            if (Looper.myLooper() != Looper.getMainLooper()) {
+                main.post { queueTranscriptSnapshot(session) }
+                return
+            }
+            val text = runCatching { session.emulator?.screen?.transcriptTextWithFullLinesJoined.orEmpty() }
+                .getOrDefault("").takeLast(TerminalRecoveryPolicy.MAX_TRANSCRIPT_CHARS)
+            if (text.isBlank()) return
+            snapshotJob?.cancel()
+            snapshotJob = startupScope.launch {
+                delay(250)
+                runCatching { writeTranscriptSnapshot(text) }
+                    .onFailure { android.util.Log.e("CueOpenTerminal", "Falha ao salvar o histórico do terminal.", it) }
+            }
+        }
+
+        private fun persistTranscriptNow(session: TerminalSession) {
+            if (Looper.myLooper() != Looper.getMainLooper()) {
+                main.post { persistTranscriptNow(session) }
+                return
+            }
+            val text = runCatching { session.emulator?.screen?.transcriptTextWithFullLinesJoined.orEmpty() }
+                .getOrDefault("").takeLast(TerminalRecoveryPolicy.MAX_TRANSCRIPT_CHARS)
+            if (text.isNotBlank()) runCatching { writeTranscriptSnapshot(text) }
+                .onFailure { android.util.Log.e("CueOpenTerminal", "Falha ao salvar o histórico do terminal.", it) }
+        }
+
+        private fun writeTranscriptSnapshot(text: String) {
+            synchronized(snapshotLock) {
+                snapshotFile.parentFile?.mkdirs()
+                val atomic = AtomicFile(snapshotFile)
+                val output = atomic.startWrite()
+                try {
+                    output.write(text.takeLast(TerminalRecoveryPolicy.MAX_TRANSCRIPT_CHARS).toByteArray(Charsets.UTF_8))
+                    output.fd.sync()
+                    atomic.finishWrite(output)
+                } catch (t: Throwable) {
+                    atomic.failWrite(output)
+                    throw t
+                }
+            }
         }
 
         private suspend fun transcript(): String = withContext(Dispatchers.Main) {
@@ -246,7 +328,7 @@ class TerminalManager(private val ctx: Context, private val sandbox: Sandbox) {
         File(cue, "hook.sh").writeText(
             "# CueOpen: avisa o app (sequência OSC invisível) sempre que o prompt volta\n" +
             "set +H 2>/dev/null  # sem expansão de histórico: '!' em HTML/JS não quebra comandos\n" +
-            "__cue_pc() { local e=\$?; printf '\\033]777;cue;done;%s\\007' \"\$e\"; return \$e; }\n" +
+            "__cue_pc() { local e=\$?; (umask 077; printf '%s\\n' \"\$PWD\" > /root/.cue/terminal_cwd.tmp && mv -f /root/.cue/terminal_cwd.tmp /root/.cue/terminal_cwd) 2>/dev/null; printf '\\033]777;cue;done;%s\\007' \"\$e\"; return \$e; }\n" +
             "case \"\$PROMPT_COMMAND\" in *__cue_pc*) ;; *) PROMPT_COMMAND=\"__cue_pc\${PROMPT_COMMAND:+;\$PROMPT_COMMAND}\" ;; esac\n")
         val rc = File(sandbox.publicFor(key), ".bashrc")
         val line = "[ -f /root/.cue/hook.sh ] && . /root/.cue/hook.sh"
@@ -258,6 +340,11 @@ class TerminalManager(private val ctx: Context, private val sandbox: Sandbox) {
         sessions.getOrPut(key) { Session(key, cwd).also { _count.value = sessions.size + 1 } }
 
     fun close(key: String) { main.post { sessions.remove(key)?.kill(); _count.value = sessions.size } }
+
+    fun persistAll() {
+        val action = { sessions.values.forEach { it.persistNow() } }
+        if (Looper.myLooper() == Looper.getMainLooper()) action() else main.post { action() }
+    }
 
     fun closeAll() { main.post { sessions.values.forEach { it.kill() }; sessions.clear(); _count.value = 0 } }
 

@@ -109,7 +109,11 @@ class MainActivity : ComponentActivity() {
 
     override fun onNewIntent(intent: Intent) { super.onNewIntent(intent); handleIntent(intent) }
 
-    override fun onStop() { super.onStop(); CueApp.instance.store.flushAsync() }
+    override fun onStop() {
+        super.onStop()
+        runCatching { CueApp.instance.persistRuntimeState() }
+        CueApp.instance.store.flushAsync()
+    }
 
     private fun handleIntent(i: Intent?) {
         i ?: return

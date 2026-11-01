@@ -106,8 +106,19 @@ fun ComputerScreen(nav: NavController, sessionId: String, initialTab: String?) {
 
 @Composable
 private fun TerminalPane(sessionId: String) {
+    val terminalSession = CueApp.instance.terminals.get(sessionId, "/root/workspace")
     Box(Modifier.fillMaxSize().padding(8.dp).clip(RoundedCornerShape(16.dp))) {
-        TerminalView(key = sessionId, cwd = "/root/workspace", modifier = Modifier.fillMaxSize())
+        Column(Modifier.fillMaxSize()) {
+            if (terminalSession.restoredAfterPreviousProcess) {
+                Text(
+                    "Histórico restaurado. A shell anterior foi reiniciada; comandos e processos em execução não continuam.",
+                    Modifier.fillMaxWidth().background(Color(0xFF24262D)).padding(horizontal = 10.dp, vertical = 8.dp),
+                    color = Color(0xFFD0D0D0),
+                    fontSize = 12.sp,
+                )
+            }
+            TerminalView(key = sessionId, cwd = "/root/workspace", modifier = Modifier.weight(1f).fillMaxWidth())
+        }
     }
 }
 
@@ -282,9 +293,17 @@ fun BrowserPane(sessionId: String) {
                 Icon(Icons.Rounded.SmartToy, null, Modifier.size(16.dp), tint = c.accent); Spacer(Modifier.width(6.dp))
                 Text("O agente está controlando o browser", fontSize = 12.sp, modifier = Modifier.weight(1f))
                 Text("Assumir", fontSize = 12.sp, color = c.accent, fontWeight = FontWeight.Bold, modifier = Modifier.clickable { browser.setAgentControl(false) })
+                }
             }
-        }
-        AndroidView(factory = { c2 -> browser.view(c2) }, modifier = Modifier.fillMaxWidth().weight(1f))
+            if (!ui.profileIsolated) {
+                Text(
+                    "Este WebView não oferece perfis separados; cookies e dados dos sites podem ser compartilhados entre chats.",
+                    Modifier.fillMaxWidth().background(c.accentSoft).padding(horizontal = 12.dp, vertical = 8.dp),
+                    color = c.ink2,
+                    fontSize = 12.sp,
+                )
+            }
+            AndroidView(factory = { c2 -> browser.view(c2) }, modifier = Modifier.fillMaxWidth().weight(1f))
         if (devtools) DevToolsPanel(browser, Modifier.fillMaxWidth().height(300.dp))
     }
 }

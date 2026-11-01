@@ -45,10 +45,20 @@ class CueApp : Application() {
     private var proxyRotationJob: Job? = null
     private val _browserProxyStatus = MutableStateFlow("Aguardando configuração")
     val browserProxyStatus: StateFlow<String> = _browserProxyStatus.asStateFlow()
-    /** Cada chat mantém seu próprio WebView, cookies, URL, histórico e estado de rede. */
-    fun browserFor(sessionId: String): BrowserHost = browsers.computeIfAbsent(sessionId) { BrowserHost(this) }
-    /** Fecha e descarta o browser isolado de uma sessão (ex.: subagente que terminou). */
-    fun closeBrowser(sessionId: String) { browsers.remove(sessionId)?.dispose() }
+    /** Cada chat recebe WebView, perfil de dados e arquivo de restauração próprios. */
+    fun browserFor(sessionId: String): BrowserHost = browsers.computeIfAbsent(sessionId) { BrowserHost(this, sessionId) }
+    /** Descarta a instância; dados persistidos só são removidos quando o chat é apagado. */
+    fun closeBrowser(sessionId: String, clearPersistentData: Boolean = false) {
+        val host = browsers.remove(sessionId)
+        if (host != null) host.dispose(clearPersistentData)
+        else if (clearPersistentData) BrowserHost.clearSessionData(this, sessionId)
+    }
+
+    /** Flush best-effort de estado nativo por chat antes de a Activity entrar em background. */
+    fun persistRuntimeState() {
+        browsers.values.forEach { browser -> runCatching { browser.persistState() } }
+        if (::terminals.isInitialized) runCatching { terminals.persistAll() }
+    }
     /** Exclui um chat e encerra somente suas execuções, agendas e heartbeats associados. */
     fun deleteChat(sessionId: String) {
         val deletion = store.deleteSessionAndLinkedWork(sessionId)
@@ -56,7 +66,7 @@ class CueApp : Application() {
         deletion.cancelledHeartbeatAgentIds.forEach { dev.cueopen.app.scheduler.Heartbeat.cancel(this, it) }
         deletion.removedSessionIds.forEach { id ->
             agent.stop(id)
-            closeBrowser(id)
+            closeBrowser(id, clearPersistentData = true)
             getSystemService(NotificationManager::class.java)
                 .cancel(SessionNotificationRouting.stableId(id))
         }

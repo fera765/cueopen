@@ -2,6 +2,7 @@ package dev.cueopen.app.browser
 
 import android.annotation.SuppressLint
 import android.content.Context
+import android.os.Bundle
 import android.graphics.Bitmap
 import android.view.ViewGroup
 import android.webkit.WebChromeClient
@@ -9,6 +10,9 @@ import android.webkit.WebResourceRequest
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import androidx.webkit.ProfileStore
+import androidx.webkit.WebViewCompat
+import androidx.webkit.WebViewFeature
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -29,11 +33,15 @@ import org.json.JSONTokener
  * ferramentas do agente (navigate/read/click/type/scroll). O usuário vê ao vivo o que o agente faz
  * e pode assumir o controle tocando na página.
  */
-class BrowserHost(private val appCtx: Context) {
+class BrowserHost(private val appCtx: Context, sessionId: String = "__legacy__") {
+
+    private val persistence = BrowserSessionPersistence(appCtx, sessionId)
+    private val profileName = persistence.profileName
 
     data class Ui(val url: String = "", val title: String = "", val loading: Boolean = false, val progress: Int = 0,
                   val canBack: Boolean = false, val canForward: Boolean = false, val agentControl: Boolean = false,
-                  val desktop: Boolean = false, val online: Boolean = true, val netType: String = "", val darkPages: Boolean = false)
+                  val desktop: Boolean = false, val online: Boolean = true, val netType: String = "", val darkPages: Boolean = false,
+                  val profileIsolated: Boolean = true)
 
     /** Uma requisição vista pelo WebView (painel Rede + ferramenta browser_network). */
     data class NetEntry(val id: Long, val url: String, val method: String, val type: String, val mainFrame: Boolean,
@@ -147,7 +155,25 @@ class BrowserHost(private val appCtx: Context) {
         // à sessão do agente e à UI; destruí-la durante uma navegação cancelava o carregamento
         // e fazia o site parecer travado até o usuário abrir o Browser.
         _view?.let { return it }
-        return createView(ctx, false).also { view -> _view = view; ensureSized(view); view.loadUrl(HOME) }
+        return createView(ctx, false).also { view ->
+            _view = view
+            ensureSized(view)
+            restoreViewState(view)
+        }
+    }
+
+    /** Restaura navegação e preferências deste chat; usa a URL simples se o Bundle não puder ser lido. */
+    private fun restoreViewState(view: WebView) {
+        val saved = persistence.load()
+        if (saved.desktop) view.settings.userAgentString = DESKTOP_UA
+        darkPages = saved.darkPages
+        applyColorScheme(view, darkPages)
+        _ui.value = _ui.value.copy(desktop = saved.desktop, darkPages = saved.darkPages)
+        val restored = runCatching {
+            persistence.loadWebViewState()?.let { view.restoreState(it) != null } ?: false
+        }.getOrDefault(false)
+        if (restored) sync(view, loading = view.progress < 100)
+        else view.loadUrl(saved.url.ifBlank { HOME })
     }
 
     /**
@@ -226,6 +252,14 @@ class BrowserHost(private val appCtx: Context) {
     @SuppressLint("SetJavaScriptEnabled")
     private fun createView(ctx: Context, agentMode: Boolean): WebView {
         val v = WebView(ctx)
+        val isolated = runCatching {
+            if (!WebViewFeature.isFeatureSupported(WebViewFeature.MULTI_PROFILE)) false
+            else {
+                WebViewCompat.setProfile(v, profileName)
+                WebViewCompat.getProfile(v)?.name == profileName
+            }
+        }.getOrDefault(false)
+        _ui.value = _ui.value.copy(profileIsolated = isolated)
         with(v.settings) {
             javaScriptEnabled = true
             domStorageEnabled = true
@@ -270,6 +304,7 @@ class BrowserHost(private val appCtx: Context) {
                 // primeiro quadro visível permite inspecionar o DOM sem esperar 45 s, mas não é
                 // tratado como prontidão funcional.
                 pageDone?.complete(navigationStatus.pageCommitted(url))
+                persistWebViewState(view)
             }
             override fun onPageFinished(view: WebView, url: String) {
                 sync(view, loading = false)
@@ -277,6 +312,7 @@ class BrowserHost(private val appCtx: Context) {
                 collectTimings(view)
                 installSnapshotInstrumentation(view)
                 installNetworkInstrumentation(view)
+                persistWebViewState(view)
             }
             override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): android.webkit.WebResourceResponse? {
                 // só observa (não intercepta): alimenta o painel de rede
@@ -364,18 +400,60 @@ class BrowserHost(private val appCtx: Context) {
     }
 
     private fun sync(v: WebView, loading: Boolean = _ui.value.loading) {
-        _ui.value = _ui.value.copy(url = v.url ?: "", title = v.title ?: "", loading = loading,
+        val next = _ui.value.copy(url = v.url ?: "", title = v.title ?: "", loading = loading,
             canBack = v.canGoBack(), canForward = v.canGoForward())
+        _ui.value = next
+        runCatching { persistence.saveMetadata(BrowserSavedState(next.url, next.desktop, next.darkPages)) }
     }
 
     fun home() { _view?.loadUrl(HOME) }
 
+    /** Chamado no onStop da Activity; o perfil e o histórico são persistidos antes de o processo sair. */
+    fun persistState() {
+        val v = _view ?: return
+        if (android.os.Looper.myLooper() == android.os.Looper.getMainLooper()) {
+            persistWebViewState(v)
+            runCatching { WebViewCompat.getProfile(v).cookieManager.flush() }
+        } else {
+            android.os.Handler(android.os.Looper.getMainLooper()).post { persistState() }
+        }
+    }
+
+    private fun persistWebViewState(view: WebView) {
+        val state = BrowserSavedState(view.url ?: _ui.value.url, _ui.value.desktop, _ui.value.darkPages)
+        runCatching { persistence.saveMetadata(state) }
+        val bundle = Bundle()
+        runCatching {
+            if (view.saveState(bundle) != null) persistence.saveWebViewState(bundle)
+        }
+    }
+
     /** Libera os WebViews (usado ao encerrar uma sessão isolada de subagente). */
-    fun dispose() {
+    fun dispose(clearPersistentState: Boolean = false) {
         android.os.Handler(android.os.Looper.getMainLooper()).post {
+            if (!clearPersistentState) _view?.let { persistWebViewState(it) }
             runCatching { _view?.destroy() }
             runCatching { _agentView?.destroy() }
             _view = null; _agentView = null
+            if (clearPersistentState) clearSessionData(appCtx, profileName, persistence)
+        }
+    }
+
+    companion object {
+        const val HOME = "file:///android_asset/start/index.html"
+        private const val DESKTOP_UA = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36"
+
+        fun clearSessionData(context: Context, sessionId: String) {
+            val persistence = BrowserSessionPersistence(context, sessionId)
+            clearSessionData(context, persistence.profileName, persistence)
+        }
+
+        private fun clearSessionData(context: Context, profileName: String, persistence: BrowserSessionPersistence) {
+            persistence.clearFiles()
+            runCatching {
+                if (WebViewFeature.isFeatureSupported(WebViewFeature.MULTI_PROFILE))
+                    ProfileStore.getInstance().deleteProfile(profileName)
+            }
         }
     }
 
@@ -390,6 +468,7 @@ class BrowserHost(private val appCtx: Context) {
         darkPages = on
         _view?.let { applyColorScheme(it, on); it.reload() }
         _ui.value = _ui.value.copy(darkPages = on)
+        runCatching { persistence.saveMetadata(BrowserSavedState(_ui.value.url, _ui.value.desktop, on)) }
     }
 
     private fun applyColorScheme(v: WebView, dark: Boolean) {
@@ -413,12 +492,11 @@ class BrowserHost(private val appCtx: Context) {
     /** Alterna entre versão mobile e desktop dos sites. */
     fun setDesktop(on: Boolean) {
         val v = _view ?: return
-        v.settings.userAgentString = if (on)
-            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36"
-        else defaultUa
+        v.settings.userAgentString = if (on) DESKTOP_UA else defaultUa
         v.settings.useWideViewPort = true
         v.settings.loadWithOverviewMode = true
         _ui.value = _ui.value.copy(desktop = on)
+        runCatching { persistence.saveMetadata(BrowserSavedState(_ui.value.url, on, _ui.value.darkPages)) }
         v.reload()
     }
 
@@ -457,8 +535,6 @@ class BrowserHost(private val appCtx: Context) {
 
     fun consoleSummary(): String = _console.value.takeLast(60).joinToString("\n") { "[${it.level}] ${it.message.take(300)} (${it.source})" }
         .ifBlank { "Console vazio." }
-
-    companion object { const val HOME = "file:///android_asset/start/index.html" }
 
     fun setAgentControl(on: Boolean) { _ui.value = _ui.value.copy(agentControl = on) }
 

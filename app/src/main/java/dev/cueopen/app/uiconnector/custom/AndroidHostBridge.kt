@@ -37,7 +37,7 @@ class AndroidHostBridge(
         fun deleteValidation(id: String) {
             val sid = legacyValidationSession(id)
             runCatching { CueApp.instance.terminals.close(sid) }
-            runCatching { CueApp.instance.closeBrowser(sid) }
+            runCatching { CueApp.instance.closeBrowser(sid, clearPersistentData = true) }
             runCatching { CueApp.instance.sandbox.deleteEnvironment(sid) }
         }
     }

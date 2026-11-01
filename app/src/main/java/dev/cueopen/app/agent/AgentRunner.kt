@@ -3345,7 +3345,7 @@ class AgentRunner(
             // roda em modo isolado e, ao terminar, devolve o controle ao agente principal sem deixar
             // sessão de terminal/WebView viva consumindo recursos.
             runCatching { terminals.close(child.id) }
-            runCatching { dev.cueopen.app.CueApp.instance.closeBrowser(child.id) }
+            runCatching { dev.cueopen.app.CueApp.instance.closeBrowser(child.id, clearPersistentData = clean) }
             if (clean) {
                 if (gitRoot != null && baseSha != null) {
                     terminal.runAgentCommand(
