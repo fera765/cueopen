@@ -21,12 +21,20 @@ internal object TerminalRecoveryPolicy {
         return if (insideSession && target.isDirectory) candidate else fallback
     }
 
-    /** Escreve o histórico como texto diretamente no emulador; não passa pelo stdin do shell. */
+    /** Limita o histórico sem começar no meio de um comando/linha. */
+    fun boundedTranscript(snapshot: String): String {
+        val normalized = snapshot.replace("\r\n", "\n").replace('\r', '\n')
+        if (normalized.length <= MAX_TRANSCRIPT_CHARS) return normalized.trimEnd('\n')
+        val boundary = normalized.indexOf('\n', normalized.length - MAX_TRANSCRIPT_CHARS)
+        if (boundary < 0) return ""
+        return normalized.substring(boundary + 1).trimEnd('\n')
+    }
+
+    /** Produz texto simples para o stdout da nova shell, nunca como entrada de comandos. */
     fun transcriptBytes(snapshot: String): ByteArray? {
-        val bounded = snapshot.takeLast(MAX_TRANSCRIPT_CHARS).trimEnd('\r', '\n')
+        val bounded = boundedTranscript(snapshot)
         if (bounded.isBlank()) return null
-        val replay = bounded.replace("\r\n", "\n").replace('\r', '\n')
-            .replace("\n", "\r\n") + "\r\n"
+        val replay = bounded.replace("\n", "\r\n") + "\r\n"
         return replay.toByteArray(StandardCharsets.UTF_8)
     }
 }

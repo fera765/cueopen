@@ -24,6 +24,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import java.io.File
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicLong
 
 /**
  * Terminais reais, iguais aos do Termux: cada tarefa tem um TerminalSession (PTY nativo via JNI,
@@ -42,10 +43,12 @@ class TerminalManager(private val ctx: Context, private val sandbox: Sandbox) {
     inner class Session(val key: String, private val cwd: String) {
         private val snapshotFile = File(sandbox.publicFor(key), ".cue/terminal_snapshot.txt")
         private val savedTranscript = runCatching { snapshotFile.takeIf { it.isFile }?.readText().orEmpty() }
-            .getOrDefault("").takeLast(TerminalRecoveryPolicy.MAX_TRANSCRIPT_CHARS)
-        val restoredAfterPreviousProcess: Boolean = savedTranscript.isNotBlank()
+            .getOrDefault("").let { TerminalRecoveryPolicy.boundedTranscript(it) }
+        private var transcriptReplayPending = savedTranscript.isNotBlank()
+        private val restoreFile = File(sandbox.publicFor(key), ".cue/terminal_restore.txt")
         private var snapshotJob: Job? = null
         private val snapshotLock = Any()
+        private val snapshotVersion = AtomicLong(0)
         @Volatile var view: TerminalView? = null
         val agentLock = Mutex()
         private val _alive = MutableStateFlow(false)
@@ -88,6 +91,7 @@ class TerminalManager(private val ctx: Context, private val sandbox: Sandbox) {
         fun start() {
             check(Looper.myLooper() == Looper.getMainLooper())
             if (_alive.value || startJob?.isActive == true) return
+            val replayTranscript = transcriptReplayPending
             val result = kotlinx.coroutines.CompletableDeferred<Boolean>()
             startResult = result
             promptReady = kotlinx.coroutines.CompletableDeferred()
@@ -98,6 +102,8 @@ class TerminalManager(private val ctx: Context, private val sandbox: Sandbox) {
                     if (!sandbox.ensureEnvironment(key)) false else {
                         File(sandbox.publicFor(key), cwd.removePrefix("/root/")).mkdirs()
                         installShellHook(key)
+                        if (replayTranscript) runCatching { stageTranscriptForReplay() }
+                            .onFailure { android.util.Log.e("CueOpenTerminal", "Falha ao preparar o histórico visual.", it) }
                         true
                     }
                 }.getOrElse {
@@ -113,16 +119,17 @@ class TerminalManager(private val ctx: Context, private val sandbox: Sandbox) {
                     val launchCwd = savedWorkingDirectory()
                     withContext(Dispatchers.Main) {
                         if (!_alive.value) {
-                            val shell = "cd ${shQuote(launchCwd)} 2>/dev/null || cd ${shQuote(cwd)} 2>/dev/null; if command -v bash >/dev/null 2>&1; then exec bash --rcfile /root/.bashrc -i; else exec sh -i; fi"
+                            val replay = if (replayTranscript) "if [ -s /root/.cue/terminal_restore.txt ]; then cat /root/.cue/terminal_restore.txt; rm -f /root/.cue/terminal_restore.txt; fi; " else ""
+                            val shell = "cd ${shQuote(launchCwd)} 2>/dev/null || cd ${shQuote(cwd)} 2>/dev/null; $replay if command -v bash >/dev/null 2>&1; then exec bash --rcfile /root/.bashrc -i; else exec sh -i; fi"
                             term = TerminalSession(
                                 "/system/bin/sh", sandbox.prefix.absolutePath,
                                 arrayOf("sh", File(sandbox.prefix, "init-sandbox.sh").absolutePath, "/bin/sh", "-c", shell),
                                 sandbox.envArray(key), 5000, client,
                             )
+                            transcriptReplayPending = false
                             _alive.value = true
                             val v = view
                             if (v != null) v.attachSession(term) else term.updateSize(100, 36, 12, 24)
-                            restoreTranscript(term, savedTranscript)
                         }
                     }
                     result.complete(_alive.value)
@@ -177,9 +184,19 @@ class TerminalManager(private val ctx: Context, private val sandbox: Sandbox) {
             )
         }
 
-        private fun restoreTranscript(session: TerminalSession, snapshot: String) {
-            val bytes = TerminalRecoveryPolicy.transcriptBytes(snapshot) ?: return
-            runCatching { session.emulator?.append(bytes, bytes.size) }
+        private fun stageTranscriptForReplay() {
+            val bytes = TerminalRecoveryPolicy.transcriptBytes(savedTranscript) ?: return
+            restoreFile.parentFile?.mkdirs()
+            val atomic = AtomicFile(restoreFile)
+            val output = atomic.startWrite()
+            try {
+                output.write(bytes)
+                output.fd.sync()
+                atomic.finishWrite(output)
+            } catch (t: Throwable) {
+                atomic.failWrite(output)
+                throw t
+            }
         }
 
         private fun queueTranscriptSnapshot(session: TerminalSession) {
@@ -188,12 +205,13 @@ class TerminalManager(private val ctx: Context, private val sandbox: Sandbox) {
                 return
             }
             val text = runCatching { session.emulator?.screen?.transcriptTextWithFullLinesJoined.orEmpty() }
-                .getOrDefault("").takeLast(TerminalRecoveryPolicy.MAX_TRANSCRIPT_CHARS)
+                .getOrDefault("").let { TerminalRecoveryPolicy.boundedTranscript(it) }
             if (text.isBlank()) return
             snapshotJob?.cancel()
+            val version = snapshotVersion.incrementAndGet()
             snapshotJob = startupScope.launch {
                 delay(250)
-                runCatching { writeTranscriptSnapshot(text) }
+                runCatching { writeTranscriptSnapshot(text, version) }
                     .onFailure { android.util.Log.e("CueOpenTerminal", "Falha ao salvar o histórico do terminal.", it) }
             }
         }
@@ -203,19 +221,23 @@ class TerminalManager(private val ctx: Context, private val sandbox: Sandbox) {
                 main.post { persistTranscriptNow(session) }
                 return
             }
+            snapshotVersion.incrementAndGet()
+            snapshotJob?.cancel()
+            snapshotJob = null
             val text = runCatching { session.emulator?.screen?.transcriptTextWithFullLinesJoined.orEmpty() }
-                .getOrDefault("").takeLast(TerminalRecoveryPolicy.MAX_TRANSCRIPT_CHARS)
+                .getOrDefault("").let { TerminalRecoveryPolicy.boundedTranscript(it) }
             if (text.isNotBlank()) runCatching { writeTranscriptSnapshot(text) }
                 .onFailure { android.util.Log.e("CueOpenTerminal", "Falha ao salvar o histórico do terminal.", it) }
         }
 
-        private fun writeTranscriptSnapshot(text: String) {
+        private fun writeTranscriptSnapshot(text: String, version: Long? = null) {
             synchronized(snapshotLock) {
+                if (version != null && version != snapshotVersion.get()) return
                 snapshotFile.parentFile?.mkdirs()
                 val atomic = AtomicFile(snapshotFile)
                 val output = atomic.startWrite()
                 try {
-                    output.write(text.takeLast(TerminalRecoveryPolicy.MAX_TRANSCRIPT_CHARS).toByteArray(Charsets.UTF_8))
+                    output.write(TerminalRecoveryPolicy.boundedTranscript(text).toByteArray(Charsets.UTF_8))
                     output.fd.sync()
                     atomic.finishWrite(output)
                 } catch (t: Throwable) {

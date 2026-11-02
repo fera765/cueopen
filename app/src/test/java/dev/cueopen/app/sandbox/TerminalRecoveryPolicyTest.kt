@@ -28,11 +28,16 @@ class TerminalRecoveryPolicyTest {
         parent.deleteRecursively()
     }
 
-    @Test fun transcriptIsReplayedToTheEmulatorAsTextAndBounded() {
+    @Test fun transcriptReplayIsPlainTextWithLineBreaksAndBounded() {
         val bytes = TerminalRecoveryPolicy.transcriptBytes("resultado anterior")
         assertNotNull(bytes)
         assertEquals("resultado anterior\r\n", String(bytes!!, Charsets.UTF_8))
         assertFalse(String(bytes, Charsets.UTF_8).contains("\u001b"))
         assertEquals(null, TerminalRecoveryPolicy.transcriptBytes(" \n  "))
+    }
+
+    @Test fun boundedTranscriptDropsPartialLeadingLine() {
+        val snapshot = "prefixo" + "x".repeat(TerminalRecoveryPolicy.MAX_TRANSCRIPT_CHARS) + "\ncomando inteiro\nresultado"
+        assertEquals("comando inteiro\nresultado", TerminalRecoveryPolicy.boundedTranscript(snapshot))
     }
 }

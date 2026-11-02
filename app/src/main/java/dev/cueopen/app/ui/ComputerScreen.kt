@@ -106,19 +106,8 @@ fun ComputerScreen(nav: NavController, sessionId: String, initialTab: String?) {
 
 @Composable
 private fun TerminalPane(sessionId: String) {
-    val terminalSession = CueApp.instance.terminals.get(sessionId, "/root/workspace")
     Box(Modifier.fillMaxSize().padding(8.dp).clip(RoundedCornerShape(16.dp))) {
-        Column(Modifier.fillMaxSize()) {
-            if (terminalSession.restoredAfterPreviousProcess) {
-                Text(
-                    "Histórico restaurado. A shell anterior foi reiniciada; comandos e processos em execução não continuam.",
-                    Modifier.fillMaxWidth().background(Color(0xFF24262D)).padding(horizontal = 10.dp, vertical = 8.dp),
-                    color = Color(0xFFD0D0D0),
-                    fontSize = 12.sp,
-                )
-            }
-            TerminalView(key = sessionId, cwd = "/root/workspace", modifier = Modifier.weight(1f).fillMaxWidth())
-        }
+        TerminalView(key = sessionId, cwd = "/root/workspace", modifier = Modifier.fillMaxSize())
     }
 }
 
