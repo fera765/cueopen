@@ -114,6 +114,65 @@ public final class TerminalBuffer {
         return getSelectedText(0, -getActiveTranscriptRows(), mColumns, mScreenRows, true, true).trim();
     }
 
+    /**
+     * Export the visible transcript while preserving cell colors and text effects.
+     * Only printable characters, line breaks and generated SGR sequences are emitted;
+     * cursor, OSC, clipboard and other control sequences are never replayed.
+     */
+    public String getTranscriptTextWithFullLinesJoinedAndStyles() {
+        StringBuilder builder = new StringBuilder();
+        long previousStyle = Long.MIN_VALUE;
+        int firstRow = -getActiveTranscriptRows();
+        int lastRow = mScreenRows - 1;
+
+        for (int row = firstRow; row <= lastRow; row++) {
+            TerminalRow lineObject = mLines[externalToInternalRow(row)];
+            int x2Index = lineObject.getSpaceUsed();
+            int lastPrintingCharIndex = -1;
+            boolean rowLineWrap = getLineWrap(row);
+            if (rowLineWrap) {
+                lastPrintingCharIndex = x2Index - 1;
+            } else {
+                for (int i = 0; i < x2Index; i++) {
+                    if (lineObject.mText[i] != ' ') lastPrintingCharIndex = i;
+                }
+            }
+
+            if (lastPrintingCharIndex >= 0) {
+                for (int column = 0; column < mColumns;) {
+                    int start = lineObject.findStartOfColumn(column);
+                    if (start > lastPrintingCharIndex) break;
+
+                    int codePoint = Character.codePointAt(lineObject.mText, start);
+                    int width = Math.max(1, WcWidth.width(codePoint));
+                    int endColumn = Math.min(mColumns, column + width);
+                    int end = lineObject.findStartOfColumn(endColumn);
+                    if (end <= start) end = start + Character.charCount(codePoint);
+                    end = Math.min(end, lastPrintingCharIndex + 1);
+
+                    long style = lineObject.getStyle(column);
+                    if (style != previousStyle) {
+                        builder.append(TerminalAnsiStyle.toSgr(style));
+                        previousStyle = style;
+                    }
+                    for (int i = start; i < end; i++) {
+                        char ch = lineObject.mText[i];
+                        if (!Character.isISOControl(ch)) builder.append(ch);
+                    }
+                    column += width;
+                }
+            }
+
+            boolean lineFillsWidth = lastPrintingCharIndex == x2Index - 1;
+            if (row < lastRow && !lineFillsWidth) builder.append('\n');
+            if (previousStyle != Long.MIN_VALUE && previousStyle != TextStyle.NORMAL) {
+                builder.append("\u001b[0m");
+                previousStyle = TextStyle.NORMAL;
+            }
+        }
+        return builder.toString().trim();
+    }
+
     public String getSelectedText(int selX1, int selY1, int selX2, int selY2) {
         return getSelectedText(selX1, selY1, selX2, selY2, true);
     }

@@ -28,12 +28,20 @@ class TerminalRecoveryPolicyTest {
         parent.deleteRecursively()
     }
 
-    @Test fun transcriptReplayIsPlainTextWithLineBreaksAndBounded() {
-        val bytes = TerminalRecoveryPolicy.transcriptBytes("resultado anterior")
+    @Test fun transcriptReplayPreservesSafeSgrWithLineBreaksAndBounded() {
+        val bytes = TerminalRecoveryPolicy.transcriptBytes("\u001b[0;38;5;209mcue\u001b[0m\nresultado")
         assertNotNull(bytes)
-        assertEquals("resultado anterior\r\n", String(bytes!!, Charsets.UTF_8))
-        assertFalse(String(bytes, Charsets.UTF_8).contains("\u001b"))
+        assertEquals("\u001b[0;38;5;209mcue\u001b[0m\r\nresultado\u001b[0m\r\n", String(bytes!!, Charsets.UTF_8))
         assertEquals(null, TerminalRecoveryPolicy.transcriptBytes(" \n  "))
+    }
+
+    @Test fun transcriptReplayDropsNonSgrControlsAndKeepsTextNonExecutable() {
+        val bytes = TerminalRecoveryPolicy.transcriptBytes("antes\u001b]52;c;clipboard\u0007\u001b[2J\u001b[0;1m<strong>\u001b[0m")
+        assertNotNull(bytes)
+        val replay = String(bytes!!, Charsets.UTF_8)
+        assertEquals("antes\u001b[0;1m<strong>\u001b[0m\u001b[0m\r\n", replay)
+        assertFalse(replay.contains("clipboard"))
+        assertFalse(replay.contains("\u001b[2J"))
     }
 
     @Test fun boundedTranscriptDropsPartialLeadingLine() {

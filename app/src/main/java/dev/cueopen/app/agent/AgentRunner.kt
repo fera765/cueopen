@@ -1499,6 +1499,9 @@ class AgentRunner(
             }, listOf("summary", "settings_json")))
             if (agent?.useBrowser != false) {
                 add(tool("browser_navigate", "Abre uma página pública ou busca para consulta. Não use páginas que exijam login nem URLs que acionem mudanças.", buildJsonObject { put("url", str("URL pública ou termos de busca")) }, listOf("url")))
+                add(tool("browser_new_tab", "Cria uma aba isolada dentro do browser desta conversa; opcionalmente abre uma URL pública.", buildJsonObject { put("url", str("URL pública opcional")) }))
+                add(tool("browser_select_tab", "Seleciona uma aba pelo id retornado por browser_read/browser_new_tab.", buildJsonObject { put("tab_id", str("Id da aba nesta conversa")) }, listOf("tab_id")))
+                add(tool("browser_close_tab", "Fecha somente uma aba desta conversa; a última aba não pode ser fechada.", buildJsonObject { put("tab_id", str("Id da aba nesta conversa")) }, listOf("tab_id")))
                 add(tool("browser_snapshot", "Lê a página atual: headings, texto, links e controles; não interage com eles.", buildJsonObject { put("max_chars", int("Limite de caracteres (padrão 9000)")) }))
                 add(tool("browser_read", "Lê o texto e os elementos da página atual, sem clicar ou preencher campos.", buildJsonObject {}))
                 add(tool("browser_scroll", "Rola a página atual sem ativar controles.", buildJsonObject { put("direction", str("up ou down")) }))
@@ -1545,6 +1548,9 @@ class AgentRunner(
         add(tool("file_list", "Lista diretórios do workspace da tarefa ou, somente para leitura, de /root/connectors/<id>/workspace/.", buildJsonObject { put("path", str("Diretório relativo ao workspace; ou /root/workspace/ ou /root/connectors/<id>/workspace/")) }))
         if (web) {
             add(tool("browser_navigate", "Abre uma URL (ou termos de busca) no browser. Erro HTTP 4xx/5xx e falhas de rede na página principal são erros, não conteúdo válido. Para localhost, valide processo, porta e health HTTP no mesmo ambiente de rede do WebView antes de navegar; CONNECTION_REFUSED exige corrigir listener/endereço, não repetir a chamada. PARTIAL significa que há texto mas o carregamento não foi confirmado, não que a aplicação esteja pronta; verifique DOM/console e um sinal funcional.", buildJsonObject { put("url", str("URL ou busca")) }, listOf("url")))
+            add(tool("browser_new_tab", "Cria uma aba no browser desta conversa. Opcionalmente abre uma URL pública; o resultado informa o id da aba.", buildJsonObject { put("url", str("URL pública opcional")) }))
+            add(tool("browser_select_tab", "Seleciona uma aba pelo id informado por browser_read/browser_new_tab. Ferramentas seguintes operam somente nessa aba.", buildJsonObject { put("tab_id", str("Id da aba")) }, listOf("tab_id")))
+            add(tool("browser_close_tab", "Fecha a aba informada desta conversa. A última aba não pode ser removida.", buildJsonObject { put("tab_id", str("Id da aba")) }, listOf("tab_id")))
             add(tool("browser_snapshot", "Gera snapshot semântico da página atual com headings, conteúdo, links e controles nomeados; refs/índices expiram após navegação.", buildJsonObject { put("max_chars", int("Limite de caracteres (padrão 9000)")) }))
             add(tool("browser_read", "Compatibilidade: lê o snapshot e o texto da página atual.", buildJsonObject {}))
             add(tool("browser_click", "Clica no elemento [índice] de browser_read. Os índices expiram quando o DOM muda: leia a página imediatamente antes do clique; se o elemento não existir, releia e use um índice novo, sem repetir o antigo.", buildJsonObject { put("index", int("Índice")) }, listOf("index")))
@@ -2255,6 +2261,9 @@ class AgentRunner(
             "file_list" -> "Listando arquivos" to Activity.Kind.EDITOR
             "multi_agents" -> "Delegando subtarefas em paralelo" to Activity.Kind.THINKING
             "browser_navigate" -> "Navegando" to Activity.Kind.BROWSER
+            "browser_new_tab" -> "Abrindo nova aba" to Activity.Kind.BROWSER
+            "browser_select_tab" -> "Trocando de aba" to Activity.Kind.BROWSER
+            "browser_close_tab" -> "Fechando aba" to Activity.Kind.BROWSER
             "browser_read", "browser_snapshot" -> "Lendo snapshot da página" to Activity.Kind.BROWSER
             "browser_click" -> "Clicando" to Activity.Kind.BROWSER
             "browser_type" -> "Digitando" to Activity.Kind.BROWSER
@@ -2292,6 +2301,8 @@ class AgentRunner(
             "shell" -> s("command")
             "file_write", "file_edit", "file_read", "file_list" -> s("path").ifBlank { cwd }
             "browser_navigate" -> s("url")
+            "browser_new_tab" -> s("url")
+            "browser_select_tab", "browser_close_tab" -> s("tab_id")
             "browser_type" -> s("text")
             "browser_click" -> "#${i("index")}"
             "remember", "memory_save" -> s("fact")
@@ -2824,6 +2835,9 @@ class AgentRunner(
                         }
                     }
                 }
+                "browser_new_tab" -> browserFor(sessionId).newTab(SecretVault.resolve(sessionId, s("url")))
+                "browser_select_tab" -> browserFor(sessionId).selectTabForAgent(s("tab_id"))
+                "browser_close_tab" -> browserFor(sessionId).closeTabForAgent(s("tab_id"))
                 "browser_read", "browser_snapshot" -> browserFor(sessionId).read((i("max_chars") ?: 9000).coerceIn(1000, 20000))
                 "browser_click" -> browserFor(sessionId).click(i("index") ?: -1)
                 "browser_type" -> browserFor(sessionId).type(i("index") ?: -1, SecretVault.resolve(sessionId, s("text")), b("submit"))

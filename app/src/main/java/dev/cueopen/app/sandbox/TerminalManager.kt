@@ -204,7 +204,7 @@ class TerminalManager(private val ctx: Context, private val sandbox: Sandbox) {
                 main.post { queueTranscriptSnapshot(session) }
                 return
             }
-            val text = runCatching { session.emulator?.screen?.transcriptTextWithFullLinesJoined.orEmpty() }
+            val text = runCatching { session.emulator?.screen?.transcriptTextWithFullLinesJoinedAndStyles.orEmpty() }
                 .getOrDefault("").let { TerminalRecoveryPolicy.boundedTranscript(it) }
             if (text.isBlank()) return
             snapshotJob?.cancel()
@@ -224,7 +224,7 @@ class TerminalManager(private val ctx: Context, private val sandbox: Sandbox) {
             snapshotVersion.incrementAndGet()
             snapshotJob?.cancel()
             snapshotJob = null
-            val text = runCatching { session.emulator?.screen?.transcriptTextWithFullLinesJoined.orEmpty() }
+            val text = runCatching { session.emulator?.screen?.transcriptTextWithFullLinesJoinedAndStyles.orEmpty() }
                 .getOrDefault("").let { TerminalRecoveryPolicy.boundedTranscript(it) }
             if (text.isNotBlank()) runCatching { writeTranscriptSnapshot(text) }
                 .onFailure { android.util.Log.e("CueOpenTerminal", "Falha ao salvar o histórico do terminal.", it) }

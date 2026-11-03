@@ -272,6 +272,35 @@ fun BrowserPane(sessionId: String) {
                 }
             }
         }
+        Row(Modifier.fillMaxWidth().height(44.dp), verticalAlignment = Alignment.CenterVertically) {
+            Row(Modifier.weight(1f).horizontalScroll(rememberScrollState()).padding(start = 8.dp), horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalAlignment = Alignment.CenterVertically) {
+                ui.tabs.forEach { browserTab ->
+                    val active = browserTab.id == ui.selectedTabId
+                    Row(
+                        Modifier.clip(CircleShape).background(if (active) c.accentSoft else c.surface2)
+                            .clickable { browser.selectTab(browserTab.id) }
+                            .padding(start = 12.dp, end = 2.dp, top = 2.dp, bottom = 2.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(
+                            browserTab.title.ifBlank { browserTab.url.substringAfterLast('/').ifBlank { "Nova aba" }.take(18) },
+                            color = if (active) c.accent else c.ink2,
+                            fontSize = 12.sp,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.widthIn(max = 128.dp),
+                        )
+                        IconButton(onClick = { browser.closeTab(browserTab.id) }, enabled = ui.tabs.size > 1, modifier = Modifier.size(32.dp)) {
+                            Icon(Icons.Rounded.Close, "Fechar aba", Modifier.size(15.dp), tint = if (active) c.accent else c.ink3)
+                        }
+                    }
+                }
+            }
+            IconButton(onClick = { browser.createTab(ctx) }, enabled = ui.tabs.size < dev.cueopen.app.browser.BrowserHost.MAX_TABS) {
+                Icon(Icons.Rounded.Add, "Nova aba", tint = c.accent)
+            }
+        }
         // status de conectividade
         if (!ui.online) Row(Modifier.fillMaxWidth().background(c.err.copy(alpha = .15f)).padding(horizontal = 16.dp, vertical = 4.dp)) {
             Text("Sem conexão com a internet", fontSize = 12.sp, color = c.err)
@@ -286,13 +315,15 @@ fun BrowserPane(sessionId: String) {
             }
             if (!ui.profileIsolated) {
                 Text(
-                    "Este WebView não oferece perfis separados; cookies e dados dos sites podem ser compartilhados entre chats.",
+                    "Este WebView não oferece perfis isolados. Por privacidade, páginas externas ficam bloqueadas para evitar compartilhamento de cookies entre chats.",
                     Modifier.fillMaxWidth().background(c.accentSoft).padding(horizontal = 12.dp, vertical = 8.dp),
                     color = c.ink2,
                     fontSize = 12.sp,
                 )
             }
-            AndroidView(factory = { c2 -> browser.view(c2) }, modifier = Modifier.fillMaxWidth().weight(1f))
+            key(ui.selectedTabId) {
+                AndroidView(factory = { c2 -> browser.view(c2) }, modifier = Modifier.fillMaxWidth().weight(1f))
+            }
         if (devtools) DevToolsPanel(browser, Modifier.fillMaxWidth().height(300.dp))
     }
 }
@@ -308,10 +339,12 @@ private fun DevToolsPanel(browser: dev.cueopen.app.browser.BrowserHost, modifier
     var selected by remember { mutableStateOf<dev.cueopen.app.browser.BrowserHost.NetEntry?>(null) }
     val c = Cue.c
     Column(modifier.background(c.surface).border(1.dp, c.line)) {
+        val currentNet = net.filter { it.tabId == ui.selectedTabId }
+        val currentConsole = console.filter { it.tabId == ui.selectedTabId }
         Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-            Chip("Rede (${net.size})", tab == "net") { tab = "net" }
+            Chip("Rede (${currentNet.size})", tab == "net") { tab = "net" }
             Spacer(Modifier.width(6.dp))
-            Chip("Console (${console.size})", tab == "console") { tab = "console" }
+            Chip("Console (${currentConsole.size})", tab == "console") { tab = "console" }
             Spacer(Modifier.weight(1f))
             Text(ui.netType, fontSize = 11.sp, color = if (ui.online) c.ok else c.err)
             IconButton({ browser.clearNet() }) { Icon(Icons.Rounded.DeleteSweep, "Limpar", Modifier.size(18.dp)) }
@@ -323,8 +356,8 @@ private fun DevToolsPanel(browser: dev.cueopen.app.browser.BrowserHost, modifier
                         fontSize = 11.sp, color = if (type == k) c.bg else c.ink)
                 }
             }
-            val list = net.filter { type == "all" || it.type == type }.asReversed()
-            val sel = selected?.let { chosen -> net.firstOrNull { it.id == chosen.id } ?: chosen }
+            val list = currentNet.filter { type == "all" || it.type == type }.asReversed()
+            val sel = selected?.takeIf { it.tabId == ui.selectedTabId }?.let { chosen -> currentNet.firstOrNull { it.id == chosen.id } ?: chosen }
             if (sel != null) {
                 Column(Modifier.fillMaxWidth().padding(10.dp).verticalScroll(rememberScrollState())) {
                     Text("← voltar", color = c.accent, fontSize = 12.sp, modifier = Modifier.clickable { selected = null })
@@ -356,7 +389,7 @@ private fun DevToolsPanel(browser: dev.cueopen.app.browser.BrowserHost, modifier
             }
         } else {
             LazyColumn(Modifier.fillMaxSize().padding(horizontal = 8.dp)) {
-                items(console.asReversed()) { m ->
+                items(currentConsole.asReversed()) { m ->
                     Text("[${m.level}] ${m.message}", fontFamily = FontFamily.Monospace, fontSize = 11.sp,
                         color = when (m.level) { "error" -> c.err; "warning" -> c.warn; else -> c.ink2 }, modifier = Modifier.padding(vertical = 2.dp))
                 }

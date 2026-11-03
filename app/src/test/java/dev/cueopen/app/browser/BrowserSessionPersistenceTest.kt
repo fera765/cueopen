@@ -12,4 +12,11 @@ class BrowserSessionPersistenceTest {
         assertNotEquals(first, BrowserProfileIdentity.profileName("chat-b"))
         assertTrue(first.startsWith("fluwy_chat_"))
     }
+
+    @Test fun tabStateKeyIsStableUniqueAndPathSafe() {
+        val first = BrowserTabPersistenceIdentity.stateKey("tab-a")
+        assertEquals(first, BrowserTabPersistenceIdentity.stateKey("tab-a"))
+        assertNotEquals(first, BrowserTabPersistenceIdentity.stateKey("../tab-a"))
+        assertTrue(first.matches(Regex("[a-f0-9]{32}")))
+    }
 }

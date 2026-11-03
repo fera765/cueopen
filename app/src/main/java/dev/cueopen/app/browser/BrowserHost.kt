@@ -29,26 +29,47 @@ import org.json.JSONObject
 import org.json.JSONTokener
 
 /**
- * Browser do agente: UM WebView compartilhado entre a UI (aba Browser do computador) e as
- * ferramentas do agente (navigate/read/click/type/scroll). O usuário vê ao vivo o que o agente faz
- * e pode assumir o controle tocando na página.
+ * Browser do agente: múltiplas abas WebView isoladas por conversa. A aba ativa é compartilhada
+ * entre a UI e as ferramentas do agente (navigate/read/click/type/scroll); o usuário vê ao vivo
+ * o que o agente faz e pode assumir o controle tocando na página.
  */
 class BrowserHost(private val appCtx: Context, sessionId: String = "__legacy__") {
 
     private val persistence = BrowserSessionPersistence(appCtx, sessionId)
     private val profileName = persistence.profileName
 
+    data class TabInfo(val id: String, val url: String, val title: String)
+
     data class Ui(val url: String = "", val title: String = "", val loading: Boolean = false, val progress: Int = 0,
                   val canBack: Boolean = false, val canForward: Boolean = false, val agentControl: Boolean = false,
                   val desktop: Boolean = false, val online: Boolean = true, val netType: String = "", val darkPages: Boolean = false,
-                  val profileIsolated: Boolean = true)
+                  val profileIsolated: Boolean = true, val tabs: List<TabInfo> = emptyList(), val selectedTabId: String = "")
 
     /** Uma requisição vista pelo WebView (painel Rede + ferramenta browser_network). */
     data class NetEntry(val id: Long, val url: String, val method: String, val type: String, val mainFrame: Boolean,
                         val time: Long, val status: Int? = null, val durationMs: Long? = null, val sizeBytes: Long? = null,
                         val error: String? = null, val requestHeaders: Map<String, String> = emptyMap(),
-                        val requestBody: String? = null, val responseHeaders: Map<String, String> = emptyMap(), val responseBody: String? = null)
-    data class ConsoleEntry(val time: Long, val level: String, val message: String, val source: String)
+                        val requestBody: String? = null, val responseHeaders: Map<String, String> = emptyMap(), val responseBody: String? = null,
+                        val tabId: String = BrowserSessionPersistence.LEGACY_TAB_ID)
+    data class ConsoleEntry(val time: Long, val level: String, val message: String, val source: String,
+                            val tabId: String = BrowserSessionPersistence.LEGACY_TAB_ID)
+
+    private data class BrowserTab(
+        val id: String,
+        var url: String,
+        var title: String,
+        var webView: WebView? = null,
+        var pageDone: CompletableDeferred<String>? = null,
+        var navigationStatus: BrowserNavigationStatus = BrowserNavigationStatus(),
+        var progress: Int = 0,
+    )
+
+    private val savedSession = persistence.load()
+    private val tabs = linkedMapOf<String, BrowserTab>().apply {
+        savedSession.tabs.forEach { put(it.id, BrowserTab(it.id, it.url, it.title)) }
+    }
+    @Volatile private var activeTabId: String = savedSession.selectedTabId
+    private var lastReadTabId: String? = null
 
     private val _net = MutableStateFlow<List<NetEntry>>(emptyList())
     val net: StateFlow<List<NetEntry>> = _net
@@ -61,11 +82,10 @@ class BrowserHost(private val appCtx: Context, sessionId: String = "__legacy__")
     private var defaultUa: String = ""
 
     @Synchronized fun clearNet() {
-        pendingNet.clear()
-        netFlushJob?.cancel()
-        netFlushJob = null
-        _net.value = emptyList()
-        _console.value = emptyList()
+        flushNet()
+        val selected = activeTabId
+        _net.value = _net.value.filterNot { it.tabId == selected }
+        _console.value = _console.value.filterNot { it.tabId == selected }
     }
 
     @Synchronized private fun addNet(e: NetEntry) {
@@ -88,13 +108,13 @@ class BrowserHost(private val appCtx: Context, sessionId: String = "__legacy__")
         netFlushJob = null
     }
 
-    @Synchronized private fun patchNet(url: String, fn: (NetEntry) -> NetEntry) {
-        val pendingIndex = pendingNet.indexOfLast { it.url == url }
+    @Synchronized private fun patchNet(url: String, tabId: String, fn: (NetEntry) -> NetEntry) {
+        val pendingIndex = pendingNet.indexOfLast { it.url == url && it.tabId == tabId }
         if (pendingIndex >= 0) {
             pendingNet[pendingIndex] = fn(pendingNet[pendingIndex])
             return
         }
-        val l = _net.value; val i = l.indexOfLast { it.url == url }
+        val l = _net.value; val i = l.indexOfLast { it.url == url && it.tabId == tabId }
         if (i >= 0) _net.value = l.toMutableList().also { it[i] = fn(it[i]) }
     }
 
@@ -142,38 +162,115 @@ class BrowserHost(private val appCtx: Context, sessionId: String = "__legacy__")
     private val _ui = MutableStateFlow(Ui())
     val ui: StateFlow<Ui> = _ui
 
+    @Volatile var darkPages: Boolean = savedSession.darkPages
+        private set
+
     // precisa vir DEPOIS de _ui (ordem de inicialização das propriedades)
-    init { runCatching { watchNetwork() } }
-    private var pageDone: CompletableDeferred<String>? = null
-    private var navigationStatus = BrowserNavigationStatus()
-    private var _view: WebView? = null
-    private var _agentView: WebView? = null
+    init {
+        if (tabs.isEmpty()) tabs[BrowserSessionPersistence.LEGACY_TAB_ID] = BrowserTab(BrowserSessionPersistence.LEGACY_TAB_ID, savedSession.url, "")
+        if (activeTabId !in tabs) activeTabId = tabs.keys.first()
+        _ui.value = _ui.value.copy(
+            url = activeTab()?.url.orEmpty(), title = activeTab()?.title.orEmpty(),
+            desktop = savedSession.desktop, darkPages = savedSession.darkPages,
+            tabs = tabInfo(), selectedTabId = activeTabId,
+        )
+        runCatching { watchNetwork() }
+    }
     @SuppressLint("SetJavaScriptEnabled")
     @Synchronized
     fun view(ctx: Context = appCtx): WebView {
-        // Nunca recriar o WebView ao abrir/focar a aba Browser. A mesma instância pertence
-        // à sessão do agente e à UI; destruí-la durante uma navegação cancelava o carregamento
-        // e fazia o site parecer travado até o usuário abrir o Browser.
-        _view?.let { return it }
-        return createView(ctx, false).also { view ->
-            _view = view
-            ensureSized(view)
-            restoreViewState(view)
+        val tab = activeTab() ?: error("A sessão do browser não tem uma aba ativa.")
+        return ensureTabView(tab, ctx)
+    }
+
+    private fun activeTab(): BrowserTab? = tabs[activeTabId] ?: tabs.values.firstOrNull()
+
+    private fun tabInfo(): List<TabInfo> = tabs.values.map { TabInfo(it.id, it.webView?.url ?: it.url, it.webView?.title ?: it.title) }
+
+    private fun saveMetadata() {
+        val active = activeTab()
+        runCatching {
+            persistence.saveMetadata(BrowserSavedState(
+                url = active?.webView?.url ?: active?.url.orEmpty(),
+                desktop = _ui.value.desktop,
+                darkPages = darkPages,
+                tabs = tabs.values.map { BrowserSavedTab(it.id, it.webView?.url ?: it.url, it.webView?.title ?: it.title) },
+                selectedTabId = activeTabId,
+            ))
         }
     }
 
-    /** Restaura navegação e preferências deste chat; usa a URL simples se o Bundle não puder ser lido. */
-    private fun restoreViewState(view: WebView) {
-        val saved = persistence.load()
-        if (saved.desktop) view.settings.userAgentString = DESKTOP_UA
-        darkPages = saved.darkPages
+    @SuppressLint("SetJavaScriptEnabled")
+    private fun ensureTabView(tab: BrowserTab, ctx: Context, restore: Boolean = true): WebView {
+        tab.webView?.let { return it }
+        return createView(ctx, tab).also { view ->
+            tab.webView = view
+            ensureSized(view)
+            if (_ui.value.desktop) view.settings.userAgentString = DESKTOP_UA
+            if (restore) restoreViewState(tab, view)
+        }
+    }
+
+    /** Restaura navegação/histórico independente da aba, com fallback para URL. */
+    private fun restoreViewState(tab: BrowserTab, view: WebView) {
+        if (_ui.value.desktop) view.settings.userAgentString = DESKTOP_UA
         applyColorScheme(view, darkPages)
-        _ui.value = _ui.value.copy(desktop = saved.desktop, darkPages = saved.darkPages)
         val restored = runCatching {
-            persistence.loadWebViewState()?.let { view.restoreState(it) != null } ?: false
+            if (!_ui.value.profileIsolated && (tab.url.startsWith("http://") || tab.url.startsWith("https://"))) false
+            else persistence.loadWebViewState(tab.id)?.let { view.restoreState(it) != null } ?: false
         }.getOrDefault(false)
         if (restored) sync(view, loading = view.progress < 100)
-        else view.loadUrl(saved.url.ifBlank { HOME })
+        else if (!_ui.value.profileIsolated && (tab.url.startsWith("http://") || tab.url.startsWith("https://"))) {
+            view.loadDataWithBaseURL(null, errorPageHtml(tab.url, "PROFILE_ISOLATION_UNAVAILABLE"), "text/html", "UTF-8", tab.url)
+        } else view.loadUrl(tab.url.ifBlank { HOME })
+    }
+
+    /** Abre uma aba dentro deste chat. Todas as abas desta conversa usam o mesmo perfil isolado. */
+    fun createTab(ctx: Context = appCtx, initialUrl: String = HOME, deferNavigation: Boolean = false): String? {
+        if (android.os.Looper.myLooper() != android.os.Looper.getMainLooper()) return null
+        if (tabs.size >= BrowserSessionPersistence.MAX_TABS) return null
+        val id = java.util.UUID.randomUUID().toString().replace('-', '_')
+        val tab = BrowserTab(id, initialUrl, "")
+        tabs[id] = tab
+        activeTabId = id
+        lastReadTabId = null
+        _ui.value = _ui.value.copy(tabs = tabInfo(), selectedTabId = id, url = "", title = "", loading = false, progress = 0,
+            canBack = false, canForward = false)
+        saveMetadata()
+        ensureTabView(tab, ctx, restore = !deferNavigation)
+        return id
+    }
+
+    fun selectTab(tabId: String): Boolean {
+        if (android.os.Looper.myLooper() != android.os.Looper.getMainLooper() || tabId !in tabs) return false
+        activeTabId = tabId
+        lastReadTabId = null
+        val tab = tabs.getValue(tabId)
+        val view = tab.webView
+        if (view != null) sync(view, loading = view.progress < 100)
+        else _ui.value = _ui.value.copy(url = tab.url, title = tab.title, loading = false, progress = tab.progress,
+            canBack = false, canForward = false, tabs = tabInfo(), selectedTabId = tabId)
+        saveMetadata()
+        return true
+    }
+
+    fun closeTab(tabId: String): Boolean {
+        if (android.os.Looper.myLooper() != android.os.Looper.getMainLooper() || tabs.size <= 1) return false
+        val tab = tabs.remove(tabId) ?: return false
+        tab.webView?.let { view ->
+            persistWebViewState(tab, view)
+            runCatching { view.stopLoading(); (view.parent as? android.view.ViewGroup)?.removeView(view); view.destroy() }
+        }
+        persistence.clearTabData(tabId)
+        if (activeTabId == tabId) activeTabId = tabs.keys.last()
+        lastReadTabId = null
+        val active = tabs.getValue(activeTabId)
+        val view = active.webView
+        if (view != null) sync(view, loading = view.progress < 100)
+        else _ui.value = _ui.value.copy(url = active.url, title = active.title, loading = false, progress = active.progress,
+            canBack = false, canForward = false, tabs = tabInfo(), selectedTabId = activeTabId)
+        saveMetadata()
+        return true
     }
 
     /**
@@ -199,16 +296,16 @@ class BrowserHost(private val appCtx: Context, sessionId: String = "__legacy__")
     }
 
     /**
-     * O agente e a aba Browser precisam operar no MESMO WebView.
-     * Um WebView separado fazia o chat navegar em segundo plano enquanto a UI ficava na HOME.
+     * O agente e a interface operam no WebView da aba ativa, evitando navegação em segundo plano.
      */
-    private fun agentView(): WebView = _view ?: view(appCtx)
+    private fun agentView(): WebView = view(appCtx)
 
     /** Página de erro própria do CueOpen, no lugar da tela padrão do Chrome/WebView. */
     private fun errorPageHtml(url: String, rawDesc: String): String {
         fun esc(s: String) = s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("\"", "&quot;")
         val code = rawDesc.substringAfter("net::", rawDesc).trim()
         val friendly = when {
+            code.contains("PROFILE_ISOLATION_UNAVAILABLE") -> "Este provedor não oferece perfis isolados. Para proteger outros chats, páginas externas ficam bloqueadas neste browser."
             code.contains("CONNECTION_REFUSED") -> "O servidor recusou a conexão. Se for um site local (localhost), confirme que ele está rodando."
             code.contains("NAME_NOT_RESOLVED") -> "Não foi possível encontrar esse endereço. Verifique se o domínio está certo."
             code.contains("INTERNET_DISCONNECTED") || code.contains("NETWORK_CHANGED") -> "Sem conexão com a internet no momento."
@@ -250,7 +347,7 @@ class BrowserHost(private val appCtx: Context, sessionId: String = "__legacy__")
     }
 
     @SuppressLint("SetJavaScriptEnabled")
-    private fun createView(ctx: Context, agentMode: Boolean): WebView {
+    private fun createView(ctx: Context, tab: BrowserTab): WebView {
         val v = WebView(ctx)
         val isolated = runCatching {
             if (!WebViewFeature.isFeatureSupported(WebViewFeature.MULTI_PROFILE)) false
@@ -269,8 +366,9 @@ class BrowserHost(private val appCtx: Context, sessionId: String = "__legacy__")
             builtInZoomControls = true
             displayZoomControls = false
             allowFileAccess = true
-            @Suppress("DEPRECATION") allowFileAccessFromFileURLs = true
-            @Suppress("DEPRECATION") allowUniversalAccessFromFileURLs = true
+            // Sem perfis particionados o provedor usaria cookies/storage globais entre chats.
+            // Nesse caso, bloquear toda rede externa em vez de permitir vazamento entre conversas.
+            blockNetworkLoads = !isolated
             mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
             // O WebView padrão anuncia "Version/4.0" e "wv", identificadores que alguns sites
             // modernos (incluindo portais de notícias) recusam como navegador incompatível.
@@ -281,9 +379,10 @@ class BrowserHost(private val appCtx: Context, sessionId: String = "__legacy__")
                 .replace(Regex("; Android [^;]+; [^;]+ Build/[^;)]+"), "; Android 12")
             cacheMode = WebSettings.LOAD_DEFAULT
             mediaPlaybackRequiresUserGesture = false
-            setSupportMultipleWindows(false)
+            setSupportMultipleWindows(true)
             if (android.os.Build.VERSION.SDK_INT >= 26) safeBrowsingEnabled = false
         }
+        enableLegacyFileAccess(v.settings)
         // TEMA: páginas renderizam como foram escritas (claro), igual a um navegador comum. Com o
         // aparelho em modo escuro o WebView podia escurecer a página ou anunciar prefers-color-scheme
         // dark e esconder o conteúdo (texto escuro sobre fundo escurecido / CSS escuro incompleto).
@@ -298,43 +397,48 @@ class BrowserHost(private val appCtx: Context, sessionId: String = "__legacy__")
         if (android.os.Build.VERSION.SDK_INT >= 26) v.setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_IMPORTANT, false)
         if (android.os.Build.VERSION.SDK_INT >= 23) v.settings.offscreenPreRaster = true
         v.webViewClient = object : WebViewClient() {
-            override fun onPageStarted(view: WebView, url: String, favicon: Bitmap?) { sync(view, loading = true) }
+            override fun onPageStarted(view: WebView, url: String, favicon: Bitmap?) {
+                tab.progress = 0
+                if (tab.id == activeTabId) lastReadTabId = null
+                sync(view, loading = true)
+            }
             override fun onPageCommitVisible(view: WebView, url: String) {
                 // Algumas SPAs mantêm requisições abertas e nunca disparam onPageFinished. Um
                 // primeiro quadro visível permite inspecionar o DOM sem esperar 45 s, mas não é
                 // tratado como prontidão funcional.
-                pageDone?.complete(navigationStatus.pageCommitted(url))
-                persistWebViewState(view)
+                tab.pageDone?.complete(tab.navigationStatus.pageCommitted(url))
+                persistWebViewState(tab, view)
             }
             override fun onPageFinished(view: WebView, url: String) {
                 sync(view, loading = false)
-                pageDone?.complete(navigationStatus.pageFinished())
-                collectTimings(view)
+                tab.pageDone?.complete(tab.navigationStatus.pageFinished())
+                collectTimings(tab, view)
                 installSnapshotInstrumentation(view)
                 installNetworkInstrumentation(view)
-                persistWebViewState(view)
+                persistWebViewState(tab, view)
             }
             override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): android.webkit.WebResourceResponse? {
                 // só observa (não intercepta): alimenta o painel de rede
                 val url = request.url.toString()
                 if (!url.startsWith("data:")) addNet(NetEntry(netSeq.incrementAndGet(), url, request.method ?: "GET",
-                    guessType(url, request.requestHeaders["Accept"], request.isForMainFrame), request.isForMainFrame, System.currentTimeMillis(), requestHeaders = request.requestHeaders.toMap()))
+                    guessType(url, request.requestHeaders["Accept"], request.isForMainFrame), request.isForMainFrame, System.currentTimeMillis(),
+                    requestHeaders = request.requestHeaders.toMap(), tabId = tab.id))
                 return null
             }
             override fun onReceivedHttpError(view: WebView, request: WebResourceRequest, errorResponse: android.webkit.WebResourceResponse) {
-                patchNet(request.url.toString()) { it.copy(status = errorResponse.statusCode) }
-                navigationStatus.recordHttpError(request.isForMainFrame, errorResponse.statusCode)?.let { failure ->
+                patchNet(request.url.toString(), tab.id) { it.copy(status = errorResponse.statusCode) }
+                tab.navigationStatus.recordHttpError(request.isForMainFrame, errorResponse.statusCode)?.let { failure ->
                     sync(view, loading = false)
-                    pageDone?.complete(failure)
+                    tab.pageDone?.complete(failure)
                 }
             }
             override fun onReceivedError(view: WebView, request: WebResourceRequest, error: android.webkit.WebResourceError) {
-                patchNet(request.url.toString()) { it.copy(error = error.description?.toString()) }
+                patchNet(request.url.toString(), tab.id) { it.copy(error = error.description?.toString()) }
                 if (request.isForMainFrame) {
                     sync(view, loading = false)
                     val desc = error.description?.toString() ?: "Falha ao carregar a página"
-                    val failure = navigationStatus.recordNetworkError(true, request.url.toString(), desc)
-                    pageDone?.complete(failure ?: "ERROR: $desc")
+                    val failure = tab.navigationStatus.recordNetworkError(true, request.url.toString(), desc)
+                    tab.pageDone?.complete(failure ?: "ERROR: $desc")
                     // Página de erro própria (substitui a tela padrão do Chrome/WebView).
                     val failing = request.url.toString()
                     view.loadDataWithBaseURL(null, errorPageHtml(failing, desc), "text/html", "UTF-8", failing)
@@ -342,15 +446,28 @@ class BrowserHost(private val appCtx: Context, sessionId: String = "__legacy__")
             }
             override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
                 val s = request.url.scheme ?: return true
+                if (!isolated && (s == "http" || s == "https")) return true
                 return s !in setOf("http", "https", "file", "about", "data")
             }
         }
         v.webChromeClient = object : WebChromeClient() {
-            override fun onProgressChanged(view: WebView, newProgress: Int) { _ui.value = _ui.value.copy(progress = newProgress) }
+            override fun onCreateWindow(view: WebView, isDialog: Boolean, isUserGesture: Boolean, resultMsg: android.os.Message): Boolean {
+                if (!isUserGesture) return false
+                val id = createTab(appCtx, "about:blank", deferNavigation = true) ?: return false
+                val child = tabs[id]?.webView ?: return false
+                val transport = resultMsg.obj as? WebView.WebViewTransport ?: return false
+                transport.webView = child
+                resultMsg.sendToTarget()
+                return true
+            }
+            override fun onProgressChanged(view: WebView, newProgress: Int) {
+                tab.progress = newProgress
+                if (tab.id == activeTabId) _ui.value = _ui.value.copy(progress = newProgress)
+            }
             override fun onReceivedTitle(view: WebView, title: String?) { sync(view) }
             override fun onConsoleMessage(m: android.webkit.ConsoleMessage): Boolean {
                 _console.value = (_console.value + ConsoleEntry(System.currentTimeMillis(), m.messageLevel().name.lowercase(),
-                    m.message(), "${m.sourceId().substringAfterLast('/')}:${m.lineNumber()}")).takeLast(300)
+                    m.message(), "${m.sourceId().substringAfterLast('/')}:${m.lineNumber()}", tab.id)).takeLast(300)
                 return true
             }
         }
@@ -377,14 +494,15 @@ class BrowserHost(private val appCtx: Context, sessionId: String = "__legacy__")
 
     private suspend fun mergeCapturedNetwork() {
         flushNet()
-        val raw = runCatching { eval("JSON.stringify((window.__cueNet||[]).slice(-200))") }.getOrNull() ?: return
+        val tab = onMain { activeTab() } ?: return
+        val raw = runCatching { eval("JSON.stringify((window.__cueNet||[]).slice(-200))", tab = tab) }.getOrNull() ?: return
         runCatching {
             val arr = JSONArray(raw)
             val captured = (0 until arr.length()).mapNotNull { arr.optJSONObject(it) }
             val entries = _net.value.toMutableList()
             captured.forEach { o ->
                 val url=o.optString("url"); val method=o.optString("method","GET")
-                val idx=entries.indexOfLast { it.url == url && it.method.equals(method,true) }
+                val idx=entries.indexOfLast { it.tabId == tab.id && it.url == url && it.method.equals(method,true) }
                 if(idx>=0) {
                     val old=entries[idx]
                     fun objMap(key:String):Map<String,String> { val jo=o.optJSONObject(key)?:return emptyMap(); val m=linkedMapOf<String,String>(); jo.keys().forEach { k->m[k]=jo.optString(k).take(2000) }; return m }
@@ -400,47 +518,61 @@ class BrowserHost(private val appCtx: Context, sessionId: String = "__legacy__")
     }
 
     private fun sync(v: WebView, loading: Boolean = _ui.value.loading) {
-        val next = _ui.value.copy(url = v.url ?: "", title = v.title ?: "", loading = loading,
-            canBack = v.canGoBack(), canForward = v.canGoForward())
-        _ui.value = next
-        runCatching { persistence.saveMetadata(BrowserSavedState(next.url, next.desktop, next.darkPages)) }
+        val tab = tabs.values.firstOrNull { it.webView === v } ?: return
+        tab.url = v.url ?: tab.url
+        tab.title = v.title ?: tab.title
+        tab.progress = v.progress
+        if (tab.id == activeTabId) {
+            _ui.value = _ui.value.copy(url = tab.url, title = tab.title, loading = loading,
+                progress = v.progress, canBack = v.canGoBack(), canForward = v.canGoForward(),
+                tabs = tabInfo(), selectedTabId = tab.id)
+        } else {
+            _ui.value = _ui.value.copy(tabs = tabInfo())
+        }
+        saveMetadata()
     }
 
-    fun home() { _view?.loadUrl(HOME) }
+    fun home() { activeTab()?.webView?.loadUrl(HOME) }
 
     /** Chamado no onStop da Activity; o perfil e o histórico são persistidos antes de o processo sair. */
     fun persistState() {
-        val v = _view ?: return
         if (android.os.Looper.myLooper() == android.os.Looper.getMainLooper()) {
-            persistWebViewState(v)
-            runCatching { WebViewCompat.getProfile(v).cookieManager.flush() }
+            tabs.values.forEach { tab -> tab.webView?.let { persistWebViewState(tab, it) } }
+            activeTab()?.webView?.let { v -> runCatching { WebViewCompat.getProfile(v).cookieManager.flush() } }
+            saveMetadata()
         } else {
             android.os.Handler(android.os.Looper.getMainLooper()).post { persistState() }
         }
     }
 
-    private fun persistWebViewState(view: WebView) {
-        val state = BrowserSavedState(view.url ?: _ui.value.url, _ui.value.desktop, _ui.value.darkPages)
-        runCatching { persistence.saveMetadata(state) }
+    private fun persistWebViewState(tab: BrowserTab, view: WebView) {
+        tab.url = view.url ?: tab.url
+        tab.title = view.title ?: tab.title
+        saveMetadata()
         val bundle = Bundle()
         runCatching {
-            if (view.saveState(bundle) != null) persistence.saveWebViewState(bundle)
+            if (view.saveState(bundle) != null) persistence.saveWebViewState(tab.id, bundle)
         }
     }
 
     /** Libera os WebViews (usado ao encerrar uma sessão isolada de subagente). */
     fun dispose(clearPersistentState: Boolean = false) {
         android.os.Handler(android.os.Looper.getMainLooper()).post {
-            if (!clearPersistentState) _view?.let { persistWebViewState(it) }
-            runCatching { _view?.destroy() }
-            runCatching { _agentView?.destroy() }
-            _view = null; _agentView = null
+            tabs.values.forEach { tab ->
+                tab.pageDone?.complete("ERROR: a sessão do browser foi encerrada.")
+                tab.webView?.let { view ->
+                    if (!clearPersistentState) persistWebViewState(tab, view)
+                    runCatching { view.stopLoading(); view.destroy() }
+                }
+            }
+            tabs.clear()
             if (clearPersistentState) clearSessionData(appCtx, profileName, persistence)
         }
     }
 
     companion object {
         const val HOME = "file:///android_asset/start/index.html"
+        const val MAX_TABS = BrowserSessionPersistence.MAX_TABS
         private const val DESKTOP_UA = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36"
 
         fun clearSessionData(context: Context, sessionId: String) {
@@ -457,18 +589,25 @@ class BrowserHost(private val appCtx: Context, sessionId: String = "__legacy__")
         }
     }
 
-    suspend fun uiBack() = onMain { if (_view?.canGoBack() == true) { pageDone = CompletableDeferred(); _view?.goBack() } }
-    suspend fun uiReload() = onMain { pageDone = CompletableDeferred(); _view?.reload() }
+    suspend fun uiBack() = onMain {
+        activeTab()?.let { tab -> tab.webView?.let { if (it.canGoBack()) { tab.pageDone = CompletableDeferred(); tab.navigationStatus = BrowserNavigationStatus(); it.goBack() } } }
+    }
+    suspend fun uiReload() = onMain {
+        activeTab()?.let { tab -> tab.webView?.let { tab.pageDone = CompletableDeferred(); tab.navigationStatus = BrowserNavigationStatus(); it.reload() } }
+    }
 
     /** Páginas em tema escuro? Padrão: não (renderiza como o site foi feito). Alternável no menu ⋮. */
-    @Volatile var darkPages: Boolean = false
-        private set
-
     fun setDarkPages(on: Boolean) {
         darkPages = on
-        _view?.let { applyColorScheme(it, on); it.reload() }
+        tabs.values.forEach { tab -> tab.webView?.let { applyColorScheme(it, on); it.reload() } }
         _ui.value = _ui.value.copy(darkPages = on)
-        runCatching { persistence.saveMetadata(BrowserSavedState(_ui.value.url, _ui.value.desktop, on)) }
+        saveMetadata()
+    }
+
+    @Suppress("DEPRECATION")
+    private fun enableLegacyFileAccess(settings: WebSettings) {
+        settings.allowFileAccessFromFileURLs = true
+        settings.allowUniversalAccessFromFileURLs = true
     }
 
     private fun applyColorScheme(v: WebView, dark: Boolean) {
@@ -491,17 +630,21 @@ class BrowserHost(private val appCtx: Context, sessionId: String = "__legacy__")
 
     /** Alterna entre versão mobile e desktop dos sites. */
     fun setDesktop(on: Boolean) {
-        val v = _view ?: return
-        v.settings.userAgentString = if (on) DESKTOP_UA else defaultUa
-        v.settings.useWideViewPort = true
-        v.settings.loadWithOverviewMode = true
         _ui.value = _ui.value.copy(desktop = on)
-        runCatching { persistence.saveMetadata(BrowserSavedState(_ui.value.url, on, _ui.value.darkPages)) }
-        v.reload()
+        tabs.values.forEach { tab ->
+            tab.webView?.let { view ->
+                view.settings.userAgentString = if (on) DESKTOP_UA else defaultUa
+                view.settings.useWideViewPort = true
+                view.settings.loadWithOverviewMode = true
+                view.reload()
+            }
+        }
+        _ui.value = _ui.value.copy(desktop = on)
+        saveMetadata()
     }
 
     /** Completa duração/tamanho das requisições com a Resource Timing API da página. */
-    private fun collectTimings(v: WebView) {
+    private fun collectTimings(tab: BrowserTab, v: WebView) {
         v.evaluateJavascript("""(function(){try{var n=performance.getEntriesByType('navigation')[0];var r=performance.getEntriesByType('resource');
             var o=r.map(function(e){return [e.name,Math.round(e.duration),e.transferSize||e.encodedBodySize||0,e.responseStatus||0]});
             if(n)o.push([location.href,Math.round(n.duration),n.transferSize||0,n.responseStatus||0]);return JSON.stringify(o.slice(-400));}catch(e){return '[]'}})()""") { raw ->
@@ -510,7 +653,7 @@ class BrowserHost(private val appCtx: Context, sessionId: String = "__legacy__")
                 val map = HashMap<String, org.json.JSONArray>()
                 for (i in 0 until arr.length()) arr.getJSONArray(i).let { map[it.getString(0)] = it }
                 _net.value = _net.value.map { e ->
-                    map[e.url]?.let { t -> e.copy(durationMs = t.getLong(1), sizeBytes = t.getLong(2).takeIf { it > 0 },
+                    map[e.url]?.takeIf { e.tabId == tab.id }?.let { t -> e.copy(durationMs = t.getLong(1), sizeBytes = t.getLong(2).takeIf { it > 0 },
                         status = e.status ?: t.getInt(3).takeIf { it > 0 }) } ?: e
                 }
             }
@@ -519,7 +662,7 @@ class BrowserHost(private val appCtx: Context, sessionId: String = "__legacy__")
 
     suspend fun networkSummary(filter: String): String {
         mergeCapturedNetwork()
-        val l = _net.value.filter { filter.isBlank() || it.url.contains(filter, true) }.takeLast(60)
+        val l = _net.value.filter { it.tabId == activeTabId && (filter.isBlank() || it.url.contains(filter, true)) }.takeLast(60)
         if (l.isEmpty()) return "Nenhuma requisição registrada (rede: ${_ui.value.netType}, online=${_ui.value.online})."
         val fails = l.count { (it.status ?: 0) >= 400 || it.error != null }
         return "Rede: ${_ui.value.netType} · ${l.size} requisições · $fails com erro\n" + l.joinToString("\n") { e ->
@@ -533,58 +676,81 @@ class BrowserHost(private val appCtx: Context, sessionId: String = "__legacy__")
         }
     }
 
-    fun consoleSummary(): String = _console.value.takeLast(60).joinToString("\n") { "[${it.level}] ${it.message.take(300)} (${it.source})" }
+    fun consoleSummary(): String = _console.value.filter { it.tabId == activeTabId }.takeLast(60).joinToString("\n") { "[${it.level}] ${it.message.take(300)} (${it.source})" }
         .ifBlank { "Console vazio." }
 
     fun setAgentControl(on: Boolean) { _ui.value = _ui.value.copy(agentControl = on) }
 
     // ---------------- API usada pelo agente ----------------
 
-    suspend fun navigate(url: String): String {
+    suspend fun navigate(url: String): String = navigateInTab(url, null)
+
+    private suspend fun navigateInTab(url: String, tabId: String?): String {
         val normalized = when {
             url.startsWith("http://", true) || url.startsWith("https://", true) || url.startsWith("file:") || url.startsWith("about:") -> url
             url.contains(".") && !url.contains(" ") -> "https://$url"
             else -> "https://www.google.com/search?q=" + java.net.URLEncoder.encode(url, "UTF-8")
+        }
+        val targetTab = onMain {
+            val tab = tabId?.let { tabs[it] } ?: activeTab()
+            if (tab != null) {
+                if (tabId != null) selectTab(tab.id)
+                ensureTabView(tab, appCtx)
+                tab.navigationStatus = BrowserNavigationStatus()
+                tab.pageDone = CompletableDeferred()
+                lastReadTabId = null
+            }
+            tab
+        } ?: return "ERROR: a aba do browser não existe mais."
+        val blockedByIsolation = onMain {
+            !_ui.value.profileIsolated && (normalized.startsWith("http://") || normalized.startsWith("https://"))
+        }
+        if (blockedByIsolation) {
+            onMain {
+                targetTab.webView?.loadDataWithBaseURL(null, errorPageHtml(normalized, "PROFILE_ISOLATION_UNAVAILABLE"), "text/html", "UTF-8", normalized)
+                if (targetTab.id == activeTabId) _ui.value = _ui.value.copy(loading = false, progress = 0)
+            }
+            return "ERROR: navegação externa bloqueada porque este WebView não oferece perfil isolado por conversa."
         }
         // Um teste TCP curto evita que um localhost sem servidor vire uma espera opaca de 45 s.
         // É apenas uma sondagem de conexão; readiness HTTP/da aplicação continua sendo validada depois.
         val localFailure = LoopbackEndpointProbe.failureIfUnavailable(normalized)
         if (localFailure != null) {
             return onMain {
-                navigationStatus = BrowserNavigationStatus()
-                val failure = navigationStatus.recordNetworkError(true, normalized, "net::ERR_CONNECTION_REFUSED")
+                targetTab.navigationStatus = BrowserNavigationStatus()
+                val failure = targetTab.navigationStatus.recordNetworkError(true, normalized, "net::ERR_CONNECTION_REFUSED")
                     ?: localFailure
-                pageDone = CompletableDeferred<String>().also { it.complete(failure) }
-                val view = agentView().also { ensureSized(it) }
-                _ui.value = _ui.value.copy(loading = false, progress = 0)
+                targetTab.pageDone = CompletableDeferred<String>().also { it.complete(failure) }
+                val view = targetTab.webView ?: ensureTabView(targetTab, appCtx)
+                if (targetTab.id == activeTabId) _ui.value = _ui.value.copy(loading = false, progress = 0)
                 view.loadDataWithBaseURL(normalized, errorPageHtml(normalized, "net::ERR_CONNECTION_REFUSED"), "text/html", "UTF-8", normalized)
                 failure
             }
         }
         val target = onMain {
-            navigationStatus = BrowserNavigationStatus()
-            pageDone = CompletableDeferred()
-            _ui.value = _ui.value.copy(loading = true, progress = 0)
-            agentView().also { ensureSized(it) }.loadUrl(normalized)
+            targetTab.navigationStatus = BrowserNavigationStatus()
+            targetTab.pageDone = CompletableDeferred()
+            if (targetTab.id == activeTabId) _ui.value = _ui.value.copy(loading = true, progress = 0)
+            (targetTab.webView ?: ensureTabView(targetTab, appCtx)).also { ensureSized(it) }.loadUrl(normalized)
             normalized
         }
-        return awaitLoad(target)
+        return awaitLoad(targetTab, target)
     }
 
     /** Aguarda o callback real do WebView e verifica o DOM; falha e timeout não viram sucesso silencioso. */
-    private suspend fun awaitLoad(target: String = _ui.value.url): String {
-        val status = navigationStatus
-        val deferred = pageDone ?: return "ERROR: não foi possível acompanhar o carregamento desta navegação."
+    private suspend fun awaitLoad(tab: BrowserTab, target: String = tab.url): String {
+        val status = tab.navigationStatus
+        val deferred = tab.pageDone ?: return "ERROR: não foi possível acompanhar o carregamento desta navegação."
         val completed = withTimeoutOrNull(45_000) { deferred.await() }
         val result = completed?.let(status::preserveHttpError) ?: status.httpError() ?: run {
-            _ui.value = _ui.value.copy(loading = false)
+            if (tab.id == activeTabId) _ui.value = _ui.value.copy(loading = false)
             // Diagnóstico curto e único: conteúdo visível não significa que a SPA/hydration esteja pronta.
             val raw = runCatching {
-                eval("JSON.stringify({chars:document.body?document.body.innerText.length:0,ready:document.readyState,url:location.href})", timeoutMillis = 1_500)
+                eval("JSON.stringify({chars:document.body?document.body.innerText.length:0,ready:document.readyState,url:location.href})", 1_500, tab)
             }.getOrDefault("")
             val state = runCatching { JSONObject(raw) }.getOrNull()
             val chars = state?.optInt("chars", 0) ?: 0
-            val currentUrl = state?.optString("url").orEmpty().ifBlank { _ui.value.url }
+            val currentUrl = state?.optString("url").orEmpty().ifBlank { tab.url }
             val readyState = state?.optString("ready").orEmpty()
             return status.timeoutMessage(target, currentUrl, readyState, chars)
         }
@@ -592,7 +758,7 @@ class BrowserHost(private val appCtx: Context, sessionId: String = "__legacy__")
         val deadline = System.currentTimeMillis() + 8_000
         var ready = ""
         while (System.currentTimeMillis() < deadline) {
-            ready = runCatching { eval("document.readyState") }.getOrDefault("")
+            ready = runCatching { eval("document.readyState", tab = tab) }.getOrDefault("")
             if (ready == "complete") break
             kotlinx.coroutines.delay(250)
         }
@@ -600,24 +766,48 @@ class BrowserHost(private val appCtx: Context, sessionId: String = "__legacy__")
         status.httpError()?.let { return it }
         return if (ready == "complete") "OK: página carregada ($target)"
         else {
-            _ui.value = _ui.value.copy(loading = false)
+            if (tab.id == activeTabId) _ui.value = _ui.value.copy(loading = false)
             val raw = runCatching {
-                eval("JSON.stringify({chars:document.body?document.body.innerText.length:0,url:location.href})", timeoutMillis = 1_500)
+                eval("JSON.stringify({chars:document.body?document.body.innerText.length:0,url:location.href})", 1_500, tab)
             }.getOrDefault("")
             val state = runCatching { JSONObject(raw) }.getOrNull()
-            status.incompleteMessage(target, state?.optString("url").orEmpty().ifBlank { _ui.value.url }, ready,
+            status.incompleteMessage(target, state?.optString("url").orEmpty().ifBlank { tab.url }, ready,
                 state?.optInt("chars", 0) ?: 0)
         }
     }
 
     suspend fun cancelNavigation() = onMain {
-        _view?.stopLoading()
-        pageDone?.complete("ERROR: navegação cancelada.")
-        _ui.value = _ui.value.copy(loading = false)
+        activeTab()?.let { tab ->
+            tab.webView?.stopLoading()
+            tab.pageDone?.complete("ERROR: navegação cancelada.")
+            if (tab.id == activeTabId) _ui.value = _ui.value.copy(loading = false)
+        }
     }
 
-    suspend fun back() { onMain { navigationStatus = BrowserNavigationStatus(); pageDone = CompletableDeferred(); agentView().goBack() }; awaitLoad(_ui.value.url) }
-    suspend fun reload() { onMain { navigationStatus = BrowserNavigationStatus(); pageDone = CompletableDeferred(); agentView().reload() }; awaitLoad(_ui.value.url) }
+    suspend fun back() {
+        val tab = onMain { activeTab()?.also { it.navigationStatus = BrowserNavigationStatus(); it.pageDone = CompletableDeferred(); it.webView?.goBack() } }
+            ?: return
+        awaitLoad(tab)
+    }
+    suspend fun reload() {
+        val tab = onMain { activeTab()?.also { it.navigationStatus = BrowserNavigationStatus(); it.pageDone = CompletableDeferred(); it.webView?.reload() } }
+            ?: return
+        awaitLoad(tab)
+    }
+
+    suspend fun newTab(url: String = ""): String {
+        val id = onMain { createTab(appCtx, "about:blank", deferNavigation = true) }
+            ?: return "ERROR: limite de ${BrowserSessionPersistence.MAX_TABS} abas por conversa atingido."
+        return if (url.isBlank()) "OK: nova aba criada (id=$id)." else navigateInTab(url, id)
+    }
+
+    suspend fun selectTabForAgent(tabId: String): String = onMain {
+        if (selectTab(tabId)) "OK: aba ativa id=$tabId." else "ERROR: aba não encontrada nesta conversa."
+    }
+
+    suspend fun closeTabForAgent(tabId: String): String = onMain {
+        if (closeTab(tabId)) "OK: aba id=$tabId fechada." else "ERROR: não foi possível fechar a aba (a última aba não pode ser removida)."
+    }
 
     /** Snapshot semântico da página, próximo ao formato Playwright: landmarks, headings, texto e controles nomeados. */
     suspend fun read(maxChars: Int = 9000): String {
@@ -643,7 +833,9 @@ class BrowserHost(private val appCtx: Context, sessionId: String = "__legacy__")
               return JSON.stringify({url:location.href,title:document.title,text:text,headings:headings.slice(0,80),landmark:main?main.tagName.toLowerCase():"body",links:links,elements:out.slice(0,180)});
             })()
         """.trimIndent()
-        val raw = eval(js)
+        val tab = onMain { activeTab()?.also { lastReadTabId = it.id } }
+            ?: return "ERROR: não há aba ativa no browser."
+        val raw = eval(js, tab = tab)
         if (raw == "null" || raw == "undefined" || raw.isBlank()) {
             return "Falha ao ler página: o JavaScript de snapshot não retornou dados. Verifique o console do WebView e se o DOM já foi criado."
         }
@@ -651,7 +843,7 @@ class BrowserHost(private val appCtx: Context, sessionId: String = "__legacy__")
             val o = JSONObject(raw)
             val els = o.getJSONArray("elements")
             buildString {
-                append("URL: ${o.optString("url")}\nTítulo: ${o.optString("title")}\n\n--- Conteúdo ---\n")
+                append("Aba: ${tab.id}\nURL: ${o.optString("url")}\nTítulo: ${o.optString("title")}\n\n--- Conteúdo ---\n")
                 append("--- Estrutura (headings) ---\n")
                 val hs = o.optJSONArray("headings") ?: JSONArray()
                 for (i in 0 until hs.length()) { val h=hs.optJSONObject(i) ?: continue; append("${h.optString("level")} ${h.optString("text")}\n") }
@@ -664,12 +856,16 @@ class BrowserHost(private val appCtx: Context, sessionId: String = "__legacy__")
     }
 
     suspend fun click(index: Int): String {
-        val r = eval("""(function(){var e=document.querySelector('[data-cue="$index"]');if(!e)return 'elemento $index não encontrado: referência obsoleta; execute browser_read novamente, escolha um índice novo e não repita este';e.scrollIntoView({block:'center'});e.click();return 'ok: clicou em '+(e.innerText||e.value||e.tagName).slice(0,60);})()""")
-        awaitLoadIfNavigating()
+        val tab = onMain { activeTab()?.takeIf { lastReadTabId == it.id } }
+            ?: return "ERRO: leia novamente a aba ativa antes de usar um índice; referências não passam entre abas."
+        val r = eval("""(function(){var e=document.querySelector('[data-cue="$index"]');if(!e)return 'elemento $index não encontrado: referência obsoleta; execute browser_read novamente, escolha um índice novo e não repita este';e.scrollIntoView({block:'center'});e.click();return 'ok: clicou em '+(e.innerText||e.value||e.tagName).slice(0,60);})()""", tab = tab)
+        awaitLoadIfNavigating(tab)
         return r
     }
 
     suspend fun type(index: Int, text: String, submit: Boolean): String {
+        val tab = onMain { activeTab()?.takeIf { lastReadTabId == it.id } }
+            ?: return "ERRO: leia novamente a aba ativa antes de usar um índice; referências não passam entre abas."
         val t = JSONObject.quote(text)
         val r = eval("""
             (function(){var e=document.querySelector('[data-cue="$index"]');if(!e)return 'elemento $index não encontrado';
@@ -678,27 +874,39 @@ class BrowserHost(private val appCtx: Context, sessionId: String = "__legacy__")
             e.dispatchEvent(new Event('input',{bubbles:true}));e.dispatchEvent(new Event('change',{bubbles:true}));
             ${if (submit) "if(e.form){e.form.requestSubmit?e.form.requestSubmit():e.form.submit();}else{e.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',keyCode:13,bubbles:true}));}" else ""}
             return 'ok';})()
-        """.trimIndent())
-        if (submit) awaitLoadIfNavigating()
+        """.trimIndent(), tab = tab)
+        if (submit) awaitLoadIfNavigating(tab)
         return r
     }
 
-    suspend fun scroll(down: Boolean): String =
-        eval("window.scrollBy(0, ${if (down) "" else "-"}window.innerHeight*0.8); 'ok'")
+    suspend fun scroll(down: Boolean): String {
+        val tab = onMain { activeTab() } ?: return "ERROR: não há aba ativa no browser."
+        return eval("window.scrollBy(0, ${if (down) "" else "-"}window.innerHeight*0.8); 'ok'", tab = tab)
+    }
 
-    suspend fun runJs(code: String): String = eval(code)
+    suspend fun runJs(code: String): String {
+        val tab = onMain { activeTab() } ?: return "ERROR: não há aba ativa no browser."
+        return eval(code, tab = tab)
+    }
 
-    private suspend fun awaitLoadIfNavigating() {
+    private suspend fun awaitLoadIfNavigating(tab: BrowserTab) {
         kotlinx.coroutines.delay(800)
         // progress é método do WebView: só pode ser lido na main thread (evita o crash
         // "A WebView method was called on thread 'DefaultDispatcher-worker'").
-        val navigating = onMain { agentView().progress < 100 }
-        if (navigating) { onMain { pageDone = CompletableDeferred() }; awaitLoad() }
+        val navigating = onMain { tab.webView?.progress?.let { it < 100 } == true }
+        if (navigating) {
+            onMain { if (tab.pageDone == null || tab.pageDone?.isCompleted == true) tab.pageDone = CompletableDeferred() }
+            awaitLoad(tab)
+        }
     }
 
-    private suspend fun eval(js: String, timeoutMillis: Long = 15_000): String {
+    private suspend fun eval(js: String, timeoutMillis: Long = 15_000, tab: BrowserTab? = null): String {
         val d = CompletableDeferred<String>()
-        onMain { agentView().evaluateJavascript(js) { d.complete(it ?: "null") } }
+        val view = onMain {
+            val target = tab ?: activeTab()
+            target?.let { ensureTabView(it, appCtx) }
+        } ?: return "ERROR: não há aba ativa no browser."
+        onMain { view.evaluateJavascript(js) { d.complete(it ?: "null") } }
         val raw = withTimeoutOrNull(timeoutMillis) { d.await() } ?: return "timeout: evaluateJavascript não respondeu em ${timeoutMillis / 1_000}s"
         // evaluateJavascript devolve um literal JSON (string entre aspas); null/undefined
         // geralmente indica que o script não retornou valor. Preserve esse estado explicitamente.
