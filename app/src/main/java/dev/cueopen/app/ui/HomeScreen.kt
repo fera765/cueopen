@@ -793,7 +793,7 @@ private fun SectionRow(
                 Text(if (!sec.configured) "Aguardando ativação" else "${sec.agentIds.size} agentes · coordenador",
                     fontSize = 12.sp, color = c.ink3, maxLines = 1)
             }
-            StatusDot(when { busy -> SessionStatus.RUNNING; waiting -> SessionStatus.WAITING_USER; else -> SessionStatus.IDLE })
+            if (busy) PulsingDot(c.ok) else StatusDot(if (waiting) SessionStatus.WAITING_USER else SessionStatus.IDLE)
             IconButton({ expanded = !expanded }, Modifier.size(32.dp)) {
                 Icon(if (expanded) Icons.Rounded.ExpandLess else Icons.Rounded.ExpandMore, if (expanded) "Recolher" else "Expandir", tint = c.ink3)
             }
@@ -807,13 +807,23 @@ private fun SectionRow(
     }
     androidx.compose.animation.AnimatedVisibility(expanded) {
         Column(Modifier.padding(start = 22.dp)) {
+            agents.firstOrNull { it.id == sec.coordinatorAgentId }?.let { coord ->
+                val main = chats.firstOrNull { it.id == sec.sessionId }
+                Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp)).clickable { onOpen(sec.sessionId) }
+                    .padding(horizontal = 8.dp, vertical = 7.dp), verticalAlignment = Alignment.CenterVertically) {
+                    AgentFace(Color(coord.color), coord.face, 20.dp); Spacer(Modifier.width(8.dp))
+                    Text("Coordenador", fontSize = 14.sp, modifier = Modifier.weight(1f), fontWeight = FontWeight.Medium)
+                    if (main?.status == SessionStatus.RUNNING) PulsingDot(c.ok) else StatusDot(main?.status ?: SessionStatus.IDLE)
+                }
+            }
             sec.agentIds.mapNotNull { id -> agents.firstOrNull { it.id == id } }.forEach { a ->
                 val chat = chats.firstOrNull { it.agentId == a.id && it.id != sec.sessionId }
                 Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp)).clickable { if (chat != null) onOpen(chat.id) else onOpenAgent(a.id) }
                     .padding(horizontal = 8.dp, vertical = 7.dp), verticalAlignment = Alignment.CenterVertically) {
                     AgentFace(Color(a.color), a.face, 20.dp); Spacer(Modifier.width(8.dp))
                     Text(a.name, fontSize = 14.sp, modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    StatusDot(chat?.status ?: SessionStatus.IDLE)
+                    // agente trabalhando agora: ponto verde pulsando (um por agente ativo)
+                    if (chat?.status == SessionStatus.RUNNING) PulsingDot(c.ok) else StatusDot(chat?.status ?: SessionStatus.IDLE)
                 }
             }
         }

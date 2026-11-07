@@ -74,6 +74,9 @@ private fun isStaleAccessibilitySnapshotFailure(toolName: String, detail: String
     ).any { phrase -> detail.contains(phrase) }
 
 /** O que o "computador" do agente está fazendo agora (mostrado no card ao vivo do chat). */
+/** Tipo do Step que representa a pílula de um agente da seção no chat do coordenador (args = "chatId|agentId"). */
+const val TEAM_MEMBER_STEP = "team_member"
+
 data class Activity(val kind: Kind = Kind.IDLE, val detail: String = "") {
     enum class Kind { IDLE, THINKING, TERMINAL, BROWSER, EDITOR, SEARCH }
 }
@@ -166,6 +169,8 @@ class AgentRunner(
                 jobs.remove(sessionId, coroutineContext[Job])
                 if (jobs.values.none { it.isActive }) dev.cueopen.app.sandbox.SandboxService.start(ctx, "Terminal ativo")
                 onDone?.invoke()
+                // só relata quando nenhuma outra execução assumiu este chat (ex.: aprovação reenviou a tarefa)
+                if (jobs[sessionId]?.isActive != true) runCatching { onRunEnded(sessionId) }
             }
         }
         jobs[sessionId] = job
@@ -270,7 +275,8 @@ class AgentRunner(
             instructions = buildString {
                 appendLine("Você é o coordenador da seção \"$title\"." + (if (description.isNotBlank()) " Objetivo: $description" else ""))
                 appendLine("Seu time:\n$roster")
-                appendLine("Use team_delegate para passar cada tarefa ao agente certo (uma por vez ou em sequência lógica) e team_status para acompanhar. Divida o trabalho, cobre prazos, confira entregas e consolide os resultados.")
+                appendLine("Use team_delegate para passar cada tarefa ao agente certo (pode acionar vários em paralelo) e team_status para acompanhar. Divida o trabalho, cobre prazos, confira entregas e consolide os resultados.")
+                appendLine("Comunicação no chat: entre uma ação e outra, mande feedbacks CURTOS ao usuário (5 a 30 palavras, ex.: \"Radar está minerando ofertas na Biblioteca do Meta.\") e continue trabalhando. Não use terminal nem browser: o trabalho é dos agentes. Quando chegar um [Relatório automático], avalie, cobre ajustes ou passe a próxima etapa.")
                 if (coordinatorInstructions.isNotBlank()) appendLine("Regras do usuário: $coordinatorInstructions")
             }.trim(),
         )
@@ -300,8 +306,9 @@ class AgentRunner(
         val wallet = WalletAgentPolicyStore(ctx.applicationContext)
         (sec.agentIds + sec.coordinatorAgentId).forEach { id ->
             store.agent(id)?.let { a ->
+                val coord = id == sec.coordinatorAgentId  // o coordenador só delega
                 store.upsertAgent(a.copy(
-                    useBrowser = p.browser && a.useBrowser, useTerminal = p.terminal && a.useTerminal,
+                    useBrowser = p.browser && a.useBrowser && !coord, useTerminal = p.terminal && a.useTerminal && !coord,
                     deviceCaps = p.deviceCaps, uiConnectorIds = p.uiConnectorIds,
                     confirmMode = if (p.fullAuto) "auto" else "ask",
                 ))
@@ -345,7 +352,12 @@ class AgentRunner(
         store.state.value.sessions.firstOrNull { it.sectionId == sec.id && it.agentId == member.id && it.id != sec.sessionId }?.id
             ?: Session(title = "${member.name} · ${sec.name}", agentId = member.id, sectionId = sec.id).also { store.upsertSession(it) }.id
 
-    private suspend fun teamDelegate(sessionId: String, agentName: String, task: String, timeoutMinutes: Int): String {
+    /** Delegações em andamento: chat do agente → (seção, pílula no chat do coordenador, índice dos itens ao começar). */
+    private data class Delegation(val sectionId: String, val memberId: String, val pillId: String, val startIndex: Int)
+    private val delegations = java.util.concurrent.ConcurrentHashMap<String, Delegation>()
+    private val sectionReportLocks = java.util.concurrent.ConcurrentHashMap<String, kotlinx.coroutines.sync.Mutex>()
+
+    private suspend fun teamDelegate(sessionId: String, agentName: String, task: String, wait: Boolean, timeoutMinutes: Int): String {
         val sec = store.section(store.session(sessionId)?.sectionId) ?: return "ERRO: esta conversa não é uma seção."
         if (!sec.configured) return "A seção ainda não foi ativada pelo usuário."
         val team = sec.agentIds.mapNotNull { store.agent(it) }
@@ -355,18 +367,28 @@ class AgentRunner(
             ?: return "ERRO: não há agente \"$agentName\" no time. Disponíveis: ${team.joinToString { it.name }}."
         if (task.isBlank()) return "ERRO: descreva a tarefa."
         val childId = memberSession(sec, member)
-        if (isRunning(childId)) return "${member.name} ainda está trabalhando na tarefa anterior. Use team_status e delegue de novo quando terminar."
+        if (isRunning(childId)) return "${member.name} ainda está trabalhando na tarefa anterior. Acompanhe com team_status; você receberá o relatório quando ele terminar."
         val before = store.session(childId)?.items?.size ?: 0
+        // Pílula do agente no chat do coordenador: fica "trabalhando" até ele terminar e abre o chat dele ao tocar.
+        val pill = ChatItem.Step(tool = TEAM_MEMBER_STEP, title = task.lineSequence().first().take(120),
+            args = "$childId|${member.id}", result = "", status = StepStatus.RUNNING)
+        store.addItem(sec.sessionId, pill)
+        delegations[childId] = Delegation(sec.id, member.id, pill.id, before)
         send(childId, "[Tarefa do coordenador da seção ${sec.name}]\n$task")
+        if (!wait) return "${member.name} começou a trabalhar. Dê ao usuário um feedback curto (5 a 30 palavras) e siga coordenando; o relatório dele chega sozinho quando terminar."
         val deadline = System.currentTimeMillis() + timeoutMinutes * 60_000L
         kotlinx.coroutines.delay(1_500)
         while (isRunning(childId) && System.currentTimeMillis() < deadline) kotlinx.coroutines.delay(2_000)
+        return if (isRunning(childId)) "${member.name} continua trabalhando (passou de $timeoutMinutes min). O relatório chega sozinho quando terminar."
+            else memberReport(member, childId, before)
+    }
+
+    private fun memberReport(member: AgentProfile, childId: String, before: Int): String {
         val child = store.session(childId)
         val newItems = child?.items?.drop(before).orEmpty()
         val answer = newItems.lastOrNull { it is ChatItem.Assistant } as? ChatItem.Assistant
         return buildString {
             when {
-                isRunning(childId) -> append("${member.name} continua trabalhando (passou de $timeoutMinutes min). Consulte depois com team_status.\n")
                 newItems.any { it is ChatItem.Approval && it.state == "pending" } -> append("${member.name} está AGUARDANDO A CONFIRMAÇÃO do usuário no chat dele.\n")
                 child?.status == SessionStatus.WAITING_USER -> append("${member.name} está aguardando uma resposta do usuário no chat dele.\n")
                 child?.status == SessionStatus.ERROR -> append("${member.name} terminou com erro.\n")
@@ -374,6 +396,35 @@ class AgentRunner(
             append("Resposta de ${member.name}:\n")
             append(answer?.text?.take(4_000) ?: "(sem resposta final)")
             newItems.filterIsInstance<ChatItem.Error>().lastOrNull()?.let { append("\nÚltimo erro: " + it.text.take(300)) }
+        }
+    }
+
+    /**
+     * Chamado quando um chat termina uma execução. Se for um agente de seção trabalhando numa delegação,
+     * atualiza a pílula e entrega o relatório ao coordenador (um por vez, sem interromper a resposta dele).
+     */
+    private fun onRunEnded(sessionId: String) {
+        val d = delegations[sessionId] ?: return
+        val child = store.session(sessionId) ?: run { delegations.remove(sessionId); return }
+        val sec = store.section(d.sectionId) ?: run { delegations.remove(sessionId); return }
+        val member = store.agent(d.memberId) ?: run { delegations.remove(sessionId); return }
+        val waitingUser = child.status == SessionStatus.WAITING_USER
+        val pill = store.session(sec.sessionId)?.items?.firstOrNull { it.id == d.pillId } as? ChatItem.Step
+        if (pill != null) store.replaceItem(sec.sessionId, pill.copy(
+            status = if (child.status == SessionStatus.ERROR) StepStatus.ERROR else if (waitingUser) StepStatus.RUNNING else StepStatus.OK,
+            result = if (waitingUser) "aguardando você" else "",
+        ))
+        // Esperando o usuário (confirmação/pergunta): mantém a delegação viva para relatar o resultado final depois.
+        if (!waitingUser) delegations.remove(sessionId)
+        val report = memberReport(member, sessionId, d.startIndex)
+        scope.launch {
+            val lock = sectionReportLocks.getOrPut(sec.id) { kotlinx.coroutines.sync.Mutex() }
+            lock.withLock {
+                var waited = 0
+                while (isRunning(sec.sessionId) && waited < 1_800) { kotlinx.coroutines.delay(2_000); waited += 2 }
+                send(sec.sessionId, "[Relatório automático — ${member.name}${if (waitingUser) " parou e aguarda o usuário" else " terminou"}]\n$report",
+                    showUserMessage = false).join()
+            }
         }
     }
 
@@ -1647,6 +1698,13 @@ class AgentRunner(
                 appendLine(); appendLine("## Confirmações")
                 appendLine(if (cats.isEmpty()) "- Este Agent é 100% autônomo: o usuário autorizou executar ações sem pedir confirmação."
                     else "- O app pede confirmação ao usuário automaticamente antes de: ${cats.joinToString("; ")}. Não pergunte por texto: tente a ação normalmente; se voltar AGUARDANDO CONFIRMAÇÃO, pare e espere. Depois de APROVADO, repita a mesma ação uma vez. Se NEGADO, não insista nem contorne.")
+                store.section(session.sectionId)?.takeIf { it.coordinatorAgentId == agent?.id }?.let { sec ->
+                    appendLine(); appendLine("## Você coordena a seção ${sec.name}")
+                    appendLine("- Time: " + sec.agentIds.mapNotNull { store.agent(it)?.name }.joinToString(", ") + ".")
+                    appendLine("- Delegue com team_delegate (não bloqueia; acione vários em paralelo quando fizer sentido). O usuário vê cada agente trabalhando numa pílula ao vivo.")
+                    appendLine("- Entre as ações, mande feedbacks CURTOS (5 a 30 palavras) e siga trabalhando. Nada de terminal/browser: o trabalho é dos agentes.")
+                    appendLine("- Ao receber [Relatório automático], avalie, cobre ajustes ou passe a próxima etapa; entregue o progresso em lista numerada.")
+                }
                 if (agent?.useBrowser != false) appendLine("- Browser: usa as contas em que o usuário já entrou (login salvo e compartilhado entre chats e Agents). Se um site pedir login, não invente credenciais: peça ao usuário com ask_user para entrar uma vez pela aba Browser e continue depois.")
             }
             if (!agent?.instructions.isNullOrBlank()) {
@@ -1766,9 +1824,13 @@ class AgentRunner(
         }
     }
 
-    private fun tools(agent: AgentProfile?, allowMultiAgent: Boolean = true, builder: Boolean = false, connectorEditId: String? = null, sectionId: String? = null) = buildJsonArray {
+    private fun tools(agentIn: AgentProfile?, allowMultiAgent: Boolean = true, builder: Boolean = false, connectorEditId: String? = null, sectionId: String? = null) = buildJsonArray {
         // ---------- Seções (time de Agents com coordenador)
         val sectionHere = store.section(sectionId)
+        // O coordenador só coordena: o trabalho (browser, terminal, Android) é dos agentes do time.
+        val agent = if (sectionHere != null && agentIn?.id == sectionHere.coordinatorAgentId)
+            agentIn.copy(useTerminal = false, useBrowser = false, deviceCaps = emptyList(), uiConnectorIds = emptyList())
+        else agentIn
         if (allowMultiAgent && sectionId == null) add(tool("create_section",
             "Cria uma SEÇÃO na sidebar: um time de Agents com um coordenador e um chat próprio. Use SOMENTE quando o usuário pedir para criar uma seção/time/equipe de agentes. " +
                 "Cada agente recebe nome, descrição e regras fixas exatamente como o usuário pediu. Depois de criar, o app mostra um card de autorização para o usuário escolher permissões; não faça mais nada até ele ativar.",
@@ -1783,12 +1845,14 @@ class AgentRunner(
             }, listOf("name", "agents_json")))
         if (allowMultiAgent && sectionHere != null && agent?.id == sectionHere.coordinatorAgentId) {
             add(tool("team_delegate",
-                "Delega uma tarefa a um Agent do seu time (pelo nome) e espera o resultado. O Agent trabalha no próprio chat da seção, com as próprias regras e permissões. " +
-                    "Seja específico: objetivo, entregável, prazo e critério de pronto. Retorna o relatório final do Agent.",
+                "Passa uma tarefa a um Agent do seu time (pelo nome). Ele começa NA HORA no próprio chat, com as próprias regras e permissões, e o usuário vê a pílula dele trabalhando. " +
+                    "Não bloqueia: você pode acionar vários agentes em paralelo. Quando cada um terminar, você recebe automaticamente um [Relatório automático]. " +
+                    "Seja específico: objetivo, entregável, prazo e critério de pronto. Use wait=true só se precisar do resultado antes de seguir.",
                 buildJsonObject {
                     put("agent", str("Nome exato do Agent do time"))
                     put("task", str("Tarefa completa e autossuficiente"))
-                    put("timeout_minutes", int("Espera máxima (1-30; padrão 15). Se estourar, ele continua trabalhando e você consulta depois com team_status"))
+                    put("wait", bool("true = espera o resultado (até timeout_minutes). Padrão false"))
+                    put("timeout_minutes", int("Com wait=true: espera máxima (1-30; padrão 15)"))
                 }, listOf("agent", "task")))
             add(tool("team_status", "Mostra o estado de cada Agent do time (trabalhando, aguardando usuário, concluído) e a última resposta de cada um.", buildJsonObject {}))
         }
@@ -2394,7 +2458,7 @@ class AgentRunner(
         when (call.name) {
             "create_section" -> return createSection(sessionId, s("name"), s("description"), s("coordinator_instructions"), s("agents_json"),
                 s("first_task"), s("suggested_android_caps"), b("suggest_wallet"))
-            "team_delegate" -> return ToolResult(teamDelegate(sessionId, s("agent"), s("task"), (i("timeout_minutes") ?: 15).coerceIn(1, 30)))
+            "team_delegate" -> return ToolResult(teamDelegate(sessionId, s("agent"), s("task"), b("wait"), (i("timeout_minutes") ?: 15).coerceIn(1, 30)))
             "team_status" -> return ToolResult(teamStatus(sessionId))
             "update_plan" -> {
                 val phases = a["phases"]?.jsonArray?.map { it.jsonPrimitive.content }.orEmpty()
@@ -3718,7 +3782,7 @@ class AgentRunner(
 
     private fun finalizeRunningSteps(sessionId: String, reason: String) {
         val steps = store.session(sessionId)?.items?.filterIsInstance<ChatItem.Step>()
-            ?.filter { it.status == StepStatus.RUNNING }.orEmpty()
+            ?.filter { it.status == StepStatus.RUNNING && it.tool != TEAM_MEMBER_STEP }.orEmpty()
         steps.forEach { step ->
             store.replaceItem(sessionId, step.copy(result = reason, status = StepStatus.ERROR))
         }

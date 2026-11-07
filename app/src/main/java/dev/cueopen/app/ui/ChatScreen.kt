@@ -194,7 +194,10 @@ fun ChatScreen(nav: NavController, sessionId: String) {
             }
           }
             val plan = session.items.lastOrNull { it is ChatItem.Plan } as? ChatItem.Plan
-            AnimatedVisibility(running || act.kind != Activity.Kind.IDLE || (plan != null && plan.phases.any { !it.done })) {
+            // Chat da seção (coordenador): mostra o time trabalhando ao vivo no lugar do "computador".
+            val teamSection = app.store.section(session.sectionId)?.takeIf { it.sessionId == sessionId }
+            if (teamSection != null) TeamLiveStrip(teamSection, nav)
+            else AnimatedVisibility(running || act.kind != Activity.Kind.IDLE || (plan != null && plan.phases.any { !it.done })) {
                 LiveComputerCard(act, agent?.name ?: "Fluwy Bot", plan, active = running) { nav.navigate("computer/$sessionId") }
             }
             mediaOpen?.let { p -> MediaDialog(java.io.File(p)) { mediaOpen = null } }
@@ -402,7 +405,11 @@ fun TimelineItem(item: ChatItem, onOpenComputer: (String) -> Unit, onOpenMedia: 
     when (item) {
         is ChatItem.User -> UserBubble(item)
         is ChatItem.Assistant -> AssistantText(item, onSend, onReply)
-        is ChatItem.Step -> StepRow(item, onOpenComputer)
+        is ChatItem.Step -> when (item.tool) {
+            dev.cueopen.app.agent.TEAM_MEMBER_STEP -> TeamMemberPill(item, nav)
+            "team_delegate", "team_status" -> {}  // a pílula do agente já representa a delegação
+            else -> StepRow(item, onOpenComputer)
+        }
         is ChatItem.Plan -> {}  // o plano fica no card do computador, acima do composer
         is ChatItem.Media -> MediaCard(item, onOpenMedia)
         is ChatItem.Error -> InfoRow(Icons.Rounded.ErrorOutline, item.text, Cue.c.err)
@@ -1079,6 +1086,101 @@ private fun SectionSetupCard(item: ChatItem.SectionSetup, sessionId: String?, na
                 if (section != null) TextButton({ nav?.navigate("chat/${section.sessionId}") }) { Text("Abrir seção", color = c.accent) }
             }
             else -> Text("Ativação adiada. Peça no chat para ativar a seção quando quiser.", fontSize = 12.sp, color = c.ink3)
+        }
+    }
+}
+
+
+/** Ponto verde pulsando: agente trabalhando agora. */
+@Composable
+fun PulsingDot(color: Color, size: androidx.compose.ui.unit.Dp = 8.dp) {
+    val t = rememberInfiniteTransition(label = "pulse")
+    val k by t.animateFloat(0f, 1f, infiniteRepeatable(tween(1100), RepeatMode.Restart), label = "k")
+    Box(Modifier.size(size * 2), contentAlignment = Alignment.Center) {
+        Box(Modifier.size(size * (1f + k)).clip(CircleShape).background(color.copy(alpha = (1f - k) * .45f)))
+        Box(Modifier.size(size).clip(CircleShape).background(color))
+    }
+}
+
+private fun teamActivityLabel(a: Activity?, running: Boolean, waiting: Boolean, failed: Boolean, done: Boolean): String = when {
+    waiting -> "aguardando você"
+    running -> when (a?.kind) {
+        Activity.Kind.BROWSER -> "usando o browser"
+        Activity.Kind.TERMINAL -> "usando o terminal"
+        Activity.Kind.EDITOR -> "editando arquivos"
+        Activity.Kind.SEARCH -> "pesquisando"
+        else -> "pensando"
+    } + (a?.detail?.takeIf { it.isNotBlank() }?.let { " · " + it.take(60) } ?: "")
+    failed -> "parou com erro"
+    done -> "concluiu"
+    else -> "na fila"
+}
+
+/** Pílula de um agente da seção no chat do coordenador: mostra ao vivo o que ele está fazendo; tocar abre o chat dele. */
+@Composable
+private fun TeamMemberPill(step: ChatItem.Step, nav: androidx.navigation.NavController?) {
+    val c = Cue.c
+    val app = dev.cueopen.app.CueApp.instance
+    val (childId, memberId) = step.args.split('|').let { (it.getOrNull(0) ?: "") to (it.getOrNull(1) ?: "") }
+    val st by app.store.state.collectAsStateWithLifecycle()
+    val activity by app.agent.activity.collectAsStateWithLifecycle()
+    val member = st.agents.firstOrNull { it.id == memberId }
+    val child = st.sessions.firstOrNull { it.id == childId }
+    val running = child?.status == SessionStatus.RUNNING
+    val waiting = child?.status == SessionStatus.WAITING_USER || step.result == "aguardando você"
+    val label = teamActivityLabel(activity[childId], running, waiting && !running, step.status == StepStatus.ERROR, step.status == StepStatus.OK)
+    Row(
+        Modifier.padding(vertical = 4.dp).clip(RoundedCornerShape(18.dp)).background(c.surface)
+            .border(1.dp, if (running) c.ok.copy(alpha = .5f) else c.line, RoundedCornerShape(18.dp))
+            .clickable(enabled = childId.isNotBlank()) { nav?.navigate("chat/$childId") }
+            .padding(horizontal = 10.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        if (member != null) AnimatedAgentFace(Color(member.color), member.face, 26.dp,
+            state = if (running) dev.cueopen.app.ui.mascot.MascotState.THINKING else dev.cueopen.app.ui.mascot.MascotState.IDLE)
+        Spacer(Modifier.width(8.dp))
+        Column(Modifier.weight(1f, fill = false)) {
+            Text(buildAnnotatedString {
+                withStyle(SpanStyle(fontWeight = FontWeight.SemiBold)) { append(member?.name ?: "Agente") }
+                append(" · $label")
+            }, fontSize = 14.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            if (step.title.isNotBlank()) Text(step.title, fontSize = 12.sp, color = c.ink3, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        }
+        Spacer(Modifier.width(6.dp))
+        when {
+            running -> PulsingDot(c.ok)
+            waiting -> Icon(Icons.Rounded.PanTool, null, Modifier.size(14.dp), tint = c.warn)
+            step.status == StepStatus.ERROR -> Icon(Icons.Rounded.Close, null, Modifier.size(14.dp), tint = c.err)
+            step.status == StepStatus.OK -> Icon(Icons.Rounded.Check, null, Modifier.size(14.dp), tint = c.ok)
+        }
+        Icon(Icons.Rounded.ChevronRight, null, Modifier.size(16.dp), tint = c.ink3)
+    }
+}
+
+/** Faixa no topo do composer do chat da seção: quem do time está trabalhando agora (toque abre o chat do agente). */
+@Composable
+private fun TeamLiveStrip(sec: dev.cueopen.app.data.Section, nav: androidx.navigation.NavController) {
+    val c = Cue.c
+    val app = dev.cueopen.app.CueApp.instance
+    val st by app.store.state.collectAsStateWithLifecycle()
+    val activity by app.agent.activity.collectAsStateWithLifecycle()
+    val busy = sec.agentIds.mapNotNull { id -> st.agents.firstOrNull { it.id == id } }.mapNotNull { a ->
+        val chat = st.sessions.firstOrNull { it.sectionId == sec.id && it.agentId == a.id && it.id != sec.sessionId } ?: return@mapNotNull null
+        if (chat.status == SessionStatus.RUNNING || chat.status == SessionStatus.WAITING_USER) Triple(a, chat, activity[chat.id]) else null
+    }
+    if (busy.isEmpty()) return
+    Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 12.dp, vertical = 6.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        busy.forEach { (a, chat, act) ->
+            val running = chat.status == SessionStatus.RUNNING
+            Row(Modifier.clip(RoundedCornerShape(16.dp)).background(c.surface).border(1.dp, if (running) c.ok.copy(alpha = .5f) else c.warn.copy(alpha = .5f), RoundedCornerShape(16.dp))
+                .clickable { nav.navigate("chat/${chat.id}") }.padding(horizontal = 8.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+                AnimatedAgentFace(Color(a.color), a.face, 20.dp, state = if (running) dev.cueopen.app.ui.mascot.MascotState.THINKING else dev.cueopen.app.ui.mascot.MascotState.IDLE)
+                Spacer(Modifier.width(6.dp))
+                Text(a.name + " · " + teamActivityLabel(act, running, !running, false, false).substringBefore(" · "), fontSize = 12.sp, maxLines = 1)
+                Spacer(Modifier.width(4.dp))
+                if (running) PulsingDot(c.ok, 6.dp)
+            }
         }
     }
 }
