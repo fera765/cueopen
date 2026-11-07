@@ -11,6 +11,13 @@ import java.security.MessageDigest
 
 /** Perfil e arquivos de restauração determinísticos, sempre derivados da identidade do chat. */
 internal object BrowserProfileIdentity {
+    /**
+     * Perfil ÚNICO e persistente de contas: o usuário faz login uma vez (Instagram, Mercado Livre…)
+     * e todos os chats e Agents — inclusive ciclos autônomos e tarefas agendadas — usam a mesma sessão.
+     * Apagar um chat não desloga; para sair use "Sair de todas as contas" no menu do browser.
+     */
+    const val SHARED_PROFILE = "fluwy_accounts"
+
     fun profileName(sessionId: String): String {
         val digest = MessageDigest.getInstance("SHA-256").digest(sessionId.toByteArray(Charsets.UTF_8))
         val hex = digest.joinToString("") { "%02x".format(it) }

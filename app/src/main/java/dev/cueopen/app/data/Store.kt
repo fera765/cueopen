@@ -193,6 +193,20 @@ class Store(context: Context) {
     }
     fun agent(id: String?) = id?.let { i -> _state.value.agents.firstOrNull { it.id == i } }
 
+    // ---------- Seções
+    fun section(id: String?) = id?.let { i -> _state.value.sections.firstOrNull { it.id == i } }
+    fun upsertSection(sec: Section) = update { st ->
+        st.copy(sections = if (st.sections.any { it.id == sec.id }) st.sections.map { if (it.id == sec.id) sec else it } else st.sections + sec)
+    }
+    /** Remove a seção, todos os chats dela e os Agents que foram criados para ela. */
+    fun deleteSection(id: String): List<String> {
+        val sec = section(id) ?: return emptyList()
+        val sessionIds = _state.value.sessions.filter { it.sectionId == id || it.id == sec.sessionId }.map { it.id }
+        val agentIds = (sec.agentIds + sec.coordinatorAgentId).toSet()
+        update { st -> st.copy(sections = st.sections.filterNot { it.id == id }, agents = st.agents.filterNot { it.id in agentIds }) }
+        return sessionIds
+    }
+
     fun upsertSkill(s: Skill) = update { st ->
         st.copy(skills = if (st.skills.any { it.id == s.id }) st.skills.map { if (it.id == s.id) s else it } else st.skills + s)
     }

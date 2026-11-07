@@ -64,6 +64,10 @@ object DeviceAccessibilityActions {
         }
     }
 
+    /** (pacote do app, rótulo) do controle, sem tocar nele — para o portão de confirmação. */
+    suspend fun describe(sessionId: String, snapshotId: String, elementId: Int): Pair<String, String> =
+        AccessibilityAutomationBridge.execute(sessionId) { it.describe(sessionId, snapshotId, elementId) }
+
     suspend fun click(sessionId: String, snapshotId: String, elementId: Int): String =
         AccessibilityAutomationBridge.execute(sessionId) { it.click(sessionId, snapshotId, elementId) }
 

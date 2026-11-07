@@ -134,7 +134,7 @@ fun ChatScreen(nav: NavController, sessionId: String) {
             navigationIcon = { IconButton({ goBack() }) { Icon(Icons.AutoMirrored.Rounded.ArrowBack, "Voltar") } },
             title = {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    if (agent != null) { AgentFace(Color(agent.color), agent.face, 24.dp); Spacer(Modifier.width(8.dp)) }
+                    if (agent != null) { AnimatedAgentFace(Color(agent.color), agent.face, 24.dp, state = when { running -> dev.cueopen.app.ui.mascot.MascotState.THINKING; session.status == SessionStatus.SLEEPING -> dev.cueopen.app.ui.mascot.MascotState.SLEEPING; else -> dev.cueopen.app.ui.mascot.MascotState.IDLE }); Spacer(Modifier.width(8.dp)) }
                     Text(session.title, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.titleMedium)
                 }
             },
@@ -201,7 +201,7 @@ fun ChatScreen(nav: NavController, sessionId: String) {
             Composer(
                 value = draft, onChange = { draft = it },
                 placeholder = if (session.status == SessionStatus.WAITING_USER) "Responda ao agente…" else "Envie uma mensagem",
-                running = running || session.status == SessionStatus.SLEEPING || autoAgent != null, onStop = { app.agent.stop(sessionId) },
+                running = running || session.status == SessionStatus.SLEEPING || autoAgent != null, onStop = { app.agent.stop(sessionId, pauseAutonomy = !running) },  // no meio de um passo: só interrompe
                 // Cronômetro até o próximo ciclo: durante um ciclo ativo (RUNNING) não mostra; parado,
                 // usa wakeAt (modo contínuo) ou o próximo heartbeat agendado (lastBeatAt + intervalo).
                 nextCycleAt = if (running) null else
@@ -252,7 +252,7 @@ fun ChatScreen(nav: NavController, sessionId: String) {
                                 kotlinx.coroutines.delay(450)
                                 app.store.replaceItem(sessionId, step.copy(title = "Contexto do modelo limpo", args = "histórico mantido na tela", status = StepStatus.OK))
                             }
-                            "/stop" -> app.agent.stop(sessionId)
+                            "/stop" -> app.agent.stop(sessionId, pauseAutonomy = true)
                             "/usage" -> usage = true
                             "/memory" -> nav.navigate("memory")
                             "/skills" -> nav.navigate("skills")
@@ -410,6 +410,8 @@ fun TimelineItem(item: ChatItem, onOpenComputer: (String) -> Unit, onOpenMedia: 
         is ChatItem.ConnectorEditProposal -> ConnectorEditProposalCard(item, sessionId)
         is ChatItem.Question -> QuestionCard(item, sessionId)
         is ChatItem.SecureForm -> SecureFormCard(item, sessionId)
+        is ChatItem.Approval -> ApprovalCard(item, sessionId)
+        is ChatItem.SectionSetup -> SectionSetupCard(item, sessionId, nav)
     }
 }
 
@@ -635,7 +637,7 @@ private fun ThinkingRow(a: Activity) {
     val alpha by t.animateFloat(0.45f, 1f, infiniteRepeatable(tween(700), RepeatMode.Reverse), label = "a")
     val bob by t.animateFloat(0f, -3f, infiniteRepeatable(tween(520, easing = FastOutSlowInEasing), RepeatMode.Reverse), label = "b")
     Row(verticalAlignment = Alignment.CenterVertically) {
-        AgentFace(persona.color, persona.face, 22.dp, Modifier.offset(y = bob.dp).alpha(alpha)); Spacer(Modifier.width(8.dp))
+        AnimatedAgentFace(persona.color, persona.face, 22.dp, Modifier.offset(y = bob.dp).alpha(alpha), state = dev.cueopen.app.ui.mascot.MascotState.THINKING); Spacer(Modifier.width(8.dp))
         Text(when (a.kind) { Activity.Kind.THINKING, Activity.Kind.IDLE -> "Pensando…"; else -> "Trabalhando…" }, color = c.ink2, fontSize = 14.sp)
     }
 }
@@ -797,6 +799,8 @@ fun sessionMarkdown(s: Session): String = buildString {
             is ChatItem.Question -> { i.questions.forEachIndexed { n, q -> appendLine("❓ ${q.question} → ${i.answers.getOrNull(n)?.joinToString().orEmpty().ifBlank { "—" }}") }; appendLine() }
             is ChatItem.SecureForm -> appendLine("🔒 ${i.title}: ${if (i.state == "submitted") "enviado com segurança (" + i.submitted.joinToString() + ")" else i.state}\n")
             is ChatItem.Media -> appendLine("🖼 ${i.caption} (${java.io.File(i.path).name})\n")
+            is ChatItem.Approval -> appendLine("🛡 Confirmação: ${i.summary} — ${i.state}\n")
+            is ChatItem.SectionSetup -> appendLine("📁 Seção ${i.sectionName} (${i.agentNames.joinToString()}) — ${i.state}\n")
         }
     }
     appendLine("\n— gerado com Fluwy Bot")
@@ -974,6 +978,107 @@ private fun ConnectorEditProposalCard(p: ChatItem.ConnectorEditProposal, session
                 else Text("Atualizar conector", fontWeight = FontWeight.SemiBold)
             }
             Text("A configuração só muda depois deste toque. Nenhuma rede externa, login ou ação real é executada; validações de definição usam mocks locais.", fontSize = 11.sp, color = c.ink3)
+        }
+    }
+}
+
+
+/** Card de confirmação de ação sensível (comprar/pagar, apagar, enviar/publicar, transferir, conta). */
+@Composable
+private fun ApprovalCard(item: ChatItem.Approval, sessionId: String?) {
+    val c = Cue.c
+    val app = dev.cueopen.app.CueApp.instance
+    val cat = dev.cueopen.app.agent.ActionGate.Category.of(item.category)
+    Column(
+        Modifier.fillMaxWidth().padding(vertical = 6.dp).clip(RoundedCornerShape(16.dp))
+            .background(c.surface).border(1.dp, if (item.state == "pending") c.warn else c.line, RoundedCornerShape(16.dp)).padding(14.dp),
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Icon(Icons.Rounded.Shield, null, tint = if (item.state == "pending") c.warn else c.ink3, modifier = Modifier.size(18.dp))
+            Spacer(Modifier.width(8.dp))
+            Text(cat?.question ?: "Confirmar ação?", fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
+        }
+        Spacer(Modifier.height(6.dp))
+        Text(item.summary, fontSize = 14.sp, color = c.ink2)
+        Spacer(Modifier.height(10.dp))
+        when (item.state) {
+            "pending" -> Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedButton({ sessionId?.let { app.agent.decideApproval(it, item, approve = false) } }, Modifier.weight(1f)) { Text("Negar") }
+                Button({ sessionId?.let { app.agent.decideApproval(it, item, approve = true) } }, Modifier.weight(1f),
+                    colors = ButtonDefaults.buttonColors(containerColor = c.ink, contentColor = c.bg)) { Text("Aprovar") }
+            }
+            "approved", "used" -> Text("✓ Aprovado", fontSize = 12.sp, color = c.ok)
+            else -> Text("✕ Negado", fontSize = 12.sp, color = c.err)
+        }
+    }
+}
+
+
+/**
+ * Card de autorização da Seção: o usuário marca o que o time pode usar e ativa.
+ * Ao ativar, as permissões valem para todos os Agents da seção e o coordenador começa a trabalhar.
+ */
+@Composable
+private fun SectionSetupCard(item: ChatItem.SectionSetup, sessionId: String?, nav: androidx.navigation.NavController?) {
+    val c = Cue.c
+    val app = dev.cueopen.app.CueApp.instance
+    val ctx = androidx.compose.ui.platform.LocalContext.current
+    var browser by remember(item.id) { mutableStateOf(true) }
+    var terminal by remember(item.id) { mutableStateOf(true) }
+    var wallet by remember(item.id) { mutableStateOf(item.suggestWallet) }
+    var caps by remember(item.id) { mutableStateOf(item.suggestedCaps.toSet()) }
+    var connectors by remember(item.id) { mutableStateOf(emptySet<String>()) }
+    var fullAuto by remember(item.id) { mutableStateOf(false) }
+    val section = app.store.section(item.sectionId)
+    Column(
+        Modifier.fillMaxWidth().padding(vertical = 6.dp).clip(RoundedCornerShape(16.dp))
+            .background(c.surface).border(1.dp, if (item.state == "pending") c.accent else c.line, RoundedCornerShape(16.dp)).padding(14.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Icon(Icons.Rounded.Folder, null, tint = c.accent, modifier = Modifier.size(18.dp)); Spacer(Modifier.width(8.dp))
+            Text("Seção “${item.sectionName}”", fontWeight = FontWeight.SemiBold, fontSize = 15.sp)
+        }
+        Text("Time: " + item.agentNames.joinToString(" · "), fontSize = 13.sp, color = c.ink2)
+        when (item.state) {
+            "pending" -> {
+                Text("O que este time pode usar?", fontSize = 13.sp, color = c.ink2, fontWeight = FontWeight.Medium)
+                ToggleRow("Browser", "Navegar e agir em sites (usa seus logins salvos)", browser) { browser = it }
+                ToggleRow("Terminal Linux", "Rodar comandos e scripts no sandbox", terminal) { terminal = it }
+                ToggleRow("Carteira Solana", "Consultar endereço e saldo e pedir transferências (cada uma pede sua aprovação)", wallet) { wallet = it }
+                val hub = app.uiConnectors.connectors
+                if (hub.isNotEmpty()) {
+                    Text("Conectores", fontSize = 13.sp, color = c.ink2, fontWeight = FontWeight.Medium)
+                    hub.forEach { uc ->
+                        ToggleRow(uc.spec.name, uc.spec.description.take(90), uc.spec.id in connectors) { on ->
+                            connectors = if (on) connectors + uc.spec.id else connectors - uc.spec.id
+                        }
+                    }
+                }
+                Text("Acesso ao Android", fontSize = 13.sp, color = c.ink2, fontWeight = FontWeight.Medium)
+                dev.cueopen.app.device.DeviceCaps.all.forEach { cap ->
+                    ToggleRow(cap.title, cap.desc, cap.id in caps) { on -> caps = if (on) caps + cap.id else caps - cap.id }
+                }
+                ToggleRow("100% autônomo", "Não pedir confirmação para comprar, pagar, apagar, enviar ou transferir", fullAuto) { fullAuto = it }
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedButton({ sessionId?.let { app.agent.cancelSectionSetup(it, item) } }, Modifier.weight(1f)) { Text("Agora não") }
+                    Button({
+                        val sid = sessionId ?: return@Button
+                        val target = app.agent.activateSection(sid, item, dev.cueopen.app.agent.AgentRunner.SectionPermissions(
+                            browser = browser, terminal = terminal, wallet = wallet, uiConnectorIds = connectors.toList(),
+                            deviceCaps = caps.toList(), fullAuto = fullAuto,
+                        ))
+                        if (dev.cueopen.app.device.DeviceCaps.BACKGROUND in caps) dev.cueopen.app.device.DeviceCaps.requestBatteryUnrestricted(ctx)
+                        caps.filterNot { dev.cueopen.app.device.DeviceCaps.granted(ctx, it) }.firstOrNull()?.let { dev.cueopen.app.device.DeviceCaps.request(ctx, it) }
+                        target?.let { nav?.navigate("chat/$it") }
+                    }, Modifier.weight(1f), colors = ButtonDefaults.buttonColors(containerColor = c.ink, contentColor = c.bg)) { Text("Ativar seção") }
+                }
+            }
+            "activated" -> Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("✓ Seção ativada", fontSize = 13.sp, color = c.ok, modifier = Modifier.weight(1f))
+                if (section != null) TextButton({ nav?.navigate("chat/${section.sessionId}") }) { Text("Abrir seção", color = c.accent) }
+            }
+            else -> Text("Ativação adiada. Peça no chat para ativar a seção quando quiser.", fontSize = 12.sp, color = c.ink3)
         }
     }
 }

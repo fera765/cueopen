@@ -36,7 +36,8 @@ import org.json.JSONTokener
 class BrowserHost(private val appCtx: Context, sessionId: String = "__legacy__") {
 
     private val persistence = BrowserSessionPersistence(appCtx, sessionId)
-    private val profileName = persistence.profileName
+    /** Perfil WebView compartilhado (contas logadas); abas/histórico continuam por chat em [persistence]. */
+    private val profileName = BrowserProfileIdentity.SHARED_PROFILE
 
     data class TabInfo(val id: String, val url: String, val title: String)
 
@@ -349,14 +350,19 @@ class BrowserHost(private val appCtx: Context, sessionId: String = "__legacy__")
     @SuppressLint("SetJavaScriptEnabled")
     private fun createView(ctx: Context, tab: BrowserTab): WebView {
         val v = WebView(ctx)
-        val isolated = runCatching {
-            if (!WebViewFeature.isFeatureSupported(WebViewFeature.MULTI_PROFILE)) false
-            else {
-                WebViewCompat.setProfile(v, profileName)
-                WebViewCompat.getProfile(v)?.name == profileName
-            }
-        }.getOrDefault(false)
+        // Perfil persistente de contas. Sem suporte a perfis, o perfil padrão do WebView já é único e
+        // persistente — serve igual, então a rede nunca é bloqueada por isso.
+        runCatching {
+            if (WebViewFeature.isFeatureSupported(WebViewFeature.MULTI_PROFILE)) WebViewCompat.setProfile(v, profileName)
+        }
+        val isolated = true
         _ui.value = _ui.value.copy(profileIsolated = isolated)
+        runCatching {
+            val cm = cookieManagerFor(v)
+            cm.setAcceptCookie(true)
+            // Logins via Google/Facebook/SSO dependem de cookies de terceiros (padrão desligado no targetSdk 28).
+            cm.setAcceptThirdPartyCookies(v, true)
+        }
         with(v.settings) {
             javaScriptEnabled = true
             domStorageEnabled = true
@@ -416,6 +422,8 @@ class BrowserHost(private val appCtx: Context, sessionId: String = "__legacy__")
                 installSnapshotInstrumentation(view)
                 installNetworkInstrumentation(view)
                 persistWebViewState(tab, view)
+                // grava o login no disco a cada página carregada: sobrevive a o app ser morto pelo Android
+                runCatching { cookieManagerFor(view).flush() }
             }
             override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): android.webkit.WebResourceResponse? {
                 // só observa (não intercepta): alimenta o painel de rede
@@ -538,7 +546,7 @@ class BrowserHost(private val appCtx: Context, sessionId: String = "__legacy__")
     fun persistState() {
         if (android.os.Looper.myLooper() == android.os.Looper.getMainLooper()) {
             tabs.values.forEach { tab -> tab.webView?.let { persistWebViewState(tab, it) } }
-            activeTab()?.webView?.let { v -> runCatching { WebViewCompat.getProfile(v).cookieManager.flush() } }
+            activeTab()?.webView?.let { v -> runCatching { cookieManagerFor(v).flush() } }
             saveMetadata()
         } else {
             android.os.Handler(android.os.Looper.getMainLooper()).post { persistState() }
@@ -581,10 +589,36 @@ class BrowserHost(private val appCtx: Context, sessionId: String = "__legacy__")
         }
 
         private fun clearSessionData(context: Context, profileName: String, persistence: BrowserSessionPersistence) {
+            // Apaga só abas/histórico deste chat. O perfil de contas é compartilhado e NÃO é apagado aqui;
+            // remove apenas o perfil isolado antigo (versões anteriores criavam um por chat).
             persistence.clearFiles()
             runCatching {
-                if (WebViewFeature.isFeatureSupported(WebViewFeature.MULTI_PROFILE))
-                    ProfileStore.getInstance().deleteProfile(profileName)
+                val legacy = persistence.profileName
+                if (legacy != BrowserProfileIdentity.SHARED_PROFILE && WebViewFeature.isFeatureSupported(WebViewFeature.MULTI_PROFILE))
+                    ProfileStore.getInstance().deleteProfile(legacy)
+            }
+        }
+
+        /** CookieManager do perfil compartilhado (ou o global, se o WebView não tiver perfis). */
+        internal fun cookieManagerFor(v: WebView): android.webkit.CookieManager =
+            runCatching {
+                if (WebViewFeature.isFeatureSupported(WebViewFeature.MULTI_PROFILE)) WebViewCompat.getProfile(v).cookieManager else null
+            }.getOrNull() ?: android.webkit.CookieManager.getInstance()
+
+        /** "Sair de todas as contas": apaga cookies e armazenamento do perfil de contas. */
+        fun signOutEverywhere(context: Context) {
+            android.os.Handler(android.os.Looper.getMainLooper()).post {
+                runCatching {
+                    if (WebViewFeature.isFeatureSupported(WebViewFeature.MULTI_PROFILE)) {
+                        val profile = ProfileStore.getInstance().getOrCreateProfile(BrowserProfileIdentity.SHARED_PROFILE)
+                        profile.cookieManager.removeAllCookies(null); profile.cookieManager.flush()
+                        profile.webStorage.deleteAllData()
+                    } else {
+                        android.webkit.CookieManager.getInstance().removeAllCookies(null)
+                        android.webkit.CookieManager.getInstance().flush()
+                        android.webkit.WebStorage.getInstance().deleteAllData()
+                    }
+                }
             }
         }
     }
@@ -861,6 +895,23 @@ class BrowserHost(private val appCtx: Context, sessionId: String = "__legacy__")
         val r = eval("""(function(){var e=document.querySelector('[data-cue="$index"]');if(!e)return 'elemento $index não encontrado: referência obsoleta; execute browser_read novamente, escolha um índice novo e não repita este';e.scrollIntoView({block:'center'});e.click();return 'ok: clicou em '+(e.innerText||e.value||e.tagName).slice(0,60);})()""", tab = tab)
         awaitLoadIfNavigating(tab)
         return r
+    }
+
+    /**
+     * Descreve, SEM interagir, o elemento [index] da última leitura: rótulo do controle e, para campos,
+     * o texto do botão de envio do formulário. Usado pelo portão de confirmação (comprar/apagar/enviar…).
+     * Retorna par (host da aba, rótulo) ou null se não houver aba/elemento.
+     */
+    suspend fun describe(index: Int): Pair<String, String>? {
+        val tab = onMain { activeTab() } ?: return null
+        val host = runCatching { android.net.Uri.parse(tab.url).host.orEmpty().removePrefix("www.") }.getOrDefault("")
+        val raw = runCatching {
+            eval("""(function(){var e=document.querySelector('[data-cue="$index"]');if(!e)return '';
+                function L(x){return ((x.innerText||x.value||x.getAttribute('aria-label')||x.title||x.placeholder||x.name||'')+'').trim().replace(/\s+/g,' ').slice(0,90);}
+                var t=L(e); if((e.tagName=='INPUT'||e.tagName=='TEXTAREA')&&e.form){var b=e.form.querySelector('button[type=submit],input[type=submit],button:not([type])'); if(b) t=L(b)+' · '+t;}
+                return t;})()""".trimIndent(), tab = tab)
+        }.getOrNull().orEmpty().trim().removeSurrounding("\"")
+        return if (raw.isBlank()) null else host to raw
     }
 
     suspend fun type(index: Int, text: String, submit: Boolean): String {

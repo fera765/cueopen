@@ -7,6 +7,8 @@ import dev.cueopen.app.data.KnowledgeItem
 import dev.cueopen.app.data.LlmMessage
 import dev.cueopen.app.data.PlanPhase
 import dev.cueopen.app.data.Session
+import dev.cueopen.app.data.Section
+import dev.cueopen.app.data.newId
 import dev.cueopen.app.data.SessionStatus
 import dev.cueopen.app.data.Skill
 import dev.cueopen.app.data.StepStatus
@@ -104,14 +106,19 @@ class AgentRunner(
 
     fun isRunning(sessionId: String) = jobs[sessionId]?.isActive == true
 
-    fun stop(sessionId: String) {
+    /**
+     * Interrompe a execução atual. A autonomia do Agent só é pausada quando [pauseAutonomy] é true
+     * (/stop explícito ou parar um chat ocioso). Antes, qualquer parada — tocar ■ no meio de um
+     * passo, o botão da notificação do terminal — desligava a autonomia sem o usuário perceber.
+     */
+    fun stop(sessionId: String, pauseAutonomy: Boolean = false) {
         executions.cancelSession(sessionId)
         // Primeiro envia Ctrl+C ao PTY ativo; cancelar só a coroutine deixava o processo vivo.
         terminals.get(sessionId).cancelAgentCommand()
         scope.launch { runCatching { browserFor(sessionId).cancelNavigation() } }
         jobs.remove(sessionId)?.cancel()
         synchronized(childJobsByParent) { childJobsByParent.remove(sessionId)?.forEach { it.cancel() } }
-        store.state.value.agents.filter { it.homeSessionId == sessionId && it.autonomous }.forEach {
+        if (pauseAutonomy) store.state.value.agents.filter { it.homeSessionId == sessionId && it.autonomous }.forEach {
             store.upsertAgent(it.copy(autonomous = false)); dev.cueopen.app.scheduler.Heartbeat.cancel(ctx, it.id)
         }
         finalizeRunningSteps(sessionId, "Execução interrompida pelo usuário.")
@@ -163,6 +170,238 @@ class AgentRunner(
         }
         jobs[sessionId] = job
         return job
+    }
+
+    // ------------------------------------------------------------------ confirmação de ações sensíveis
+    /**
+     * Portão por Agent: classifica a chamada (rótulo do botão, nome da ferramenta do conector, comando)
+     * e, se a categoria exigir confirmação, cria o card e NÃO executa. Aprovação vale uma vez, por 30 min.
+     * @return null para executar normalmente; um ToolResult para bloquear/aguardar.
+     */
+    private suspend fun actionGate(sessionId: String, call: dev.cueopen.app.llm.ToolCall): ToolResult? {
+        val sess = store.session(sessionId) ?: return null
+        val agent = store.agent(sess.agentId)
+        if (agent?.confirmMode == "auto") return null
+        val args = runCatching { json.parseToJsonElement(call.argsJson).jsonObject }.getOrNull()
+        fun arg(k: String) = runCatching { args?.get(k)?.jsonPrimitive?.content }.getOrNull().orEmpty()
+        var host: String? = null
+        val label: String? = when (call.name) {
+            "browser_click" -> browserFor(sessionId).describe(arg("index").toIntOrNull() ?: -1)?.let { host = it.first; it.second }
+            "browser_type" -> if (arg("submit") != "true") return null
+                else browserFor(sessionId).describe(arg("index").toIntOrNull() ?: -1)?.let { host = it.first; it.second }
+            "device_accessibility_click" -> runCatching {
+                dev.cueopen.app.device.DeviceAccessibilityActions.describe(sessionId, arg("snapshot_id"), arg("element_id").toIntOrNull() ?: -1)
+            }.getOrNull()?.let { host = it.first; it.second }
+            "browser_js" -> arg("code")
+            "shell" -> arg("command")
+            else -> null
+        }
+        val category = ActionGate.classify(call.name, label) ?: return null
+        if (!ActionGate.requiresConfirmation(agent?.confirmMode, agent?.confirmCategories, category)) return null
+        val key = ActionGate.approvalKey(call.name, normArgs(call.argsJson), label, host)
+        val now = System.currentTimeMillis()
+        val recent = sess.items.filterIsInstance<ChatItem.Approval>()
+            .filter { it.callKey == key && now - it.time < ActionGate.DECISION_TTL_MS }
+        recent.lastOrNull { it.state == "approved" }?.let { ok ->
+            store.replaceItem(sessionId, ok.copy(state = "used"))  // vale uma única execução
+            return null
+        }
+        if (recent.any { it.state == "denied" })
+            return ToolResult("NEGADO pelo usuário: \"${category.label}\" não foi autorizado. Não tente de novo nem por outro caminho; siga sem essa ação ou finalize explicando.")
+        if (recent.any { it.state == "pending" })
+            return ToolResult("Aguardando a confirmação do usuário para esta ação. Nada foi executado.", SessionStatus.WAITING_USER)
+        val summary = ActionGate.summary(category, call.name, label, host)
+        store.addItem(sessionId, ChatItem.Approval(tool = call.name, callKey = key, category = category.id, summary = summary))
+        agent?.let { notifyAgent(it.copy(homeSessionId = sessionId), "Confirmação necessária: $summary") }
+        return ToolResult("AGUARDANDO CONFIRMAÇÃO do usuário (${category.label}): $summary. Nada foi executado. " +
+            "Quando ele aprovar você receberá uma mensagem; então leia a tela de novo e repita a MESMA ação. Se ele negar, não insista.", SessionStatus.WAITING_USER)
+    }
+
+    // ------------------------------------------------------------------ Seções (time de Agents)
+    /** Permissões escolhidas pelo usuário no card de autorização da seção. */
+    data class SectionPermissions(
+        val browser: Boolean, val terminal: Boolean, val wallet: Boolean,
+        val uiConnectorIds: List<String>, val deviceCaps: List<String>, val fullAuto: Boolean,
+    )
+
+    private val sectionColors = listOf(0xFFFF6B3DL, 0xFF4D8DFFL, 0xFF2FBF71L, 0xFFFFC53DL, 0xFFB57BFFL, 0xFFFF5C8AL, 0xFF2EC4C4L, 0xFF9C978EL)
+
+    private fun createSection(
+        sessionId: String, name: String, description: String, coordinatorInstructions: String,
+        agentsJson: String, firstTask: String, capsCsv: String, suggestWallet: Boolean,
+    ): ToolResult {
+        val title = name.trim().take(40)
+        if (title.isBlank()) return ToolResult("ERRO: informe o nome da seção.")
+        store.state.value.sections.firstOrNull { it.name.equals(title, ignoreCase = true) }?.let { existing ->
+            if (existing.configured) return ToolResult("Já existe uma seção ativa chamada \"$title\". Use a existente (está na sidebar) ou peça outro nome ao usuário.")
+            // seção criada mas não ativada: mostra o card de autorização de novo
+            store.addItem(sessionId, ChatItem.SectionSetup(sectionId = existing.id, sectionName = existing.name,
+                agentNames = (listOf(existing.coordinatorAgentId) + existing.agentIds).mapNotNull { store.agent(it)?.name }))
+            return ToolResult("A seção \"$title\" já existia sem ativação; mostrei o card de autorização de novo. Aguarde o usuário.", SessionStatus.WAITING_USER)
+        }
+        val arr = runCatching { json.parseToJsonElement(agentsJson).jsonArray }.getOrNull()
+            ?: return ToolResult("ERRO: agents_json deve ser um array JSON de objetos {name, role, description, rules}.")
+        if (arr.isEmpty() || arr.size > 12) return ToolResult("ERRO: informe de 1 a 12 agentes.")
+        val faces = dev.cueopen.app.ui.mascot.Mascots.builtinIds
+        val sectionId = newId()
+        val members = arr.mapIndexedNotNull { idx, el ->
+            val o = el as? JsonObject ?: return@mapIndexedNotNull null
+            fun f(k: String) = runCatching { o[k]?.jsonPrimitive?.contentOrNull }.getOrNull().orEmpty().trim()
+            fun bo(k: String, d: Boolean) = runCatching { o[k]?.jsonPrimitive?.booleanOrNull }.getOrNull() ?: d
+            val n = f("name").ifBlank { "Agente ${idx + 1}" }.take(40)
+            val role = f("role")
+            AgentProfile(
+                name = n, face = faces[(idx + 1) % faces.size], color = sectionColors[idx % sectionColors.size],
+                mission = f("description"),
+                instructions = buildString {
+                    appendLine("Você é $n" + (if (role.isNotBlank()) " ($role)" else "") + ", membro da seção \"$title\".")
+                    if (f("description").isNotBlank()) appendLine("Função: " + f("description"))
+                    if (f("rules").isNotBlank()) appendLine("Regras fixas (nunca quebre): " + f("rules"))
+                    appendLine("Você recebe tarefas do coordenador da seção. Entregue resultados concretos e verificáveis (links, números, arquivos). Nunca invente dados; se faltar algo, diga exatamente o que falta.")
+                }.trim(),
+                useBrowser = bo("needs_browser", true), useTerminal = bo("needs_terminal", true),
+            )
+        }
+        if (members.isEmpty()) return ToolResult("ERRO: nenhum agente válido em agents_json.")
+        val roster = members.joinToString("\n") { "- ${it.name}: ${it.mission.ifBlank { it.instructions.lineSequence().drop(1).firstOrNull().orEmpty() }}" }
+        val coordinator = AgentProfile(
+            name = "Coordenador · $title".take(40), face = "bot", color = sectionColors[members.size % sectionColors.size],
+            mission = description,
+            instructions = buildString {
+                appendLine("Você é o coordenador da seção \"$title\"." + (if (description.isNotBlank()) " Objetivo: $description" else ""))
+                appendLine("Seu time:\n$roster")
+                appendLine("Use team_delegate para passar cada tarefa ao agente certo (uma por vez ou em sequência lógica) e team_status para acompanhar. Divida o trabalho, cobre prazos, confira entregas e consolide os resultados.")
+                if (coordinatorInstructions.isNotBlank()) appendLine("Regras do usuário: $coordinatorInstructions")
+            }.trim(),
+        )
+        members.forEach { store.upsertAgent(it) }
+        store.upsertAgent(coordinator)
+        val chat = Session(title = "📁 $title", agentId = coordinator.id, sectionId = sectionId)
+        store.upsertSession(chat)
+        val task = firstTask.trim().ifBlank {
+            store.session(sessionId)?.llm?.lastOrNull { it.role == "user" && it.content?.startsWith("[") != true }?.content.orEmpty()
+        }
+        store.upsertSection(Section(id = sectionId, name = title, description = description.trim(), coordinatorAgentId = coordinator.id,
+            agentIds = members.map { it.id }, sessionId = chat.id, configured = false, firstTask = task))
+        val allowedCaps = setOf(dev.cueopen.app.device.DeviceCapPolicy.BACKGROUND, dev.cueopen.app.device.DeviceCapPolicy.POST_NOTIFICATIONS,
+            dev.cueopen.app.device.DeviceCapPolicy.PHONE_NOTIFICATIONS, dev.cueopen.app.device.DeviceCapPolicy.ACCESSIBILITY, dev.cueopen.app.device.DeviceCapPolicy.SCREEN)
+        val caps = capsCsv.split(',').map { it.trim() }.filter { it in allowedCaps }.distinct()
+        store.addItem(sessionId, ChatItem.SectionSetup(sectionId = sectionId, sectionName = title,
+            agentNames = listOf(coordinator.name) + members.map { it.name }, suggestedCaps = caps, suggestWallet = suggestWallet))
+        return ToolResult("Seção \"$title\" criada com ${members.size} agentes + coordenador. O card de autorização está na tela: o usuário escolhe as permissões e toca em Ativar. " +
+            "Responda em 1-2 frases o que foi criado e aguarde; não delegue nada daqui.", SessionStatus.WAITING_USER)
+    }
+
+    /** Aplica as permissões do card a todos os Agents da seção e dá a largada no coordenador. Retorna o chat da seção. */
+    fun activateSection(sessionId: String, item: ChatItem.SectionSetup, p: SectionPermissions): String? {
+        val cur = store.session(sessionId)?.items?.firstOrNull { it.id == item.id } as? ChatItem.SectionSetup ?: return null
+        if (cur.state != "pending") return store.section(cur.sectionId)?.sessionId
+        val sec = store.section(cur.sectionId) ?: return null
+        val wallet = WalletAgentPolicyStore(ctx.applicationContext)
+        (sec.agentIds + sec.coordinatorAgentId).forEach { id ->
+            store.agent(id)?.let { a ->
+                store.upsertAgent(a.copy(
+                    useBrowser = p.browser && a.useBrowser, useTerminal = p.terminal && a.useTerminal,
+                    deviceCaps = p.deviceCaps, uiConnectorIds = p.uiConnectorIds,
+                    confirmMode = if (p.fullAuto) "auto" else "ask",
+                ))
+                runCatching {
+                    wallet.setAgentCapabilities(id, readAddress = p.wallet, readBalance = p.wallet, requestTransfer = p.wallet,
+                        autonomousTransfer = false, dayTrade = false)
+                }
+            }
+        }
+        store.replaceItem(sessionId, cur.copy(state = "activated"))
+        store.upsertSection(sec.copy(configured = true))
+        send(sec.sessionId, sec.firstTask.ifBlank { "Apresente o time, proponha o plano inicial e comece." })
+        return sec.sessionId
+    }
+
+    fun cancelSectionSetup(sessionId: String, item: ChatItem.SectionSetup) {
+        val cur = store.session(sessionId)?.items?.firstOrNull { it.id == item.id } as? ChatItem.SectionSetup ?: return
+        if (cur.state != "pending") return
+        store.replaceItem(sessionId, cur.copy(state = "cancelled"))
+    }
+
+    /** Limpa o contexto do modelo em todos os chats da seção (o histórico na tela continua). */
+    fun clearSectionContext(sectionId: String) {
+        store.state.value.sessions.filter { it.sectionId == sectionId }.forEach { s ->
+            stop(s.id)
+            store.editSession(s.id) { it.copy(llm = emptyList(), summary = "", status = SessionStatus.IDLE) }
+        }
+    }
+
+    /** Reinicia a seção: para tudo, apaga histórico e contexto dos chats do time e recomeça do pedido original. */
+    fun restartSection(sectionId: String) {
+        val sec = store.section(sectionId) ?: return
+        store.state.value.sessions.filter { it.sectionId == sectionId }.forEach { s ->
+            stop(s.id)
+            store.editSession(s.id) { it.copy(llm = emptyList(), items = emptyList(), summary = "", status = SessionStatus.IDLE, wakeAt = null) }
+        }
+        if (sec.configured) send(sec.sessionId, sec.firstTask.ifBlank { "Apresente o time, proponha o plano inicial e comece." })
+    }
+
+    private fun memberSession(sec: Section, member: AgentProfile): String =
+        store.state.value.sessions.firstOrNull { it.sectionId == sec.id && it.agentId == member.id && it.id != sec.sessionId }?.id
+            ?: Session(title = "${member.name} · ${sec.name}", agentId = member.id, sectionId = sec.id).also { store.upsertSession(it) }.id
+
+    private suspend fun teamDelegate(sessionId: String, agentName: String, task: String, timeoutMinutes: Int): String {
+        val sec = store.section(store.session(sessionId)?.sectionId) ?: return "ERRO: esta conversa não é uma seção."
+        if (!sec.configured) return "A seção ainda não foi ativada pelo usuário."
+        val team = sec.agentIds.mapNotNull { store.agent(it) }
+        val wanted = agentName.trim()
+        val member = team.firstOrNull { it.name.equals(wanted, ignoreCase = true) }
+            ?: team.firstOrNull { it.name.contains(wanted, ignoreCase = true) || wanted.contains(it.name, ignoreCase = true) }
+            ?: return "ERRO: não há agente \"$agentName\" no time. Disponíveis: ${team.joinToString { it.name }}."
+        if (task.isBlank()) return "ERRO: descreva a tarefa."
+        val childId = memberSession(sec, member)
+        if (isRunning(childId)) return "${member.name} ainda está trabalhando na tarefa anterior. Use team_status e delegue de novo quando terminar."
+        val before = store.session(childId)?.items?.size ?: 0
+        send(childId, "[Tarefa do coordenador da seção ${sec.name}]\n$task")
+        val deadline = System.currentTimeMillis() + timeoutMinutes * 60_000L
+        kotlinx.coroutines.delay(1_500)
+        while (isRunning(childId) && System.currentTimeMillis() < deadline) kotlinx.coroutines.delay(2_000)
+        val child = store.session(childId)
+        val newItems = child?.items?.drop(before).orEmpty()
+        val answer = newItems.lastOrNull { it is ChatItem.Assistant } as? ChatItem.Assistant
+        return buildString {
+            when {
+                isRunning(childId) -> append("${member.name} continua trabalhando (passou de $timeoutMinutes min). Consulte depois com team_status.\n")
+                newItems.any { it is ChatItem.Approval && it.state == "pending" } -> append("${member.name} está AGUARDANDO A CONFIRMAÇÃO do usuário no chat dele.\n")
+                child?.status == SessionStatus.WAITING_USER -> append("${member.name} está aguardando uma resposta do usuário no chat dele.\n")
+                child?.status == SessionStatus.ERROR -> append("${member.name} terminou com erro.\n")
+            }
+            append("Resposta de ${member.name}:\n")
+            append(answer?.text?.take(4_000) ?: "(sem resposta final)")
+            newItems.filterIsInstance<ChatItem.Error>().lastOrNull()?.let { append("\nÚltimo erro: " + it.text.take(300)) }
+        }
+    }
+
+    private fun teamStatus(sessionId: String): String {
+        val sec = store.section(store.session(sessionId)?.sectionId) ?: return "ERRO: esta conversa não é uma seção."
+        return sec.agentIds.mapNotNull { store.agent(it) }.mapIndexed { idx, a ->
+            val child = store.state.value.sessions.firstOrNull { it.sectionId == sec.id && it.agentId == a.id && it.id != sec.sessionId }
+            val state = when {
+                child == null -> "sem tarefas ainda"
+                isRunning(child.id) -> "trabalhando"
+                child.items.any { it is ChatItem.Approval && it.state == "pending" } -> "aguardando confirmação do usuário"
+                child.status == SessionStatus.WAITING_USER -> "aguardando o usuário"
+                child.status == SessionStatus.ERROR -> "erro"
+                else -> "livre"
+            }
+            val last = (child?.items?.lastOrNull { it is ChatItem.Assistant } as? ChatItem.Assistant)?.text?.take(300)?.replace('\n', ' ')
+            "${idx + 1}. ${a.name} — $state" + (last?.let { "\n   Última resposta: $it" } ?: "")
+        }.joinToString("\n").ifBlank { "Time vazio." }
+    }
+
+    /** Resposta do card de confirmação. */
+    fun decideApproval(sessionId: String, item: ChatItem.Approval, approve: Boolean) {
+        val cur = store.session(sessionId)?.items?.firstOrNull { it.id == item.id } as? ChatItem.Approval ?: return
+        if (cur.state != "pending") return
+        store.replaceItem(sessionId, cur.copy(state = if (approve) "approved" else "denied"))
+        val msg = if (approve) "[Sistema] O usuário APROVOU: ${cur.summary}. Faça agora exatamente essa ação (releia a tela se precisar) e continue a tarefa."
+            else "[Sistema] O usuário NEGOU: ${cur.summary}. Não execute essa ação nem tente contorná-la; continue sem ela ou finalize explicando."
+        send(sessionId, msg, showUserMessage = false)
     }
 
     // ------------------------------------------------------------------ ask_question / ask_secure (respostas da UI)
@@ -242,8 +481,10 @@ class AgentRunner(
         // Quantas vezes seguidas o modelo ANUNCIOU uma ação ("vou pesquisar…") sem chamar ferramenta.
         var intentNoActionTurns = 0
         // Detecção de loop de ferramentas: mesma chamada (nome+args) repetida sem progresso.
-        val toolSigWindow = ArrayDeque<String>()
-        val resultSigWindow = ArrayDeque<String>()
+        val toolLoops = ToolLoopDetector()
+        // Assinaturas dos resultados das duas últimas rodadas: texto repetido com resultados mudando é progresso.
+        var lastRoundResults = ""
+        var prevRoundResults = ""
         // Reutiliza resultados idênticos do builder somente nesta invocação do loop; evita dry-runs/cards duplicados aqui.
         val connectorBuilderResults = ExactToolCallMemo<ToolResult>()
         val invalidAccessibilitySnapshots = dev.cueopen.app.device.InvalidAccessibilitySnapshotGuard()
@@ -277,7 +518,7 @@ class AgentRunner(
                 s = ctxMgr.compactIfNeeded(s)
             }
             // Planejamento contextual: decide quais ferramentas/conectores e quanto conhecimento/memória entram neste passo
-            val allTools = tools(agent, allowMultiAgent = tokenBudgetOverride == null, builder = s.connectorBuilder, connectorEditId = s.connectorEditId)
+            val allTools = tools(agent, allowMultiAgent = tokenBudgetOverride == null, builder = s.connectorBuilder, connectorEditId = s.connectorEditId, sectionId = s.sectionId)
             val (contextPlan, stepTools) = toolContextPlan(sessionId, s, allTools)
             // O schema enviado ao provider também é uma allowlist de execução para esta volta.
             val exposedToolNames = stepTools.mapNotNull(::toolName).toSet()
@@ -377,7 +618,8 @@ class AgentRunner(
             // diferentes (ex.: navegar em URLs distintas) é progresso, não loop.
             val cNow = displayContent.trim()
             val curToolSig = reply.toolCalls.joinToString(";") { it.name + "|" + normArgs(it.argsJson) }
-            val sameActions = reply.toolCalls.isEmpty() || curToolSig == lastToolSig
+            // Mesma ação só é "parada" se os resultados também não mudaram (polling legítimo devolve dados novos).
+            val sameActions = reply.toolCalls.isEmpty() || (curToolSig == lastToolSig && lastRoundResults == prevRoundResults)
             lastToolSig = curToolSig
             // Repetição de texto: compara com a JANELA das últimas respostas (não só a anterior), para pegar
             // o modelo que fica alternando 2–3 frases quase iguais sem progredir. Só conta como repetição se
@@ -441,6 +683,8 @@ class AgentRunner(
             val resultLong = HashSet<String>()
             var repeatedFileFailure: String? = null
             val staleSnapshotRecoveryCache = HashMap<String?, String>()
+            // Depois que uma ação pediu confirmação, nada mais desta resposta é executado.
+            var awaitingApproval = false
             for (call in reply.toolCalls) {
                 val callWasExposed = ToolCallExecutionPolicy.isExposed(call.name, exposedToolNames)
                 val accessibilitySnapshotId = if (callWasExposed && call.name in accessibilitySnapshotBoundTools) runCatching {
@@ -467,8 +711,14 @@ class AgentRunner(
                 val cachedTradeResult = if (tradeResultTool) tradeCallCache[cacheKey] else null
                 val cacheConnectorResult = memoizeConnectorBuilderCall(call.name)
                 val cachedConnectorResult = if (cacheConnectorResult) connectorBuilderResults[cacheKey] else null
+                val gate = if (!callWasExposed || blockedSnapshotReuse || cachedTradeResult != null || cachedConnectorResult != null) null
+                    else if (awaitingApproval) ToolResult("NÃO EXECUTADO: uma ação anterior desta resposta aguarda a confirmação do usuário. Espere a resposta antes de continuar.")
+                    else runCatching { actionGate(sessionId, call) }.getOrNull()
+                if (gate?.stop == SessionStatus.WAITING_USER) awaitingApproval = true
                 val rawResult = if (!callWasExposed) {
                     ToolResult("RECUSADO: a ferramenta '${call.name}' não foi disponibilizada neste passo. Nenhuma ação foi executada; continue somente com ferramentas expostas ou carregue a capacidade autorizada.")
+                } else if (gate != null) {
+                    gate
                 } else if (blockedSnapshotReuse) {
                     ToolResult("ERRO: Snapshot ausente ou invalidado; nenhuma ação foi executada com o ID já recusado. Use somente IDs da releitura atual:\n${blockedSnapshotRead.orEmpty()}")
                 } else try {
@@ -548,7 +798,9 @@ class AgentRunner(
                         transientAccessibilityOutputs.remove(oldest)
                     }
                 }
-                val durableToolOutput = AccessibilityToolHistory.durableResult(call.name, ctxOut)
+                // OpenBot: conteúdo externo vai como dado não confiável + falhas ganham motivo e próximo passo.
+                val durableToolOutput = ToolOutcomeAdvisor.decorate(
+                    call.name, AccessibilityToolHistory.durableResult(call.name, ctxOut), result.output)
                 store.editSession(sessionId) {
                     it.copy(llm = it.llm + LlmMessage("tool", durableToolOutput, toolCallId = call.id, name = call.name))
                 }
@@ -571,30 +823,32 @@ class AgentRunner(
             // Ferramentas de ambiente (browser, aparelho, shell, conectores) mudam de estado entre chamadas — rolar,
             // executar script, consultar posições: repetir é legítimo. Elas têm limite bem maior e nunca contam
             // "mesmo resultado com argumentos diferentes". Leituras puras (arquivo, memória, spec) seguem o limite rígido.
+            prevRoundResults = lastRoundResults
+            lastRoundResults = reply.toolCalls.joinToString(";") { it.name + "#" + (resultHashes[it.id] ?: 0) }
             run {
                 var tripped: String? = null
+                var trippedKind = ToolLoopDetector.Kind.SAME_CALL
                 var trippedRepeatable = true
                 var trippedStrict = false
+                val seqBefore = toolLoops.sequence
                 for (call in reply.toolCalls) {
                     if (call.name in controlTools) continue
                     val repeatable = isRepeatableTool(call.name)
-                    val sig = call.name + "|" + normArgs(call.argsJson) + "|" + (resultHashes[call.id] ?: 0)
-                    toolSigWindow.addLast(sig)
-                    while (toolSigWindow.size > 16) toolSigWindow.removeFirst()
-                    val same = toolSigWindow.count { it == sig }
-                    if (same >= repeatToolThreshold(call.name)) {
-                        tripped = call.name
-                        trippedRepeatable = trippedRepeatable && repeatable
-                        trippedStrict = call.name in STRICT_REPEAT_TOOLS
-                    }
-                    // mesmo conteúdo longo por caminhos diferentes (ex.: reler cópias do mesmo arquivo) — só para leituras puras
-                    if (!repeatable && call.id in resultLong) {
-                        val rsig = call.name + "#" + resultHashes[call.id]
-                        resultSigWindow.addLast(rsig)
-                        while (resultSigWindow.size > 10) resultSigWindow.removeFirst()
-                        if (resultSigWindow.count { it == rsig } >= 3) { tripped = call.name; trippedRepeatable = false }
-                    }
+                    val trip = toolLoops.record(
+                        name = call.name,
+                        normArgs = normArgs(call.argsJson),
+                        resultHash = resultHashes[call.id] ?: 0,
+                        longResult = call.id in resultLong,
+                        callThreshold = repeatToolThreshold(call.name),
+                        contentThreshold = if (call.name in CONTENT_REPEAT_TOOLS) 3 else null,
+                    ) ?: continue
+                    tripped = call.name
+                    trippedKind = trip.kind
+                    trippedRepeatable = trippedRepeatable && repeatable && trip.kind == ToolLoopDetector.Kind.SAME_CALL
+                    trippedStrict = trippedStrict || call.name in STRICT_REPEAT_TOOLS
                 }
+                // Trouxe informação nova nesta rodada: os avisos anteriores deixam de valer.
+                if (tripped == null && toolLoops.progressedAt(seqBefore)) { toolLoopNudges = 0; cleanRounds = 0 }
                 if (tripped == null) {
                     if (++cleanRounds >= 5) { toolLoopNudges = 0; cleanRounds = 0 } // voltou a progredir: zera os avisos
                 } else {
@@ -606,7 +860,10 @@ class AgentRunner(
                     }
                     if (++toolLoopNudges >= limit) {
                         runCatching { dev.cueopen.app.diag.ErrorLog.log("agent", "Loop de ferramenta sem progresso: $tripped (interrompido).", sessionId, tripped) }
-                        store.addItemUnique(sessionId, ChatItem.Error(text = "O agente repetiu exatamente a mesma ação ($tripped), com os mesmos argumentos e o mesmo resultado, várias vezes seguidas. Interrompi para evitar um loop. Ajuste o pedido/abordagem ou troque de modelo."))
+                        val why = if (trippedKind == ToolLoopDetector.Kind.SAME_CONTENT)
+                            "recebeu o mesmo conteúdo de \"$tripped\" várias vezes, sem nada novo entre as chamadas"
+                        else "repetiu a mesma ação ($tripped), com os mesmos argumentos e o mesmo resultado, sem progresso entre as chamadas"
+                        store.addItemUnique(sessionId, ChatItem.Error(text = "O agente $why. Interrompi para evitar um loop. Ajuste o pedido/abordagem ou troque de modelo."))
                         store.editSession(sessionId) { it.copy(status = SessionStatus.WAITING_USER) }
                         return
                     }
@@ -893,6 +1150,8 @@ class AgentRunner(
     /** Detectores puros de loop/degeneração (sem Android) — testáveis na JVM. */
     companion object LoopGuards {
         private val STRICT_REPEAT_TOOLS = setOf("connector_validate", "connector_test", "connector_propose", "connector_edit_propose")
+        /** Leituras de conteúdo: o mesmo texto longo voltando por caminhos diferentes é falta de progresso. */
+        private val CONTENT_REPEAT_TOOLS = setOf("file_read", "file_list", "memory_search", "notes_read", "connector_spec", "skill_load")
         private val PURE_REPEAT_TOOLS = setOf(
             "file_read", "file_list", "memory_search", "notes_read", "connector_spec", "skill_load",
             "wallet_get_balance", "wallet_list_tokens", "market_discover", "market_token_info",
@@ -1005,6 +1264,8 @@ class AgentRunner(
                 val after = store.session(sid)
                 if (after != null && !cancelledByCaller) {
                     val used = ((after.tokensIn + after.tokensOut) - tokMark).coerceAtLeast(0)
+                    // Falha do ciclo: exceção, watchdog ou qualquer erro registrado durante este ciclo.
+                    val cycleHadError = watchdogTimedOut || cycleFailed || after.items.drop(itemsMark).any { it is ChatItem.Error }
                     var quiet = false
                     if (watchdogTimedOut || cycleFailed) {
                         store.editSession(sid) { it.copy(status = SessionStatus.ERROR, continuous = false) }
@@ -1033,8 +1294,17 @@ class AgentRunner(
                     store.agent(a.id)?.let { cur ->
                         val day = today()
                         val successfulAction = !watchdogTimedOut && !cycleFailed && !quiet
-                        store.upsertAgent(cur.copy(beats = cur.beats + 1, actions = cur.actions + if (successfulAction) 1 else 0,
-                            tokensDay = day, tokensToday = (if (cur.tokensDay == day) cur.tokensToday else 0) + used))
+                        val counted = cur.copy(beats = cur.beats + 1, actions = cur.actions + if (successfulAction) 1 else 0,
+                            tokensDay = day, tokensToday = (if (cur.tokensDay == day) cur.tokensToday else 0) + used)
+                        val (updated, fatigued) = dev.cueopen.app.device.AgentAutonomyPolicy.recordCycle(counted, cycleHadError)
+                        store.upsertAgent(updated)
+                        if (fatigued) {
+                            dev.cueopen.app.scheduler.Heartbeat.cancel(ctx, cur.id)
+                            val msg = "Autonomia desligada: ${dev.cueopen.app.device.AgentAutonomyPolicy.MAX_CONSECUTIVE_FAILURES} ciclos seguidos falharam. Veja os erros acima, corrija e religue a autonomia no Agent."
+                            runCatching { dev.cueopen.app.diag.ErrorLog.log("heartbeat", msg, sid, "heartbeat") }
+                            store.addItem(sid, ChatItem.Error(text = msg))
+                            notifyAgent(updated, msg)
+                        }
                     }
                     // Em falha, mantenha o lastBeatAt do início do ciclo para permitir recuperação após reinício.
                     if (!watchdogTimedOut && !cycleFailed) {
@@ -1116,7 +1386,7 @@ class AgentRunner(
         val raw = runCatching {
             llm.quick("""
                 Gere a configuração de um agente de IA a partir do pedido do usuário. Responda SOMENTE com JSON válido:
-                {"name":"curto, 2-3 palavras","face":"wink|smile|side|dot","color":0-7,
+                {"name":"curto, 2-3 palavras","face":"jelly|bot|ghost|cat|owl|octo|sprout|cloud|star|bee|flame|orbit","color":0-7,
                  "instructions":"instruções detalhadas de como o agente age, tom, objetivos (2-5 frases)",
                  "mission":"missão permanente se for para rodar continuamente, senão vazio",
                  "autonomous":true|false, "heartbeatMinutes":0,
@@ -1137,7 +1407,7 @@ class AgentRunner(
         val name = str("name", desc.take(24)).ifBlank { "Novo Agente" }
         val hb = intf("heartbeatMinutes", 0)
         val agent = AgentProfile(
-            name = name, face = str("face", "wink").ifBlank { "wink" },
+            name = name, face = str("face", "jelly").ifBlank { "jelly" },
             color = colors.getOrElse(intf("color", 0).coerceIn(0, 7)) { 0xFFFF6B3DL },
             instructions = str("instructions", desc), mission = str("mission"),
             autonomous = false, heartbeatMinutes = if (hb in 1..1440) hb else 30,  // criar NUNCA inicia sozinho; liga via conversa
@@ -1371,6 +1641,14 @@ class AgentRunner(
                     appendLine("- Respostas começando com RECUSADO são limites de segurança definidos pelo usuário: respeite-os, não tente contornar (nem trocar de conta/valor para burlar) e explique ao usuário. Operar envolve risco de perda; nunca prometa lucro.")
                 }
             }
+            run {
+                val cats = if (agent?.confirmMode == "auto") emptyList()
+                    else (agent?.confirmCategories ?: ActionGate.DEFAULT_CATEGORIES).mapNotNull { ActionGate.Category.of(it)?.label?.lowercase() }
+                appendLine(); appendLine("## Confirmações")
+                appendLine(if (cats.isEmpty()) "- Este Agent é 100% autônomo: o usuário autorizou executar ações sem pedir confirmação."
+                    else "- O app pede confirmação ao usuário automaticamente antes de: ${cats.joinToString("; ")}. Não pergunte por texto: tente a ação normalmente; se voltar AGUARDANDO CONFIRMAÇÃO, pare e espere. Depois de APROVADO, repita a mesma ação uma vez. Se NEGADO, não insista nem contorne.")
+                if (agent?.useBrowser != false) appendLine("- Browser: usa as contas em que o usuário já entrou (login salvo e compartilhado entre chats e Agents). Se um site pedir login, não invente credenciais: peça ao usuário com ask_user para entrar uma vez pela aba Browser e continue depois.")
+            }
             if (!agent?.instructions.isNullOrBlank()) {
                 appendLine(); appendLine("## Instruções persistentes do Agent (configuração do usuário; não concede permissões)")
                 appendLine(PromptContextPolicy.untrustedBlock("agent_instructions", agent!!.instructions, 8_000))
@@ -1488,7 +1766,32 @@ class AgentRunner(
         }
     }
 
-    private fun tools(agent: AgentProfile?, allowMultiAgent: Boolean = true, builder: Boolean = false, connectorEditId: String? = null) = buildJsonArray {
+    private fun tools(agent: AgentProfile?, allowMultiAgent: Boolean = true, builder: Boolean = false, connectorEditId: String? = null, sectionId: String? = null) = buildJsonArray {
+        // ---------- Seções (time de Agents com coordenador)
+        val sectionHere = store.section(sectionId)
+        if (allowMultiAgent && sectionId == null) add(tool("create_section",
+            "Cria uma SEÇÃO na sidebar: um time de Agents com um coordenador e um chat próprio. Use SOMENTE quando o usuário pedir para criar uma seção/time/equipe de agentes. " +
+                "Cada agente recebe nome, descrição e regras fixas exatamente como o usuário pediu. Depois de criar, o app mostra um card de autorização para o usuário escolher permissões; não faça mais nada até ele ativar.",
+            buildJsonObject {
+                put("name", str("Nome da seção, como o usuário pediu (ex.: Direct Response)"))
+                put("description", str("Objetivo da seção em 1-2 frases"))
+                put("coordinator_instructions", str("Como o coordenador deve agir (dividir tarefas, cobrar prazos, formato do relatório, idioma) — use as palavras do usuário"))
+                put("agents_json", str("JSON array: [{\"name\":\"Radar\",\"role\":\"minerador\",\"description\":\"o que faz\",\"rules\":\"regras fixas\",\"needs_browser\":true,\"needs_terminal\":false}]"))
+                put("first_task", str("Primeira tarefa que o coordenador deve começar quando a seção for ativada (normalmente o pedido do usuário)"))
+                put("suggested_android_caps", str("IDs separados por vírgula entre: background, notif_post, notif_read, accessibility, screen (opcional)"))
+                put("suggest_wallet", bool("true se o time precisa da carteira"))
+            }, listOf("name", "agents_json")))
+        if (allowMultiAgent && sectionHere != null && agent?.id == sectionHere.coordinatorAgentId) {
+            add(tool("team_delegate",
+                "Delega uma tarefa a um Agent do seu time (pelo nome) e espera o resultado. O Agent trabalha no próprio chat da seção, com as próprias regras e permissões. " +
+                    "Seja específico: objetivo, entregável, prazo e critério de pronto. Retorna o relatório final do Agent.",
+                buildJsonObject {
+                    put("agent", str("Nome exato do Agent do time"))
+                    put("task", str("Tarefa completa e autossuficiente"))
+                    put("timeout_minutes", int("Espera máxima (1-30; padrão 15). Se estourar, ele continua trabalhando e você consulta depois com team_status"))
+                }, listOf("agent", "task")))
+            add(tool("team_status", "Mostra o estado de cada Agent do time (trabalhando, aguardando usuário, concluído) e a última resposta de cada um.", buildJsonObject {}))
+        }
         if (!connectorEditId.isNullOrBlank()) {
             add(tool("connector_edit_propose", "Propõe um card de atualização somente para o conector já associado a esta conversa. Não aplica alterações. settings_json é um objeto JSON com IDs listados; definition_yaml é opcional e só serve para alterações funcionais do conector customizado. Não inclua segredos.", buildJsonObject {
                 put("summary", str("Resumo curto do que será alterado"))
@@ -2089,6 +2392,10 @@ class AgentRunner(
 
         // Ferramentas "silenciosas" com card próprio
         when (call.name) {
+            "create_section" -> return createSection(sessionId, s("name"), s("description"), s("coordinator_instructions"), s("agents_json"),
+                s("first_task"), s("suggested_android_caps"), b("suggest_wallet"))
+            "team_delegate" -> return ToolResult(teamDelegate(sessionId, s("agent"), s("task"), (i("timeout_minutes") ?: 15).coerceIn(1, 30)))
+            "team_status" -> return ToolResult(teamStatus(sessionId))
             "update_plan" -> {
                 val phases = a["phases"]?.jsonArray?.map { it.jsonPrimitive.content }.orEmpty()
                 val done = i("done_count") ?: 0

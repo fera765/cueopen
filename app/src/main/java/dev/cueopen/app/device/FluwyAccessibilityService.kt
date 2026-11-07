@@ -331,6 +331,27 @@ class FluwyAccessibilityService : AccessibilityService() {
         }
     }
 
+    /**
+     * Rótulo do controle (texto/descrição, ou do primeiro ancestral clicável que tenha texto) sem tocar nele.
+     * Usado pelo portão de confirmação. Retorna (pacote do app, rótulo).
+     */
+    internal fun describe(sessionId: String, snapshotId: String, elementId: Int): Pair<String, String> {
+        requireAuthorized(sessionId)
+        val located = locate(sessionId, snapshotId, elementId)
+        fun label(n: AccessibilityNodeInfo?): String =
+            (n?.text?.toString()?.takeIf { it.isNotBlank() } ?: n?.contentDescription?.toString()).orEmpty().trim()
+        var node: AccessibilityNodeInfo? = located.node
+        var text = label(node)
+        var depth = 0
+        while (text.isBlank() && node != null && depth < MAX_CLICK_ANCESTORS) { node = node.parent; text = label(node); depth++ }
+        if (text.isBlank()) {
+            // botão de ícone: usa o texto do primeiro filho com texto
+            val n = located.node
+            for (i in 0 until n.childCount) { text = label(n.getChild(i)); if (text.isNotBlank()) break }
+        }
+        return (snapshots[sessionId]?.packageName ?: "") to text.take(90)
+    }
+
     internal suspend fun click(sessionId: String, snapshotId: String, elementId: Int): String {
         requireAuthorized(sessionId)
         val located = locate(sessionId, snapshotId, elementId)

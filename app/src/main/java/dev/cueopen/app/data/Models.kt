@@ -132,6 +132,40 @@ sealed class ChatItem {
         val submitted: List<String> = emptyList(),
     ) : ChatItem()
 
+    /**
+     * Pedido de confirmação antes de uma ação sensível (comprar/pagar, apagar, enviar/publicar,
+     * transferir, conta). A aprovação vale UMA vez para a mesma chamada (ferramenta + argumentos).
+     */
+    @Serializable
+    data class Approval(
+        override val id: String = newId(),
+        override val time: Long = now(),
+        val tool: String,
+        /** Chave da chamada (ferramenta + argumentos normalizados) — nunca contém segredos resolvidos. */
+        val callKey: String,
+        val category: String,
+        val summary: String,
+        /** pending | approved | denied | used */
+        val state: String = "pending",
+    ) : ChatItem()
+
+    /**
+     * Card de autorização da Seção: o usuário escolhe o que o time pode usar (browser, terminal,
+     * carteira, conectores, acesso ao Android, confirmações) e ativa. Só então o coordenador começa.
+     */
+    @Serializable
+    data class SectionSetup(
+        override val id: String = newId(),
+        override val time: Long = now(),
+        val sectionId: String,
+        val sectionName: String,
+        val agentNames: List<String> = emptyList(),
+        /** pending | activated | cancelled */
+        val state: String = "pending",
+        val suggestedCaps: List<String> = emptyList(),
+        val suggestWallet: Boolean = false,
+    ) : ChatItem()
+
     @Serializable
     data class Error(
         override val id: String = newId(),
@@ -202,6 +236,8 @@ data class Session(
     val autoCompact: Boolean = true,
     /** Sessão aberta pelo criador de UI Connectors: só nela as ferramentas connector_* existem. */
     val connectorBuilder: Boolean = false,
+    /** Seção (time de Agents) a que este chat pertence; null = chat comum. */
+    val sectionId: String? = null,
     /** Chat de edição vinculado a um único UI Connector; não habilita ferramentas gerais nem outros conectores. */
     val connectorEditId: String? = null,
     /** Fingerprint da configuração apresentada ao abrir o chat de edição. */
@@ -257,6 +293,35 @@ data class AgentProfile(
     val deviceCaps: List<String> = emptyList(),
     /** UI Connectors (SDK próprio, ex.: "iqoption") ativados PARA ESTE agente. */
     val uiConnectorIds: List<String> = emptyList(),
+    /**
+     * Confirmações: "ask" = pergunta antes das categorias em [confirmCategories]; "auto" = 100% autônomo,
+     * executa tudo sem perguntar. Padrão seguro para agentes novos e antigos.
+     */
+    val confirmMode: String = "ask",
+    /** Categorias que exigem confirmação no modo "ask" (ids de ActionGate.Category). */
+    val confirmCategories: List<String> = listOf("purchase", "delete", "send", "transfer", "account"),
+    /** Ciclos autônomos com falha em sequência; ao chegar no limite a autonomia é desligada. */
+    val consecutiveFailures: Int = 0,
+)
+
+/**
+ * Seção: um time de Agents criado a partir de um pedido em linguagem natural ("crie uma seção
+ * Direct Response com estes agentes…"). Tem um Agent coordenador e um chat próprio na sidebar.
+ */
+@Serializable
+data class Section(
+    val id: String = newId(),
+    val name: String,
+    val description: String = "",
+    val coordinatorAgentId: String,
+    val agentIds: List<String> = emptyList(),
+    /** Chat principal da seção (com o coordenador). */
+    val sessionId: String,
+    /** false até o usuário ativar as permissões no card de autorização. */
+    val configured: Boolean = false,
+    /** Primeira tarefa a enviar ao coordenador quando a seção for ativada. */
+    val firstTask: String = "",
+    val createdAt: Long = now(),
 )
 
 /** Conector MCP remoto (OAuth público com registro dinâmico de cliente, sem API key). */
@@ -364,6 +429,8 @@ data class AppState(
     val knowledge: List<KnowledgeItem> = emptyList(),
     val memories: List<MemoryItem> = emptyList(),
     val connectors: List<Connector> = emptyList(),
+    /** Seções criadas pelo usuário no chat: um time de Agents com coordenador e chat próprio. */
+    val sections: List<Section> = emptyList(),
     val settings: Settings = Settings(),
     val onboarded: Boolean = false,
 )

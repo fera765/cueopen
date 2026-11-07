@@ -92,8 +92,17 @@ fun AgentEditScreen(nav: NavController, id: String) {
     val app = CueApp.instance
     val st by app.store.state.collectAsStateWithLifecycle()
     val existing = st.agents.firstOrNull { it.id == id }
+    // Foto do Agent no momento em que a tela abriu: base para saber o que o usuário mudou de fato.
+    val original = remember { existing }
     var a by remember { mutableStateOf(existing ?: AgentProfile(name = "")) }
     val c = Cue.c
+    val ctx = LocalContext.current
+    var resumeTick by remember { mutableIntStateOf(0) }
+    val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val obs = androidx.lifecycle.LifecycleEventObserver { _, e -> if (e == androidx.lifecycle.Lifecycle.Event.ON_RESUME) resumeTick++ }
+        lifecycleOwner.lifecycle.addObserver(obs); onDispose { lifecycleOwner.lifecycle.removeObserver(obs) }
+    }
     val walletPolicies = remember { WalletAgentPolicyStore(app.applicationContext) }
     var walletAccess by remember(a.id) {
         mutableStateOf(
@@ -114,30 +123,39 @@ fun AgentEditScreen(nav: NavController, id: String) {
         }
     }) { pad ->
         Column(Modifier.padding(pad).verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) { AnimatedAgentFace(Color(a.color), a.face, 96.dp) }
+            dev.cueopen.app.ui.mascot.MascotPreview(a.face, Color(a.color))
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center) {
                 agentColors.forEach { col ->
                     Box(Modifier.padding(4.dp).size(28.dp).clip(CircleShape).background(Color(col))
                         .border(if (a.color == col) 3.dp else 0.dp, c.ink, CircleShape).clickable { a = a.copy(color = col) })
                 }
             }
-            val selectedFace = when (a.face) { "wink" -> "blob"; "smile" -> "square"; "side" -> "pill"; "dot" -> "circle"; else -> a.face }
-            FlowRow(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center, verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                agentFaces.forEach { f ->
-                    val selected = selectedFace == f
-                    Box(Modifier.padding(4.dp).clip(RoundedCornerShape(12.dp)).border(if (selected) 2.dp else 1.dp, if (selected) c.ink else c.line, RoundedCornerShape(12.dp))
-                        .clickable { a = a.copy(face = f) }.padding(6.dp)) { AgentFace(Color(a.color), f, 32.dp) }
-                }
-            }
+            dev.cueopen.app.ui.mascot.MascotPicker(a.face, Color(a.color)) { a = a.copy(face = it) }
             CueField(a.name, { a = a.copy(name = it) }, "Nome do Agent")
             // Caixa de tamanho fixo: prompts grandes rolam por dentro em vez de esticar a tela.
             CueField(a.instructions, { a = a.copy(instructions = it) }, "Instruções (como deve agir, tom, objetivos)", modifier = Modifier.height(200.dp), minLines = 5)
             ModelPicker(a.model ?: "", { a = a.copy(model = it.ifBlank { null }) }, "Modelo (vazio = padrão do app)", allowEmpty = true,
                 baseUrl = app.store.settings.baseUrl, apiKey = app.store.settings.apiKey)
             SectionLabel("Autonomia")
-            ToggleRow("Pode trabalhar de forma autônoma", "Quando ligado, o próprio agente decide, pela conversa, se e de quanto em quanto tempo deve acordar para seguir uma tarefa contínua. Sem um pedido assim, ele fica dormindo.", a.autonomous) { a = a.copy(autonomous = it) }
+            ToggleRow("Pode trabalhar de forma autônoma", "Quando ligado, o próprio agente decide, pela conversa, se e de quanto em quanto tempo deve acordar para seguir uma tarefa contínua. Sem um pedido assim, ele fica dormindo.", a.autonomous) { on ->
+                // Um toque só: ligar a autonomia já liga ‘Executar em segundo plano’ no Acesso ao Android
+                // e, se o Android ainda otimiza a bateria do app, abre o diálogo do sistema na hora.
+                a = dev.cueopen.app.device.AgentAutonomyPolicy.setAutonomous(a, on)
+                // Agent já salvo: grava na hora, para não se perder se o Android recriar a tela
+                // enquanto o usuário está no diálogo de bateria.
+                if (existing != null) app.store.agent(a.id)?.let { cur ->
+                    val upd = dev.cueopen.app.device.AgentAutonomyPolicy.setAutonomous(cur, on)
+                    app.store.upsertAgent(upd); dev.cueopen.app.scheduler.Heartbeat.sync(ctx, upd)
+                }
+                if (on) dev.cueopen.app.device.DeviceCaps.requestBatteryUnrestricted(ctx)
+            }
+            resumeTick.let {}
             if (a.autonomous && dev.cueopen.app.device.DeviceCaps.BACKGROUND !in a.deviceCaps)
-                Text("Para executar ciclos com o app fechado, habilite também ‘Executar em segundo plano’ em Permissões do dispositivo abaixo. O Android pode impor limites e não há garantia de execução contínua.", fontSize = 12.sp, color = c.warn)
+                Text("‘Executar em segundo plano’ foi desligado manualmente. Toque para religar →", fontSize = 12.sp, color = c.warn,
+                    modifier = Modifier.clickable { a = dev.cueopen.app.device.AgentAutonomyPolicy.setAutonomous(a, true); dev.cueopen.app.device.DeviceCaps.requestBatteryUnrestricted(ctx) })
+            else if (a.autonomous && !dev.cueopen.app.device.DeviceCaps.batteryUnrestricted(ctx))
+                Text("O Android ainda otimiza a bateria do app e pode pausar os ciclos. Toque para liberar →", fontSize = 12.sp, color = c.warn,
+                    modifier = Modifier.clickable { dev.cueopen.app.device.DeviceCaps.requestBatteryUnrestricted(ctx) })
             if (a.autonomous) {
                 Text("Não precisa configurar intervalo: diga no chat o que acompanhar (ex.: \"a cada 20 min verifique o mercado\") e ele se agenda sozinho. Deixe o orçamento de tokens por dia como limite de segurança.", fontSize = 12.sp, color = c.ink3)
                 Text("Orçamento diário de tokens", fontSize = 13.sp, color = c.ink2)
@@ -148,7 +166,43 @@ fun AgentEditScreen(nav: NavController, id: String) {
                 }
                 ToggleRow("Notificar quando agir", "Avisa quando um ciclo fizer algo (silencioso quando nada muda)", a.notifyOnAction) { a = a.copy(notifyOnAction = it) }
             }
-            DevicePermissionsCard(a) { a = it }
+            DevicePermissionsCard(a) { upd ->
+                a = upd
+                // Acessos ao Android de um Agent existente valem imediatamente, sem depender do Salvar.
+                if (existing != null) app.store.agent(upd.id)?.let { cur ->
+                    app.store.upsertAgent(cur.copy(deviceCaps = upd.deviceCaps, browserAutonomy = upd.browserAutonomy,
+                        browserAutonomyGrantedBackground = upd.browserAutonomyGrantedBackground))
+                }
+            }
+            SectionLabel("Confirmações")
+            Column(
+                Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).background(c.surface).border(1.dp, c.line, RoundedCornerShape(16.dp)).padding(12.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                ToggleRow(
+                    "100% autônomo (sem confirmações)",
+                    "Executa tudo sozinho, inclusive comprar, pagar, apagar e enviar. Use apenas em Agents de total confiança.",
+                    a.confirmMode == "auto",
+                ) { a = a.copy(confirmMode = if (it) "auto" else "ask") }
+                if (a.confirmMode == "auto") Text("⚠ Este Agent não vai pedir sua confirmação para nada.", fontSize = 12.sp, color = c.warn)
+                else {
+                    Text("Perguntar antes de:", fontSize = 13.sp, color = c.ink2)
+                    dev.cueopen.app.agent.ActionGate.Category.entries.forEach { cat ->
+                        val desc = when (cat) {
+                            dev.cueopen.app.agent.ActionGate.Category.PURCHASE -> "Botões como Comprar, Finalizar pedido, Pagar, Assinar, gerar Pix/boleto"
+                            dev.cueopen.app.agent.ActionGate.Category.TRANSFER -> "Transferir, sacar, apostar, vender, operações em corretoras e conectores de trading"
+                            dev.cueopen.app.agent.ActionGate.Category.DELETE -> "Excluir/apagar posts, mensagens, arquivos do aparelho, itens em sites e conectores"
+                            dev.cueopen.app.agent.ActionGate.Category.SEND -> "Enviar mensagens e e-mails, publicar, postar, comentar, compartilhar"
+                            dev.cueopen.app.agent.ActionGate.Category.ACCOUNT -> "Trocar senha, excluir ou desativar conta"
+                        }
+                        ToggleRow(cat.label, desc, cat.id in a.confirmCategories) { on ->
+                            a = a.copy(confirmCategories = if (on) (a.confirmCategories + cat.id).distinct() else a.confirmCategories - cat.id)
+                        }
+                    }
+                    Text("Quando precisar, o Agent para, mostra um card no chat e envia uma notificação. Cada aprovação vale uma única vez. A Carteira Solana segue as regras da aba Carteira abaixo.",
+                        fontSize = 11.sp, color = c.ink3)
+                }
+            }
             SectionLabel("Capacidades")
             var capTab by remember { mutableStateOf(0) }
             Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -266,7 +320,9 @@ fun AgentEditScreen(nav: NavController, id: String) {
             }
             Spacer(Modifier.height(8.dp))
             PillButton("Salvar", Icons.Rounded.Check, modifier = Modifier.fillMaxWidth(), enabled = a.name.isNotBlank()) {
-                app.store.upsertAgent(a)
+                val saved = dev.cueopen.app.device.AgentAutonomyPolicy.mergeForSave(a, original, app.store.agent(a.id))
+                app.store.upsertAgent(saved)
+                dev.cueopen.app.scheduler.Heartbeat.sync(ctx, saved)
                 walletPolicies.setAgentCapabilities(
                     a.id,
                     readAddress = walletAccess && walletReadAddress,
@@ -275,7 +331,7 @@ fun AgentEditScreen(nav: NavController, id: String) {
                     autonomousTransfer = walletAccess && walletRequestTransfer && walletAutonomousTransfer,
                     dayTrade = walletAccess && walletDayTrade
                 )
-                if (a.autonomous) app.agent.startAutonomy()
+                if (saved.autonomous) app.agent.startAutonomy()
                 nav.popBackStack()
             }
             Spacer(Modifier.height(24.dp))
@@ -652,12 +708,14 @@ fun DevicePermissionsCard(a: dev.cueopen.app.data.AgentProfile, onChange: (dev.c
     val c = Cue.c
     val ctx = LocalContext.current
     var open by remember { mutableStateOf(a.deviceCaps.isNotEmpty()) }
+    // Abre sozinho quando outra opção (ex.: autonomia) concede um acesso, para o usuário ver o que ligou.
+    LaunchedEffect(a.deviceCaps.size) { if (a.deviceCaps.isNotEmpty()) open = true }
     var tick by remember { mutableIntStateOf(0) }
     var showAccessibilityDisclosure by remember(a.id) { mutableStateOf(false) }
     val permissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { tick++ }
     fun requestCap(id: String) {
         // O launcher/Settings só é aberto quando o estado real do Android está faltante.
-        if (dev.cueopen.app.device.DeviceCaps.granted(ctx, id)) return
+        if (!dev.cueopen.app.device.DeviceCaps.needsAction(ctx, id)) return
         val missing = dev.cueopen.app.device.DeviceCaps.runtimePermissions(ctx, id)
             .filter { ctx.checkSelfPermission(it) != PackageManager.PERMISSION_GRANTED }
         if (missing.isNotEmpty()) permissionLauncher.launch(missing.toTypedArray())
@@ -683,7 +741,7 @@ fun DevicePermissionsCard(a: dev.cueopen.app.data.AgentProfile, onChange: (dev.c
             dev.cueopen.app.device.DeviceCaps.all.forEach { cap ->
                 tick.let {}
                 val on = cap.id in a.deviceCaps
-                val granted = dev.cueopen.app.device.DeviceCaps.granted(ctx, cap.id)
+                val granted = !dev.cueopen.app.device.DeviceCaps.needsAction(ctx, cap.id)
                 Row(Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
                     Column(Modifier.weight(1f)) {
                         Text(cap.title, fontWeight = FontWeight.Medium)
@@ -703,7 +761,7 @@ fun DevicePermissionsCard(a: dev.cueopen.app.data.AgentProfile, onChange: (dev.c
                                 a.copy(deviceCaps = if (v) (a.deviceCaps + cap.id).distinct() else a.deviceCaps - cap.id)
                             }
                             onChange(updated)
-                            if (v && !dev.cueopen.app.device.DeviceCaps.granted(ctx, cap.id)) requestCap(cap.id)
+                            if (v) requestCap(cap.id)
                         }
                     }, colors = SwitchDefaults.colors(checkedTrackColor = c.ink, checkedThumbColor = c.bg))
                 }

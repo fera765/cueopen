@@ -590,7 +590,7 @@ private fun SessionDrawer(nav: NavController, sessions: List<Session>, agents: L
     var query by remember { mutableStateOf("") }
     // Sessões de subagentes são detalhes internos da tarefa pai, nunca chats independentes na navegação.
     val filtered = remember(sessions, query) {
-        sessions.filterNot { it.title.startsWith("[Worker ", ignoreCase = true) }
+        sessions.filterNot { it.title.startsWith("[Worker ", ignoreCase = true) || it.sectionId != null }
             .filter { query.isBlank() || it.title.contains(query, true) }
             .sortedByDescending { it.updatedAt }
     }
@@ -606,17 +606,38 @@ private fun SessionDrawer(nav: NavController, sessions: List<Session>, agents: L
         Spacer(Modifier.height(8.dp))
         CueField(query, { query = it }, "Buscar tarefas")
         Spacer(Modifier.height(4.dp))
-        DrawerItem(Icons.Rounded.Groups, "Agents", "${agents.size}") { go("agents") }
-        DrawerItem(Icons.Rounded.AutoAwesome, "Skills") { go("skills") }
-        DrawerItem(Icons.Rounded.Cable, "Conectores", "$connectedConnectorCount".takeIf { it != "0" }) { go("connectors") }
-        DrawerItem(Icons.Rounded.Schedule, "Tarefas agendadas") { go("scheduled") }
-        DrawerItem(Icons.Rounded.LibraryBooks, "Knowledge") { go("knowledge") }
-        DrawerItem(Icons.Rounded.Psychology, "Memória") { go("memory") }
-        DrawerItem(Icons.Rounded.FolderOpen, "Arquivos") { go("files") }
-        DrawerItem(Icons.Rounded.AccountBalanceWallet, "Carteira Solana") { go("wallet") }
-        DrawerItem(Icons.Rounded.Computer, "Computador (sandbox)") { go("sandbox") }
+        // Menu agrupado e recolhido por padrão: a sidebar fica para tarefas e seções.
+        var menuOpen by androidx.compose.runtime.saveable.rememberSaveable { mutableStateOf(false) }
+        Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).clickable { menuOpen = !menuOpen }.padding(horizontal = 10.dp, vertical = 11.dp),
+            verticalAlignment = Alignment.CenterVertically) {
+            Icon(Icons.Rounded.Apps, null, Modifier.size(20.dp), tint = c.ink2); Spacer(Modifier.width(12.dp))
+            Text("Menu", style = MaterialTheme.typography.bodyLarge, modifier = Modifier.weight(1f))
+            Icon(if (menuOpen) Icons.Rounded.ExpandLess else Icons.Rounded.ExpandMore, if (menuOpen) "Recolher menu" else "Abrir menu", tint = c.ink3)
+        }
+        androidx.compose.animation.AnimatedVisibility(menuOpen) {
+            Column(Modifier.padding(start = 8.dp)) {
+                DrawerItem(Icons.Rounded.Groups, "Agents", "${agents.size}") { go("agents") }
+                DrawerItem(Icons.Rounded.AutoAwesome, "Skills") { go("skills") }
+                DrawerItem(Icons.Rounded.Cable, "Conectores", "$connectedConnectorCount".takeIf { it != "0" }) { go("connectors") }
+                DrawerItem(Icons.Rounded.Schedule, "Tarefas agendadas") { go("scheduled") }
+                DrawerItem(Icons.Rounded.LibraryBooks, "Knowledge") { go("knowledge") }
+                DrawerItem(Icons.Rounded.Psychology, "Memória") { go("memory") }
+                DrawerItem(Icons.Rounded.FolderOpen, "Arquivos") { go("files") }
+                DrawerItem(Icons.Rounded.AccountBalanceWallet, "Carteira Solana") { go("wallet") }
+                DrawerItem(Icons.Rounded.Computer, "Computador (sandbox)") { go("sandbox") }
+            }
+        }
         Divider()
+        val live by CueApp.instance.store.state.collectAsStateWithLifecycle()
+        val sections = live.sections
         LazyColumn(Modifier.weight(1f)) {
+            // Seções só aparecem quando existem (criadas pelo chat).
+            if (sections.isNotEmpty()) {
+                item { SectionLabel("Seções") }
+                items(sections, key = { "sec-" + it.id }) { sec ->
+                    SectionRow(sec, live.sessions, live.agents, onOpen = { go("chat/$it") }, onOpenAgent = { go("agent/$it") })
+                }
+            }
             groups.forEach { (g, list) ->
                 item { SectionLabel(g) }
                 items(list, key = { it.id }) { s -> SessionRow(s, agents.firstOrNull { it.id == s.agentId }) { go("chat/${s.id}") } }
@@ -711,6 +732,8 @@ fun previewOf(i: dev.cueopen.app.data.ChatItem): String = when (i) {
     is dev.cueopen.app.data.ChatItem.ConnectorEditProposal -> "Atualização de " + i.connectorName
     is dev.cueopen.app.data.ChatItem.Question -> "❓ " + (i.questions.firstOrNull()?.question ?: "Pergunta")
     is dev.cueopen.app.data.ChatItem.SecureForm -> "🔒 " + i.title
+    is dev.cueopen.app.data.ChatItem.Approval -> "🛡 " + i.summary
+    is dev.cueopen.app.data.ChatItem.SectionSetup -> "📁 Seção " + i.sectionName
     is dev.cueopen.app.data.ChatItem.Media -> "🖼 " + (i.caption.ifBlank { java.io.File(i.path).name })
 }.lineSequence().firstOrNull().orEmpty()
 
@@ -738,3 +761,85 @@ val slashCommands = listOf(
     "/connectors" to "Abre os conectores",
     "/help" to "Lista os comandos",
 )
+
+
+/** Seção na sidebar: tocar abre o chat da seção e expande o time; segurar mostra limpar/reiniciar/excluir. */
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun SectionRow(
+    sec: dev.cueopen.app.data.Section, sessions: List<Session>, agents: List<AgentProfile>,
+    onOpen: (String) -> Unit, onOpenAgent: (String) -> Unit,
+) {
+    val c = Cue.c
+    val app = CueApp.instance
+    var expanded by androidx.compose.runtime.saveable.rememberSaveable(sec.id) { mutableStateOf(false) }
+    var menu by remember { mutableStateOf(false) }
+    var confirm by remember { mutableStateOf<String?>(null) } // "delete" | "restart" | "clear"
+    val chats = sessions.filter { it.sectionId == sec.id }
+    val busy = chats.any { it.status == SessionStatus.RUNNING }
+    val waiting = chats.any { it.status == SessionStatus.WAITING_USER }
+    // Itens de LazyColumn empilham filhos como um Box: a linha e a lista do time precisam de uma Column.
+    Column {
+    Box {
+        Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).combinedClickable(
+            onClick = { expanded = true; onOpen(sec.sessionId) }, onLongClick = { menu = true },
+        ).padding(horizontal = 8.dp, vertical = 9.dp), verticalAlignment = Alignment.CenterVertically) {
+            Box(Modifier.size(26.dp).clip(RoundedCornerShape(8.dp)).background(c.accentSoft), contentAlignment = Alignment.Center) {
+                Icon(Icons.Rounded.Folder, null, Modifier.size(15.dp), tint = c.accent)
+            }
+            Spacer(Modifier.width(10.dp))
+            Column(Modifier.weight(1f)) {
+                Text(sec.name, maxLines = 1, overflow = TextOverflow.Ellipsis, fontSize = 15.sp, fontWeight = FontWeight.Medium)
+                Text(if (!sec.configured) "Aguardando ativação" else "${sec.agentIds.size} agentes · coordenador",
+                    fontSize = 12.sp, color = c.ink3, maxLines = 1)
+            }
+            StatusDot(when { busy -> SessionStatus.RUNNING; waiting -> SessionStatus.WAITING_USER; else -> SessionStatus.IDLE })
+            IconButton({ expanded = !expanded }, Modifier.size(32.dp)) {
+                Icon(if (expanded) Icons.Rounded.ExpandLess else Icons.Rounded.ExpandMore, if (expanded) "Recolher" else "Expandir", tint = c.ink3)
+            }
+        }
+        DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+            DropdownMenuItem(text = { Text("Abrir") }, leadingIcon = { Icon(Icons.Rounded.ChatBubbleOutline, null) }, onClick = { menu = false; onOpen(sec.sessionId) })
+            DropdownMenuItem(text = { Text("Limpar contexto") }, leadingIcon = { Icon(Icons.Rounded.CleaningServices, null) }, onClick = { menu = false; confirm = "clear" })
+            DropdownMenuItem(text = { Text("Reiniciar") }, leadingIcon = { Icon(Icons.Rounded.RestartAlt, null) }, onClick = { menu = false; confirm = "restart" })
+            DropdownMenuItem(text = { Text("Excluir seção", color = c.err) }, leadingIcon = { Icon(Icons.Rounded.DeleteOutline, null, tint = c.err) }, onClick = { menu = false; confirm = "delete" })
+        }
+    }
+    androidx.compose.animation.AnimatedVisibility(expanded) {
+        Column(Modifier.padding(start = 22.dp)) {
+            sec.agentIds.mapNotNull { id -> agents.firstOrNull { it.id == id } }.forEach { a ->
+                val chat = chats.firstOrNull { it.agentId == a.id && it.id != sec.sessionId }
+                Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp)).clickable { if (chat != null) onOpen(chat.id) else onOpenAgent(a.id) }
+                    .padding(horizontal = 8.dp, vertical = 7.dp), verticalAlignment = Alignment.CenterVertically) {
+                    AgentFace(Color(a.color), a.face, 20.dp); Spacer(Modifier.width(8.dp))
+                    Text(a.name, fontSize = 14.sp, modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    StatusDot(chat?.status ?: SessionStatus.IDLE)
+                }
+            }
+        }
+    }
+    }
+    confirm?.let { kind ->
+        val (title, body, action) = when (kind) {
+            "clear" -> Triple("Limpar contexto?", "Os agentes esquecem a conversa até aqui (o histórico continua visível). Use quando o contexto ficar grande ou confuso.", "Limpar")
+            "restart" -> Triple("Reiniciar a seção?", "Para tudo, apaga o histórico dos chats da seção e o coordenador recomeça do pedido original. Os agentes e permissões continuam.", "Reiniciar")
+            else -> Triple("Excluir a seção “${sec.name}”?", "Remove a seção, os chats dela e os ${sec.agentIds.size + 1} agentes criados para ela.", "Excluir")
+        }
+        AlertDialog(
+            onDismissRequest = { confirm = null },
+            title = { Text(title) }, text = { Text(body) },
+            confirmButton = { TextButton({
+                when (kind) {
+                    "clear" -> app.agent.clearSectionContext(sec.id)
+                    "restart" -> app.agent.restartSection(sec.id)
+                    else -> {
+                        (sec.agentIds + sec.coordinatorAgentId).forEach { dev.cueopen.app.scheduler.Heartbeat.cancel(app, it) }
+                        app.store.deleteSection(sec.id).forEach { app.deleteChat(it) }
+                    }
+                }
+                confirm = null
+            }) { Text(action, color = if (kind == "delete") c.err else c.accent) } },
+            dismissButton = { TextButton({ confirm = null }) { Text("Cancelar") } },
+        )
+    }
+}

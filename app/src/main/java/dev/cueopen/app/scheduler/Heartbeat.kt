@@ -43,6 +43,14 @@ object Heartbeat {
         ctx.getSystemService(AlarmManager::class.java).cancel(pi(ctx, agentId))
     }
 
+    /** Alinha o alarme ao perfil salvo: agenda se autônomo (com sessão-base), cancela se não. */
+    fun sync(ctx: Context, agent: dev.cueopen.app.data.AgentProfile) {
+        if (agent.autonomous && agent.homeSessionId != null) {
+            val next = (agent.lastBeatAt ?: System.currentTimeMillis()) + agent.heartbeatMinutes * 60_000L
+            schedule(ctx, agent.id, agent.heartbeatMinutes, atMillis = maxOf(next, System.currentTimeMillis() + 5_000))
+        } else if (!agent.autonomous) cancel(ctx, agent.id)
+    }
+
     /** (Re)agenda todos os agentes autônomos — usado no boot e ao abrir o app. */
     fun rescheduleAll(ctx: Context) {
         val app = ctx.applicationContext as? CueApp ?: return

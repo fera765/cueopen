@@ -138,9 +138,30 @@ object DeviceCaps {
         else -> false
     }
 
+    /** O app está fora da otimização de bateria (Doze não adia os ciclos do agente). */
+    fun batteryUnrestricted(ctx: Context): Boolean =
+        Build.VERSION.SDK_INT < Build.VERSION_CODES.M ||
+            runCatching { ctx.getSystemService(android.os.PowerManager::class.java).isIgnoringBatteryOptimizations(ctx.packageName) }.getOrDefault(true)
+
+    /** Abre direto o diálogo do Android "Permitir execução em segundo plano?" (um toque). */
+    fun requestBatteryUnrestricted(ctx: Context) {
+        if (batteryUnrestricted(ctx)) return
+        val direct = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:${ctx.packageName}"))
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        val ok = runCatching { ctx.startActivity(direct) }.isSuccess
+        if (!ok) runCatching {
+            ctx.startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+        }
+    }
+
+    /** Consentimento ligado mas ainda exige ação no Android (ex.: bateria otimizada). */
+    fun needsAction(ctx: Context, id: String): Boolean =
+        !granted(ctx, id) || (id == BACKGROUND && !batteryUnrestricted(ctx))
+
     fun status(ctx: Context, id: String): String = when {
         id == BLUETOOTH && usesNearbyRuntimePermission() && !granted(ctx, id) -> "Android 12+: conceda Dispositivos próximos (BLUETOOTH_CONNECT) na janela do Android."
-        granted(ctx, id) && id == BACKGROUND -> "Autorizada para este agente. Toque para revisar otimização da bateria; o Android ainda pode interromper ciclos."
+        id == BACKGROUND && !batteryUnrestricted(ctx) -> "Ativa, mas o Android ainda otimiza a bateria do app e pode pausar os ciclos. Toque para liberar →"
+        granted(ctx, id) && id == BACKGROUND -> "Autorizada e sem restrição de bateria. Alguns fabricantes ainda podem limitar apps em segundo plano."
         granted(ctx, id) && id == PHONE_CALLS -> "Autorizada. Cada chamada abre o discador para sua confirmação."
         granted(ctx, id) && id == ACCESSIBILITY -> "Serviço ativo no Android; o opt-in deste perfil limita o uso a este agente."
         granted(ctx, id) -> "Concedida no Android"
@@ -164,8 +185,9 @@ object DeviceCaps {
             OVERLAY -> Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:${ctx.packageName}"))
             SCREEN -> Intent(ctx, ScreenCapture.RequestActivity::class.java)
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            BACKGROUND -> if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)
-                else Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:${ctx.packageName}"))
+            BACKGROUND -> if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                requestBatteryUnrestricted(ctx); return
+            } else Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:${ctx.packageName}"))
             else -> {
                 // Runtime permission já concedida, mas AppOp revogado: só a tela oficial
                 // de detalhes do app pode permitir ao usuário revisar esse estado.
