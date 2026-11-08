@@ -38,3 +38,13 @@ class ToolOutcomeAdvisorTest {
         assertTrue(out.endsWith(ToolOutcomeAdvisor.adviceLine(ToolOutcomeAdvisor.Reason.PERMISSION)))
     }
 }
+
+class BrowserRateLimitAdviceTest {
+    @Test
+    fun browser403IsRateLimitNotPermission() {
+        org.junit.Assert.assertEquals(ToolOutcomeAdvisor.Reason.RATE_LIMIT,
+            ToolOutcomeAdvisor.classify("browser_navigate", "ERROR: HTTP 403 na página principal."))
+        org.junit.Assert.assertEquals(ToolOutcomeAdvisor.Reason.PERMISSION,
+            ToolOutcomeAdvisor.classify("shell", "curl: HTTP 403 status: 403"))
+    }
+}

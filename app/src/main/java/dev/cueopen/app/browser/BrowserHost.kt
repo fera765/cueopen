@@ -373,6 +373,12 @@ class BrowserHost(private val appCtx: Context, sessionId: String = "__legacy__")
             displayZoomControls = false
             allowFileAccess = true
             // Sem perfis particionados o provedor usaria cookies/storage globais entre chats.
+            runCatching {
+                // O WebView envia "X-Requested-With: <pacote do app>" em toda requisição; Meta e outros sites
+                // usam isso para marcar tráfego de app/robô e responder 403. Lista vazia = não envia para ninguém.
+                if (WebViewFeature.isFeatureSupported(WebViewFeature.REQUESTED_WITH_HEADER_ALLOW_LIST))
+                    androidx.webkit.WebSettingsCompat.setRequestedWithHeaderOriginAllowList(this, emptySet())
+            }
             // Nesse caso, bloquear toda rede externa em vez de permitir vazamento entre conversas.
             blockNetworkLoads = !isolated
             mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
@@ -435,10 +441,9 @@ class BrowserHost(private val appCtx: Context, sessionId: String = "__legacy__")
             }
             override fun onReceivedHttpError(view: WebView, request: WebResourceRequest, errorResponse: android.webkit.WebResourceResponse) {
                 patchNet(request.url.toString(), tab.id) { it.copy(status = errorResponse.statusCode) }
-                tab.navigationStatus.recordHttpError(request.isForMainFrame, errorResponse.statusCode)?.let { failure ->
-                    sync(view, loading = false)
-                    tab.pageDone?.complete(failure)
-                }
+                // Só registra: vários sites (Meta, Cloudflare) respondem 403/429 e mesmo assim renderizam a página.
+                // A decisão (erro x página válida) é tomada em awaitLoad pelo conteúdo realmente visível.
+                tab.navigationStatus.recordHttpError(request.isForMainFrame, errorResponse.statusCode)
             }
             override fun onReceivedError(view: WebView, request: WebResourceRequest, error: android.webkit.WebResourceError) {
                 patchNet(request.url.toString(), tab.id) { it.copy(error = error.description?.toString()) }
@@ -761,14 +766,63 @@ class BrowserHost(private val appCtx: Context, sessionId: String = "__legacy__")
                 failure
             }
         }
-        val target = onMain {
-            targetTab.navigationStatus = BrowserNavigationStatus()
-            targetTab.pageDone = CompletableDeferred()
-            if (targetTab.id == activeTabId) _ui.value = _ui.value.copy(loading = true, progress = 0)
-            (targetTab.webView ?: ensureTabView(targetTab, appCtx)).also { ensureSized(it) }.loadUrl(normalized)
-            normalized
+        val host = runCatching { android.net.Uri.parse(normalized).host.orEmpty().removePrefix("www.") }.getOrDefault("")
+        var attempt = 0
+        while (true) {
+            // Ritmo por site: evita rajadas que disparam limite de acesso (rate limit) e bloqueio anti-robô.
+            HostPacing.waitTurn(host)
+            val target = onMain {
+                targetTab.navigationStatus = BrowserNavigationStatus()
+                targetTab.pageDone = CompletableDeferred()
+                if (targetTab.id == activeTabId) _ui.value = _ui.value.copy(loading = true, progress = 0)
+                (targetTab.webView ?: ensureTabView(targetTab, appCtx)).also { ensureSized(it) }.loadUrl(normalized)
+                normalized
+            }
+            val result = awaitLoad(targetTab, target)
+            val code = targetTab.navigationStatus.httpStatusCode()
+            val blocked = result.startsWith("ERROR: HTTP") && code in setOf(403, 429, 503)
+            if (!blocked) { if (!result.startsWith("ERROR")) HostPacing.success(host); return result }
+            val cooldown = HostPacing.strike(host)
+            // Uma nova tentativa automática depois de esperar; se continuar bloqueado, explica sem induzir repetição.
+            if (attempt++ == 0 && cooldown <= 30_000L) continue
+            return "ERROR: o site $host está limitando os acessos (HTTP $code) e a página não carregou conteúdo. " +
+                "O app já esperou e tentou de novo. Não repita agora: aguarde ~${cooldown / 1000} s (use sleep) ou siga com outra fonte. " +
+                "Se o site pedir login, peça ao usuário para entrar uma vez pela aba Browser — o login fica salvo."
         }
-        return awaitLoad(targetTab, target)
+    }
+
+    /** Lê readyState e texto visível; usado para esperar páginas que montam o conteúdo depois do load (SPAs). */
+    private suspend fun pageState(tab: BrowserTab): Pair<String, Int> {
+        val raw = runCatching {
+            eval("JSON.stringify({chars:document.body?document.body.innerText.length:0,ready:document.readyState})", 1_500, tab)
+        }.getOrDefault("")
+        val o = runCatching { JSONObject(raw.trim().removeSurrounding("\"").replace("\\\"", "\"")) }.getOrNull()
+            ?: runCatching { JSONObject(raw) }.getOrNull()
+        return (o?.optString("ready").orEmpty()) to (o?.optInt("chars", 0) ?: 0)
+    }
+
+    /**
+     * Espera o conteúdo de verdade: "complete" com texto, ou texto visível que parou de crescer.
+     * SPAs como a Biblioteca de Anúncios ficam em "interactive" (conexões abertas) mas já mostram tudo.
+     */
+    private suspend fun waitForContent(tab: BrowserTab, maxMillis: Long): Pair<String, Int> {
+        val deadline = System.currentTimeMillis() + maxMillis
+        var last = "" to 0
+        var stableRounds = 0
+        var completeSince = 0L
+        while (System.currentTimeMillis() < deadline) {
+            val now = pageState(tab)
+            if (now.first == "complete" && completeSince == 0L) completeSince = System.currentTimeMillis()
+            stableRounds = if (now.second >= 200 && kotlin.math.abs(now.second - last.second) <= maxOf(20, last.second / 50)) stableRounds + 1 else 0
+            last = now
+            when {
+                now.first == "complete" && now.second > 0 && stableRounds >= 1 -> break
+                stableRounds >= 3 -> break                           // ~1,2 s sem crescer: renderizou
+                completeSince > 0 && System.currentTimeMillis() - completeSince > 6_000 -> break  // completa, mas sem texto
+            }
+            kotlinx.coroutines.delay(400)
+        }
+        return last
     }
 
     /** Aguarda o callback real do WebView e verifica o DOM; falha e timeout não viram sucesso silencioso. */
@@ -788,25 +842,20 @@ class BrowserHost(private val appCtx: Context, sessionId: String = "__legacy__")
             val readyState = state?.optString("ready").orEmpty()
             return status.timeoutMessage(target, currentUrl, readyState, chars)
         }
-        if (result.startsWith("ERROR:")) return result
-        val deadline = System.currentTimeMillis() + 8_000
-        var ready = ""
-        while (System.currentTimeMillis() < deadline) {
-            ready = runCatching { eval("document.readyState", tab = tab) }.getOrDefault("")
-            if (ready == "complete") break
-            kotlinx.coroutines.delay(250)
+        val httpCode = status.httpStatusCode()
+        if (result.startsWith("ERROR:") && httpCode == null) return result  // falha de rede real
+        val (ready, chars) = waitForContent(tab, 20_000)
+        if (tab.id == activeTabId) _ui.value = _ui.value.copy(loading = false)
+        if (httpCode != null) {
+            // HTTP de erro mas a página renderizou de fato: é página válida (o usuário também a vê normal).
+            return if (chars >= 200) "OK: página carregada ($target). Aviso: o servidor respondeu HTTP $httpCode, mas a página exibiu $chars caracteres; leia com browser_read antes de concluir que houve bloqueio."
+            else result
         }
-        kotlinx.coroutines.delay(500)
-        status.httpError()?.let { return it }
-        return if (ready == "complete") "OK: página carregada ($target)"
+        return if (ready == "complete" || chars >= 200) "OK: página carregada ($target)" + (if (ready != "complete") " — conteúdo visível ($chars caracteres); a página ainda mantém conexões abertas, o que é normal em sites dinâmicos." else "")
         else {
-            if (tab.id == activeTabId) _ui.value = _ui.value.copy(loading = false)
-            val raw = runCatching {
-                eval("JSON.stringify({chars:document.body?document.body.innerText.length:0,url:location.href})", 1_500, tab)
-            }.getOrDefault("")
-            val state = runCatching { JSONObject(raw) }.getOrNull()
-            status.incompleteMessage(target, state?.optString("url").orEmpty().ifBlank { tab.url }, ready,
-                state?.optInt("chars", 0) ?: 0)
+            val url = runCatching { eval("location.href", 1_500, tab) }.getOrDefault("").trim('"').ifBlank { tab.url }
+            status.incompleteMessage(target, url, ready, chars) +
+                " Dica: sites dinâmicos às vezes levam mais tempo; chame browser_read uma vez em alguns segundos antes de concluir."
         }
     }
 
@@ -972,4 +1021,39 @@ class BrowserHost(private val appCtx: Context, sessionId: String = "__legacy__")
     }
 
     private suspend fun <T> onMain(block: () -> T): T = withContext(Dispatchers.Main) { block() }
+}
+
+/**
+ * Ritmo de navegação por site, compartilhado por todos os chats/agentes (o login também é compartilhado,
+ * então o site enxerga um único visitante). Intervalo mínimo entre aberturas e recuo crescente após 403/429.
+ */
+internal object HostPacing {
+    private const val MIN_GAP_MS = 2_500L
+    private const val MAX_WAIT_MS = 45_000L
+    private data class State(var lastAt: Long = 0, var cooldownUntil: Long = 0, var strikes: Int = 0)
+    private val hosts = java.util.concurrent.ConcurrentHashMap<String, State>()
+
+    /** Tempo a esperar antes de abrir o host agora (puro, para testes). */
+    fun delayFor(host: String, now: Long = System.currentTimeMillis()): Long {
+        val st = hosts[host] ?: return 0
+        return (maxOf(st.lastAt + MIN_GAP_MS, st.cooldownUntil) - now).coerceIn(0, MAX_WAIT_MS)
+    }
+
+    suspend fun waitTurn(host: String) {
+        if (host.isBlank()) return
+        val wait = delayFor(host)
+        if (wait > 0) kotlinx.coroutines.delay(wait)
+        hosts.getOrPut(host) { State() }.lastAt = System.currentTimeMillis()
+    }
+
+    /** Registra bloqueio e devolve o recuo aplicado: 10 s, 30 s, 60 s, 120 s… (máx. 5 min). */
+    fun strike(host: String, now: Long = System.currentTimeMillis()): Long {
+        val st = hosts.getOrPut(host) { State() }
+        st.strikes++
+        val backoff = when (st.strikes) { 1 -> 10_000L; 2 -> 30_000L; 3 -> 60_000L; else -> minOf(300_000L, 120_000L * (st.strikes - 3)) }
+        st.cooldownUntil = now + backoff
+        return backoff
+    }
+
+    fun success(host: String) { hosts[host]?.let { it.strikes = 0; it.cooldownUntil = 0 } }
 }

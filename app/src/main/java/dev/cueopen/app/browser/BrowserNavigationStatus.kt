@@ -6,9 +6,14 @@ package dev.cueopen.app.browser
  */
 internal class BrowserNavigationStatus {
     @Volatile private var mainFrameError: String? = null
+    @Volatile private var mainFrameStatus: Int? = null
+
+    /** Código HTTP de erro da página principal (null se não houve), para decidir pelo conteúdo renderizado. */
+    fun httpStatusCode(): Int? = mainFrameStatus
 
     fun recordHttpError(isMainFrame: Boolean, statusCode: Int): String? {
         if (!isMainFrame || statusCode !in 400..599) return null
+        mainFrameStatus = statusCode
         return "ERROR: HTTP $statusCode na página principal. Não use este conteúdo nem repita a URL; localize um endereço válido."
             .also { mainFrameError = it }
     }

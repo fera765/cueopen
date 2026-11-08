@@ -20,8 +20,8 @@ object ToolOutcomeAdvisor {
             "repetir não muda nada. Explique ao usuário qual permissão falta (Acesso ao Android do Agent ou do sistema) e siga sem ela."),
         NOT_FOUND("recurso não encontrado",
             "não repita o mesmo caminho/URL. Liste/pesquise para achar o alvo certo ou pergunte ao usuário."),
-        RATE_LIMIT("limite de requisições (429)",
-            "espere antes de tentar de novo (use sleep) e reduza a frequência; não dispare a mesma chamada em sequência."),
+        RATE_LIMIT("o site está limitando acessos (rate limit/anti-robô)",
+            "não repita agora. Use sleep (1-2 min) antes de outra tentativa, abra menos páginas por minuto, prefira ler a página já aberta com browser_read e, se o site pedir login, peça ao usuário para entrar uma vez pela aba Browser."),
         NETWORK("falha de rede/DNS",
             "verifique a URL; se estiver correta, tente uma única vez depois de um intervalo e, se persistir, avise o usuário."),
         TIMEOUT("tempo esgotado",
@@ -46,6 +46,9 @@ object ToolOutcomeAdvisor {
     /** Classifica a saída de uma ferramenta; null quando parece sucesso comum. Só olha o começo (saídas grandes). */
     fun classify(tool: String, output: String): Reason? {
         val head = output.take(4_000)
+        // No browser, 403/429 na abertura é limite/anti-robô do site (o app já esperou e tentou de novo),
+        // não falta de permissão do aparelho.
+        if (tool.startsWith("browser_") && Regex("(?i)limitando os acessos|^ERROR: HTTP (403|429|503)").containsMatchIn(head)) return Reason.RATE_LIMIT
         rules.firstOrNull { (_, re) -> re.containsMatchIn(head) }?.let { (reason, _) ->
             // "timeout"/"404" aparecem em textos de páginas normais; só valem para leituras se a saída for curta.
             val isPageRead = tool.startsWith("browser_") || tool.startsWith("web_")
