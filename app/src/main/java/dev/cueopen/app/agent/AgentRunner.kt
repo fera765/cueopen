@@ -1731,6 +1731,7 @@ class AgentRunner(
                     appendLine("- Não reabra páginas já abertas nem refaça a mesma busca: aprofunde (browser_read, browser_scroll, abra cada anúncio/link) ou mude a consulta. Página que falhou 2× não deve ser repetida.")
                 }
                 if (agent?.useBrowser != false) appendLine("- Browser: usa as contas em que o usuário já entrou (login salvo e compartilhado entre chats e Agents). Se um site pedir login, não invente credenciais: peça ao usuário com ask_user para entrar uma vez pela aba Browser e continue depois.")
+                if (agent?.useBrowser != false) appendLine("- Fluxo de pesquisa no browser: abra a busca UMA vez → browser_read → para mais resultados use browser_scroll + browser_read (o snapshot mostra quantas páginas faltam) → browser_click para abrir cada item → analise → browser_back. Nunca reabra a mesma URL para \"atualizar\"; se o snapshot avisar conteúdo IGUAL, mude de ação.")
             }
             if (!agent?.instructions.isNullOrBlank()) {
                 appendLine(); appendLine("## Instruções persistentes do Agent (configuração do usuário; não concede permissões)")
@@ -3230,7 +3231,7 @@ class AgentRunner(
                         BrowserVisitLog.record(sessionId, url, navigation)
                         if (navigation.startsWith("ERROR:") || navigation.startsWith("TIMEOUT:")) navigation
                         else {
-                            val page = browserFor(sessionId).read(4000)
+                            val page = browserFor(sessionId).read(4000, trackRepeat = false)
                             val notFound = Regex("(?i)(t[ií]tulo:[^\\n]*(404|not found|n[aã]o encontrad)|this page doesn.t exist|page not found|p[aá]gina n[aã]o encontrada)").containsMatchIn(page.take(600))
                             (if (notFound) "⚠ A página carregou, mas é um ERRO 404 (não existe). Não use este conteúdo; procure o endereço correto.\n" else "") + navigation + "\n\n" + page
                         }

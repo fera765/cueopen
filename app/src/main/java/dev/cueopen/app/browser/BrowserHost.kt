@@ -63,6 +63,8 @@ class BrowserHost(private val appCtx: Context, sessionId: String = "__legacy__")
         var pageDone: CompletableDeferred<String>? = null,
         var navigationStatus: BrowserNavigationStatus = BrowserNavigationStatus(),
         var progress: Int = 0,
+        /** Hash da última leitura (detecta leituras repetidas sem progresso). */
+        var lastSnapshotDigest: Int? = null,
     )
 
     private val savedSession = persistence.load()
@@ -411,8 +413,16 @@ class BrowserHost(private val appCtx: Context, sessionId: String = "__legacy__")
         v.setLayerType(android.view.View.LAYER_TYPE_HARDWARE, null)
         if (android.os.Build.VERSION.SDK_INT >= 26) v.setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_IMPORTANT, false)
         if (android.os.Build.VERSION.SDK_INT >= 23) v.settings.offscreenPreRaster = true
+        // Rastreador de prontidão (técnica do browser-use/Playwright "networkidle"): instalado ANTES dos
+        // scripts da página quando o WebView suporta; senão, injetado no início de cada carregamento.
+        val docStart = runCatching {
+            if (WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) {
+                WebViewCompat.addDocumentStartJavaScript(v, READINESS_JS, setOf("*")); true
+            } else false
+        }.getOrDefault(false)
         v.webViewClient = object : WebViewClient() {
             override fun onPageStarted(view: WebView, url: String, favicon: Bitmap?) {
+                if (!docStart) runCatching { view.evaluateJavascript(READINESS_JS, null) }
                 tab.progress = 0
                 if (tab.id == activeTabId) lastReadTabId = null
                 sync(view, loading = true)
@@ -587,6 +597,34 @@ class BrowserHost(private val appCtx: Context, sessionId: String = "__legacy__")
     }
 
     companion object {
+        /**
+         * Rastreador de prontidão instalado no início do documento: conta requisições fetch/XHR em andamento
+         * (ignorando rastreadores/beacons e polling com mais de 10 s), guarda o momento da última atividade de
+         * rede e da última mudança no DOM. `window.__cueLoadState()` devolve o estado para a espera por estabilidade.
+         */
+        internal val READINESS_JS = """
+            (function(){ if (window.__cueLoad) return;
+              var st = { reqs: {}, seq: 0, lastNet: Date.now(), lastMut: Date.now() }; window.__cueLoad = st;
+              var ign = /doubleclick|googlesyndication|googletagmanager|google-analytics|analytics\.|hotjar|clarity\.ms|mixpanel|segment\.(io|com)|newrelic|nr-data|sentry|\/beacon|\/collect\b|\/telemetry|\/metrics|\/tracker|\/track\b|\/log(ging)?\b|\/ajax\/bz|\/ajax\/webstorage|\/tr\/?\?/i;
+              function start(u){ u = String(u||''); if (ign.test(u)) return null; var id = ++st.seq; st.reqs[id] = Date.now(); st.lastNet = Date.now(); return id; }
+              function end(id){ if (id != null) delete st.reqs[id]; st.lastNet = Date.now(); }
+              try { var of = window.fetch; if (of) window.fetch = function(i, o){ var id = start((i && i.url) || i);
+                return of.apply(this, arguments).then(function(r){ end(id); return r; }, function(e){ end(id); throw e; }); }; } catch(e) {}
+              try { var X = XMLHttpRequest.prototype, op = X.open, sd = X.send;
+                X.open = function(m, u){ this.__cueU = u; return op.apply(this, arguments); };
+                X.send = function(){ var x = this, id = start(x.__cueU); x.addEventListener('loadend', function(){ end(id); }); return sd.apply(this, arguments); }; } catch(e) {}
+              function observe(){ try { new MutationObserver(function(){ st.lastMut = Date.now(); })
+                .observe(document.documentElement || document, { childList: true, subtree: true, characterData: true }); } catch(e) {} }
+              if (document.documentElement) observe(); else document.addEventListener('readystatechange', observe, { once: true });
+              window.__cueLoadState = function(){ var now = Date.now(), n = 0;
+                for (var k in st.reqs) { if (now - st.reqs[k] < 10000) n++; }   // polling/streaming > 10 s não segura a leitura
+                var se = document.scrollingElement || document.documentElement;
+                return JSON.stringify({ ready: document.readyState, chars: document.body ? document.body.innerText.length : 0,
+                  inflight: n, net: now - st.lastNet, mut: now - st.lastMut,
+                  sh: se ? se.scrollHeight : 0, ch: window.innerHeight, sy: se ? se.scrollTop : 0 }); };
+            })();
+        """.trimIndent()
+
         const val HOME = "file:///android_asset/start/index.html"
         const val MAX_TABS = BrowserSessionPersistence.MAX_TABS
         private const val DESKTOP_UA = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36"
@@ -740,6 +778,7 @@ class BrowserHost(private val appCtx: Context, sessionId: String = "__legacy__")
                 ensureTabView(tab, appCtx)
                 tab.navigationStatus = BrowserNavigationStatus()
                 tab.pageDone = CompletableDeferred()
+                tab.lastSnapshotDigest = null
                 lastReadTabId = null
             }
             tab
@@ -794,39 +833,65 @@ class BrowserHost(private val appCtx: Context, sessionId: String = "__legacy__")
         }
     }
 
-    /** Lê readyState e texto visível; usado para esperar páginas que montam o conteúdo depois do load (SPAs). */
-    private suspend fun pageState(tab: BrowserTab): Pair<String, Int> {
+    /** Estado de prontidão da página (rede, DOM, rolagem). */
+    internal data class PageReadiness(
+        val ready: String = "", val chars: Int = 0, val inflight: Int = 0,
+        val netQuietMs: Long = 0, val domQuietMs: Long = 0,
+        val scrollHeight: Int = 0, val viewport: Int = 0, val scrollY: Int = 0, val tracked: Boolean = false,
+    ) {
+        val pagesAbove: Double get() = if (viewport > 0) scrollY.toDouble() / viewport else 0.0
+        val pagesBelow: Double get() = if (viewport > 0) ((scrollHeight - scrollY - viewport).coerceAtLeast(0)).toDouble() / viewport else 0.0
+    }
+
+    private suspend fun readiness(tab: BrowserTab): PageReadiness {
         val raw = runCatching {
-            eval("JSON.stringify({chars:document.body?document.body.innerText.length:0,ready:document.readyState})", 1_500, tab)
+            eval("(function(){try{if(window.__cueLoadState)return window.__cueLoadState();}catch(e){}" +
+                "var se=document.scrollingElement||document.documentElement;return JSON.stringify({ready:document.readyState,chars:document.body?document.body.innerText.length:0," +
+                "sh:se?se.scrollHeight:0,ch:window.innerHeight,sy:se?se.scrollTop:0});})()", 2_000, tab)
         }.getOrDefault("")
-        val o = runCatching { JSONObject(raw.trim().removeSurrounding("\"").replace("\\\"", "\"")) }.getOrNull()
-            ?: runCatching { JSONObject(raw) }.getOrNull()
-        return (o?.optString("ready").orEmpty()) to (o?.optInt("chars", 0) ?: 0)
+        val o = runCatching { JSONObject(raw) }.getOrNull()
+            ?: runCatching { JSONObject(raw.trim().removeSurrounding("\"").replace("\\\"", "\"")) }.getOrNull()
+            ?: return PageReadiness()
+        val tracked = o.has("inflight")
+        return PageReadiness(
+            ready = o.optString("ready"), chars = o.optInt("chars"), inflight = o.optInt("inflight"),
+            netQuietMs = o.optLong("net", if (tracked) 0 else 60_000), domQuietMs = o.optLong("mut", if (tracked) 0 else 60_000),
+            scrollHeight = o.optInt("sh"), viewport = o.optInt("ch"), scrollY = o.optInt("sy"), tracked = tracked,
+        )
     }
 
     /**
-     * Espera o conteúdo de verdade: "complete" com texto, ou texto visível que parou de crescer.
-     * SPAs como a Biblioteca de Anúncios ficam em "interactive" (conexões abertas) mas já mostram tudo.
+     * Espera a página ESTABILIZAR antes de qualquer leitura (padrão browser-use/Playwright):
+     *  - espera mínima de 500 ms;
+     *  - rede ociosa: nenhuma requisição relevante em andamento (rastreadores e polling > 10 s ignorados)
+     *    ou 1,5 s sem atividade de rede;
+     *  - DOM parado há 700 ms (MutationObserver) e algum texto visível;
+     *  - condições verdadeiras em 2 leituras seguidas.
+     * Não depende de readyState=complete (Meta e outras SPAs mantêm o documento em streaming).
      */
-    private suspend fun waitForContent(tab: BrowserTab, maxMillis: Long): Pair<String, Int> {
-        val deadline = System.currentTimeMillis() + maxMillis
-        var last = "" to 0
-        var stableRounds = 0
-        var completeSince = 0L
-        while (System.currentTimeMillis() < deadline) {
-            val now = pageState(tab)
-            if (now.first == "complete" && completeSince == 0L) completeSince = System.currentTimeMillis()
-            stableRounds = if (now.second >= 200 && kotlin.math.abs(now.second - last.second) <= maxOf(20, last.second / 50)) stableRounds + 1 else 0
+    private suspend fun waitForStable(tab: BrowserTab, maxMillis: Long): PageReadiness {
+        val started = System.currentTimeMillis()
+        var last = PageReadiness()
+        var okRounds = 0
+        while (System.currentTimeMillis() - started < maxMillis) {
+            val now = readiness(tab)
             last = now
-            when {
-                now.first == "complete" && now.second > 0 && stableRounds >= 1 -> break
-                stableRounds >= 3 -> break                           // ~1,2 s sem crescer: renderizou
-                completeSince > 0 && System.currentTimeMillis() - completeSince > 6_000 -> break  // completa, mas sem texto
-            }
-            kotlinx.coroutines.delay(400)
+            val elapsed = System.currentTimeMillis() - started
+            val netIdle = now.inflight == 0 || now.netQuietMs >= 1_500
+            val domIdle = now.domQuietMs >= 700
+            val hasContent = now.chars > 0 || now.ready == "complete"
+            val stable = if (now.tracked) netIdle && domIdle && hasContent
+                else (now.ready == "complete" && now.chars > 0) // sem rastreador: comportamento conservador
+            okRounds = if (stable && elapsed >= 500) okRounds + 1 else 0
+            if (okRounds >= 2) break
+            kotlinx.coroutines.delay(300)
         }
         return last
     }
+
+    /** Compat: chamadas antigas esperavam (readyState, caracteres). */
+    private suspend fun waitForContent(tab: BrowserTab, maxMillis: Long): Pair<String, Int> =
+        waitForStable(tab, maxMillis).let { it.ready to it.chars }
 
     /** Aguarda o callback real do WebView e verifica o DOM; falha e timeout não viram sucesso silencioso. */
     private suspend fun awaitLoad(tab: BrowserTab, target: String = tab.url): String {
@@ -893,7 +958,7 @@ class BrowserHost(private val appCtx: Context, sessionId: String = "__legacy__")
     }
 
     /** Snapshot semântico da página, próximo ao formato Playwright: landmarks, headings, texto e controles nomeados. */
-    suspend fun read(maxChars: Int = 9000): String {
+    suspend fun read(maxChars: Int = 9000, trackRepeat: Boolean = true): String {
         val js = """
             (function(){
               var els=[].slice.call(document.querySelectorAll('a,button,input,textarea,select,[role=button],[onclick],summary,[role=link],[role=checkbox],[role=tab]'));
@@ -918,6 +983,8 @@ class BrowserHost(private val appCtx: Context, sessionId: String = "__legacy__")
         """.trimIndent()
         val tab = onMain { activeTab()?.also { lastReadTabId = it.id } }
             ?: return "ERROR: não há aba ativa no browser."
+        // Snapshot só depois que a página parou de carregar/mudar (evita ler só o "esqueleto" do site).
+        val state = waitForStable(tab, 8_000)
         val raw = eval(js, tab = tab)
         if (raw == "null" || raw == "undefined" || raw.isBlank()) {
             return "Falha ao ler página: o JavaScript de snapshot não retornou dados. Verifique o console do WebView e se o DOM já foi criado."
@@ -934,6 +1001,19 @@ class BrowserHost(private val appCtx: Context, sessionId: String = "__legacy__")
                 append(o.optString("text").take(maxChars))
                 append("\n\n--- Elementos interativos ---\n")
                 for (i in 0 until els.length()) append(els.getString(i)).append('\n')
+                // Rolagem (como o browser-use): diz quanto conteúdo ainda existe abaixo — evita reabrir a página
+                // para "ver mais" quando bastaria rolar.
+                if (state.viewport > 0 && state.scrollHeight > state.viewport) append(
+                    "\n--- Rolagem: %.1f página(s) acima · %.1f abaixo%s ---\n".format(java.util.Locale.ROOT, state.pagesAbove, state.pagesBelow,
+                        if (state.pagesBelow > 0.2) " (use browser_scroll para ver mais resultados)" else " (fim da página)"))
+                if (state.tracked && (state.inflight > 0 && state.netQuietMs < 1_500)) append("\n(Aviso: a página ainda estava carregando dados; se faltar algo, leia de novo em alguns segundos.)\n")
+            }.let { snap ->
+                // Mesmo conteúdo da leitura anterior nesta aba = o agente não está progredindo.
+                // inclui a posição de rolagem: rolar e ler de novo é progresso, não repetição
+                val digest = (snap.substringAfter("--- Conteúdo principal") + "|" + state.scrollY / maxOf(1, state.viewport / 2)).hashCode()
+                val repeated = trackRepeat && tab.lastSnapshotDigest == digest
+                tab.lastSnapshotDigest = if (trackRepeat) digest else null
+                if (repeated) "⚠ Conteúdo IGUAL à leitura anterior desta aba. Não leia de novo nem recarregue: role (browser_scroll), clique num item ou mude de abordagem.\n\n$snap" else snap
             }
         }.getOrElse { "Falha ao ler página: $raw" }
     }
@@ -943,6 +1023,7 @@ class BrowserHost(private val appCtx: Context, sessionId: String = "__legacy__")
             ?: return "ERRO: leia novamente a aba ativa antes de usar um índice; referências não passam entre abas."
         val r = eval("""(function(){var e=document.querySelector('[data-cue="$index"]');if(!e)return 'elemento $index não encontrado: referência obsoleta; execute browser_read novamente, escolha um índice novo e não repita este';e.scrollIntoView({block:'center'});e.click();return 'ok: clicou em '+(e.innerText||e.value||e.tagName).slice(0,60);})()""", tab = tab)
         awaitLoadIfNavigating(tab)
+        if (!r.contains("não encontrado")) waitForStable(tab, 6_000)  // modais/listas que abrem por JS
         return r
     }
 
@@ -981,7 +1062,18 @@ class BrowserHost(private val appCtx: Context, sessionId: String = "__legacy__")
 
     suspend fun scroll(down: Boolean): String {
         val tab = onMain { activeTab() } ?: return "ERROR: não há aba ativa no browser."
-        return eval("window.scrollBy(0, ${if (down) "" else "-"}window.innerHeight*0.8); 'ok'", tab = tab)
+        val before = readiness(tab)
+        eval("window.scrollBy(0, ${if (down) "" else "-"}window.innerHeight*0.8); 'ok'", tab = tab)
+        // Listas com rolagem infinita carregam itens depois do scroll: espera estabilizar.
+        val after = waitForStable(tab, 5_000)
+        val grew = after.chars - before.chars
+        val moved = after.scrollY != before.scrollY
+        return buildString {
+            append(if (moved) "ok: rolou" else "ok: já estava no ${if (down) "fim" else "topo"} da página")
+            if (grew > 50) append("; +$grew caracteres carregados")
+            if (after.viewport > 0) append("; %.1f página(s) abaixo".format(java.util.Locale.ROOT, after.pagesBelow))
+            append(". Use browser_read para ver o conteúdo atual.")
+        }
     }
 
     suspend fun runJs(code: String): String {
