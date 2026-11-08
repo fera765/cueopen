@@ -77,6 +77,9 @@ fun ChatScreen(nav: NavController, sessionId: String) {
     val act = activity[sessionId] ?: Activity()
     val autoAgent = st.agents.firstOrNull { it.id == session.agentId && it.autonomous && it.homeSessionId == sessionId }
     val running = session.status == SessionStatus.RUNNING
+    // Chat principal de uma seção: "rodando" enquanto o coordenador OU qualquer agente do time trabalha.
+    val homeSection = st.sections.firstOrNull { it.sessionId == sessionId }
+    val sectionRunning = homeSection != null && st.sessions.any { it.sectionId == homeSection.id && it.status == SessionStatus.RUNNING }
     val list = rememberLazyListState()
     var draft by remember { mutableStateOf("") }
     var copyingAttachments by remember { mutableStateOf(false) }
@@ -204,7 +207,11 @@ fun ChatScreen(nav: NavController, sessionId: String) {
             Composer(
                 value = draft, onChange = { draft = it },
                 placeholder = if (session.status == SessionStatus.WAITING_USER) "Responda ao agente…" else "Envie uma mensagem",
-                running = running || session.status == SessionStatus.SLEEPING || autoAgent != null, onStop = { app.agent.stop(sessionId, pauseAutonomy = !running) },  // no meio de um passo: só interrompe
+                running = running || sectionRunning || session.status == SessionStatus.SLEEPING || autoAgent != null,
+                onStop = {
+                    // Chat da seção: pausa em cascata (coordenador + todos os agentes). Senão, no meio de um passo só interrompe.
+                    if (homeSection != null) app.agent.pauseSection(homeSection.id) else app.agent.stop(sessionId, pauseAutonomy = !running)
+                },
                 // Cronômetro até o próximo ciclo: durante um ciclo ativo (RUNNING) não mostra; parado,
                 // usa wakeAt (modo contínuo) ou o próximo heartbeat agendado (lastBeatAt + intervalo).
                 nextCycleAt = if (running) null else
@@ -255,7 +262,7 @@ fun ChatScreen(nav: NavController, sessionId: String) {
                                 kotlinx.coroutines.delay(450)
                                 app.store.replaceItem(sessionId, step.copy(title = "Contexto do modelo limpo", args = "histórico mantido na tela", status = StepStatus.OK))
                             }
-                            "/stop" -> app.agent.stop(sessionId, pauseAutonomy = true)
+                            "/stop" -> if (homeSection != null) app.agent.pauseSection(homeSection.id) else app.agent.stop(sessionId, pauseAutonomy = true)
                             "/usage" -> usage = true
                             "/memory" -> nav.navigate("memory")
                             "/skills" -> nav.navigate("skills")
@@ -1077,7 +1084,12 @@ private fun SectionSetupCard(item: ChatItem.SectionSetup, sessionId: String?, na
                         ))
                         if (dev.cueopen.app.device.DeviceCaps.BACKGROUND in caps) dev.cueopen.app.device.DeviceCaps.requestBatteryUnrestricted(ctx)
                         caps.filterNot { dev.cueopen.app.device.DeviceCaps.granted(ctx, it) }.firstOrNull()?.let { dev.cueopen.app.device.DeviceCaps.request(ctx, it) }
-                        target?.let { nav?.navigate("chat/$it") }
+                        target?.let { t ->
+                            // O chat que só serviu para criar a seção sai de cena: vai direto para a seção rodando.
+                            nav?.popBackStack()
+                            nav?.navigate("chat/$t")
+                            app.deleteChat(sid)
+                        }
                     }, Modifier.weight(1f), colors = ButtonDefaults.buttonColors(containerColor = c.ink, contentColor = c.bg)) { Text("Ativar seção") }
                 }
             }
@@ -1128,7 +1140,8 @@ private fun TeamMemberPill(step: ChatItem.Step, nav: androidx.navigation.NavCont
     val child = st.sessions.firstOrNull { it.id == childId }
     val running = child?.status == SessionStatus.RUNNING
     val waiting = child?.status == SessionStatus.WAITING_USER || step.result == "aguardando você"
-    val label = teamActivityLabel(activity[childId], running, waiting && !running, step.status == StepStatus.ERROR, step.status == StepStatus.OK)
+    val label = if (!running && step.result == "pausado") "pausado"
+        else teamActivityLabel(activity[childId], running, waiting && !running, step.status == StepStatus.ERROR, step.status == StepStatus.OK)
     Row(
         Modifier.padding(vertical = 4.dp).clip(RoundedCornerShape(18.dp)).background(c.surface)
             .border(1.dp, if (running) c.ok.copy(alpha = .5f) else c.line, RoundedCornerShape(18.dp))

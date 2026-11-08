@@ -181,7 +181,8 @@ class BrowserHost(private val appCtx: Context, sessionId: String = "__legacy__")
     @Synchronized
     fun view(ctx: Context = appCtx): WebView {
         val tab = activeTab() ?: error("A sessão do browser não tem uma aba ativa.")
-        return ensureTabView(tab, ctx)
+        // A UI vai exibir o WebView: tira do palco invisível do agente antes de anexar na tela.
+        return ensureTabView(tab, ctx).also { OffscreenStage.release(it) }
     }
 
     private fun activeTab(): BrowserTab? = tabs[activeTabId] ?: tabs.values.firstOrNull()
@@ -282,10 +283,12 @@ class BrowserHost(private val appCtx: Context, sessionId: String = "__legacy__")
      */
     private fun ensureSized(v: WebView) {
         if (v.isAttachedToWindow && v.width > 0 && v.height > 0) return
-        if (v.width > 0 && v.height > 0) return
         val dm = appCtx.resources.displayMetrics
         val w = dm.widthPixels.coerceAtLeast(360)
         val h = (dm.heightPixels - (dm.density * 180).toInt()).coerceAtLeast(480) // menos barras/abas do Computador
+        // Fora de uma janela o Chromium trata a página como escondida e SPAs não terminam de montar.
+        if (!v.isAttachedToWindow && OffscreenStage.attach(v, w, h)) return
+        if (v.width > 0 && v.height > 0) return
         v.measure(android.view.View.MeasureSpec.makeMeasureSpec(w, android.view.View.MeasureSpec.EXACTLY),
             android.view.View.MeasureSpec.makeMeasureSpec(h, android.view.View.MeasureSpec.EXACTLY))
         v.layout(0, 0, w, h)
@@ -829,18 +832,15 @@ class BrowserHost(private val appCtx: Context, sessionId: String = "__legacy__")
     private suspend fun awaitLoad(tab: BrowserTab, target: String = tab.url): String {
         val status = tab.navigationStatus
         val deferred = tab.pageDone ?: return "ERROR: não foi possível acompanhar o carregamento desta navegação."
-        val completed = withTimeoutOrNull(45_000) { deferred.await() }
+        val completed = withTimeoutOrNull(25_000) { deferred.await() }
         val result = completed?.let(status::preserveHttpError) ?: status.httpError() ?: run {
+            // Sem sinal de fim do WebView: muitos sites (Meta) mantêm o documento em streaming.
+            // Decide pelo conteúdo realmente visível em vez de declarar timeout às cegas.
+            val (ready, chars) = waitForContent(tab, 12_000)
             if (tab.id == activeTabId) _ui.value = _ui.value.copy(loading = false)
-            // Diagnóstico curto e único: conteúdo visível não significa que a SPA/hydration esteja pronta.
-            val raw = runCatching {
-                eval("JSON.stringify({chars:document.body?document.body.innerText.length:0,ready:document.readyState,url:location.href})", 1_500, tab)
-            }.getOrDefault("")
-            val state = runCatching { JSONObject(raw) }.getOrNull()
-            val chars = state?.optInt("chars", 0) ?: 0
-            val currentUrl = state?.optString("url").orEmpty().ifBlank { tab.url }
-            val readyState = state?.optString("ready").orEmpty()
-            return status.timeoutMessage(target, currentUrl, readyState, chars)
+            if (chars >= 200) return "OK: página carregada ($target) — $chars caracteres visíveis; o site mantém o carregamento aberto, o que é normal. Leia com browser_read."
+            val currentUrl = runCatching { eval("location.href", 1_500, tab) }.getOrDefault("").trim('"').ifBlank { tab.url }
+            return status.timeoutMessage(target, currentUrl, ready, chars)
         }
         val httpCode = status.httpStatusCode()
         if (result.startsWith("ERROR:") && httpCode == null) return result  // falha de rede real
@@ -1004,7 +1004,7 @@ class BrowserHost(private val appCtx: Context, sessionId: String = "__legacy__")
         val d = CompletableDeferred<String>()
         val view = onMain {
             val target = tab ?: activeTab()
-            target?.let { ensureTabView(it, appCtx) }
+            target?.let { ensureTabView(it, appCtx).also { v -> if (!v.isAttachedToWindow) ensureSized(v) } }
         } ?: return "ERROR: não há aba ativa no browser."
         onMain { view.evaluateJavascript(js) { d.complete(it ?: "null") } }
         val raw = withTimeoutOrNull(timeoutMillis) { d.await() } ?: return "timeout: evaluateJavascript não respondeu em ${timeoutMillis / 1_000}s"

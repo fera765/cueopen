@@ -53,6 +53,17 @@ class MainActivity : ComponentActivity() {
         ).show()
     }
 
+    override fun onResume() {
+        super.onResume()
+        // palco invisível do browser do agente (WebView fora da janela não renderiza SPAs)
+        dev.cueopen.app.browser.OffscreenStage.onActivityResumed(this)
+    }
+
+    override fun onDestroy() {
+        dev.cueopen.app.browser.OffscreenStage.onActivityDestroyed(this)
+        super.onDestroy()
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()

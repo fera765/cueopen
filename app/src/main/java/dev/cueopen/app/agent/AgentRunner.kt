@@ -343,6 +343,7 @@ class AgentRunner(
         val sec = store.section(sectionId) ?: return
         store.state.value.sessions.filter { it.sectionId == sectionId }.forEach { s ->
             stop(s.id)
+            BrowserVisitLog.clear(s.id)
             store.editSession(s.id) { it.copy(llm = emptyList(), items = emptyList(), summary = "", status = SessionStatus.IDLE, wakeAt = null) }
         }
         if (sec.configured) send(sec.sessionId, sec.firstTask.ifBlank { "Apresente o time, proponha o plano inicial e comece." })
@@ -356,6 +357,23 @@ class AgentRunner(
     private data class Delegation(val sectionId: String, val memberId: String, val pillId: String, val startIndex: Int)
     private val delegations = java.util.concurrent.ConcurrentHashMap<String, Delegation>()
     private val sectionReportLocks = java.util.concurrent.ConcurrentHashMap<String, kotlinx.coroutines.sync.Mutex>()
+    /** Muda a cada pausa da seção: relatórios enfileirados antes da pausa são descartados. */
+    private val sectionGeneration = java.util.concurrent.ConcurrentHashMap<String, Int>()
+
+    /**
+     * Pausa em cascata: para o coordenador e TODOS os agentes da seção na hora, descarta relatórios
+     * pendentes (para ninguém religar o coordenador sozinho) e marca as pílulas como pausadas.
+     */
+    fun pauseSection(sectionId: String) {
+        val sec = store.section(sectionId) ?: return
+        sectionGeneration.merge(sectionId, 1, Int::plus)
+        delegations.entries.removeIf { it.value.sectionId == sectionId }
+        store.state.value.sessions.filter { it.sectionId == sectionId || it.id == sec.sessionId }.forEach { stop(it.id) }
+        store.session(sec.sessionId)?.items?.filterIsInstance<ChatItem.Step>()
+            ?.filter { it.tool == TEAM_MEMBER_STEP && it.status == StepStatus.RUNNING }
+            ?.forEach { store.replaceItem(sec.sessionId, it.copy(status = StepStatus.OK, result = "pausado")) }
+        store.addItem(sec.sessionId, ChatItem.Error(text = "Seção pausada: coordenador e agentes parados. Envie uma mensagem para retomar."))
+    }
 
     private suspend fun teamDelegate(sessionId: String, agentName: String, task: String, wait: Boolean, timeoutMinutes: Int): String {
         val sec = store.section(store.session(sessionId)?.sectionId) ?: return "ERRO: esta conversa não é uma seção."
@@ -417,9 +435,11 @@ class AgentRunner(
         // Esperando o usuário (confirmação/pergunta): mantém a delegação viva para relatar o resultado final depois.
         if (!waitingUser) delegations.remove(sessionId)
         val report = memberReport(member, sessionId, d.startIndex)
+        val generation = sectionGeneration[sec.id] ?: 0
         scope.launch {
             val lock = sectionReportLocks.getOrPut(sec.id) { kotlinx.coroutines.sync.Mutex() }
             lock.withLock {
+                if ((sectionGeneration[sec.id] ?: 0) != generation) return@withLock  // seção pausada depois deste relatório
                 var waited = 0
                 while (isRunning(sec.sessionId) && waited < 1_800) { kotlinx.coroutines.delay(2_000); waited += 2 }
                 send(sec.sessionId, "[Relatório automático — ${member.name}${if (waitingUser) " parou e aguarda o usuário" else " terminou"}]\n$report",
@@ -1704,6 +1724,11 @@ class AgentRunner(
                     appendLine("- Delegue com team_delegate (não bloqueia; acione vários em paralelo quando fizer sentido). O usuário vê cada agente trabalhando numa pílula ao vivo.")
                     appendLine("- Entre as ações, mande feedbacks CURTOS (5 a 30 palavras) e siga trabalhando. Nada de terminal/browser: o trabalho é dos agentes.")
                     appendLine("- Ao receber [Relatório automático], avalie, cobre ajustes ou passe a próxima etapa; entregue o progresso em lista numerada.")
+                }
+                BrowserVisitLog.summary(sessionId).takeIf { it.isNotEmpty() }?.let { visits ->
+                    appendLine(); appendLine("## Histórico do browser nesta tarefa (confira ANTES de navegar)")
+                    visits.forEach { appendLine(it) }
+                    appendLine("- Não reabra páginas já abertas nem refaça a mesma busca: aprofunde (browser_read, browser_scroll, abra cada anúncio/link) ou mude a consulta. Página que falhou 2× não deve ser repetida.")
                 }
                 if (agent?.useBrowser != false) appendLine("- Browser: usa as contas em que o usuário já entrou (login salvo e compartilhado entre chats e Agents). Se um site pedir login, não invente credenciais: peça ao usuário com ask_user para entrar uma vez pela aba Browser e continue depois.")
             }
@@ -3197,12 +3222,18 @@ class AgentRunner(
                         "ERROR: arquivo não existe no workspace: $guest. Use file_list para achar o caminho certo (arquivos de conectores ficam em /root/connectors/<id>/workspace)."
                     } else {
                         val url = hostF?.let { "file://" + it.absolutePath } ?: raw
+                        // Guarda-corpo: não reabrir a mesma busca/página em looping (mesmo com parâmetros reordenados).
+                        val current = runCatching { browserFor(sessionId).ui.value.url }.getOrNull()
+                        val repeated = BrowserVisitLog.check(sessionId, url, current)
+                        if (repeated != null) repeated else run {
                         val navigation = browserFor(sessionId).navigate(url)
+                        BrowserVisitLog.record(sessionId, url, navigation)
                         if (navigation.startsWith("ERROR:") || navigation.startsWith("TIMEOUT:")) navigation
                         else {
                             val page = browserFor(sessionId).read(4000)
                             val notFound = Regex("(?i)(t[ií]tulo:[^\\n]*(404|not found|n[aã]o encontrad)|this page doesn.t exist|page not found|p[aá]gina n[aã]o encontrada)").containsMatchIn(page.take(600))
                             (if (notFound) "⚠ A página carregou, mas é um ERRO 404 (não existe). Não use este conteúdo; procure o endereço correto.\n" else "") + navigation + "\n\n" + page
+                        }
                         }
                     }
                 }
