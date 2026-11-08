@@ -1850,6 +1850,16 @@ class AgentRunner(
         }
     }
 
+    /** Igual ao browser_wait_for do Playwright MCP: esperar dados em vez de reabrir a página. */
+    private fun browserWaitForTool() = tool("browser_wait_for",
+        "Espera um texto aparecer (text) ou sumir (text_gone) na página atual, ou só aguarda alguns segundos (seconds, máx. 30). " +
+            "Use quando a página ainda está carregando dados, em vez de reabrir a URL. Devolve o snapshot atualizado.",
+        buildJsonObject {
+            put("text", str("Texto que deve aparecer (opcional)"))
+            put("text_gone", str("Texto que deve sumir, ex.: 'Carregando' (opcional)"))
+            put("seconds", int("Limite em segundos (1-30; padrão 10)"))
+        })
+
     private fun tools(agentIn: AgentProfile?, allowMultiAgent: Boolean = true, builder: Boolean = false, connectorEditId: String? = null, sectionId: String? = null) = buildJsonArray {
         // ---------- Seções (time de Agents com coordenador)
         val sectionHere = store.section(sectionId)
@@ -1898,6 +1908,7 @@ class AgentRunner(
                 add(tool("browser_snapshot", "Lê a página atual: headings, texto, links e controles; não interage com eles.", buildJsonObject { put("max_chars", int("Limite de caracteres (padrão 9000)")) }))
                 add(tool("browser_read", "Lê o texto e os elementos da página atual, sem clicar ou preencher campos.", buildJsonObject {}))
                 add(tool("browser_scroll", "Rola a página atual sem ativar controles.", buildJsonObject { put("direction", str("up ou down")) }))
+                add(browserWaitForTool())
                 add(tool("browser_back", "Volta para a página anterior.", buildJsonObject {}))
             }
             return@buildJsonArray
@@ -1950,7 +1961,8 @@ class AgentRunner(
             add(tool("browser_type", "Digita num campo [índice]; submit=true envia.", buildJsonObject {
                 put("index", int("Índice")); put("text", str("Texto")); put("submit", bool("Enviar formulário"))
             }, listOf("index", "text")))
-            add(tool("browser_scroll", "Rola a página.", buildJsonObject { put("direction", str("up ou down")) }))
+            add(tool("browser_scroll", "Rola a página e espera novos itens carregarem; informa quantas páginas faltam.", buildJsonObject { put("direction", str("up ou down")) }))
+            add(browserWaitForTool())
             add(tool("browser_back", "Volta uma página.", buildJsonObject {}))
             add(tool("browser_js", "Executa JavaScript na página e retorna o resultado.", buildJsonObject { put("code", str("Código JS (expressão)")) }, listOf("code")))
         }
@@ -2691,6 +2703,7 @@ class AgentRunner(
             "device_accessibility_back" -> "Voltando no aplicativo" to Activity.Kind.THINKING
             "device_notify", "device_overlay" -> "Avisando no aparelho" to Activity.Kind.THINKING
             "browser_console" -> "Lendo console" to Activity.Kind.BROWSER
+            "browser_wait_for" -> "Aguardando a página" to Activity.Kind.BROWSER
             "create_skill" -> "Criando skill" to Activity.Kind.THINKING
             else -> (if (call.name.startsWith("mcp_")) "Conector · " + call.name.substringAfter("__") else call.name) to Activity.Kind.THINKING
         }
@@ -3222,14 +3235,19 @@ class AgentRunner(
                     if (hostF != null && !hostF.exists()) {
                         "ERROR: arquivo não existe no workspace: $guest. Use file_list para achar o caminho certo (arquivos de conectores ficam em /root/connectors/<id>/workspace)."
                     } else {
-                        val url = hostF?.let { "file://" + it.absolutePath } ?: raw
+                        val url = hostF?.let { "file://" + it.absolutePath } ?: BrowserVisitLog.canonical(raw)
                         // Guarda-corpo: não reabrir a mesma busca/página em looping (mesmo com parâmetros reordenados).
                         val current = runCatching { browserFor(sessionId).ui.value.url }.getOrNull()
                         val repeated = BrowserVisitLog.check(sessionId, url, current)
                         if (repeated != null) repeated else run {
                         val navigation = browserFor(sessionId).navigate(url)
                         BrowserVisitLog.record(sessionId, url, navigation)
-                        if (navigation.startsWith("ERROR:") || navigation.startsWith("TIMEOUT:")) navigation
+                        if (navigation.startsWith("ERROR:")) navigation
+                        else if (navigation.startsWith("TIMEOUT:")) {
+                            // Como o Playwright MCP: mesmo lento, devolve o que a página mostra agora.
+                            val now = runCatching { browserFor(sessionId).read(2500, trackRepeat = false) }.getOrDefault("")
+                            navigation + (if (now.isNotBlank()) "\n\n[Estado atual da página]\n$now" else "")
+                        }
                         else {
                             val page = browserFor(sessionId).read(4000, trackRepeat = false)
                             val notFound = Regex("(?i)(t[ií]tulo:[^\\n]*(404|not found|n[aã]o encontrad)|this page doesn.t exist|page not found|p[aá]gina n[aã]o encontrada)").containsMatchIn(page.take(600))
@@ -3242,6 +3260,11 @@ class AgentRunner(
                 "browser_select_tab" -> browserFor(sessionId).selectTabForAgent(s("tab_id"))
                 "browser_close_tab" -> browserFor(sessionId).closeTabForAgent(s("tab_id"))
                 "browser_read", "browser_snapshot" -> browserFor(sessionId).read((i("max_chars") ?: 9000).coerceIn(1000, 20000))
+                "browser_wait_for" -> {
+                    val br = browserFor(sessionId)
+                    val waited = br.waitFor(s("text"), s("text_gone"), i("seconds") ?: 10)
+                    waited + "\n\n" + br.read(4000)
+                }
                 "browser_click" -> browserFor(sessionId).click(i("index") ?: -1)
                 "browser_type" -> browserFor(sessionId).type(i("index") ?: -1, SecretVault.resolve(sessionId, s("text")), b("submit"))
                 "browser_scroll" -> browserFor(sessionId).scroll(s("direction") != "up")
@@ -3406,7 +3429,11 @@ class AgentRunner(
         else out
         if (isError) executions.fail(executionId, safeExecutionOutput) else executions.finish(executionId, safeExecutionOutput)
         if (isError || markerError) {
-            val safeLog = if (accessibilityTool) "Falha de ferramenta Android; conteúdo de tela omitido por privacidade." else out.take(1000)
+            val safeLog = if (accessibilityTool) "Falha de ferramenta Android; conteúdo de tela omitido por privacidade."
+                else if (call.name.startsWith("browser_") && isError)
+                    // Falha de browser: grava o diagnóstico completo para a próxima correção ser certeira.
+                    out.take(900) + "\n\n" + runCatching { browserFor(sessionId).diagnostics() }.getOrDefault("(diagnóstico indisponível)")
+                else out.take(1000)
             runCatching { dev.cueopen.app.diag.ErrorLog.log(errorSource(call.name), safeLog, sessionId, call.name) }
         }
         val safeStepOutput = if (accessibilityTool)

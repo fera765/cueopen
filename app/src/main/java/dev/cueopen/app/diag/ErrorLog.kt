@@ -39,7 +39,8 @@ object ErrorLog {
                     if (!tool.isNullOrBlank()) append(" · tool=").append(tool)
                     if (!sessionId.isNullOrBlank()) append(" · sess=").append(sessionId.take(8))
                 }
-                val body = detail.trim().take(2000).replace("\n", "\n    ")
+                // Falhas do browser trazem o diagnóstico completo (linha do tempo, rede, janela): limite maior.
+                val body = detail.trim().take(if (source == "browser") 6000 else 2000).replace("\n", "\n    ")
                 f.appendText("$header\n    $body\n")
                 if (f.length() > MAX_BYTES) {
                     val tail = f.readText().takeLast((MAX_BYTES / 2).toInt())

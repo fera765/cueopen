@@ -42,3 +42,31 @@ class BrowserVisitLogTest {
         assertTrue(BrowserVisitLog.summary(s).first().startsWith("- [ok ×2]"))
     }
 }
+
+class BrowserVisitLogGuardsTest {
+    @Test
+    fun facebookMobileAndWebVariantsBecomeWww() {
+        assertEquals("https://www.facebook.com/ads/library/?q=curso&country=BR",
+            BrowserVisitLog.canonical("https://m.facebook.com/ads/library/?q=curso&country=BR&_rdr"))
+        assertEquals("https://www.facebook.com/ads/library/?q=x",
+            BrowserVisitLog.canonical("https://web.facebook.com/ads/library/?q=x&_rdc=1&_rdr"))
+        assertEquals("https://example.com/a%5Bb%5D?x=1", BrowserVisitLog.canonical("https://example.com/a%5Bb%5D?x=1"))
+        assertEquals(BrowserVisitLog.normalize("https://web.facebook.com/ads/library/?q=x"),
+            BrowserVisitLog.normalize("https://www.facebook.com/ads/library/?q=x&_rdr"))
+    }
+
+    @Test
+    fun hostCircuitBreakerTripsAfterFourFailuresAndResetsOnSuccess() {
+        val host = "breaker-" + System.nanoTime() + ".test"
+        val s = "s-" + System.nanoTime()
+        repeat(4) { i -> BrowserVisitLog.record(s, "https://$host/p$i", "TIMEOUT: x") }
+        val msg = BrowserVisitLog.check(s, "https://$host/outra", null)
+        assertNotNull(msg); assertTrue(msg!!.contains("falhou 4×"))
+        BrowserVisitLog.resetHost(host)
+        assertNull(BrowserVisitLog.check(s, "https://$host/outra", null))
+        repeat(3) { i -> BrowserVisitLog.record(s, "https://$host/q$i", "TIMEOUT: x") }
+        BrowserVisitLog.record(s, "https://$host/ok", "OK: página carregada")
+        BrowserVisitLog.record(s, "https://$host/z", "TIMEOUT: x")
+        assertNull(BrowserVisitLog.check(s, "https://$host/nova", null))
+    }
+}

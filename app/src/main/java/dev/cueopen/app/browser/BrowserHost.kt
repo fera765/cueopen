@@ -65,7 +65,22 @@ class BrowserHost(private val appCtx: Context, sessionId: String = "__legacy__")
         var progress: Int = 0,
         /** Hash da última leitura (detecta leituras repetidas sem progresso). */
         var lastSnapshotDigest: Int? = null,
+        /** Linha do tempo da navegação atual (para o log de erros). */
+        val diag: NavDiag = NavDiag(),
     )
+
+    /** Linha do tempo de uma navegação: eventos do WebView com o tempo desde o início. */
+    internal class NavDiag {
+        @Volatile var startedAt = System.currentTimeMillis(); private set
+        @Volatile var target = ""; private set
+        private val events = java.util.concurrent.ConcurrentLinkedDeque<String>()
+        fun reset(url: String) { startedAt = System.currentTimeMillis(); target = url; events.clear() }
+        fun add(e: String) {
+            events.addLast("+${(System.currentTimeMillis() - startedAt) / 100 / 10.0}s ${e.take(220)}")
+            while (events.size > 30) events.pollFirst()
+        }
+        fun lines(): List<String> = events.toList()
+    }
 
     private val savedSession = persistence.load()
     private val tabs = linkedMapOf<String, BrowserTab>().apply {
@@ -354,7 +369,9 @@ class BrowserHost(private val appCtx: Context, sessionId: String = "__legacy__")
 
     @SuppressLint("SetJavaScriptEnabled")
     private fun createView(ctx: Context, tab: BrowserTab): WebView {
-        val v = WebView(ctx)
+        // Nunca "escondido" para o Chromium: a página continua viva com o app em segundo plano.
+        val v = AgentWebView(ctx)
+        runCatching { v.resumeTimers() }
         // Perfil persistente de contas. Sem suporte a perfis, o perfil padrão do WebView já é único e
         // persistente — serve igual, então a rede nunca é bloqueada por isso.
         runCatching {
@@ -422,12 +439,14 @@ class BrowserHost(private val appCtx: Context, sessionId: String = "__legacy__")
         }.getOrDefault(false)
         v.webViewClient = object : WebViewClient() {
             override fun onPageStarted(view: WebView, url: String, favicon: Bitmap?) {
+                tab.diag.add("onPageStarted $url")
                 if (!docStart) runCatching { view.evaluateJavascript(READINESS_JS, null) }
                 tab.progress = 0
                 if (tab.id == activeTabId) lastReadTabId = null
                 sync(view, loading = true)
             }
             override fun onPageCommitVisible(view: WebView, url: String) {
+                tab.diag.add("onPageCommitVisible (primeiro quadro)")
                 // Algumas SPAs mantêm requisições abertas e nunca disparam onPageFinished. Um
                 // primeiro quadro visível permite inspecionar o DOM sem esperar 45 s, mas não é
                 // tratado como prontidão funcional.
@@ -435,6 +454,7 @@ class BrowserHost(private val appCtx: Context, sessionId: String = "__legacy__")
                 persistWebViewState(tab, view)
             }
             override fun onPageFinished(view: WebView, url: String) {
+                tab.diag.add("onPageFinished $url")
                 sync(view, loading = false)
                 tab.pageDone?.complete(tab.navigationStatus.pageFinished())
                 collectTimings(tab, view)
@@ -454,12 +474,14 @@ class BrowserHost(private val appCtx: Context, sessionId: String = "__legacy__")
             }
             override fun onReceivedHttpError(view: WebView, request: WebResourceRequest, errorResponse: android.webkit.WebResourceResponse) {
                 patchNet(request.url.toString(), tab.id) { it.copy(status = errorResponse.statusCode) }
+                if (request.isForMainFrame) tab.diag.add("HTTP ${errorResponse.statusCode} na página principal ${request.url}")
                 // Só registra: vários sites (Meta, Cloudflare) respondem 403/429 e mesmo assim renderizam a página.
                 // A decisão (erro x página válida) é tomada em awaitLoad pelo conteúdo realmente visível.
                 tab.navigationStatus.recordHttpError(request.isForMainFrame, errorResponse.statusCode)
             }
             override fun onReceivedError(view: WebView, request: WebResourceRequest, error: android.webkit.WebResourceError) {
                 patchNet(request.url.toString(), tab.id) { it.copy(error = error.description?.toString()) }
+                if (request.isForMainFrame) tab.diag.add("erro de rede ${error.errorCode} ${error.description} em ${request.url}")
                 if (request.isForMainFrame) {
                     sync(view, loading = false)
                     val desc = error.description?.toString() ?: "Falha ao carregar a página"
@@ -470,7 +492,18 @@ class BrowserHost(private val appCtx: Context, sessionId: String = "__legacy__")
                     view.loadDataWithBaseURL(null, errorPageHtml(failing, desc), "text/html", "UTF-8", failing)
                 }
             }
+            override fun onRenderProcessGone(view: WebView, detail: android.webkit.RenderProcessGoneDetail): Boolean {
+                // O processo do Chromium morreu (memória/crash). Sem tratar, o Android encerra o app inteiro.
+                val crashed = if (android.os.Build.VERSION.SDK_INT >= 26) detail.didCrash() else true
+                tab.diag.add("processo do renderer encerrado (" + (if (crashed) "crash" else "falta de memória") + ")")
+                runCatching { dev.cueopen.app.diag.ErrorLog.log("browser", "Renderer do WebView encerrado (" + (if (crashed) "crash" else "memória") + ") na aba ${tab.id}; a aba será recriada.\n" + tab.diag.lines().joinToString("\n")) }
+                tab.pageDone?.complete("ERROR: o motor do browser foi encerrado pelo Android (" + (if (crashed) "falha" else "memória") + "). A aba será recriada; abra a página de novo uma vez.")
+                runCatching { (view.parent as? android.view.ViewGroup)?.removeView(view); view.destroy() }
+                if (tab.webView === view) tab.webView = null
+                return true
+            }
             override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
+                if (request.isForMainFrame) tab.diag.add((if (request.isRedirect) "redirecionamento → " else "navegação pela página → ") + request.url)
                 val s = request.url.scheme ?: return true
                 if (!isolated && (s == "http" || s == "https")) return true
                 return s !in setOf("http", "https", "file", "about", "data")
@@ -604,10 +637,10 @@ class BrowserHost(private val appCtx: Context, sessionId: String = "__legacy__")
          */
         internal val READINESS_JS = """
             (function(){ if (window.__cueLoad) return;
-              var st = { reqs: {}, seq: 0, lastNet: Date.now(), lastMut: Date.now() }; window.__cueLoad = st;
+              var st = { reqs: {}, urls: {}, seq: 0, lastNet: Date.now(), lastMut: Date.now() }; window.__cueLoad = st;
               var ign = /doubleclick|googlesyndication|googletagmanager|google-analytics|analytics\.|hotjar|clarity\.ms|mixpanel|segment\.(io|com)|newrelic|nr-data|sentry|\/beacon|\/collect\b|\/telemetry|\/metrics|\/tracker|\/track\b|\/log(ging)?\b|\/ajax\/bz|\/ajax\/webstorage|\/tr\/?\?/i;
-              function start(u){ u = String(u||''); if (ign.test(u)) return null; var id = ++st.seq; st.reqs[id] = Date.now(); st.lastNet = Date.now(); return id; }
-              function end(id){ if (id != null) delete st.reqs[id]; st.lastNet = Date.now(); }
+              function start(u){ u = String(u||''); if (ign.test(u)) return null; var id = ++st.seq; st.reqs[id] = Date.now(); st.urls[id] = u.slice(0, 120); st.lastNet = Date.now(); return id; }
+              function end(id){ if (id != null) { delete st.reqs[id]; delete st.urls[id]; } st.lastNet = Date.now(); }
               try { var of = window.fetch; if (of) window.fetch = function(i, o){ var id = start((i && i.url) || i);
                 return of.apply(this, arguments).then(function(r){ end(id); return r; }, function(e){ end(id); throw e; }); }; } catch(e) {}
               try { var X = XMLHttpRequest.prototype, op = X.open, sd = X.send;
@@ -620,7 +653,8 @@ class BrowserHost(private val appCtx: Context, sessionId: String = "__legacy__")
                 for (var k in st.reqs) { if (now - st.reqs[k] < 10000) n++; }   // polling/streaming > 10 s não segura a leitura
                 var se = document.scrollingElement || document.documentElement;
                 return JSON.stringify({ ready: document.readyState, chars: document.body ? document.body.innerText.length : 0,
-                  inflight: n, net: now - st.lastNet, mut: now - st.lastMut,
+                  inflight: n, net: now - st.lastNet, mut: now - st.lastMut, vis: document.visibilityState,
+                  pend: Object.keys(st.reqs).slice(0, 4).map(function(k){ return st.urls[k] || ''; }),
                   sh: se ? se.scrollHeight : 0, ch: window.innerHeight, sy: se ? se.scrollTop : 0 }); };
             })();
         """.trimIndent()
@@ -814,6 +848,8 @@ class BrowserHost(private val appCtx: Context, sessionId: String = "__legacy__")
             // Ritmo por site: evita rajadas que disparam limite de acesso (rate limit) e bloqueio anti-robô.
             HostPacing.waitTurn(host)
             val target = onMain {
+                targetTab.diag.reset(normalized)
+                targetTab.diag.add("loadUrl (tentativa ${attempt + 1})")
                 targetTab.navigationStatus = BrowserNavigationStatus()
                 targetTab.pageDone = CompletableDeferred()
                 if (targetTab.id == activeTabId) _ui.value = _ui.value.copy(loading = true, progress = 0)
@@ -838,6 +874,7 @@ class BrowserHost(private val appCtx: Context, sessionId: String = "__legacy__")
         val ready: String = "", val chars: Int = 0, val inflight: Int = 0,
         val netQuietMs: Long = 0, val domQuietMs: Long = 0,
         val scrollHeight: Int = 0, val viewport: Int = 0, val scrollY: Int = 0, val tracked: Boolean = false,
+        val visibility: String = "", val pending: List<String> = emptyList(),
     ) {
         val pagesAbove: Double get() = if (viewport > 0) scrollY.toDouble() / viewport else 0.0
         val pagesBelow: Double get() = if (viewport > 0) ((scrollHeight - scrollY - viewport).coerceAtLeast(0)).toDouble() / viewport else 0.0
@@ -857,6 +894,8 @@ class BrowserHost(private val appCtx: Context, sessionId: String = "__legacy__")
             ready = o.optString("ready"), chars = o.optInt("chars"), inflight = o.optInt("inflight"),
             netQuietMs = o.optLong("net", if (tracked) 0 else 60_000), domQuietMs = o.optLong("mut", if (tracked) 0 else 60_000),
             scrollHeight = o.optInt("sh"), viewport = o.optInt("ch"), scrollY = o.optInt("sy"), tracked = tracked,
+            visibility = o.optString("vis"),
+            pending = o.optJSONArray("pend")?.let { a -> (0 until a.length()).map { a.optString(it) } }.orEmpty(),
         )
     }
 
@@ -889,38 +928,134 @@ class BrowserHost(private val appCtx: Context, sessionId: String = "__legacy__")
         return last
     }
 
+    /**
+     * Diagnóstico detalhado da aba ativa para o log de erros (Configurações › Logs): linha do tempo,
+     * redirecionamentos, estado do documento, requisições pendentes, visibilidade, janela e permissões.
+     */
+    suspend fun diagnostics(): String {
+        val tab = onMain { activeTab() } ?: return "Diagnóstico: sem aba ativa."
+        val st = runCatching { readiness(tab) }.getOrDefault(PageReadiness())
+        val (placement, window, url, ua) = onMain {
+            val v = tab.webView
+            listOf(
+                v?.let { OffscreenStage.placement(it) } ?: "WebView ainda não criado",
+                (v as? AgentWebView)?.windowVisibilityLabel() ?: "-",
+                v?.url ?: tab.url,
+                v?.settings?.userAgentString?.let { it.substringAfter("Chrome/").substringBefore(' ').let { c -> "Chrome $c" } } ?: "-",
+            )
+        }
+        val webViewPkg = runCatching { WebViewCompat.getCurrentWebViewPackage(appCtx)?.let { "${it.packageName} ${it.versionName}" } }.getOrNull() ?: "?"
+        val errors = _console.value.filter { it.tabId == tab.id && (it.level == "error" || it.level == "warning") }.takeLast(3)
+        return buildString {
+            appendLine("── DIAGNÓSTICO DO BROWSER ──")
+            appendLine("Alvo: ${tab.diag.target.take(200)}")
+            appendLine("URL atual: ${url.take(200)}")
+            appendLine("Tempo desde o início: ${(System.currentTimeMillis() - tab.diag.startedAt) / 1000}s")
+            appendLine("Documento: readyState=${st.ready.ifBlank { "?" }} · visibilityState=${st.visibility.ifBlank { "?" }} · texto=${st.chars} caracteres · rolagem=${st.scrollHeight}px")
+            if (st.tracked) appendLine("Rede: ${st.inflight} requisição(ões) pendente(s) · ${st.netQuietMs / 1000.0}s sem rede · DOM parado há ${st.domQuietMs / 1000.0}s")
+            else appendLine("Rede: rastreador de prontidão ausente nesta página (script não injetado)")
+            st.pending.filter { it.isNotBlank() }.forEach { appendLine("  pendente: $it") }
+            appendLine("Status HTTP principal: ${tab.navigationStatus.httpStatusCode() ?: "OK/sem erro"}")
+            appendLine("App: ${if (OffscreenStage.foreground) "em primeiro plano" else "em SEGUNDO PLANO"} · WebView: $placement · $window")
+            appendLine("Permissão de sobreposição: ${if (OffscreenStage.overlayPermission(appCtx)) "concedida" else "NÃO concedida (sem ela o browser pode parar com o app fechado)"}")
+            appendLine("Motor: $webViewPkg · UA $ua · perfil de contas compartilhado")
+            if (errors.isNotEmpty()) { appendLine("Console (últimos erros):"); errors.forEach { appendLine("  [${it.level}] ${it.message.take(160)} (${it.source})") } }
+            appendLine("Linha do tempo:")
+            tab.diag.lines().forEach { appendLine("  $it") }
+            append("Causa provável: ").append(probableCause(st, placement))
+        }
+    }
+
+    private fun probableCause(st: PageReadiness, placement: String): String = when {
+        placement.startsWith("sem janela") -> "o WebView estava fora de qualquer janela; o Chromium pausa páginas assim. Abra o app ou conceda a permissão de sobreposição."
+        st.visibility == "hidden" -> "a página está marcada como escondida pelo sistema (app em segundo plano)."
+        st.ready == "loading" && st.chars == 0 -> "o documento principal não terminou de chegar (rede lenta, bloqueio do site ou resposta em streaming)."
+        st.inflight > 0 -> "a página ainda aguardava dados (requisições pendentes acima)."
+        st.chars < 200 -> "a página carregou quase sem conteúdo: possível parede de login/anti-robô."
+        else -> "a página tem conteúdo; o problema é de interpretação/ação, não de carregamento."
+    }
+
+    /**
+     * Espera um texto aparecer ou sumir (como o browser_wait_for do Playwright MCP), até 30 s.
+     * Alternativa correta a reabrir a página quando os dados ainda estão chegando.
+     */
+    suspend fun waitFor(text: String?, textGone: String?, seconds: Int): String {
+        val tab = onMain { activeTab() } ?: return "ERROR: não há aba ativa no browser."
+        val limit = seconds.coerceIn(1, 30) * 1000L
+        val started = System.currentTimeMillis()
+        val t = text?.trim()?.takeIf { it.isNotEmpty() }
+        val g = textGone?.trim()?.takeIf { it.isNotEmpty() }
+        if (t == null && g == null) {
+            kotlinx.coroutines.delay(limit)
+            val st = waitForStable(tab, 3_000)
+            return "ok: esperou ${limit / 1000}s; página com ${st.chars} caracteres (readyState=${st.ready})."
+        }
+        while (System.currentTimeMillis() - started < limit) {
+            val js = "(function(){var b=(document.body?document.body.innerText:'').toLowerCase();return JSON.stringify({" +
+                "has:${if (t != null) "b.indexOf(${JSONObject.quote(t.lowercase())})>=0" else "false"}," +
+                "gone:${if (g != null) "b.indexOf(${JSONObject.quote(g.lowercase())})<0" else "false"}});})()"
+            val o = runCatching { JSONObject(eval(js, 2_000, tab)) }.getOrNull()
+            val secs = (System.currentTimeMillis() - started) / 1000.0
+            if (o?.optBoolean("has") == true) return "ok: o texto \"$t\" apareceu em ${secs}s."
+            if (o?.optBoolean("gone") == true) return "ok: o texto \"$g\" sumiu em ${secs}s."
+            kotlinx.coroutines.delay(400)
+        }
+        val st = readiness(tab)
+        return "TIMEOUT: ${if (t != null) "o texto \"$t\" não apareceu" else "o texto \"$g\" não sumiu"} em ${limit / 1000}s " +
+            "(página: readyState=${st.ready}, ${st.chars} caracteres, ${st.inflight} requisição(ões) pendente(s)). Leia o snapshot abaixo antes de decidir; não reabra a página."
+    }
+
     /** Compat: chamadas antigas esperavam (readyState, caracteres). */
     private suspend fun waitForContent(tab: BrowserTab, maxMillis: Long): Pair<String, Int> =
         waitForStable(tab, maxMillis).let { it.ready to it.chars }
 
-    /** Aguarda o callback real do WebView e verifica o DOM; falha e timeout não viram sucesso silencioso. */
+    /**
+     * Aguarda a navegação no estilo do Playwright MCP:
+     *  1. primeiro sinal do WebView (commit/fim/erro) — até 30 s;
+     *  2. DOMContentLoaded (readyState ≠ loading) — até 10 s;
+     *  3. evento load — no máximo 5 s ("a página já está operacional");
+     *  4. página estável (rede ociosa + DOM parado) — até 8 s.
+     * Lentidão não vira erro: só falha quando não há sinal NENHUM e nenhum conteúdo visível.
+     */
     private suspend fun awaitLoad(tab: BrowserTab, target: String = tab.url): String {
         val status = tab.navigationStatus
         val deferred = tab.pageDone ?: return "ERROR: não foi possível acompanhar o carregamento desta navegação."
-        val completed = withTimeoutOrNull(25_000) { deferred.await() }
+        val completed = withTimeoutOrNull(30_000) { deferred.await() }
         val result = completed?.let(status::preserveHttpError) ?: status.httpError() ?: run {
-            // Sem sinal de fim do WebView: muitos sites (Meta) mantêm o documento em streaming.
-            // Decide pelo conteúdo realmente visível em vez de declarar timeout às cegas.
-            val (ready, chars) = waitForContent(tab, 12_000)
+            tab.diag.add("30s sem sinal do WebView; conferindo conteúdo")
+            val st = waitForStable(tab, 6_000)
             if (tab.id == activeTabId) _ui.value = _ui.value.copy(loading = false)
-            if (chars >= 200) return "OK: página carregada ($target) — $chars caracteres visíveis; o site mantém o carregamento aberto, o que é normal. Leia com browser_read."
+            if (st.chars >= 200) return "OK: página carregada ($target) — ${st.chars} caracteres visíveis; o site mantém o carregamento aberto, o que é normal."
             val currentUrl = runCatching { eval("location.href", 1_500, tab) }.getOrDefault("").trim('"').ifBlank { tab.url }
-            return status.timeoutMessage(target, currentUrl, ready, chars)
+            return status.timeoutMessage(target, currentUrl, st.ready, st.chars) +
+                " Detalhes completos no log de erros (Configurações › Logs). Não reabra a mesma página: use browser_wait_for ou outra fonte."
         }
         val httpCode = status.httpStatusCode()
         if (result.startsWith("ERROR:") && httpCode == null) return result  // falha de rede real
-        val (ready, chars) = waitForContent(tab, 20_000)
+        // 2) DOMContentLoaded
+        val dclDeadline = System.currentTimeMillis() + 10_000
+        var st = readiness(tab)
+        while (st.ready == "loading" && System.currentTimeMillis() < dclDeadline) { kotlinx.coroutines.delay(300); st = readiness(tab) }
+        tab.diag.add("readyState=${st.ready} (DOMContentLoaded ${if (st.ready != "loading") "ok" else "não chegou"})")
+        // 3) load, no máximo 5 s
+        val loadDeadline = System.currentTimeMillis() + 5_000
+        while (st.ready != "complete" && System.currentTimeMillis() < loadDeadline) { kotlinx.coroutines.delay(300); st = readiness(tab) }
+        // 4) estabilidade
+        st = waitForStable(tab, 8_000)
+        tab.diag.add("estável: readyState=${st.ready}, ${st.chars} caracteres, ${st.inflight} pendente(s)")
         if (tab.id == activeTabId) _ui.value = _ui.value.copy(loading = false)
         if (httpCode != null) {
-            // HTTP de erro mas a página renderizou de fato: é página válida (o usuário também a vê normal).
-            return if (chars >= 200) "OK: página carregada ($target). Aviso: o servidor respondeu HTTP $httpCode, mas a página exibiu $chars caracteres; leia com browser_read antes de concluir que houve bloqueio."
+            return if (st.chars >= 200) "OK: página carregada ($target). Aviso: o servidor respondeu HTTP $httpCode, mas a página exibiu ${st.chars} caracteres; leia o snapshot antes de concluir que houve bloqueio."
             else result
         }
-        return if (ready == "complete" || chars >= 200) "OK: página carregada ($target)" + (if (ready != "complete") " — conteúdo visível ($chars caracteres); a página ainda mantém conexões abertas, o que é normal em sites dinâmicos." else "")
-        else {
-            val url = runCatching { eval("location.href", 1_500, tab) }.getOrDefault("").trim('"').ifBlank { tab.url }
-            status.incompleteMessage(target, url, ready, chars) +
-                " Dica: sites dinâmicos às vezes levam mais tempo; chame browser_read uma vez em alguns segundos antes de concluir."
+        return when {
+            st.ready == "complete" || st.chars >= 200 -> "OK: página carregada ($target)" +
+                (if (st.ready != "complete") " — conteúdo visível (${st.chars} caracteres); o site mantém conexões abertas, o que é normal." else "")
+            else -> {
+                val url = runCatching { eval("location.href", 1_500, tab) }.getOrDefault("").trim('"').ifBlank { tab.url }
+                status.incompleteMessage(target, url, st.ready, st.chars) +
+                    " Use browser_wait_for (texto esperado) em vez de reabrir; detalhes no log de erros."
+            }
         }
     }
 

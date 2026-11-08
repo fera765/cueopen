@@ -30,12 +30,32 @@ internal object OffscreenStage {
     private var activityRef: WeakReference<Activity>? = null
     private var overlay: FrameLayout? = null
 
-    fun onActivityResumed(a: Activity) { activityRef = WeakReference(a) }
+    /** App em primeiro plano (para o diagnóstico). */
+    @Volatile var foreground: Boolean = false
+        private set
+
+    fun onActivityResumed(a: Activity) { activityRef = WeakReference(a); foreground = true }
+
+    fun onActivityPaused(a: Activity) { if (activityRef?.get() === a) foreground = false }
 
     fun onActivityDestroyed(a: Activity) {
-        if (activityRef?.get() === a) activityRef = null
-        // Não deixa WebViews presos à janela destruída.
-        (a.window?.decorView as? ViewGroup)?.findViewWithTag<FrameLayout>(TAG)?.removeAllViews()
+        if (activityRef?.get() === a) { activityRef = null; foreground = false }
+        // Não deixa WebViews presos à janela destruída: tenta levá-los para a janela sobreposta.
+        val stage = (a.window?.decorView as? ViewGroup)?.findViewWithTag<FrameLayout>(TAG) ?: return
+        val views = (0 until stage.childCount).mapNotNull { stage.getChildAt(it) as? WebView }
+        stage.removeAllViews()
+        views.forEach { v -> overlayStage(v.context)?.let { o -> runCatching { o.addView(v, FrameLayout.LayoutParams(v.width.coerceAtLeast(360), v.height.coerceAtLeast(480))) } } }
+    }
+
+    fun overlayPermission(ctx: Context): Boolean =
+        Build.VERSION.SDK_INT < 23 || runCatching { Settings.canDrawOverlays(ctx.applicationContext) }.getOrDefault(false)
+
+    /** Onde o WebView está agora, em linguagem do log. */
+    fun placement(v: WebView): String = when {
+        !v.isAttachedToWindow -> "sem janela (o Chromium pausa a página)"
+        isStaged(v) && v.parent === overlay -> "palco em janela sobreposta (app em segundo plano)"
+        isStaged(v) -> "palco atrás da UI do app"
+        else -> "na tela (aba Browser aberta)"
     }
 
     fun isStaged(v: View): Boolean = (v.parent as? View)?.tag == TAG

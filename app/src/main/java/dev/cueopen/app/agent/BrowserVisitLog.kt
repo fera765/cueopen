@@ -22,13 +22,41 @@ object BrowserVisitLog {
     /** Mesma página = mesmo host/caminho e mesmos parâmetros, em qualquer ordem. */
     fun normalize(url: String): String = runCatching {
         val u = URI(url.trim())
-        val host = (u.host ?: return url.trim().lowercase()).lowercase().removePrefix("www.").removePrefix("m.")
+        val host = hostKey(u.host ?: return url.trim().lowercase())
         val path = (u.rawPath ?: "").trimEnd('/').ifEmpty { "/" }
         val query = (u.rawQuery ?: "").split('&').filter { it.isNotBlank() }
             .map { p -> URLDecoder.decode(p, "UTF-8").replace('+', ' ').lowercase().trim() }
-            .filterNot { it.endsWith("=") }.sorted().joinToString("&")
+            .filterNot { it.endsWith("=") || it.startsWith("_rdr") || it.startsWith("_rdc") }.sorted().joinToString("&")
         host + path + (if (query.isNotEmpty()) "?$query" else "")
     }.getOrElse { url.trim().lowercase() }
+
+    /** www., m., web., mbasic. e touch. são o mesmo site. */
+    fun hostKey(host: String): String = host.lowercase().replace(Regex("^(www|m|web|mbasic|touch|mobile)\\."), "")
+
+    /**
+     * URL canônica para abrir: versões móveis/alternativas do Facebook redirecionam em cadeia (_rdr) e
+     * caem em páginas diferentes; sempre usa www e remove marcadores de redirecionamento.
+     */
+    fun canonical(url: String): String = runCatching {
+        val u = URI(url.trim())
+        val host = u.host ?: return url
+        val fb = Regex("^(m|web|mbasic|touch|mobile)\\.facebook\\.com$").matches(host.lowercase())
+        val q = u.rawQuery?.split('&')?.filterNot { it.startsWith("_rdr") || it.startsWith("_rdc") }?.joinToString("&")
+        if (!fb && q == u.rawQuery) url
+        else {
+            // monta como texto para não recodificar %xx do caminho
+            val base = "${u.scheme}://" + (if (fb) "www.facebook.com" else u.rawAuthority) + (u.rawPath ?: "")
+            (if (q.isNullOrEmpty()) base else "$base?$q") + (u.rawFragment?.let { "#$it" } ?: "")
+        }
+    }.getOrElse { url }
+
+    // ---------- disjuntor por site: falhas seguidas no mesmo site bloqueiam novas tentativas por um tempo
+    const val HOST_FAILS_TO_TRIP = 4
+    const val HOST_COOLDOWN_MS = 10 * 60_000L
+    private data class HostFails(var count: Int = 0, var lastAt: Long = 0, var lastOutcome: String = "")
+    private val hostFails = ConcurrentHashMap<String, HostFails>()
+
+    private fun hostOf(url: String) = runCatching { URI(url.trim()).host?.let { hostKey(it) } }.getOrNull()
 
     fun outcomeOf(result: String): String = when {
         result.startsWith("OK") -> "ok"
@@ -43,6 +71,13 @@ object BrowserVisitLog {
      * @param currentUrl URL da aba ativa agora (para não recarregar a página que já está aberta).
      */
     fun check(sessionId: String, url: String, currentUrl: String?, now: Long = System.currentTimeMillis()): String? {
+        hostOf(url)?.let { h ->
+            val f = hostFails[h]
+            if (f != null && f.count >= HOST_FAILS_TO_TRIP && now - f.lastAt < HOST_COOLDOWN_MS)
+                return "RECUSADO: o browser falhou ${f.count}× seguidas em $h (último resultado: ${f.lastOutcome}). Repetir agora não resolve. " +
+                    "A causa detalhada está no log de erros (Configurações › Logs). Volte a esse site em ~${(HOST_COOLDOWN_MS - (now - f.lastAt)) / 60_000 + 1} min, " +
+                    "use outra fonte, ou peça ao usuário para abrir o site na aba Browser e confirmar que carrega."
+        }
         val key = normalize(url)
         val v = bySession[sessionId]?.get(key)?.takeIf { now - it.at < WINDOW_MS } ?: return null
         val failed = v.outcome == "timeout" || v.outcome == "erro"
@@ -66,6 +101,11 @@ object BrowserVisitLog {
             map[key] = Visit(key, url, outcomeOf(result), (prev?.count ?: 0) + 1, now)
             while (map.size > 40) map.remove(map.keys.first())
         }
+        hostOf(url)?.let { h ->
+            val outcome = outcomeOf(result)
+            if (outcome == "ok" || outcome == "parcial") hostFails.remove(h)
+            else hostFails.getOrPut(h) { HostFails() }.apply { count++; lastAt = now; lastOutcome = outcome }
+        }
     }
 
     /** Linhas para o system prompt (mais recentes primeiro). Vazio se não houve navegação. */
@@ -76,4 +116,7 @@ object BrowserVisitLog {
     }
 
     fun clear(sessionId: String) { bySession.remove(sessionId) }
+
+    /** Testes: zera o disjuntor de um site. */
+    internal fun resetHost(host: String) { hostFails.remove(hostKey(host)) }
 }

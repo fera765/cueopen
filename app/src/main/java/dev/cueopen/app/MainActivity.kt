@@ -59,6 +59,11 @@ class MainActivity : ComponentActivity() {
         dev.cueopen.app.browser.OffscreenStage.onActivityResumed(this)
     }
 
+    override fun onPause() {
+        dev.cueopen.app.browser.OffscreenStage.onActivityPaused(this)
+        super.onPause()
+    }
+
     override fun onDestroy() {
         dev.cueopen.app.browser.OffscreenStage.onActivityDestroyed(this)
         super.onDestroy()
