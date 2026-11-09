@@ -28,6 +28,8 @@ internal object AgentFilePathPolicy {
      * ".", "./x", "~", "~/workspace/x", "/root", "workspace/x" (o cwd do shell é /root/workspace).
      */
     fun normalize(rawPath: String): String {
+        // URIs (file://, content://…) seguem intactas e são recusadas mais adiante.
+        if (rawPath.contains(':')) return rawPath.trim()
         var p = rawPath.trim().trim('"', '\'').replace(Regex("/{2,}"), "/")
         if (p == "~" || p == "~/" || p == "/root" || p == "/root/" || p == "." || p == "./" || p == "workspace" || p == "workspace/") return ""
         if (p.startsWith("~/workspace")) p = "/root/workspace" + p.removePrefix("~/workspace")

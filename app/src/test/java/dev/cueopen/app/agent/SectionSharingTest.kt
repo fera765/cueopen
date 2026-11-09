@@ -8,7 +8,7 @@ import org.junit.Test
 import java.io.File
 
 class SectionSharingTest {
-    @After fun reset() { SecretVault.scopeOf = null; listOf("coord", "membro", "outro", "solo", "s1").forEach { SecretVault.clear(it) } }
+    @After fun reset() { SecretVault.scopeOf = null; listOf("coord", "membro", "outro", "solo", "s1", "section_A", "section_B").forEach { SecretVault.clear(it) } }
 
     @Test fun `secret typed in the coordinator chat is visible to every agent of the section`() {
         val section = mapOf("coord" to "section_A", "membro" to "section_A", "outro" to "section_B")
