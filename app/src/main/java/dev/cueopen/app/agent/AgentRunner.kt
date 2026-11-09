@@ -456,7 +456,14 @@ class AgentRunner(
             args = "$childId|${member.id}", result = "", status = StepStatus.RUNNING)
         store.addItem(sec.sessionId, pill)
         delegations[childId] = Delegation(sec.id, member.id, pill.id, before, task)
-        send(childId, "[Tarefa do coordenador da seção ${sec.name}]\n$task")
+        val files = runCatching {
+            val root = sandbox.workspaceFor(childId)
+            root.walkTopDown().maxDepth(3).filter { it.isFile && !it.path.contains("/.cue/") }
+                .take(40).map { it.relativeTo(root).path }.toList()
+        }.getOrDefault(emptyList())
+        send(childId, "[Tarefa do coordenador da seção ${sec.name}]\n$task\n\n" +
+            "Arquivos do time em /root/workspace (compartilhado): " + (if (files.isEmpty()) "nenhum ainda." else files.joinToString(", ")) +
+            "\nRegras: faça só esta tarefa; dê feedback curto a cada etapa; se faltar insumo, diga o que falta e encerre (o coordenador resolve).")
         if (!wait) return "${member.name} começou a trabalhar. Dê ao usuário um feedback curto (5 a 30 palavras) e siga coordenando; o relatório dele chega sozinho quando terminar."
         val deadline = System.currentTimeMillis() + timeoutMinutes * 60_000L
         kotlinx.coroutines.delay(1_500)
@@ -520,6 +527,95 @@ class AgentRunner(
                     showUserMessage = false).join()
             }
         }
+    }
+
+    /** Orientações do coordenador aguardando o próximo ponto seguro do loop do agente. */
+    private val coordinatorInbox = java.util.concurrent.ConcurrentHashMap<String, MutableList<String>>()
+    private val lastCheckpointStep = java.util.concurrent.ConcurrentHashMap<String, Int>()
+
+    private fun resolveMember(sec: Section, name: String): AgentProfile? {
+        val team = sec.agentIds.mapNotNull { store.agent(it) }
+        val w = name.trim()
+        return team.firstOrNull { it.name.equals(w, true) } ?: team.firstOrNull { it.name.contains(w, true) || w.contains(it.name, true) }
+    }
+
+    /**
+     * Checkpoint para o coordenador: a cada [MemberSupervision.CHECKPOINT_EVERY_STEPS] passos, ou na hora em que
+     * aparece um sinal de desvio (falhas seguidas, ação repetida, varredura do sistema). O coordenador decide:
+     * deixar seguir (feedback curto), corrigir (team_message) ou parar (team_stop).
+     */
+    private fun memberCheckpoint(sessionId: String, steps: Int) {
+        val d = delegations[sessionId] ?: return
+        val sec = store.section(d.sectionId) ?: return
+        val member = store.agent(d.memberId) ?: return
+        val child = store.session(sessionId) ?: return
+        val recentSteps = child.items.drop(d.startIndex).filterIsInstance<ChatItem.Step>().takeLast(8)
+        val risk = MemberSupervision.riskSignal(recentSteps.map { MemberSupervision.Action(it.tool, it.args, it.status == StepStatus.ERROR) })
+        val last = lastCheckpointStep[sessionId] ?: 0
+        val periodic = steps - last >= MemberSupervision.CHECKPOINT_EVERY_STEPS
+        if (!periodic && (risk == null || steps - last < 3)) return
+        lastCheckpointStep[sessionId] = steps
+        val plan = child.items.lastOrNull { it is ChatItem.Plan } as? ChatItem.Plan
+        val feedback = (child.items.drop(d.startIndex).lastOrNull { it is ChatItem.Assistant } as? ChatItem.Assistant)?.text?.take(300)
+        val digest = buildString {
+            append("[Checkpoint — ${member.name}, $steps passos nesta tarefa]\n")
+            append("Tarefa: ${d.task.take(220)}\n")
+            if (plan != null) append("Plano dele: " + plan.phases.joinToString(" · ") { (if (it.done) "[x] " else "[ ] ") + it.title.take(60) } + "\n")
+            append("Último feedback dele: ${feedback ?: "(nenhum — está só executando ferramentas)"}\n")
+            append("Últimas ações:\n" + recentSteps.joinToString("\n") { "- ${it.title}: ${it.args.take(70)}" + if (it.status == StepStatus.ERROR) " ✕" else "" })
+            if (risk != null) append("\n⚠ Sinal de desvio: $risk")
+            append("\nDecida agora: no caminho → feedback de 5-30 palavras; desviou/travou → team_message; cumpriu ou está perdido → team_stop.")
+        }
+        val generation = sectionGeneration[sec.id] ?: 0
+        scope.launch {
+            val lock = sectionReportLocks.getOrPut(sec.id) { kotlinx.coroutines.sync.Mutex() }
+            lock.withLock {
+                if ((sectionGeneration[sec.id] ?: 0) != generation || delegations[sessionId] == null) return@withLock
+                // Coordenador ocupado: checkpoint periódico pode ser descartado; desvio espera até 2 min.
+                var waited = 0
+                while (isRunning(sec.sessionId) && waited < (if (risk != null) 120 else 0)) { kotlinx.coroutines.delay(2_000); waited += 2 }
+                if (isRunning(sec.sessionId)) return@withLock
+                send(sec.sessionId, digest, showUserMessage = false).join()
+            }
+        }
+    }
+
+    private fun teamMessage(sessionId: String, agentName: String, message: String): String {
+        val sec = store.section(store.session(sessionId)?.sectionId) ?: return "ERRO: esta conversa não é uma seção."
+        val member = resolveMember(sec, agentName) ?: return "ERRO: não há agente \"$agentName\" no time."
+        if (message.isBlank()) return "ERRO: escreva a orientação."
+        val childId = memberSession(sec, member)
+        val text = "[Coordenador] $message"
+        store.addItem(childId, ChatItem.User(text = text))
+        if (isRunning(childId)) {
+            coordinatorInbox.getOrPut(childId) { java.util.Collections.synchronizedList(mutableListOf()) }.add(text)
+            return "Orientação entregue a ${member.name}; ele aplica no próximo passo."
+        }
+        // Parado: retoma com a orientação e volta a reportar ao coordenador.
+        val before = store.session(childId)?.items?.size ?: 0
+        val pill = ChatItem.Step(tool = TEAM_MEMBER_STEP, title = message.lineSequence().first().take(120), args = "$childId|${member.id}", result = "", status = StepStatus.RUNNING)
+        store.addItem(sec.sessionId, pill)
+        delegations[childId] = Delegation(sec.id, member.id, pill.id, before, message)
+        send(childId, text, showUserMessage = false)
+        return "${member.name} retomou com a sua orientação."
+    }
+
+    private fun teamStop(sessionId: String, agentName: String, reason: String): String {
+        val sec = store.section(store.session(sessionId)?.sectionId) ?: return "ERRO: esta conversa não é uma seção."
+        val member = resolveMember(sec, agentName) ?: return "ERRO: não há agente \"$agentName\" no time."
+        val childId = memberSession(sec, member)
+        val d = delegations.remove(childId)  // antes do stop: o fim da execução não gera relatório duplicado
+        coordinatorInbox.remove(childId)
+        val wasRunning = isRunning(childId)
+        stop(childId)
+        store.addItem(childId, ChatItem.Error(text = "Parado pelo coordenador: ${reason.take(200)}"))
+        d?.let { del ->
+            (store.session(sec.sessionId)?.items?.firstOrNull { it.id == del.pillId } as? ChatItem.Step)?.let { p ->
+                store.replaceItem(sec.sessionId, p.copy(status = StepStatus.OK, result = "parado pelo coordenador"))
+            }
+        }
+        val partial = memberReport(member, childId, d?.startIndex ?: 0)
+        return (if (wasRunning) "${member.name} parado. " else "${member.name} já estava parado. ") + partial
     }
 
     private fun teamStatus(sessionId: String): String {
@@ -626,6 +722,8 @@ class AgentRunner(
         val recentTexts = ArrayDeque<String>()
         // Quantas vezes seguidas o modelo ANUNCIOU uma ação ("vou pesquisar…") sem chamar ferramenta.
         var intentNoActionTurns = 0
+        // Supervisão de agente de Seção: rodadas só com ferramentas, sem nenhuma frase de feedback.
+        var silentRounds = 0
         // Detecção de loop de ferramentas: mesma chamada (nome+args) repetida sem progresso.
         val toolLoops = ToolLoopDetector()
         // Assinaturas dos resultados das duas últimas rodadas: texto repetido com resultados mudando é progresso.
@@ -762,6 +860,7 @@ class AgentRunner(
                 return
             }
             val displayContent = truncatedOutput.complete(reply.content)
+            if (sectionMember) silentRounds = if (displayContent.isBlank() && reply.toolCalls.isNotEmpty()) silentRounds + 1 else 0
             // Anti-repetição: se o modelo repetir quase o mesmo texto várias vezes, interrompe.
             // Só é repetição real se o texto for quase igual E as ações também forem as mesmas
             // (mesmas ferramentas com os mesmos argumentos). Mesma ferramenta com argumentos
@@ -1038,8 +1137,18 @@ class AgentRunner(
                 continue
             }
             steps++
+            // Orientações do coordenador chegam aqui, num ponto seguro (depois dos resultados das ferramentas).
+            coordinatorInbox.remove(sessionId)?.let { msgs ->
+                store.editSession(sessionId) { it.copy(llm = it.llm + msgs.map { m -> LlmMessage("user", m) }) }
+            }
             // Tarefa delegada por coordenador de seção: entrega com prazo, em vez de trabalhar para sempre.
             if (sectionMember) {
+                if (silentRounds >= MemberSupervision.SILENT_ROUNDS_BEFORE_NUDGE) {
+                    silentRounds = 0
+                    store.editSession(sessionId) { it.copy(llm = it.llm + LlmMessage("user",
+                        "[Sistema] Você está há várias ações sem dar feedback. Antes da próxima ferramenta, escreva 1-2 frases ao coordenador: o que já fez, o que vai fazer agora e se algo está faltando ou travado.")) }
+                }
+                memberCheckpoint(sessionId, steps)
                 if (steps == MEMBER_SOFT_STEPS) store.editSession(sessionId) { it.copy(llm = it.llm + LlmMessage("user",
                     "[Sistema] Você já usou $MEMBER_SOFT_STEPS passos nesta tarefa delegada. Finalize AGORA: entregue o que já tem (dados reais, links, o que falta) numa resposta final. Não comece novas pesquisas.")) }
                 if (steps >= MEMBER_HARD_STEPS) {
@@ -1807,6 +1916,14 @@ class AgentRunner(
                 appendLine(); appendLine("## Confirmações")
                 appendLine(if (cats.isEmpty()) "- Este Agent é 100% autônomo: o usuário autorizou executar ações sem pedir confirmação."
                     else "- O app pede confirmação ao usuário automaticamente antes de: ${cats.joinToString("; ")}. Não pergunte por texto: tente a ação normalmente; se voltar AGUARDANDO CONFIRMAÇÃO, pare e espere. Depois de APROVADO, repita a mesma ação uma vez. Se NEGADO, não insista nem contorne.")
+                store.section(session.sectionId)?.takeIf { it.coordinatorAgentId != agent?.id && it.sessionId != session.id }?.let { sec ->
+                    appendLine(); appendLine("## Você é agente da seção ${sec.name} (quem manda é o coordenador)")
+                    appendLine("- Execute SOMENTE a tarefa recebida do coordenador; não invente etapas novas nem amplie o escopo.")
+                    appendLine("- A cada etapa escreva 1-2 frases de feedback (o que fez, o que vai fazer, o que falta). Não encadeie ferramentas em silêncio.")
+                    appendLine("- Arquivos do time ficam em /root/workspace (compartilhado entre os agentes). Liste com file_list; nunca vasculhe o sistema (find /).")
+                    appendLine("- Se faltar um insumo (arquivo, ID, acesso), diga exatamente o que falta e ENCERRE com resposta final — o coordenador resolve. Não fique tentando por horas.")
+                    appendLine("- Mensagens [Coordenador] têm prioridade sobre o seu plano. Ao concluir, responda com o entregável (caminhos de arquivo, links, números) e pare.")
+                }
                 store.section(session.sectionId)?.takeIf { it.coordinatorAgentId == agent?.id }?.let { sec ->
                     appendLine(); appendLine("## Você coordena a seção ${sec.name}")
                     appendLine("- Time: " + sec.agentIds.mapNotNull { store.agent(it)?.name }.joinToString(", ") + ".")
@@ -1814,6 +1931,8 @@ class AgentRunner(
                     appendLine("- Entre as ações, mande feedbacks CURTOS (5 a 30 palavras) e siga trabalhando. Nada de terminal/browser: o trabalho é dos agentes.")
                     appendLine("- Ao receber [Relatório automático], avalie, cobre ajustes ou passe a próxima etapa; entregue o progresso em lista numerada.")
                     appendLine("- Nunca re-delegue uma tarefa já entregue (o app recusa): use o resultado ou peça um ajuste específico. Quando TODAS as etapas estiverem entregues e revisadas, envie o relatório final e PARE — não recomece o pedido original.")
+                    appendLine("- Você SUPERVISIONA o tempo todo: chegam [Checkpoint] com o progresso de cada agente. Se está no caminho, responda em 5-30 palavras. Se desviou, travou ou falta insumo, use team_message para corrigir ou team_stop para parar; se a etapa já está cumprida, team_stop e passe para a próxima.")
+                    appendLine("- Os agentes compartilham /root/workspace: ao delegar, cite os arquivos exatos que já existem (ex.: copy_frances.md) e onde o resultado deve ser salvo.")
                 }
                 BrowserVisitLog.summary(sessionId).takeIf { it.isNotEmpty() }?.let { visits ->
                     appendLine(); appendLine("## Histórico do browser nesta tarefa (confira ANTES de navegar)")
@@ -1981,6 +2100,14 @@ class AgentRunner(
                     put("timeout_minutes", int("Com wait=true: espera máxima (1-30; padrão 15)"))
                 }, listOf("agent", "task")))
             add(tool("team_status", "Mostra o estado de cada Agent do time (trabalhando, aguardando usuário, concluído) e a última resposta de cada um.", buildJsonObject {}))
+            add(tool("team_message",
+                "Envia AGORA uma orientação/correção a um agente do time (ele recebe no próximo passo, sem parar). Use quando um checkpoint mostrar desvio, travamento ou falta de insumo.",
+                buildJsonObject { put("agent", str("Nome do agente")); put("message", str("Orientação objetiva: o que fazer/parar de fazer e o critério de pronto")) },
+                listOf("agent", "message")))
+            add(tool("team_stop",
+                "Para um agente do time imediatamente: tarefa já cumprida, desvio, loop ou insumo ausente. Devolve o que ele entregou até agora. Depois redirecione com team_delegate se preciso.",
+                buildJsonObject { put("agent", str("Nome do agente")); put("reason", str("Motivo curto")) },
+                listOf("agent", "reason")))
         }
         if (!connectorEditId.isNullOrBlank()) {
             add(tool("connector_edit_propose", "Propõe um card de atualização somente para o conector já associado a esta conversa. Não aplica alterações. settings_json é um objeto JSON com IDs listados; definition_yaml é opcional e só serve para alterações funcionais do conector customizado. Não inclua segredos.", buildJsonObject {
@@ -2588,6 +2715,8 @@ class AgentRunner(
                 s("first_task"), s("suggested_android_caps"), b("suggest_wallet"))
             "team_delegate" -> return ToolResult(teamDelegate(sessionId, s("agent"), s("task"), b("wait"), (i("timeout_minutes") ?: 15).coerceIn(1, 30)))
             "team_status" -> return ToolResult(teamStatus(sessionId))
+            "team_message" -> return ToolResult(teamMessage(sessionId, s("agent"), s("message")))
+            "team_stop" -> return ToolResult(teamStop(sessionId, s("agent"), s("reason")))
             "update_plan" -> {
                 val phases = a["phases"]?.jsonArray?.map { it.jsonPrimitive.content }.orEmpty()
                 val done = i("done_count") ?: 0
@@ -3233,14 +3362,21 @@ class AgentRunner(
                             val f = sandbox.hostFile(path, sessionId)
                             if (!f.exists() || !f.isDirectory) path else null
                         }
-                    if (missingScript != null) {
+                    if (ShellCommandPolicy.isWholeSystemSearch(command)) {
+                        "GUARDRAIL: não vasculhe o sistema inteiro (/, /vendor, /system…): isso leva horas e não encontra os arquivos do agente. " +
+                            "Tudo o que importa fica em /root/workspace" + (if (store.session(sessionId)?.sectionId != null) " (compartilhado por todos os agentes da seção)" else "") +
+                            ". Use file_list ou `find /root/workspace -maxdepth 3`. Se o arquivo não estiver lá, ele não existe: diga o que falta e encerre a tarefa."
+                    } else if (missingScript != null) {
                         "GUARDRAIL: o script '$missingScript' não existe neste workspace. Não execute novamente. Use file_list/ls para descobrir o caminho real ou file_write para criar o arquivo antes de executá-lo."
                     } else if (badCd != null) {
                         "GUARDRAIL: o diretório '$badCd' não existe neste workspace. Liste o diretório pai e escolha um caminho existente."
                     } else {
                     // tudo roda DENTRO do terminal da tarefa (visível ao vivo no Computador)
-                    val r = terminals.get(sessionId, cwd).runAgentCommand(command, (i("timeout") ?: 180).toLong(), b("background"))
-                    ShellOutput.formatExecutionResult(r.output, r.exitCode, r.timedOut)
+                    // Servidor em primeiro plano prende o terminal e quebra a captura: roda em segundo plano.
+                    val autoBackground = !b("background") && ShellCommandPolicy.isLongRunningServer(command)
+                    val r = terminals.get(sessionId, cwd).runAgentCommand(command, (i("timeout") ?: 180).toLong(), b("background") || autoBackground)
+                    (if (autoBackground) "(Servidor detectado: iniciado em SEGUNDO PLANO para não travar o terminal. Teste com `curl -s http://127.0.0.1:PORTA/` e não inicie outro na mesma porta.)\n" else "") +
+                        ShellOutput.formatExecutionResult(r.output, r.exitCode, r.timedOut)
                     }
                 }
                 "file_write" -> {

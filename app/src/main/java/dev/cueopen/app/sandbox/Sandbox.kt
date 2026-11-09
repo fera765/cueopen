@@ -57,9 +57,16 @@ class Sandbox(private val ctx: Context) {
     fun isConnectorSession(sessionId: String): Boolean = sessionId.startsWith("__uic__")
     fun connectorId(sessionId: String): String = safeId(sessionId.removePrefix("__uic__"))
 
+    /**
+     * Ambiente compartilhado: chats de uma mesma Seção apontam para o mesmo workspace, para que o arquivo
+     * criado por um agente (ex.: copy_francês.md do copywriter) exista para os outros (ex.: o construtor).
+     * Antes cada agente tinha um workspace isolado e passava horas procurando arquivos "inexistentes".
+     */
+    @Volatile var environmentAlias: ((String) -> String?)? = null
+
     fun environmentRoot(sessionId: String): File =
         if (isConnectorSession(sessionId)) File(connectorsDir, connectorId(sessionId))
-        else File(environmentsDir, safeId(sessionId))
+        else File(environmentsDir, safeId(runCatching { environmentAlias?.invoke(sessionId) }.getOrNull() ?: sessionId))
     // Todos os chats reutilizam o Alpine já instalado; dados de usuário continuam separados por chat.
     // Não copiar centenas/milhares de arquivos no primeiro comando ou ao criar uma conversa.
     fun rootfsFor(sessionId: String): File = alpineDir

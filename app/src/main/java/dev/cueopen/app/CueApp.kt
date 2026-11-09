@@ -104,7 +104,13 @@ class CueApp : Application() {
         applyBrowserProxy()
         restartProxyRotation()
         sandbox = Sandbox(this)
-        store.onDeleteWorkspace = { sid -> runCatching { sandbox.deleteEnvironment(sid) }; runCatching { sandbox.workspaceFor(sid).deleteRecursively() } }
+        // Agentes de uma mesma Seção compartilham o workspace (arquivos entregues entre etapas).
+        sandbox.environmentAlias = { sid -> store.session(sid)?.sectionId?.let { "section_$it" } }
+        store.onDeleteWorkspace = { sid ->
+            // Workspace compartilhado de Seção ainda ativa: não apaga ao remover só um chat do time.
+            val sharedAlive = store.session(sid)?.sectionId?.let { store.section(it) != null } == true
+            if (!sharedAlive) { runCatching { sandbox.deleteEnvironment(sid) }; runCatching { sandbox.workspaceFor(sid).deleteRecursively() } }
+        }
         llm = OpenRouter { store.settings }
         terminals = dev.cueopen.app.sandbox.TerminalManager(this, sandbox)
         agent = AgentRunner(store, sandbox, ::browserFor, llm, terminals, this)

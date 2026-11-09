@@ -845,6 +845,7 @@ private fun SectionRow(
                     else -> {
                         (sec.agentIds + sec.coordinatorAgentId).forEach { dev.cueopen.app.scheduler.Heartbeat.cancel(app, it) }
                         app.store.deleteSection(sec.id).forEach { app.deleteChat(it) }
+                        runCatching { app.sandbox.deleteEnvironment("section_${sec.id}") }  // workspace compartilhado do time
                     }
                 }
                 confirm = null

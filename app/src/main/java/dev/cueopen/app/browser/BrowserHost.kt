@@ -893,8 +893,17 @@ class BrowserHost(private val appCtx: Context, sessionId: String = "__legacy__")
                 targetTab.navigationStatus = BrowserNavigationStatus()
                 targetTab.pageDone = CompletableDeferred()
                 if (targetTab.id == activeTabId) _ui.value = _ui.value.copy(loading = true, progress = 0)
-                (targetTab.webView ?: ensureTabView(targetTab, appCtx)).also { ensureSized(it) }.loadUrl(normalized)
-                normalized
+                val v = (targetTab.webView ?: ensureTabView(targetTab, appCtx)).also { ensureSized(it) }
+                if (!v.isAttachedToWindow) {
+                    targetTab.diag.add("sem janela: app fechado e sem permissão de sobreposição — navegação abortada")
+                    null
+                } else { v.loadUrl(normalized); normalized }
+            }
+            if (target == null) {
+                if (targetTab.id == activeTabId) onMain { _ui.value = _ui.value.copy(loading = false) }
+                runCatching { dev.cueopen.app.diag.ErrorLog.log("browser", "Navegação abortada sem janela: $normalized") }
+                return "ERROR: browser indisponível com o app fechado (o Android pausa páginas fora de janela). " +
+                    "Peça ao usuário para abrir o app ou conceder 'Sobrepor a outros apps'. Para página local use curl no shell. Não tente navegar de novo agora."
             }
             val result = awaitLoad(targetTab, target)
             // Aba travada: nem primeiro quadro nem fim em 30 s (o motor dela parou). Recria e tenta 1×.
