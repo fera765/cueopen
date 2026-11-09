@@ -48,3 +48,14 @@ class BrowserRateLimitAdviceTest {
             ToolOutcomeAdvisor.classify("shell", "curl: HTTP 403 status: 403"))
     }
 }
+
+class LlmTransientErrorTest {
+    @Test
+    fun upstreamUnavailable404IsTransient() {
+        org.junit.Assert.assertTrue(dev.cueopen.app.llm.LlmRetryPolicy.isTransientHttp(404, "Upstream request failed: Endpoint is unavailable."))
+        org.junit.Assert.assertFalse(dev.cueopen.app.llm.LlmRetryPolicy.isTransientHttp(401, "Invalid API key"))
+        org.junit.Assert.assertFalse(dev.cueopen.app.llm.LlmRetryPolicy.isTransientHttp(404, "model not found"))
+        org.junit.Assert.assertEquals(120_000L, dev.cueopen.app.llm.LlmRetryPolicy.autoResumeDelayMillis(1))
+        org.junit.Assert.assertNull(dev.cueopen.app.llm.LlmRetryPolicy.autoResumeDelayMillis(5))
+    }
+}

@@ -1140,7 +1140,8 @@ private fun TeamMemberPill(step: ChatItem.Step, nav: androidx.navigation.NavCont
     val child = st.sessions.firstOrNull { it.id == childId }
     val running = child?.status == SessionStatus.RUNNING
     val waiting = child?.status == SessionStatus.WAITING_USER || step.result == "aguardando você"
-    val label = if (!running && step.result == "pausado") "pausado"
+    val label = if (!running && step.result == "retomando sozinho") "retomando sozinho (falha temporária do modelo)"
+        else if (!running && step.result == "pausado") "pausado"
         else teamActivityLabel(activity[childId], running, waiting && !running, step.status == StepStatus.ERROR, step.status == StepStatus.OK)
     Row(
         Modifier.padding(vertical = 4.dp).clip(RoundedCornerShape(18.dp)).background(c.surface)

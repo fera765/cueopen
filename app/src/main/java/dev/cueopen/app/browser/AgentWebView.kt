@@ -23,6 +23,9 @@ internal class AgentWebView(context: Context) : WebView(context) {
         super.onWindowVisibilityChanged(View.VISIBLE)
     }
 
+    /** O Chromium também consulta a visibilidade diretamente (ao anexar e ao retomar): sempre VISIBLE. */
+    override fun getWindowVisibility(): Int = View.VISIBLE
+
     fun windowVisibilityLabel(): String = when {
         !isAttachedToWindow -> "sem janela"
         realWindowVisibility == View.VISIBLE -> "janela visível"

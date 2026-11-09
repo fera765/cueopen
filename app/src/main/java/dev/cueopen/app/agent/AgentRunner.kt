@@ -74,6 +74,10 @@ private fun isStaleAccessibilitySnapshotFailure(toolName: String, detail: String
     ).any { phrase -> detail.contains(phrase) }
 
 /** O que o "computador" do agente está fazendo agora (mostrado no card ao vivo do chat). */
+/** Passos de uma tarefa delegada: aviso para entregar e corte (com entrega parcial ao coordenador). */
+const val MEMBER_SOFT_STEPS = 40
+const val MEMBER_HARD_STEPS = 60
+
 /** Tipo do Step que representa a pílula de um agente da seção no chat do coordenador (args = "chatId|agentId"). */
 const val TEAM_MEMBER_STEP = "team_member"
 
@@ -115,6 +119,7 @@ class AgentRunner(
      * passo, o botão da notificação do terminal — desligava a autonomia sem o usuário perceber.
      */
     fun stop(sessionId: String, pauseAutonomy: Boolean = false) {
+        autoResumeJobs.remove(sessionId)?.cancel(); autoResumeRound.remove(sessionId)
         executions.cancelSession(sessionId)
         // Primeiro envia Ctrl+C ao PTY ativo; cancelar só a coroutine deixava o processo vivo.
         terminals.get(sessionId).cancelAgentCommand()
@@ -132,6 +137,7 @@ class AgentRunner(
 
     /** Envia uma mensagem do usuário e (re)inicia o loop. */
     fun send(sessionId: String, text: String, attachments: List<String> = emptyList(), onDone: (() -> Unit)? = null, quotedReply: String? = null, showUserMessage: Boolean = true): Job {
+        autoResumeJobs.remove(sessionId)?.cancel()  // o usuário (ou a retomada) agiu: cancela a retomada agendada
         jobs[sessionId]?.cancel()
         synchronized(childJobsByParent) { childJobsByParent.remove(sessionId)?.forEach { it.cancel() } }
         val quote = quotedReply?.trim()?.take(800)?.takeIf { it.isNotBlank() }
@@ -147,6 +153,8 @@ class AgentRunner(
         st0.agents.firstOrNull { a -> text.contains("@" + a.name, ignoreCase = true) }?.let { a ->
             store.editSession(sessionId) { it.copy(agentId = a.id) }
         }
+        // "continuar / prossiga / retome": seguir de onde parou, nunca recomeçar o pedido original.
+        if (showUserMessage && ContinuationPolicy.isContinueIntent(text)) content += "\n\n" + continuationDirective(sessionId, automatic = false)
         store.editSession(sessionId) { it.copy(llm = it.llm + LlmMessage("user", content), status = SessionStatus.RUNNING) }
         dev.cueopen.app.sandbox.SandboxService.start(ctx, "Executando tarefa…")
         val job = scope.launch {
@@ -175,6 +183,53 @@ class AgentRunner(
         }
         jobs[sessionId] = job
         return job
+    }
+
+    // ------------------------------------------------------------------ auto-estabilização e continuidade
+    private val autoResumeRound = java.util.concurrent.ConcurrentHashMap<String, Int>()
+    private val autoResumeJobs = java.util.concurrent.ConcurrentHashMap<String, Job>()
+
+    /**
+     * Agenda a retomada automática após falha temporária do modelo (2, 5, 15, 30 min). O composer mostra a
+     * contagem regressiva (wakeAt). Enviar uma mensagem ou parar cancela. Retorna a frase para o chat,
+     * ou null quando a escada de tentativas acabou.
+     */
+    private fun scheduleAutoResume(sessionId: String): String? {
+        val round = (autoResumeRound[sessionId] ?: 0) + 1
+        val wait = dev.cueopen.app.llm.LlmRetryPolicy.autoResumeDelayMillis(round) ?: run { autoResumeRound.remove(sessionId); return null }
+        autoResumeRound[sessionId] = round
+        val wakeAt = System.currentTimeMillis() + wait
+        store.editSession(sessionId) { it.copy(status = SessionStatus.SLEEPING, wakeAt = wakeAt, wakeReason = "retomada automática após falha do modelo") }
+        autoResumeJobs.remove(sessionId)?.cancel()
+        autoResumeJobs[sessionId] = scope.launch {
+            kotlinx.coroutines.delay(wait)
+            autoResumeJobs.remove(sessionId)
+            val s = store.session(sessionId) ?: return@launch
+            if (s.status != SessionStatus.SLEEPING || s.wakeAt != wakeAt || isRunning(sessionId)) return@launch  // usuário já agiu
+            store.editSession(sessionId) { it.copy(wakeAt = null, wakeReason = "") }
+            send(sessionId, continuationDirective(sessionId, automatic = true), showUserMessage = false)
+        }
+        return "Vou tentar de novo sozinho em ${wait / 60_000} min (retomada $round/4). Enviar uma mensagem antes disso retoma na hora."
+    }
+
+    /** Instrução de continuidade: seguir da próxima etapa com base no que já foi feito, sem recomeçar. */
+    private fun continuationDirective(sessionId: String, automatic: Boolean): String {
+        val s = store.session(sessionId)
+        val plan = s?.items?.lastOrNull { it is ChatItem.Plan } as? ChatItem.Plan
+        val lastAnswer = (s?.items?.lastOrNull { it is ChatItem.Assistant } as? ChatItem.Assistant)?.text?.take(500)
+        val lastError = (s?.items?.lastOrNull { it is ChatItem.Error } as? ChatItem.Error)?.text?.take(200)
+        val sec = store.section(s?.sectionId)?.takeIf { it.sessionId == sessionId }
+        return buildString {
+            append(if (automatic) "[Sistema] Retomada automática depois de uma falha temporária." else "[Sistema] O usuário pediu para CONTINUAR de onde parou.")
+            append(" NÃO recomece do zero e NÃO repita o pedido original. Revise o que já foi feito, identifique a última etapa concluída e execute a PRÓXIMA.")
+            if (plan != null) append("\nPlano: " + plan.phases.joinToString(" · ") { (if (it.done) "[x] " else "[ ] ") + it.title })
+            if (lastError != null) append("\nO que interrompeu: $lastError")
+            if (lastAnswer != null) append("\nSua última resposta: $lastAnswer")
+            if (sec != null) {
+                append("\nEstado do time agora:\n").append(teamStatus(sessionId))
+                append("\nNão re-delegue o que já foi entregue; acione só quem falta ou peça ajustes específicos. Se tudo estiver pronto, entregue o relatório final e pare.")
+            }
+        }
     }
 
     // ------------------------------------------------------------------ confirmação de ações sensíveis
@@ -354,7 +409,10 @@ class AgentRunner(
             ?: Session(title = "${member.name} · ${sec.name}", agentId = member.id, sectionId = sec.id).also { store.upsertSession(it) }.id
 
     /** Delegações em andamento: chat do agente → (seção, pílula no chat do coordenador, índice dos itens ao começar). */
-    private data class Delegation(val sectionId: String, val memberId: String, val pillId: String, val startIndex: Int)
+    private data class Delegation(val sectionId: String, val memberId: String, val pillId: String, val startIndex: Int, val task: String = "")
+    /** Entregas concluídas por agente (tarefa, quando, resultado) — impede re-delegar o mesmo trabalho. */
+    private data class Delivered(val task: String, val at: Long, val answer: String)
+    private val delivered = java.util.concurrent.ConcurrentHashMap<String, MutableList<Delivered>>()
     private val delegations = java.util.concurrent.ConcurrentHashMap<String, Delegation>()
     private val sectionReportLocks = java.util.concurrent.ConcurrentHashMap<String, kotlinx.coroutines.sync.Mutex>()
     /** Muda a cada pausa da seção: relatórios enfileirados antes da pausa são descartados. */
@@ -386,12 +444,18 @@ class AgentRunner(
         if (task.isBlank()) return "ERRO: descreva a tarefa."
         val childId = memberSession(sec, member)
         if (isRunning(childId)) return "${member.name} ainda está trabalhando na tarefa anterior. Acompanhe com team_status; você receberá o relatório quando ele terminar."
+        // Mesmo trabalho já entregue há pouco: devolve o resultado em vez de mandar refazer (evita o ciclo infinito).
+        val now0 = System.currentTimeMillis()
+        delivered[member.id]?.lastOrNull { now0 - it.at < 3 * 3_600_000L && (similar(task.lowercase(), it.task.lowercase()) || task.trim().equals(it.task.trim(), true)) }?.let { d ->
+            return "${member.name} JÁ CONCLUIU esta mesma tarefa há ${(now0 - d.at) / 60_000} min. Resultado entregue:\n${d.answer.take(1_800)}\n\n" +
+                "Não re-delegue. Use esse resultado e siga para a próxima etapa, ou passe uma tarefa NOVA/ajuste específico (diga exatamente o que mudar)."
+        }
         val before = store.session(childId)?.items?.size ?: 0
         // Pílula do agente no chat do coordenador: fica "trabalhando" até ele terminar e abre o chat dele ao tocar.
         val pill = ChatItem.Step(tool = TEAM_MEMBER_STEP, title = task.lineSequence().first().take(120),
             args = "$childId|${member.id}", result = "", status = StepStatus.RUNNING)
         store.addItem(sec.sessionId, pill)
-        delegations[childId] = Delegation(sec.id, member.id, pill.id, before)
+        delegations[childId] = Delegation(sec.id, member.id, pill.id, before, task)
         send(childId, "[Tarefa do coordenador da seção ${sec.name}]\n$task")
         if (!wait) return "${member.name} começou a trabalhar. Dê ao usuário um feedback curto (5 a 30 palavras) e siga coordenando; o relatório dele chega sozinho quando terminar."
         val deadline = System.currentTimeMillis() + timeoutMinutes * 60_000L
@@ -428,6 +492,11 @@ class AgentRunner(
         val member = store.agent(d.memberId) ?: run { delegations.remove(sessionId); return }
         val waitingUser = child.status == SessionStatus.WAITING_USER
         val pill = store.session(sec.sessionId)?.items?.firstOrNull { it.id == d.pillId } as? ChatItem.Step
+        // Falha temporária do modelo com retomada agendada: o agente continua sozinho; nada a relatar ainda.
+        if (child.status == SessionStatus.SLEEPING) {
+            if (pill != null) store.replaceItem(sec.sessionId, pill.copy(status = StepStatus.RUNNING, result = "retomando sozinho"))
+            return
+        }
         if (pill != null) store.replaceItem(sec.sessionId, pill.copy(
             status = if (child.status == SessionStatus.ERROR) StepStatus.ERROR else if (waitingUser) StepStatus.RUNNING else StepStatus.OK,
             result = if (waitingUser) "aguardando você" else "",
@@ -435,6 +504,11 @@ class AgentRunner(
         // Esperando o usuário (confirmação/pergunta): mantém a delegação viva para relatar o resultado final depois.
         if (!waitingUser) delegations.remove(sessionId)
         val report = memberReport(member, sessionId, d.startIndex)
+        if (!waitingUser && d.task.isNotBlank()) {
+            val answer = (child.items.drop(d.startIndex).lastOrNull { it is ChatItem.Assistant } as? ChatItem.Assistant)?.text.orEmpty()
+            if (answer.isNotBlank()) delivered.getOrPut(member.id) { java.util.Collections.synchronizedList(mutableListOf()) }
+                .apply { add(Delivered(d.task, System.currentTimeMillis(), answer)); while (size > 20) removeAt(0) }
+        }
         val generation = sectionGeneration[sec.id] ?: 0
         scope.launch {
             val lock = sectionReportLocks.getOrPut(sec.id) { kotlinx.coroutines.sync.Mutex() }
@@ -542,6 +616,7 @@ class AgentRunner(
                 store.editSession(sessionId) { AccessibilityToolHistory.sanitizePersistedSession(it) }
         }
         val maxSteps = (maxStepsOverride ?: store.settings.maxSteps).coerceIn(1, store.settings.maxSteps.coerceAtLeast(1))
+        val sectionMember = store.session(sessionId)?.let { s -> s.sectionId != null && store.section(s.sectionId)?.sessionId != sessionId } == true
         val startingTokens = store.session(sessionId)?.let { it.tokensIn + it.tokensOut } ?: 0L
         var steps = 0
         var repeats = 0
@@ -632,8 +707,11 @@ class AgentRunner(
                         if (!retryable || attempt >= 3) {
                             runCatching { dev.cueopen.app.diag.ErrorLog.log("agent", "LLM falhou após $attempt tentativa(s): ${t.javaClass.simpleName}: ${t.message.orEmpty()}", sessionId, "llm") }
                             val attempts = if (attempt == 1) "Não repeti porque a falha não foi classificada como transitória." else "Tentei $attempt vezes."
-                            store.addItemUnique(sessionId, ChatItem.Error(text = "O modelo falhou (${t.message?.take(120)}). $attempts Toque em enviar para continuar, ou troque de modelo em Configurações."))
-                            store.editSession(sessionId) { it.copy(status = SessionStatus.WAITING_USER) }
+                            // Auto-estabilização: falha temporária do provedor → retoma sozinho depois de alguns minutos.
+                            val resume = if (retryable && tokenBudgetOverride == null) scheduleAutoResume(sessionId) else null
+                            store.addItemUnique(sessionId, ChatItem.Error(text = "O modelo falhou (${t.message?.take(120)}). $attempts " +
+                                (resume ?: "Toque em enviar para continuar, ou troque de modelo em Configurações.")))
+                            if (resume == null) store.editSession(sessionId) { it.copy(status = SessionStatus.WAITING_USER) }
                             return
                         }
                         if (llmFailure.responseTruncated && tokenBudgetOverride == null) {
@@ -648,6 +726,7 @@ class AgentRunner(
                 @Suppress("UNREACHABLE_CODE") return
             }
             val modelId = stepModel(agent)
+            autoResumeRound.remove(sessionId)  // o modelo voltou a responder: zera a escada de retomadas
             store.editSession(sessionId) {
                 it.copy(llm = it.llm + LlmMessage("assistant", reply.content,
                     toolCallsJson = ToolCallHistoryNormalizer.redactSensitiveToolArguments(reply.rawToolCallsJson)),
@@ -959,6 +1038,16 @@ class AgentRunner(
                 continue
             }
             steps++
+            // Tarefa delegada por coordenador de seção: entrega com prazo, em vez de trabalhar para sempre.
+            if (sectionMember) {
+                if (steps == MEMBER_SOFT_STEPS) store.editSession(sessionId) { it.copy(llm = it.llm + LlmMessage("user",
+                    "[Sistema] Você já usou $MEMBER_SOFT_STEPS passos nesta tarefa delegada. Finalize AGORA: entregue o que já tem (dados reais, links, o que falta) numa resposta final. Não comece novas pesquisas.")) }
+                if (steps >= MEMBER_HARD_STEPS) {
+                    store.addItemUnique(sessionId, ChatItem.Error(text = "Limite da tarefa delegada ($MEMBER_HARD_STEPS passos) atingido: entreguei ao coordenador o que foi feito até aqui."))
+                    store.editSession(sessionId) { it.copy(status = SessionStatus.IDLE) }
+                    return
+                }
+            }
             // Aviso de proximidade do limite: pede para priorizar a entrega antes do corte abrupto.
             if (steps == (maxSteps - 2).coerceAtLeast(1) && store.session(sessionId)?.continuous != true) {
                 store.editSession(sessionId) { it.copy(llm = it.llm + LlmMessage("user", "[Sistema] Você está perto do limite de passos. Priorize concluir o essencial e entregar agora com finish (resumo curto + arquivos). Deixe o não-essencial como próximo passo.")) }
@@ -1724,6 +1813,7 @@ class AgentRunner(
                     appendLine("- Delegue com team_delegate (não bloqueia; acione vários em paralelo quando fizer sentido). O usuário vê cada agente trabalhando numa pílula ao vivo.")
                     appendLine("- Entre as ações, mande feedbacks CURTOS (5 a 30 palavras) e siga trabalhando. Nada de terminal/browser: o trabalho é dos agentes.")
                     appendLine("- Ao receber [Relatório automático], avalie, cobre ajustes ou passe a próxima etapa; entregue o progresso em lista numerada.")
+                    appendLine("- Nunca re-delegue uma tarefa já entregue (o app recusa): use o resultado ou peça um ajuste específico. Quando TODAS as etapas estiverem entregues e revisadas, envie o relatório final e PARE — não recomece o pedido original.")
                 }
                 BrowserVisitLog.summary(sessionId).takeIf { it.isNotEmpty() }?.let { visits ->
                     appendLine(); appendLine("## Histórico do browser nesta tarefa (confira ANTES de navegar)")

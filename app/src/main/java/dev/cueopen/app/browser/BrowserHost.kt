@@ -67,6 +67,8 @@ class BrowserHost(private val appCtx: Context, sessionId: String = "__legacy__")
         var lastSnapshotDigest: Int? = null,
         /** Linha do tempo da navegação atual (para o log de erros). */
         val diag: NavDiag = NavDiag(),
+        /** Último uso (para estacionar WebViews ociosos e liberar memória). */
+        var lastUsed: Long = System.currentTimeMillis(),
     )
 
     /** Linha do tempo de uma navegação: eventos do WebView com o tempo desde o início. */
@@ -221,13 +223,49 @@ class BrowserHost(private val appCtx: Context, sessionId: String = "__legacy__")
 
     @SuppressLint("SetJavaScriptEnabled")
     private fun ensureTabView(tab: BrowserTab, ctx: Context, restore: Boolean = true): WebView {
+        tab.lastUsed = System.currentTimeMillis()
         tab.webView?.let { return it }
         return createView(ctx, tab).also { view ->
             tab.webView = view
             ensureSized(view)
             if (_ui.value.desktop) view.settings.userAgentString = DESKTOP_UA
             if (restore) restoreViewState(tab, view)
+            trimLiveViews(keep = tab.id)
         }
+    }
+
+    /**
+     * Mantém no máximo [MAX_LIVE_VIEWS] WebViews vivos por conversa. Cada aba do Facebook é um motor
+     * Chromium inteiro: com 12 abas abertas a memória acaba e uma aba trava (o log mostrava uma aba presa
+     * em onPageStarted enquanto outras carregavam). Abas ociosas são "estacionadas": o histórico é salvo e
+     * o WebView liberado; ao voltar para ela, é recriado e restaurado.
+     */
+    private fun trimLiveViews(keep: String) {
+        val live = tabs.values.filter { it.webView != null }
+        if (live.size <= MAX_LIVE_VIEWS) return
+        live.filter { it.id != keep && it.id != activeTabId }
+            .filter { t -> t.webView?.let { v -> !v.isAttachedToWindow || OffscreenStage.isStaged(v) } == true } // não tira da tela
+            .sortedBy { it.lastUsed }
+            .take(live.size - MAX_LIVE_VIEWS)
+            .forEach { parkTab(it) }
+    }
+
+    /** Libera o WebView da aba guardando o histórico (recriado sob demanda). */
+    private fun parkTab(tab: BrowserTab) {
+        val v = tab.webView ?: return
+        runCatching { persistWebViewState(tab, v) }
+        runCatching { v.stopLoading(); (v.parent as? android.view.ViewGroup)?.removeView(v); v.destroy() }
+        tab.webView = null
+        tab.lastSnapshotDigest = null
+    }
+
+    /** Recria o motor de uma aba travada (sem histórico corrompido): a próxima navegação começa limpa. */
+    private fun recreateTabView(tab: BrowserTab) {
+        val v = tab.webView
+        runCatching { v?.stopLoading(); (v?.parent as? android.view.ViewGroup)?.removeView(v); v?.destroy() }
+        tab.webView = null
+        tab.lastSnapshotDigest = null
+        tab.pageDone?.complete("ERROR: aba recriada")
     }
 
     /** Restaura navegação/histórico independente da aba, com fallback para URL. */
@@ -661,6 +699,8 @@ class BrowserHost(private val appCtx: Context, sessionId: String = "__legacy__")
 
         const val HOME = "file:///android_asset/start/index.html"
         const val MAX_TABS = BrowserSessionPersistence.MAX_TABS
+        /** WebViews vivos ao mesmo tempo por conversa (o resto fica estacionado). */
+        const val MAX_LIVE_VIEWS = 3
         private const val DESKTOP_UA = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36"
 
         fun clearSessionData(context: Context, sessionId: String) {
@@ -857,6 +897,15 @@ class BrowserHost(private val appCtx: Context, sessionId: String = "__legacy__")
                 normalized
             }
             val result = awaitLoad(targetTab, target)
+            // Aba travada: nem primeiro quadro nem fim em 30 s (o motor dela parou). Recria e tenta 1×.
+            val stuck = result.startsWith("TIMEOUT") &&
+                targetTab.diag.lines().none { it.contains("onPageCommitVisible") || it.contains("onPageFinished") }
+            if (stuck && attempt == 0) {
+                attempt++
+                runCatching { dev.cueopen.app.diag.ErrorLog.log("browser", "Aba ${targetTab.id} travada (só onPageStarted em 30 s); motor recriado e nova tentativa.\n" + targetTab.diag.lines().joinToString("\n")) }
+                onMain { recreateTabView(targetTab) }
+                continue
+            }
             val code = targetTab.navigationStatus.httpStatusCode()
             val blocked = result.startsWith("ERROR: HTTP") && code in setOf(403, 429, 503)
             if (!blocked) { if (!result.startsWith("ERROR")) HostPacing.success(host); return result }
@@ -1079,9 +1128,18 @@ class BrowserHost(private val appCtx: Context, sessionId: String = "__legacy__")
     }
 
     suspend fun newTab(url: String = ""): String {
+        // No limite, fecha a aba usada há mais tempo em vez de travar o agente com erro.
+        val closed = onMain {
+            if (tabs.size < BrowserSessionPersistence.MAX_TABS) null
+            else tabs.values.filter { it.id != activeTabId }.minByOrNull { it.lastUsed }?.let { old ->
+                val label = (old.webView?.title ?: old.title).ifBlank { old.url }.take(60)
+                if (closeTab(old.id)) label else null
+            }
+        }
         val id = onMain { createTab(appCtx, "about:blank", deferNavigation = true) }
-            ?: return "ERROR: limite de ${BrowserSessionPersistence.MAX_TABS} abas por conversa atingido."
-        return if (url.isBlank()) "OK: nova aba criada (id=$id)." else navigateInTab(url, id)
+            ?: return "ERROR: não foi possível abrir outra aba. Reuse a aba atual com browser_navigate."
+        val note = closed?.let { " A aba mais antiga (\"$it\") foi fechada para liberar espaço. Prefira reusar a aba atual com browser_navigate em vez de abrir uma nova a cada busca." }.orEmpty()
+        return if (url.isBlank()) "OK: nova aba criada (id=$id).$note" else navigateInTab(url, id) + note
     }
 
     suspend fun selectTabForAgent(tabId: String): String = onMain {

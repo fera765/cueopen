@@ -22,6 +22,21 @@ internal object LlmRetryPolicy {
         return (retryAtMillis - nowMillis).coerceAtLeast(0L)
     }
 
+    private val transientText = Regex("(?i)upstream|endpoint is unavailable|no endpoints? (found|available)|provider returned error|overloaded|temporarily|try again|unavailable|timeout|timed out|rate.?limit|capacity")
+
+    /**
+     * Códigos que normalmente são transitórios. Roteadores (OpenRouter/OpenCode) devolvem 404/400 com
+     * "Upstream request failed: Endpoint is unavailable" quando o provedor do modelo cai por instantes.
+     */
+    fun isTransientHttp(code: Int, message: String?): Boolean =
+        code == 408 || code == 425 || code == 429 || code in 500..599 ||
+            (code in setOf(400, 403, 404, 409) && message != null && transientText.containsMatchIn(message))
+
+    /** Retomada automática depois que as tentativas imediatas falharam: 2, 5, 15 e 30 minutos. */
+    fun autoResumeDelayMillis(round: Int): Long? = when (round) {
+        1 -> 2 * 60_000L; 2 -> 5 * 60_000L; 3 -> 15 * 60_000L; 4 -> 30 * 60_000L; else -> null
+    }
+
     /** Honors a provider hint when present; otherwise uses capped exponential backoff. */
     fun delayMillis(attempt: Int, retryAfterMillis: Long?): Long {
         retryAfterMillis?.let { return it.coerceAtLeast(0L) }

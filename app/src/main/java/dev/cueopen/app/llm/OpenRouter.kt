@@ -217,7 +217,7 @@ class OpenRouter(private val settings: () -> Settings) {
         }
         if (code !in 200..299) {
             val msg = runCatching { json.parseToJsonElement(text).jsonObject["error"]?.jsonObject?.get("message")?.jsonPrimitive?.content }.getOrNull()
-            val retryable = code == 408 || code == 425 || code == 429 || code in 500..599
+            val retryable = LlmRetryPolicy.isTransientHttp(code, msg ?: text.take(300))
             throw LlmRequestFailure(
                 "HTTP $code — ${msg ?: text.take(160)}",
                 retryable = retryable,
