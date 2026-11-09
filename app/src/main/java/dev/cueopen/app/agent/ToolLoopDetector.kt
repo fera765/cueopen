@@ -73,10 +73,13 @@ class ToolLoopDetector(private val window: Int = 24) {
         val sinceProgress = entries.filter { it.seq >= progressSeq }
         if (sinceProgress.count { it.call == call } >= callThreshold) return Trip(name, Kind.SAME_CALL)
         // Ping-pong: A,B,A,B,A,B com as duas chamadas e resultados idênticos, sem nada novo.
-        if (sinceProgress.size >= PING_PONG_CALLS) {
-            val tail = sinceProgress.takeLast(PING_PONG_CALLS).map { it.call }
+        // (a primeira ida e volta conta como progresso; daí em diante nada pode ser novo)
+        if (entries.size >= PING_PONG_CALLS) {
+            val last = entries.takeLast(PING_PONG_CALLS)
+            val tail = last.map { it.call }
             val a = tail[0]; val b = tail[1]
-            if (a != b && tail.withIndex().all { (i, c) -> c == if (i % 2 == 0) a else b }) return Trip(name, Kind.PING_PONG)
+            if (a != b && progressSeq <= last[1].seq && tail.withIndex().all { (i, c) -> c == if (i % 2 == 0) a else b })
+                return Trip(name, Kind.PING_PONG)
         }
         // Disjuntor global: muitas chamadas seguidas sem nenhuma informação nova, seja qual for o padrão.
         if (sinceProgress.size >= NO_PROGRESS_CALLS) return Trip(name, Kind.NO_PROGRESS)
