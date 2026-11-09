@@ -106,6 +106,8 @@ class CueApp : Application() {
         sandbox = Sandbox(this)
         // Agentes de uma mesma Seção compartilham o workspace (arquivos entregues entre etapas).
         sandbox.environmentAlias = { sid -> store.session(sid)?.sectionId?.let { "section_$it" } }
+        // Tudo de uma Seção é compartilhado: workspace (acima) e cofre de dados seguros (e-mail, senha, API key).
+        dev.cueopen.app.agent.SecretVault.scopeOf = { sid -> store.session(sid)?.sectionId?.let { "section_$it" } }
         store.onDeleteWorkspace = { sid ->
             // Workspace compartilhado de Seção ainda ativa: não apaga ao remover só um chat do time.
             val sharedAlive = store.session(sid)?.sectionId?.let { store.section(it) != null } == true

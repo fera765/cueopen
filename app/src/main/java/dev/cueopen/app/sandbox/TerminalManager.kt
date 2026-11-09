@@ -315,7 +315,12 @@ class TerminalManager(private val ctx: Context, private val sandbox: Sandbox) {
                 }
                 if (exit == null) { write("\u0003"); delay(500) }
                 val out = if (background) {
-                    "Iniciado em segundo plano (log: $gcue/bg_$id.log). Use 'cat $gcue/bg_$id.log' para ver a saída quando precisar."
+                    // Mostra já o começo do log: erro imediato (porta ocupada, arquivo inexistente) aparece na hora.
+                    val bgLog = File(dir, "bg_$id.log")
+                    delay(1_500)
+                    val head = runCatching { if (bgLog.isFile) bgLog.readText().take(1_500).trim() else "" }.getOrDefault("")
+                    "Iniciado em segundo plano. Log: $gcue/bg_$id.log (use `cat $gcue/bg_$id.log`; não use outro caminho de log)." +
+                        if (head.isNotEmpty()) "\n[Primeiras linhas do log]\n$head" else "\n(sem saída no log ainda)"
                 } else {
                     // O out.log é escrito no filesystem do Android via bind-mount do proot; aguarda
                     // brevemente a visibilidade do arquivo antes de ler (evita leitura prematura vazia).
@@ -323,7 +328,9 @@ class TerminalManager(private val ctx: Context, private val sandbox: Sandbox) {
                     while (!outputFile.isFile && waited < 500) { delay(40); waited += 40 }
                     ShellOutput.readCapturedFile(outputFile)
                 }
-                File(dir, "run_$id.sh").delete()
+                // Em segundo plano o nohup ainda vai ler o script: apagar aqui causava
+                // "bash: …/run_x.sh: No such file or directory" e o servidor nunca subia.
+                if (!background) File(dir, "run_$id.sh").delete()
                 outputFile.delete()
                 Sandbox.ExecResult(exit ?: -1, out, exit == null)
             }

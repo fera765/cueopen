@@ -130,6 +130,9 @@ sealed class ChatItem {
         /** pending | submitted | cancelled */
         val state: String = "pending",
         val submitted: List<String> = emptyList(),
+        /** Agente da seção que pediu o formulário (exibido no chat do coordenador); null = este chat. */
+        val forSessionId: String? = null,
+        val forAgentName: String? = null,
     ) : ChatItem()
 
     /**
@@ -322,6 +325,8 @@ data class Section(
     /** Primeira tarefa a enviar ao coordenador quando a seção for ativada. */
     val firstTask: String = "",
     val createdAt: Long = now(),
+    /** Chat onde a seção foi criada: seus dados seguros e o pedido original são herdados pela seção. */
+    val originSessionId: String? = null,
 )
 
 /** Conector MCP remoto (OAuth público com registro dinâmico de cliente, sem API key). */

@@ -21,18 +21,28 @@ object SecretVault {
     private val EXACT_REF = Regex("^\\s*\\{\\{\\s*secret:([a-z][a-z0-9_]{0,31})\\s*\\}\\}\\s*$")
     private val vault = ConcurrentHashMap<String, LinkedHashMap<String, String>>()
 
+    /**
+     * Escopo do cofre: chats de uma mesma Seção (coordenador + agentes) compartilham UM cofre, então o que o
+     * usuário digita no formulário seguro do coordenador fica disponível para todos os agentes da seção.
+     */
+    @Volatile var scopeOf: ((String) -> String?)? = null
+    private fun k(sessionId: String): String = runCatching { scopeOf?.invoke(sessionId) }.getOrNull() ?: sessionId
+
     fun put(sessionId: String, values: Map<String, String>) {
-        val m = vault.getOrPut(sessionId) { LinkedHashMap() }
+        val m = vault.getOrPut(k(sessionId)) { LinkedHashMap() }
         synchronized(m) { values.forEach { (k, v) -> if (NAME.matches(k) && v.isNotEmpty()) m[k] = v } }
     }
 
-    fun names(sessionId: String): List<String> = vault[sessionId]?.let { synchronized(it) { it.keys.toList() } }.orEmpty()
+    fun names(sessionId: String): List<String> = vault[k(sessionId)]?.let { synchronized(it) { it.keys.toList() } }.orEmpty()
 
-    fun get(sessionId: String, name: String): String? = vault[sessionId]?.let { synchronized(it) { it[name] } }
+    fun get(sessionId: String, name: String): String? = vault[k(sessionId)]?.let { synchronized(it) { it[name] } }
 
     fun has(sessionId: String, name: String) = get(sessionId, name) != null
 
-    fun clear(sessionId: String) { vault.remove(sessionId) }
+    fun clear(sessionId: String) { vault.remove(k(sessionId)) }
+
+    /** Cópia dos valores (para herdar o cofre do chat que criou a seção). Nunca vai para a IA. */
+    fun snapshot(sessionId: String): Map<String, String> = vault[k(sessionId)]?.let { synchronized(it) { LinkedHashMap(it) } }.orEmpty()
 
     /** Marcadores `{{secret:x}}` do texto que ainda NÃO têm valor no cofre desta tarefa. */
     fun missing(sessionId: String, text: String): List<String> =
@@ -54,7 +64,7 @@ object SecretVault {
 
     /** Esconde qualquer valor do cofre que apareça no texto (cru, URL-encoded ou base64). */
     fun redact(sessionId: String, text: String): String {
-        val m = vault[sessionId] ?: return text
+        val m = vault[k(sessionId)] ?: return text
         val entries = synchronized(m) { m.entries.map { it.key to it.value } }
         var out = text
         for ((k, v) in entries.sortedByDescending { it.second.length }) {
@@ -72,5 +82,5 @@ object SecretVault {
     }
 
     /** Todos os valores desta tarefa (para o Redactor dos conectores). */
-    fun values(sessionId: String): List<String> = vault[sessionId]?.let { synchronized(it) { it.values.toList() } }.orEmpty()
+    fun values(sessionId: String): List<String> = vault[k(sessionId)]?.let { synchronized(it) { it.values.toList() } }.orEmpty()
 }

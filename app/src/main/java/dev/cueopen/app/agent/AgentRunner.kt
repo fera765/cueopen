@@ -339,11 +339,13 @@ class AgentRunner(
         store.upsertAgent(coordinator)
         val chat = Session(title = "📁 $title", agentId = coordinator.id, sectionId = sectionId)
         store.upsertSession(chat)
+        // Dados seguros já informados no chat de origem passam a valer para toda a seção.
+        SecretVault.snapshot(sessionId).takeIf { it.isNotEmpty() }?.let { SecretVault.put(chat.id, it) }
         val task = firstTask.trim().ifBlank {
             store.session(sessionId)?.llm?.lastOrNull { it.role == "user" && it.content?.startsWith("[") != true }?.content.orEmpty()
         }
         store.upsertSection(Section(id = sectionId, name = title, description = description.trim(), coordinatorAgentId = coordinator.id,
-            agentIds = members.map { it.id }, sessionId = chat.id, configured = false, firstTask = task))
+            agentIds = members.map { it.id }, sessionId = chat.id, configured = false, firstTask = task, originSessionId = sessionId))
         val allowedCaps = setOf(dev.cueopen.app.device.DeviceCapPolicy.BACKGROUND, dev.cueopen.app.device.DeviceCapPolicy.POST_NOTIFICATIONS,
             dev.cueopen.app.device.DeviceCapPolicy.PHONE_NOTIFICATIONS, dev.cueopen.app.device.DeviceCapPolicy.ACCESSIBILITY, dev.cueopen.app.device.DeviceCapPolicy.SCREEN)
         val caps = capsCsv.split(',').map { it.trim() }.filter { it in allowedCaps }.distinct()
@@ -529,6 +531,26 @@ class AgentRunner(
         }
     }
 
+    /**
+     * Contexto compartilhado da seção para o prompt: mensagens do usuário no chat de origem e no do coordenador,
+     * respostas a perguntas, nomes dos dados seguros (cofre único da seção) e entregas dos outros agentes.
+     */
+    private fun sectionSharedContext(sec: Section, sessionId: String, coordinator: Boolean): String = runCatching {
+        val origin = sec.originSessionId?.let { store.session(it) }
+        val coord = store.session(sec.sessionId)
+        val originMsgs = origin?.items.orEmpty().filterIsInstance<ChatItem.User>().map { it.text }.takeLast(8)
+        val coordMsgs = if (coordinator) emptyList() else coord?.items.orEmpty().filterIsInstance<ChatItem.User>().map { it.text }
+        val answers = (origin?.items.orEmpty() + coord?.items.orEmpty()).filterIsInstance<ChatItem.Question>()
+            .filter { it.state == "answered" }.sortedBy { it.time }
+            .flatMap { q -> q.questions.mapIndexedNotNull { i, spec -> q.answers.getOrNull(i)?.takeIf { it.isNotEmpty() }?.let { spec.question to it.joinToString(", ") } } }
+        val me = store.session(sessionId)?.agentId
+        val deliveries = if (coordinator) emptyList() else sec.agentIds.filter { it != me }.flatMap { id ->
+            val name = store.agent(id)?.name ?: return@flatMap emptyList()
+            delivered[id]?.let { synchronized(it) { it.takeLast(2).map { d -> SectionSharedContext.Delivery(name, d.task, d.answer) } } }.orEmpty()
+        }
+        SectionSharedContext.render(sec.firstTask, originMsgs + coordMsgs, answers, SecretVault.names(sessionId), deliveries)
+    }.getOrDefault("")
+
     /** Orientações do coordenador aguardando o próximo ponto seguro do loop do agente. */
     private val coordinatorInbox = java.util.concurrent.ConcurrentHashMap<String, MutableList<String>>()
     private val lastCheckpointStep = java.util.concurrent.ConcurrentHashMap<String, Int>()
@@ -671,15 +693,23 @@ class AgentRunner(
         val allowed = cur.fields.map { it.name }.toSet()
         val clean = values.filterKeys { it in allowed }.filterValues { it.isNotBlank() }
         SecretVault.put(sessionId, clean)
+        // Seções criadas a partir deste chat herdam o dado na hora (o cofre da seção é compartilhado pelos agentes).
+        store.state.value.sections.filter { it.originSessionId == sessionId }.forEach { SecretVault.put(it.sessionId, clean) }
         store.replaceItem(sessionId, cur.copy(state = "submitted", submitted = clean.keys.toList()))
-        send(sessionId, AskTools.secureSubmittedMessage(clean.keys.toList()), showUserMessage = false)
+        val target = cur.forSessionId?.takeIf { store.session(it) != null }
+        if (target != null) {
+            // Pedido por um agente da seção: o cofre já é o mesmo; retoma o agente e avisa o coordenador.
+            SecretVault.put(target, clean)
+            send(target, AskTools.secureSubmittedMessage(clean.keys.toList()), showUserMessage = false)
+            if (!isRunning(sessionId)) store.addItem(sessionId, ChatItem.Assistant(text = "🔒 Dados enviados para ${cur.forAgentName ?: "o agente"}: " + clean.keys.joinToString { "{{secret:$it}}" }))
+        } else send(sessionId, AskTools.secureSubmittedMessage(clean.keys.toList()), showUserMessage = false)
     }
 
     fun cancelSecure(sessionId: String, item: ChatItem.SecureForm) {
         val cur = store.session(sessionId)?.items?.firstOrNull { it.id == item.id } as? ChatItem.SecureForm ?: return
         if (cur.state != "pending") return
         store.replaceItem(sessionId, cur.copy(state = "cancelled"))
-        send(sessionId, AskTools.SECURE_CANCELLED, showUserMessage = false)
+        send(cur.forSessionId?.takeIf { store.session(it) != null } ?: sessionId, AskTools.SECURE_CANCELLED, showUserMessage = false)
     }
 
     /** Troca {{secret:nome}} pelos valores do cofre em todos os textos de um objeto de argumentos. */
@@ -1923,6 +1953,7 @@ class AgentRunner(
                     appendLine("- Arquivos do time ficam em /root/workspace (compartilhado entre os agentes). Liste com file_list; nunca vasculhe o sistema (find /).")
                     appendLine("- Se faltar um insumo (arquivo, ID, acesso), diga exatamente o que falta e ENCERRE com resposta final — o coordenador resolve. Não fique tentando por horas.")
                     appendLine("- Mensagens [Coordenador] têm prioridade sobre o seu plano. Ao concluir, responda com o entregável (caminhos de arquivo, links, números) e pare.")
+                    sectionSharedContext(sec, session.id, coordinator = false).takeIf { it.isNotBlank() }?.let { appendLine(); appendLine(it) }
                 }
                 store.section(session.sectionId)?.takeIf { it.coordinatorAgentId == agent?.id }?.let { sec ->
                     appendLine(); appendLine("## Você coordena a seção ${sec.name}")
@@ -1933,6 +1964,8 @@ class AgentRunner(
                     appendLine("- Nunca re-delegue uma tarefa já entregue (o app recusa): use o resultado ou peça um ajuste específico. Quando TODAS as etapas estiverem entregues e revisadas, envie o relatório final e PARE — não recomece o pedido original.")
                     appendLine("- Você SUPERVISIONA o tempo todo: chegam [Checkpoint] com o progresso de cada agente. Se está no caminho, responda em 5-30 palavras. Se desviou, travou ou falta insumo, use team_message para corrigir ou team_stop para parar; se a etapa já está cumprida, team_stop e passe para a próxima.")
                     appendLine("- Os agentes compartilham /root/workspace: ao delegar, cite os arquivos exatos que já existem (ex.: copy_frances.md) e onde o resultado deve ser salvo.")
+                    appendLine("- Tudo o que o usuário informar aqui (mensagens, respostas, dados seguros do ask_secure) chega AUTOMATICAMENTE a todos os agentes no \"Contexto compartilhado da seção\". Não repasse senhas em texto: cite o marcador {{secret:nome}}.")
+                    sectionSharedContext(sec, session.id, coordinator = true).takeIf { it.isNotBlank() }?.let { appendLine(); appendLine(it) }
                 }
                 BrowserVisitLog.summary(sessionId).takeIf { it.isNotEmpty() }?.let { visits ->
                     appendLine(); appendLine("## Histórico do browser nesta tarefa (confira ANTES de navegar)")
@@ -2847,9 +2880,14 @@ class AgentRunner(
                 if (err != null) return ToolResult("ERRO em ask_secure: $err")
                 if (fields.all { SecretVault.has(sessionId, it.name) })
                     return ToolResult("Você JÁ tem esses dados seguros: ${fields.joinToString { "{{secret:${it.name}}}" }}. Use os marcadores direto; não peça de novo.")
-                val pending = store.session(sessionId)?.items?.any { it is ChatItem.SecureForm && it.state == "pending" } == true
+                // Agente de seção: o usuário está no chat do coordenador, então o formulário aparece LÁ (cofre é o mesmo).
+                val memberSec = store.section(store.session(sessionId)?.sectionId)?.takeIf { it.sessionId != sessionId && store.session(it.sessionId) != null }
+                val formChat = memberSec?.sessionId ?: sessionId
+                val pending = store.session(formChat)?.items?.any { it is ChatItem.SecureForm && it.state == "pending" && (it.forSessionId ?: formChat) == sessionId } == true
                 if (pending) return ToolResult("Já há um formulário seguro aguardando o usuário. Espere a resposta.", SessionStatus.WAITING_USER)
-                store.addItem(sessionId, ChatItem.SecureForm(title = title, reason = s("reason").take(300), fields = fields))
+                store.addItem(formChat, ChatItem.SecureForm(title = title, reason = s("reason").take(300), fields = fields,
+                    forSessionId = if (memberSec != null) sessionId else null,
+                    forAgentName = if (memberSec != null) store.session(sessionId)?.agentId?.let { store.agent(it)?.name } else null))
                 return ToolResult("Formulário seguro exibido ao usuário; aguardando. Você NÃO verá os valores — depois use " +
                     fields.joinToString { "{{secret:${it.name}}}" } + " nos argumentos das ferramentas.", SessionStatus.WAITING_USER)
             }
@@ -3443,12 +3481,15 @@ class AgentRunner(
                     val d = if (path.isBlank()) root else AgentFilePathPolicy.readableWorkspace(
                         root, sandbox.connectorsDir, path, allowRoot = true,
                     )
+                    fun listing(dir: java.io.File) = dir.walkTopDown().maxDepth(3).filter { it != dir && !it.path.contains("/.cue/") && it.name != ".cue" }.take(300)
+                        .joinToString("\n") { (if (it.isDirectory) "📁 " else "📄 ") + it.relativeTo(dir).path + if (it.isFile) " (${it.length()}b)" else "" }
+                        .ifBlank { "(vazio)" }
                     when {
-                        d == null -> "ERRO: caminho inválido. Para listar a raiz do workspace, deixe path vazio; senão use caminho relativo ou /root/workspace/.... Para conector, use o ID completo em /root/connectors/<id>/workspace/.... Não tente outros caminhos absolutos."
-                        !d.exists() || !d.isDirectory -> "ERRO: diretório não existe: $path. Confira o ID e use o segmento `/workspace` completo; não repita o path inexistente."
-                        else -> d.walkTopDown().maxDepth(3).filter { it != d }.take(300)
-                            .joinToString("\n") { (if (it.isDirectory) "📁 " else "📄 ") + it.relativeTo(d).path + if (it.isFile) " (${it.length()}b)" else "" }
-                            .ifBlank { "(vazio)" }
+                        // Caminho fora do workspace: em vez de um erro que leva a novas tentativas, mostra a raiz real.
+                        d == null -> "AVISO: '$path' está fora do workspace (só /root/workspace e /root/connectors/<id>/workspace são listáveis). " +
+                            "Conteúdo de /root/workspace — use estes caminhos relativos:\n" + listing(root)
+                        !d.exists() || !d.isDirectory -> "ERRO: diretório não existe: $path. Conteúdo de /root/workspace:\n" + listing(root)
+                        else -> listing(d)
                     }
                 }
                 "browser_navigate" -> {

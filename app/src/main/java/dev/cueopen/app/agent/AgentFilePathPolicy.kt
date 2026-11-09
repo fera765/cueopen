@@ -9,7 +9,7 @@ internal object AgentFilePathPolicy {
 
     /** Caminhos relativos e aliases explícitos do workspace da tarefa; nunca caminhos absolutos arbitrários. */
     fun taskWorkspace(root: File, rawPath: String, allowRoot: Boolean = false): File? {
-        val path = rawPath.trim()
+        val path = normalize(rawPath)
         if (path.isEmpty()) return if (allowRoot) canonical(root) else null
         val relative = when {
             taskAliases.any { path == it } -> ""
@@ -21,6 +21,21 @@ internal object AgentFilePathPolicy {
             else -> path
         }
         return confined(root, relative, allowRoot)
+    }
+
+    /**
+     * Formas comuns que o modelo usa para "a raiz do workspace" ou caminhos relativos a ela:
+     * ".", "./x", "~", "~/workspace/x", "/root", "workspace/x" (o cwd do shell é /root/workspace).
+     */
+    fun normalize(rawPath: String): String {
+        var p = rawPath.trim().trim('"', '\'').replace(Regex("/{2,}"), "/")
+        if (p == "~" || p == "~/" || p == "/root" || p == "/root/" || p == "." || p == "./" || p == "workspace" || p == "workspace/") return ""
+        if (p.startsWith("~/workspace")) p = "/root/workspace" + p.removePrefix("~/workspace")
+        else if (p.startsWith("~/")) p = p.removePrefix("~/")
+        if (p.startsWith("workspace/")) p = p.removePrefix("workspace/")
+        while (p.startsWith("./")) p = p.removePrefix("./")
+        if (p.length > 1) p = p.trimEnd('/')
+        return p
     }
 
     /** Leitura/listagem do workspace próprio ou dos workspaces de conectores montados como somente leitura. */

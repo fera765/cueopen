@@ -160,6 +160,7 @@ fun SecureFormCard(item: ChatItem.SecureForm, sessionId: String?) {
             Text(item.title, Modifier.weight(1f), fontFamily = FontFamily.Serif, fontSize = 18.sp, color = c.ink)
             IconButton({ CueApp.instance.agent.cancelSecure(sessionId, item) }, Modifier.size(36.dp)) { Icon(Icons.Rounded.Close, "Cancelar", tint = c.ink2) }
         }
+        if (!item.forAgentName.isNullOrBlank()) Text("Pedido por ${item.forAgentName} · fica disponível para todos os agentes da seção", fontSize = 12.sp, color = c.accent)
         if (item.reason.isNotBlank()) Text(item.reason, fontSize = 13.sp, color = c.ink2)
         item.fields.forEach { f ->
             val masked = f.type in AskTools.MASKED
