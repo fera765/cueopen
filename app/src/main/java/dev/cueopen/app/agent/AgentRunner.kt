@@ -164,7 +164,9 @@ class AgentRunner(
             } catch (c: kotlinx.coroutines.CancellationException) {
                 throw c
             } catch (t: Throwable) {
-                store.addItem(sessionId, ChatItem.Error(text = t.message ?: t.toString()))
+                // Mensagem legível + stack trace no log de erros (antes aparecia só "dev.cueopen.app.agent.X").
+                runCatching { dev.cueopen.app.diag.ErrorLog.log("agent", "Erro interno ${t.javaClass.name}: ${t.message}\n" + t.stackTraceToString().take(2_500), sessionId, "loop") }
+                store.addItem(sessionId, ChatItem.Error(text = "Erro interno (${t.javaClass.simpleName}" + (t.message?.let { ": ${it.take(160)}" } ?: "") + "). Detalhes no log de erros; envie uma mensagem para continuar."))
                 store.editSession(sessionId) { it.copy(status = SessionStatus.ERROR) }
             } finally {
                 // Só o job que ainda pertence a esta sessão pode reconciliar os passos dela.
@@ -843,7 +845,11 @@ class AgentRunner(
             if (s.autoCompact && ctxMgr.estimateTokens(s.llm) + ctxMgr.estimateTokens(s.summary) >= store.settings.contextBudget) {
                 setActivity(sessionId, Activity(Activity.Kind.THINKING, "Compactando contexto"))
                 val before = s.compactions
-                s = ctxMgr.compactIfNeeded(s)
+                s = try { ctxMgr.compactIfNeeded(s) } catch (c: kotlinx.coroutines.CancellationException) { throw c } catch (t: Throwable) {
+                    // Compactar NUNCA pode derrubar o agente: corta o histórico antigo com segurança e segue.
+                    runCatching { dev.cueopen.app.diag.ErrorLog.log("agent", "Falha na compactação (${t.javaClass.simpleName}: ${t.message}); usando corte seguro.\n" + t.stackTraceToString().take(1_500), sessionId, "compact") }
+                    ctxMgr.safeTrim(s)
+                }
                 // Guarda pós-compactação (OpenClaw): se o agente repetir o mesmo loop logo depois, interrompe.
                 if (s.compactions > before) toolLoops.armPostCompaction()
             }
@@ -1737,7 +1743,10 @@ class AgentRunner(
     suspend fun compactNow(sessionId: String): String {
         val s = store.session(sessionId) ?: return "Sessão não encontrada"
         val before = ctxMgr.estimateTokens(s.llm)
-        val after = ctxMgr.compactIfNeeded(s, force = true)
+        val after = try { ctxMgr.compactIfNeeded(s, force = true) } catch (c: kotlinx.coroutines.CancellationException) { throw c } catch (t: Throwable) {
+            runCatching { dev.cueopen.app.diag.ErrorLog.log("agent", "Falha no /compact (${t.javaClass.simpleName}): ${t.message}", sessionId, "compact") }
+            ctxMgr.safeTrim(s)
+        }
         val now = ctxMgr.estimateTokens(after.llm) + ctxMgr.estimateTokens(after.summary)
         return "Contexto compactado: ~$before → ~$now tokens."
     }

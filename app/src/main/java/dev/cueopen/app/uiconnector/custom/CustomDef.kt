@@ -603,7 +603,7 @@ object CustomDefParser {
                     if (treq == null || response.isBlank() || to["list"] != null) errors.add("$p.outputPolicy exige request HTTP, response textual e não pode usar list.")
                     val requestTexts = treq?.let { listOf(it.path, it.url) + it.query.values + it.headers.values + it.form.values + Template.strings(it.body) }.orEmpty()
                     for ((id, label) in listOf(durationParam to "durationParam", languageParam to "languageParam", guardrailsParam to "guardrailsParam")) {
-                        if (id.isNotBlank() && requestTexts.none { Regex("\\{\\{\\s*${Regex.escape(id)}(?:\\s*\\||\\s*}})").containsMatchIn(it) })
+                        if (id.isNotBlank() && requestTexts.none { Regex("\\{\\{\\s*${Regex.escape(id)}(?:\\s*\\||\\s*\\}\\})").containsMatchIn(it) })
                             errors.add("$p.outputPolicy.$label não é enviado na requisição de geração.")
                     }
                     vslPolicy = VslOutputPolicy(durationParam, languageParam, guardrailsParam, wpm ?: 130, tolerance ?: 0.20, sections, forbiddenTermsParam)
