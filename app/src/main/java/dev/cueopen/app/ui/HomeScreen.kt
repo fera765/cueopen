@@ -831,8 +831,8 @@ private fun SectionRow(
     }
     confirm?.let { kind ->
         val (title, body, action) = when (kind) {
-            "clear" -> Triple("Limpar contexto?", "Os agentes esquecem a conversa até aqui (o histórico continua visível). Use quando o contexto ficar grande ou confuso.", "Limpar")
-            "restart" -> Triple("Reiniciar a seção?", "Para tudo, apaga o histórico dos chats da seção e o coordenador recomeça do pedido original. Os agentes e permissões continuam.", "Reiniciar")
+            "clear" -> Triple("Limpar contexto?", "Apaga TUDO da seção: conversa de todos os agentes, histórico, arquivos do workspace, terminais e dados seguros. O time fica parado esperando um novo pedido.", "Limpar")
+            "restart" -> Triple("Reiniciar a seção?", "Apaga TUDO (conversa, histórico, workspace, terminais, dados seguros) e o coordenador recomeça do zero pelo pedido original. Agentes e permissões continuam.", "Reiniciar")
             else -> Triple("Excluir a seção “${sec.name}”?", "Remove a seção, os chats dela e os ${sec.agentIds.size + 1} agentes criados para ela.", "Excluir")
         }
         AlertDialog(

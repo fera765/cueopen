@@ -67,3 +67,25 @@ class SectionSharingTest {
         } finally { temp.deleteRecursively() }
     }
 }
+
+class CompactionIdentifiersTest {
+    @Test fun `identifiers survive compaction literally`() {
+        val text = "Abri https://loja.com/oferta?id=9 e salvei em /root/workspace/site/index.html; copy em copy_frances.md. Pixel 123456789012345 e {{secret:senha}}."
+        val ids = CompactionIdentifiers.extract(text)
+        assertTrue(ids.contains("https://loja.com/oferta?id=9"))
+        assertTrue(ids.contains("/root/workspace/site/index.html"))
+        assertTrue(ids.contains("copy_frances.md"))
+        assertTrue(ids.contains("123456789012345"))
+        assertTrue(ids.contains("{{secret:senha}}"))
+        val out = CompactionIdentifiers.ensure("Resumo: site criado em /root/workspace/site/index.html", ids)
+        assertTrue(out.contains("## Identificadores exatos"))
+        assertEquals(1, Regex(Regex.escape("/root/workspace/site/index.html")).findAll(out).count())
+        assertEquals("abc", CompactionIdentifiers.ensure("abc", emptyList()))
+    }
+
+    @Test fun `long tool output keeps head and tail`() {
+        val t = "INICIO" + "x".repeat(5000) + "ERRO FINAL"
+        val p = CompactionIdentifiers.project(t, 2000)
+        assertTrue(p.startsWith("INICIO") && p.endsWith("ERRO FINAL") && p.length < 2200)
+    }
+}

@@ -258,9 +258,10 @@ fun ChatScreen(nav: NavController, sessionId: String) {
                             "/clear" -> cmdScope.launch {
                                 val step = ChatItem.Step(tool = "clear", title = "Limpando contexto…", args = "", status = StepStatus.RUNNING)
                                 app.store.addItem(sessionId, step)
-                                app.store.editSession(sessionId) { it.copy(llm = emptyList(), summary = "") }
-                                kotlinx.coroutines.delay(450)
-                                app.store.replaceItem(sessionId, step.copy(title = "Contexto do modelo limpo", args = "histórico mantido na tela", status = StepStatus.OK))
+                                kotlinx.coroutines.delay(300)
+                                // Reinício do zero: contexto, histórico, workspace, terminal e dados seguros.
+                                app.agent.resetSession(sessionId)
+                                app.store.addItem(sessionId, step.copy(title = "Sessão limpa do zero", args = "contexto, histórico e workspace apagados", status = StepStatus.OK))
                             }
                             "/stop" -> if (homeSection != null) app.agent.pauseSection(homeSection.id) else app.agent.stop(sessionId, pauseAutonomy = true)
                             "/usage" -> usage = true

@@ -387,23 +387,70 @@ class AgentRunner(
         store.replaceItem(sessionId, cur.copy(state = "cancelled"))
     }
 
-    /** Limpa o contexto do modelo em todos os chats da seção (o histórico na tela continua). */
-    fun clearSectionContext(sectionId: String) {
-        store.state.value.sessions.filter { it.sectionId == sectionId }.forEach { s ->
-            stop(s.id)
-            store.editSession(s.id) { it.copy(llm = emptyList(), summary = "", status = SessionStatus.IDLE) }
+    /**
+     * Zera o estado de execução de um chat: para o agente, fecha o terminal e apaga contexto do modelo,
+     * histórico, resumo, contadores, visitas do browser, cofre e pendências de supervisão.
+     */
+    private suspend fun wipeRuntime(sessionId: String) {
+        val running = jobs[sessionId]
+        stop(sessionId)
+        // Espera o loop cancelado terminar: senão ele grava passos/mensagens DEPOIS da limpeza.
+        kotlinx.coroutines.withTimeoutOrNull(4_000) { running?.join() }
+        runCatching { terminals.close(sessionId) }
+        BrowserVisitLog.clear(sessionId)
+        SecretVault.clear(sessionId)
+        delegations.remove(sessionId)
+        coordinatorInbox.remove(sessionId)
+        lastCheckpointStep.remove(sessionId)
+        store.editSession(sessionId) {
+            it.copy(llm = emptyList(), items = emptyList(), summary = "", compactions = 0, status = SessionStatus.IDLE,
+                wakeAt = null, wakeReason = "", continuous = false)
         }
     }
 
-    /** Reinicia a seção: para tudo, apaga histórico e contexto dos chats do time e recomeça do pedido original. */
+    /** Apaga o workspace e o ambiente do chat (recriados vazios no próximo uso). Conectores nunca são apagados. */
+    private fun wipeWorkspace(sessionId: String) {
+        if (sandbox.isConnectorSession(sessionId)) return
+        runCatching { sandbox.deleteEnvironment(sessionId) }
+        runCatching { sandbox.workspaceFor(sessionId).deleteRecursively() }
+    }
+
+    /**
+     * Reinício do zero de um chat comum (/clear): contexto, histórico, workspace, terminal e dados seguros.
+     */
+    suspend fun resetSession(sessionId: String) {
+        val s = store.session(sessionId) ?: return
+        val sec = store.section(s.sectionId)
+        if (sec != null) { wipeSection(sec); return }
+        wipeRuntime(sessionId)
+        wipeWorkspace(sessionId)
+    }
+
+    /** Zera a seção inteira: todos os chats do time, workspace compartilhado, terminais, cofre e delegações. */
+    private suspend fun wipeSection(sec: Section) {
+        sectionGeneration.merge(sec.id, 1, Int::plus)  // descarta relatórios/checkpoints ainda na fila
+        delegations.entries.removeIf { it.value.sectionId == sec.id }
+        sec.agentIds.forEach { delivered.remove(it) }
+        val chats = store.state.value.sessions.filter { it.sectionId == sec.id || it.id == sec.sessionId }
+        kotlinx.coroutines.coroutineScope { chats.map { c -> async { wipeRuntime(c.id) } }.forEach { it.await() } }
+        chats.forEach { wipeWorkspace(it.id) }  // o alias aponta todos para o mesmo ambiente section_<id>
+        // Dados seguros digitados no chat que criou a seção continuam valendo (pertencem àquele chat).
+        sec.originSessionId?.let { o -> SecretVault.snapshot(o).takeIf { it.isNotEmpty() }?.let { SecretVault.put(sec.sessionId, it) } }
+    }
+
+    /** Limpar contexto da seção: apaga TUDO (conversa, workspace, terminais, cofre) e deixa o time parado. */
+    fun clearSectionContext(sectionId: String) {
+        val sec = store.section(sectionId) ?: return
+        scope.launch { wipeSection(sec) }
+    }
+
+    /** Reinicia a seção do zero e o coordenador recomeça do pedido original. */
     fun restartSection(sectionId: String) {
         val sec = store.section(sectionId) ?: return
-        store.state.value.sessions.filter { it.sectionId == sectionId }.forEach { s ->
-            stop(s.id)
-            BrowserVisitLog.clear(s.id)
-            store.editSession(s.id) { it.copy(llm = emptyList(), items = emptyList(), summary = "", status = SessionStatus.IDLE, wakeAt = null) }
+        scope.launch {
+            wipeSection(sec)
+            if (sec.configured) send(sec.sessionId, sec.firstTask.ifBlank { "Apresente o time, proponha o plano inicial e comece." })
         }
-        if (sec.configured) send(sec.sessionId, sec.firstTask.ifBlank { "Apresente o time, proponha o plano inicial e comece." })
     }
 
     private fun memberSession(sec: Section, member: AgentProfile): String =
@@ -411,7 +458,8 @@ class AgentRunner(
             ?: Session(title = "${member.name} · ${sec.name}", agentId = member.id, sectionId = sec.id).also { store.upsertSession(it) }.id
 
     /** Delegações em andamento: chat do agente → (seção, pílula no chat do coordenador, índice dos itens ao começar). */
-    private data class Delegation(val sectionId: String, val memberId: String, val pillId: String, val startIndex: Int, val task: String = "")
+    private data class Delegation(val sectionId: String, val memberId: String, val pillId: String, val startIndex: Int, val task: String = "",
+        val startedAt: Long = System.currentTimeMillis())
     /** Entregas concluídas por agente (tarefa, quando, resultado) — impede re-delegar o mesmo trabalho. */
     private data class Delivered(val task: String, val at: Long, val answer: String)
     private val delivered = java.util.concurrent.ConcurrentHashMap<String, MutableList<Delivered>>()
@@ -446,6 +494,9 @@ class AgentRunner(
         if (task.isBlank()) return "ERRO: descreva a tarefa."
         val childId = memberSession(sec, member)
         if (isRunning(childId)) return "${member.name} ainda está trabalhando na tarefa anterior. Acompanhe com team_status; você receberá o relatório quando ele terminar."
+        // Teto de agentes em paralelo (maxChildrenPerAgent do OpenClaw): no celular, muitos browsers/terminais juntos travam tudo.
+        val active = delegations.values.count { it.sectionId == sec.id && it.memberId != member.id }
+        if (active >= MAX_PARALLEL_MEMBERS) return "Já há $active agentes trabalhando em paralelo (limite $MAX_PARALLEL_MEMBERS). Aguarde um relatório e então delegue a próxima tarefa."
         // Mesmo trabalho já entregue há pouco: devolve o resultado em vez de mandar refazer (evita o ciclo infinito).
         val now0 = System.currentTimeMillis()
         delivered[member.id]?.lastOrNull { now0 - it.at < 3 * 3_600_000L && (similar(task.lowercase(), it.task.lowercase()) || task.trim().equals(it.task.trim(), true)) }?.let { d ->
@@ -580,7 +631,9 @@ class AgentRunner(
         val plan = child.items.lastOrNull { it is ChatItem.Plan } as? ChatItem.Plan
         val feedback = (child.items.drop(d.startIndex).lastOrNull { it is ChatItem.Assistant } as? ChatItem.Assistant)?.text?.take(300)
         val digest = buildString {
-            append("[Checkpoint — ${member.name}, $steps passos nesta tarefa]\n")
+            val minutes = (System.currentTimeMillis() - d.startedAt) / 60_000
+            append("[Checkpoint — ${member.name}, $steps passos e $minutes min nesta tarefa]\n")
+            if (minutes >= MEMBER_SLOW_MINUTES) append("⏱ Passou de $MEMBER_SLOW_MINUTES min: se não está perto de entregar, use team_stop e redivida a tarefa.\n")
             append("Tarefa: ${d.task.take(220)}\n")
             if (plan != null) append("Plano dele: " + plan.phases.joinToString(" · ") { (if (it.done) "[x] " else "[ ] ") + it.title.take(60) } + "\n")
             append("Último feedback dele: ${feedback ?: "(nenhum — está só executando ferramentas)"}\n")
@@ -789,7 +842,10 @@ class AgentRunner(
             setActivity(sessionId, Activity(Activity.Kind.THINKING, "Pensando"))
             if (s.autoCompact && ctxMgr.estimateTokens(s.llm) + ctxMgr.estimateTokens(s.summary) >= store.settings.contextBudget) {
                 setActivity(sessionId, Activity(Activity.Kind.THINKING, "Compactando contexto"))
+                val before = s.compactions
                 s = ctxMgr.compactIfNeeded(s)
+                // Guarda pós-compactação (OpenClaw): se o agente repetir o mesmo loop logo depois, interrompe.
+                if (s.compactions > before) toolLoops.armPostCompaction()
             }
             // Planejamento contextual: decide quais ferramentas/conectores e quanto conhecimento/memória entram neste passo
             val allTools = tools(agent, allowMultiAgent = tokenBudgetOverride == null, builder = s.connectorBuilder, connectorEditId = s.connectorEditId, sectionId = s.sectionId)
@@ -1110,6 +1166,14 @@ class AgentRunner(
                 var trippedRepeatable = true
                 var trippedStrict = false
                 val seqBefore = toolLoops.sequence
+                // Ferramenta inexistente/não liberada chamada de novo e de novo: não há o que insistir.
+                reply.toolCalls.filter { !ToolCallExecutionPolicy.isExposed(it.name, exposedToolNames) }
+                    .firstNotNullOfOrNull { toolLoops.unknownTool(it.name) }?.let { t ->
+                        runCatching { dev.cueopen.app.diag.ErrorLog.log("agent", "Ferramenta indisponível repetida: ${t.tool} (interrompido).", sessionId, t.tool) }
+                        store.addItemUnique(sessionId, ChatItem.Error(text = "O agente insistiu na ferramenta \"${t.tool}\", que não está disponível aqui. Interrompi para não gastar tokens."))
+                        store.editSession(sessionId) { it.copy(status = SessionStatus.WAITING_USER) }
+                        return
+                    }
                 for (call in reply.toolCalls) {
                     if (call.name in controlTools) continue
                     val repeatable = isRepeatableTool(call.name)
@@ -1133,21 +1197,32 @@ class AgentRunner(
                 } else {
                     cleanRounds = 0
                     val limit = when {
+                        trippedKind == ToolLoopDetector.Kind.POST_COMPACTION -> 1  // compactar não quebrou o loop
+                        trippedKind == ToolLoopDetector.Kind.NO_PROGRESS || trippedKind == ToolLoopDetector.Kind.PING_PONG -> 2
                         trippedStrict -> 1
                         trippedRepeatable -> 4
                         else -> 2
                     }
                     if (++toolLoopNudges >= limit) {
                         runCatching { dev.cueopen.app.diag.ErrorLog.log("agent", "Loop de ferramenta sem progresso: $tripped (interrompido).", sessionId, tripped) }
-                        val why = if (trippedKind == ToolLoopDetector.Kind.SAME_CONTENT)
-                            "recebeu o mesmo conteúdo de \"$tripped\" várias vezes, sem nada novo entre as chamadas"
-                        else "repetiu a mesma ação ($tripped), com os mesmos argumentos e o mesmo resultado, sem progresso entre as chamadas"
+                        val why = when (trippedKind) {
+                            ToolLoopDetector.Kind.SAME_CONTENT -> "recebeu o mesmo conteúdo de \"$tripped\" várias vezes, sem nada novo entre as chamadas"
+                            ToolLoopDetector.Kind.PING_PONG -> "ficou alternando entre as mesmas duas ações (ping-pong) sem nada novo"
+                            ToolLoopDetector.Kind.NO_PROGRESS -> "fez ${ToolLoopDetector.NO_PROGRESS_CALLS}+ chamadas seguidas sem obter nenhuma informação nova"
+                            ToolLoopDetector.Kind.POST_COMPACTION -> "voltou ao mesmo loop logo depois da compactação do contexto ($tripped)"
+                            else -> "repetiu a mesma ação ($tripped), com os mesmos argumentos e o mesmo resultado, sem progresso entre as chamadas"
+                        }
                         store.addItemUnique(sessionId, ChatItem.Error(text = "O agente $why. Interrompi para evitar um loop. Ajuste o pedido/abordagem ou troque de modelo."))
                         store.editSession(sessionId) { it.copy(status = SessionStatus.WAITING_USER) }
                         return
                     }
                     store.editSession(sessionId) {
-                        it.copy(llm = it.llm + LlmMessage("user", "[Sistema] Você chamou \"$tripped\" várias vezes com os MESMOS argumentos e recebeu o MESMO resultado — nada mudou. " +
+                        val head = when (trippedKind) {
+                            ToolLoopDetector.Kind.PING_PONG -> "[Sistema] Você está alternando entre as mesmas duas ações (\"$tripped\" e outra) e nada muda. "
+                            ToolLoopDetector.Kind.NO_PROGRESS -> "[Sistema] Suas últimas ${ToolLoopDetector.NO_PROGRESS_CALLS} chamadas não trouxeram NADA novo. Pare de tentar variações; "
+                            else -> "[Sistema] Você chamou \"$tripped\" várias vezes com os MESMOS argumentos e recebeu o MESMO resultado — nada mudou. "
+                        }
+                        it.copy(llm = it.llm + LlmMessage("user", head +
                             "Se está esperando algo acontecer (página carregar, requisição chegar), espere de outro jeito (ex.: um passo diferente, outro seletor/script, browser_read) ou mude a abordagem; " +
                             "se a tarefa estiver concluída ou bloqueada, chame finish explicando."))
                     }
@@ -1448,6 +1523,8 @@ class AgentRunner(
 
     /** Detectores puros de loop/degeneração (sem Android) — testáveis na JVM. */
     companion object LoopGuards {
+        const val MAX_PARALLEL_MEMBERS = 4
+        const val MEMBER_SLOW_MINUTES = 30L
         private val STRICT_REPEAT_TOOLS = setOf("connector_validate", "connector_test", "connector_propose", "connector_edit_propose")
         /** Leituras de conteúdo: o mesmo texto longo voltando por caminhos diferentes é falta de progresso. */
         private val CONTENT_REPEAT_TOOLS = setOf("file_read", "file_list", "memory_search", "notes_read", "connector_spec", "skill_load")

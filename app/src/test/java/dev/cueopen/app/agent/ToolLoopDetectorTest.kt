@@ -60,4 +60,44 @@ class ToolLoopDetectorTest {
         val other = ToolLoopDetector()
         repeat(6) { i -> assertNull(other.call("browser_navigate", "{\"u\":\"$i\"}", 9, long = true, content = null)) }
     }
+
+    @Test
+    fun pingPongBetweenTwoIdenticalCallsTrips() {
+        val d = ToolLoopDetector()
+        val kinds = (0 until 3).flatMap {
+            listOf(d.call("browser_back", "{}", 1, threshold = 99), d.call("browser_read", "{}", 2, threshold = 99))
+        }
+        assertEquals(ToolLoopDetector.Kind.PING_PONG, kinds.last()?.kind)
+    }
+
+    @Test
+    fun globalBreakerTripsAfterManyCallsWithoutAnythingNew() {
+        val d = ToolLoopDetector()
+        assertNull(d.call("file_read", "{\"p\":\"0\"}", 5, long = true, threshold = 99))
+        var last: ToolLoopDetector.Trip? = null
+        for (i in 1 until ToolLoopDetector.NO_PROGRESS_CALLS) last = d.call("file_read", "{\"p\":\"$i\"}", 5, long = true, threshold = 99)
+        assertEquals(ToolLoopDetector.Kind.NO_PROGRESS, last?.kind)
+    }
+
+    @Test
+    fun postCompactionGuardCatchesTheSameLoopAfterCompacting() {
+        val d = ToolLoopDetector()
+        assertNull(d.call("shell", "{\"c\":\"ls\"}", 3, threshold = 99))
+        d.armPostCompaction()
+        assertNull(d.call("shell", "{\"c\":\"ls\"}", 3, threshold = 99))
+        assertEquals(ToolLoopDetector.Kind.POST_COMPACTION, d.call("shell", "{\"c\":\"ls\"}", 3, threshold = 99)?.kind)
+
+        val fresh = ToolLoopDetector()
+        assertNull(fresh.call("shell", "{\"c\":\"ls\"}", 3, threshold = 99))
+        fresh.armPostCompaction()
+        repeat(3) { i -> assertNull(fresh.call("shell", "{\"c\":\"cat $i\"}", 10 + i, threshold = 99)) }
+    }
+
+    @Test
+    fun unknownToolRetriesTrip() {
+        val d = ToolLoopDetector()
+        assertNull(d.unknownTool("magic"))
+        assertNull(d.unknownTool("magic"))
+        assertEquals(ToolLoopDetector.Kind.UNKNOWN_TOOL, d.unknownTool("magic")?.kind)
+    }
 }
