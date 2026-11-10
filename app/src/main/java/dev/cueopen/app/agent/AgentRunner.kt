@@ -8,6 +8,8 @@ import dev.cueopen.app.data.LlmMessage
 import dev.cueopen.app.data.PlanPhase
 import dev.cueopen.app.data.Session
 import dev.cueopen.app.data.Section
+import dev.cueopen.app.data.SectionTask
+import dev.cueopen.app.data.TaskStatus
 import dev.cueopen.app.data.newId
 import dev.cueopen.app.data.SessionStatus
 import dev.cueopen.app.data.Skill
@@ -431,6 +433,10 @@ class AgentRunner(
     /** Zera a seção inteira: todos os chats do time, workspace compartilhado, terminais, cofre e delegações. */
     private suspend fun wipeSection(sec: Section) {
         sectionGeneration.merge(sec.id, 1, Int::plus)  // descarta relatórios/checkpoints ainda na fila
+        planNudges.remove(sec.id); finalReportAsked.remove(sec.id)
+        synchronized(planLocks.getOrPut(sec.id) { Any() }) {
+            store.section(sec.id)?.let { store.upsertSection(it.copy(plan = emptyList(), planGoal = "", planItemId = null)) }
+        }
         delegations.entries.removeIf { it.value.sectionId == sec.id }
         sec.agentIds.forEach { delivered.remove(it) }
         val chats = store.state.value.sessions.filter { it.sectionId == sec.id || it.id == sec.sessionId }
@@ -461,7 +467,7 @@ class AgentRunner(
 
     /** Delegações em andamento: chat do agente → (seção, pílula no chat do coordenador, índice dos itens ao começar). */
     private data class Delegation(val sectionId: String, val memberId: String, val pillId: String, val startIndex: Int, val task: String = "",
-        val startedAt: Long = System.currentTimeMillis())
+        val startedAt: Long = System.currentTimeMillis(), val taskId: String? = null)
     /** Entregas concluídas por agente (tarefa, quando, resultado) — impede re-delegar o mesmo trabalho. */
     private data class Delivered(val task: String, val at: Long, val answer: String)
     private val delivered = java.util.concurrent.ConcurrentHashMap<String, MutableList<Delivered>>()
@@ -485,7 +491,8 @@ class AgentRunner(
         store.addItem(sec.sessionId, ChatItem.Error(text = "Seção pausada: coordenador e agentes parados. Envie uma mensagem para retomar."))
     }
 
-    private suspend fun teamDelegate(sessionId: String, agentName: String, task: String, wait: Boolean, timeoutMinutes: Int): String {
+    private suspend fun teamDelegate(sessionId: String, agentName: String, task: String, wait: Boolean, timeoutMinutes: Int,
+                                     taskId: String? = null): String {
         val sec = store.section(store.session(sessionId)?.sectionId) ?: return "ERRO: esta conversa não é uma seção."
         if (!sec.configured) return "A seção ainda não foi ativada pelo usuário."
         val team = sec.agentIds.mapNotNull { store.agent(it) }
@@ -501,7 +508,7 @@ class AgentRunner(
         if (active >= MAX_PARALLEL_MEMBERS) return "Já há $active agentes trabalhando em paralelo (limite $MAX_PARALLEL_MEMBERS). Aguarde um relatório e então delegue a próxima tarefa."
         // Mesmo trabalho já entregue há pouco: devolve o resultado em vez de mandar refazer (evita o ciclo infinito).
         val now0 = System.currentTimeMillis()
-        delivered[member.id]?.lastOrNull { now0 - it.at < 3 * 3_600_000L && (similar(task.lowercase(), it.task.lowercase()) || task.trim().equals(it.task.trim(), true)) }?.let { d ->
+        if (taskId == null) delivered[member.id]?.lastOrNull { now0 - it.at < 3 * 3_600_000L && (similar(task.lowercase(), it.task.lowercase()) || task.trim().equals(it.task.trim(), true)) }?.let { d ->
             return "${member.name} JÁ CONCLUIU esta mesma tarefa há ${(now0 - d.at) / 60_000} min. Resultado entregue:\n${d.answer.take(1_800)}\n\n" +
                 "Não re-delegue. Use esse resultado e siga para a próxima etapa, ou passe uma tarefa NOVA/ajuste específico (diga exatamente o que mudar)."
         }
@@ -510,21 +517,195 @@ class AgentRunner(
         val pill = ChatItem.Step(tool = TEAM_MEMBER_STEP, title = task.lineSequence().first().take(120),
             args = "$childId|${member.id}", result = "", status = StepStatus.RUNNING)
         store.addItem(sec.sessionId, pill)
-        delegations[childId] = Delegation(sec.id, member.id, pill.id, before, task)
+        delegations[childId] = Delegation(sec.id, member.id, pill.id, before, task, taskId = taskId)
+        if (taskId != null) editPlan(sec.id) { SectionPlanEngine.started(it, taskId, System.currentTimeMillis()) }
         val files = runCatching {
             val root = sandbox.workspaceFor(childId)
             root.walkTopDown().maxDepth(3).filter { it.isFile && !it.path.contains("/.cue/") }
                 .take(40).map { it.relativeTo(root).path }.toList()
         }.getOrDefault(emptyList())
-        send(childId, "[Tarefa do coordenador da seção ${sec.name}]\n$task\n\n" +
+        send(childId, "[Tarefa do coordenador da seção ${sec.name}" + (taskId?.let { " · etapa $it do plano" } ?: "") + "]\n$task\n\n" +
             "Arquivos do time em /root/workspace (compartilhado): " + (if (files.isEmpty()) "nenhum ainda." else files.joinToString(", ")) +
             "\nRegras: faça só esta tarefa; dê feedback curto a cada etapa; se faltar insumo, diga o que falta e encerre (o coordenador resolve).")
-        if (!wait) return "${member.name} começou a trabalhar. Dê ao usuário um feedback curto (5 a 30 palavras) e siga coordenando; o relatório dele chega sozinho quando terminar."
+        if (!wait) return "$DELEGATION_STARTED ${member.name} começou a trabalhar. Dê ao usuário um feedback curto (5 a 30 palavras) e siga coordenando; o relatório dele chega sozinho quando terminar."
         val deadline = System.currentTimeMillis() + timeoutMinutes * 60_000L
         kotlinx.coroutines.delay(1_500)
         while (isRunning(childId) && System.currentTimeMillis() < deadline) kotlinx.coroutines.delay(2_000)
         return if (isRunning(childId)) "${member.name} continua trabalhando (passou de $timeoutMinutes min). O relatório chega sozinho quando terminar."
             else memberReport(member, childId, before)
+    }
+
+
+    // ───────────────────────── Plano persistido da seção (continuidade automática) ─────────────────────────
+
+    private val planLocks = java.util.concurrent.ConcurrentHashMap<String, Any>()
+    private val planNudges = java.util.concurrent.ConcurrentHashMap<String, Pair<String, Int>>()
+    private val finalReportAsked = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+
+    /** Leitura-modificação-escrita atômica do plano (vários agentes terminam ao mesmo tempo). */
+    private fun editPlan(sectionId: String, fn: (List<SectionTask>) -> List<SectionTask>) {
+        synchronized(planLocks.getOrPut(sectionId) { Any() }) {
+            val sec = store.section(sectionId) ?: return
+            val next = fn(sec.plan)
+            if (next != sec.plan) store.upsertSection(sec.copy(plan = next))
+        }
+        store.section(sectionId)?.let { syncPlanItem(it) }
+    }
+
+    /** Espelha o plano no chat do coordenador (cartão de progresso acima do campo de mensagem): estados reais. */
+    private fun syncPlanItem(sec: Section) {
+        if (sec.plan.isEmpty()) return
+        val state = SectionPlanEngine.state(sec.plan)
+        val item = ChatItem.Plan(
+            id = sec.planItemId ?: newId(),
+            goal = (sec.planGoal.ifBlank { "Plano da seção" }).take(80) + " · " + SectionPlanEngine.label(state),
+            phases = sec.plan.map { t ->
+                PlanPhase("${SectionPlanEngine.icon(t.status)} ${t.id} · ${t.agentName}: ${t.task.lineSequence().first().take(70)}",
+                    done = t.status == TaskStatus.DONE || t.status == TaskStatus.CANCELLED)
+            },
+        )
+        val exists = store.session(sec.sessionId)?.items?.any { it.id == item.id } == true
+        if (exists) store.replaceItem(sec.sessionId, item) else {
+            store.addItem(sec.sessionId, item)
+            if (sec.planItemId != item.id) store.section(sec.id)?.let { store.upsertSection(it.copy(planItemId = item.id)) }
+        }
+    }
+
+    /** Inicia toda etapa pronta (dependências aprovadas), respeitando o limite de paralelismo. */
+    private suspend fun planDispatch(sectionId: String): List<String> {
+        val started = mutableListOf<String>()
+        val sec = store.section(sectionId) ?: return started
+        if (!sec.configured) return started
+        for (t in SectionPlanEngine.ready(sec.plan)) {
+            val fresh = store.section(sectionId) ?: break
+            val text = buildString {
+                append(t.task)
+                SectionPlanEngine.handoff(fresh.plan, t).takeIf { it.isNotBlank() }?.let { append("\n\n").append(it) }
+                if (t.attempts > 0 && t.note.isNotBlank()) append("\n\nAJUSTE pedido pelo coordenador (tentativa ${t.attempts + 1}): ${t.note}. Preserve o que já estava certo.")
+            }
+            val r = teamDelegate(sec.sessionId, t.agentName, text, wait = false, timeoutMinutes = 15, taskId = t.id)
+            if (r.startsWith(DELEGATION_STARTED)) started += "${t.id} (${t.agentName})"
+        }
+        return started
+    }
+
+    /**
+     * Vigia do coordenador: sempre que ele para, confere o plano. Inicia etapas prontas, cobra validação de
+     * entregas, pede o relatório final quando tudo foi aprovado e retoma etapas órfãs. Sem progresso após
+     * [MAX_PLAN_NUDGES] lembretes, marca o plano como travado e avisa o usuário — nunca fica em loop.
+     */
+    private fun planWatchdog(sectionId: String, afterRestart: Boolean = false) {
+        val generation = sectionGeneration[sectionId] ?: 0
+        scope.launch {
+            kotlinx.coroutines.delay(if (afterRestart) 4_000 else 1_500)
+            val lock = sectionReportLocks.getOrPut(sectionId) { kotlinx.coroutines.sync.Mutex() }
+            lock.withLock {
+                if ((sectionGeneration[sectionId] ?: 0) != generation) return@withLock
+                val sec = store.section(sectionId) ?: return@withLock
+                if (!sec.configured || sec.plan.isEmpty() || isRunning(sec.sessionId)) return@withLock
+                val coordStatus = store.session(sec.sessionId)?.status
+                // Parado pelo usuário, esperando resposta/confirmação ou com erro: não insiste.
+                if (!afterRestart && coordStatus !in setOf(SessionStatus.DONE, SessionStatus.IDLE)) return@withLock
+                if (coordStatus == SessionStatus.WAITING_USER) return@withLock
+                // Etapa marcada como em execução, mas sem agente rodando nem delegação (app reiniciou/morreu).
+                sec.plan.filter { it.status == TaskStatus.RUNNING }.forEach { t ->
+                    val member = store.agent(t.agentId) ?: return@forEach
+                    val childId = memberSession(sec, member)
+                    if (!isRunning(childId) && delegations[childId] == null) resumeOrphanTask(sec, t, member, childId)
+                }
+                val started = planDispatch(sectionId)
+                val plan = store.section(sectionId)?.plan ?: return@withLock
+                val state = SectionPlanEngine.state(plan)
+                val msg = when (state) {
+                    SectionPlanEngine.State.VALIDATING -> "[Sistema] Entregas aguardando a SUA validação:\n" +
+                        plan.filter { it.status == TaskStatus.REVIEW }.joinToString("\n") { "- ${it.id} (${it.agentName}): ${it.result.replace(Regex("\\s+"), " ").take(400)}" } +
+                        "\nChame team_review para cada uma (approve, redo com o ajuste, ou block). O plano só avança depois."
+                    SectionPlanEngine.State.COMPLETED -> if (finalReportAsked.add(sectionId))
+                        "[Sistema] Todas as etapas do plano foram aprovadas. Envie AGORA ao usuário o relatório final consolidado (entregáveis, arquivos, números) e pare." else null
+                    SectionPlanEngine.State.FAILED, SectionPlanEngine.State.BLOCKED ->
+                        "[Sistema] O plano está ${SectionPlanEngine.label(state)}:\n${SectionPlanEngine.describe(plan)}\n" +
+                            "Decida: reorganize com team_plan (outra estratégia/agente) ou explique ao usuário exatamente o que falta e pare."
+                    else -> null  // agentes trabalhando: o próximo evento é o relatório deles
+                }
+                if (started.isNotEmpty()) store.addItem(sec.sessionId, ChatItem.Assistant(text = "▶ Próximas etapas iniciadas automaticamente: " + started.joinToString()))
+                if (msg == null) return@withLock
+                val sig = SectionPlanEngine.signature(plan) + state
+                val (prev, n) = planNudges[sectionId] ?: ("" to 0)
+                val count = if (prev == sig) n + 1 else 1
+                planNudges[sectionId] = sig to count
+                if (count > MAX_PLAN_NUDGES) {
+                    if (count == MAX_PLAN_NUDGES + 1) store.addItem(sec.sessionId, ChatItem.Error(text =
+                        "O plano não avançou depois de $MAX_PLAN_NUDGES lembretes ao coordenador (${SectionPlanEngine.label(state)}). Parei para não gastar tokens. Envie uma mensagem para orientar."))
+                    return@withLock
+                }
+                send(sec.sessionId, msg, showUserMessage = false).join()
+            }
+        }
+    }
+
+    /** Retoma uma etapa que estava rodando quando o app fechou: o agente continua do histórico dele, sem refazer. */
+    private fun resumeOrphanTask(sec: Section, t: SectionTask, member: AgentProfile, childId: String) {
+        val before = store.session(childId)?.items?.size ?: 0
+        val pill = ChatItem.Step(tool = TEAM_MEMBER_STEP, title = "Retomando ${t.id}: " + t.task.lineSequence().first().take(100),
+            args = "$childId|${member.id}", result = "", status = StepStatus.RUNNING)
+        store.addItem(sec.sessionId, pill)
+        delegations[childId] = Delegation(sec.id, member.id, pill.id, before, t.task, taskId = t.id)
+        send(childId, "[Sistema] A execução da etapa ${t.id} foi interrompida (o app fechou/reiniciou). Continue de onde parou: " +
+            "confira o que já está feito (arquivos, notas, histórico) e NÃO repita ações externas já concluídas.", showUserMessage = false)
+    }
+
+    /** Na abertura do app: retoma planos que estavam em andamento. */
+    fun recoverSections() {
+        store.state.value.sections.filter { it.configured && it.plan.isNotEmpty() &&
+            SectionPlanEngine.state(it.plan) != SectionPlanEngine.State.COMPLETED }.forEach { planWatchdog(it.id, afterRestart = true) }
+    }
+
+    private suspend fun teamPlan(sessionId: String, goal: String, tasksJson: String): String {
+        val sec = store.section(store.session(sessionId)?.sectionId) ?: return "ERRO: esta conversa não é uma seção."
+        if (sec.plan.any { it.status == TaskStatus.RUNNING })
+            return "ERRO: há etapas em execução (${sec.plan.filter { it.status == TaskStatus.RUNNING }.joinToString { it.id }}). Espere os relatórios ou pare com team_stop antes de trocar o plano."
+        val arr = runCatching { json.parseToJsonElement(tasksJson).jsonArray }.getOrNull()
+            ?: return "ERRO: tasks_json deve ser um array JSON [{\"id\":\"T1\",\"agent\":\"Nome\",\"task\":\"...\",\"depends_on\":[]}]."
+        val drafts = arr.mapNotNull { el ->
+            val o = el as? JsonObject ?: return@mapNotNull null
+            fun f(k: String) = runCatching { o[k]?.jsonPrimitive?.contentOrNull }.getOrNull().orEmpty().trim()
+            val deps = runCatching { o["depends_on"]?.jsonArray?.mapNotNull { it.jsonPrimitive.contentOrNull?.trim() } }.getOrNull().orEmpty()
+            SectionPlanEngine.Draft(f("id"), f("agent"), f("task"), deps)
+        }
+        val team = sec.agentIds.mapNotNull { store.agent(it) }
+        SectionPlanEngine.validate(drafts, team.map { it.name }.toSet())?.let { return "ERRO no plano: $it. Corrija e chame team_plan de novo." }
+        val tasks = drafts.map { d ->
+            val a = team.first { it.name.equals(d.agent, true) }
+            SectionTask(id = d.id, agentId = a.id, agentName = a.name, task = d.task, dependsOn = d.dependsOn)
+        }
+        synchronized(planLocks.getOrPut(sec.id) { Any() }) {
+            store.section(sec.id)?.let { store.upsertSection(it.copy(plan = tasks, planGoal = goal.trim().take(200))) }
+        }
+        planNudges.remove(sec.id); finalReportAsked.remove(sec.id)
+        store.section(sec.id)?.let { syncPlanItem(it) }
+        val started = planDispatch(sec.id)
+        return "Plano salvo (${tasks.size} etapas). " + (if (started.isEmpty()) "Nenhuma etapa pôde começar agora." else "Iniciadas: ${started.joinToString()}.") +
+            " O app inicia sozinho cada etapa quando as dependências forem aprovadas por você com team_review; você recebe um relatório a cada entrega.\n" +
+            SectionPlanEngine.describe(store.section(sec.id)?.plan.orEmpty())
+    }
+
+    private suspend fun teamReview(sessionId: String, taskId: String, verdictRaw: String, note: String): String {
+        val sec = store.section(store.session(sessionId)?.sectionId) ?: return "ERRO: esta conversa não é uma seção."
+        val verdict = when (verdictRaw.trim().lowercase()) {
+            "approve", "aprovar", "ok" -> SectionPlanEngine.Verdict.APPROVE
+            "redo", "refazer", "ajustar" -> SectionPlanEngine.Verdict.REDO
+            "block", "bloquear" -> SectionPlanEngine.Verdict.BLOCK
+            "cancel", "cancelar" -> SectionPlanEngine.Verdict.CANCEL
+            else -> return "ERRO: verdict deve ser approve, redo, block ou cancel."
+        }
+        if (verdict == SectionPlanEngine.Verdict.REDO && note.isBlank()) return "ERRO: para redo diga em note exatamente o que ajustar."
+        var err: String? = null
+        editPlan(sec.id) { plan -> SectionPlanEngine.review(plan, taskId.trim(), verdict, note).also { err = it.second }.first }
+        err?.let { return "ERRO: $it" }
+        val started = planDispatch(sec.id)
+        val plan = store.section(sec.id)?.plan.orEmpty()
+        return "Etapa $taskId: ${verdict.name.lowercase()}. " + (if (started.isNotEmpty()) "Iniciadas automaticamente: ${started.joinToString()}. " else "") +
+            "\n" + SectionPlanEngine.describe(plan)
     }
 
     private fun memberReport(member: AgentProfile, childId: String, before: Int): String {
@@ -548,6 +729,7 @@ class AgentRunner(
      * atualiza a pílula e entrega o relatório ao coordenador (um por vez, sem interromper a resposta dele).
      */
     private fun onRunEnded(sessionId: String) {
+        store.session(sessionId)?.sectionId?.let { sid -> store.section(sid)?.takeIf { it.sessionId == sessionId }?.let { planWatchdog(it.id); return } }
         val d = delegations[sessionId] ?: return
         val child = store.session(sessionId) ?: run { delegations.remove(sessionId); return }
         val sec = store.section(d.sectionId) ?: run { delegations.remove(sessionId); return }
@@ -565,7 +747,19 @@ class AgentRunner(
         ))
         // Esperando o usuário (confirmação/pergunta): mantém a delegação viva para relatar o resultado final depois.
         if (!waitingUser) delegations.remove(sessionId)
-        val report = memberReport(member, sessionId, d.startIndex)
+        var report = memberReport(member, sessionId, d.startIndex)
+        if (d.taskId != null && !waitingUser) {
+            val ok = child.status != SessionStatus.ERROR
+            val answer = (child.items.drop(d.startIndex).lastOrNull { it is ChatItem.Assistant } as? ChatItem.Assistant)?.text.orEmpty()
+            editPlan(sec.id) { SectionPlanEngine.finished(it, d.taskId, ok, answer.ifBlank { report }, System.currentTimeMillis()) }
+            val t = store.section(sec.id)?.plan?.firstOrNull { it.id == d.taskId }
+            report += "\n\n" + when (t?.status) {
+                TaskStatus.REVIEW -> "Etapa ${d.taskId} do plano ENTREGUE. Valide agora: team_review(task_id=\"${d.taskId}\", verdict=approve|redo|block, note). Aprovando, as próximas etapas começam sozinhas."
+                TaskStatus.PENDING -> "Etapa ${d.taskId} falhou (${t.note}); o app vai tentar de novo automaticamente."
+                TaskStatus.FAILED -> "Etapa ${d.taskId} FALHOU de vez (${t.note}). Reorganize com team_plan ou explique o bloqueio ao usuário."
+                else -> "Etapa ${d.taskId}: ${t?.status}."
+            }
+        }
         if (!waitingUser && d.task.isNotBlank()) {
             val answer = (child.items.drop(d.startIndex).lastOrNull { it is ChatItem.Assistant } as? ChatItem.Assistant)?.text.orEmpty()
             if (answer.isNotBlank()) delivered.getOrPut(member.id) { java.util.Collections.synchronizedList(mutableListOf()) }
@@ -692,7 +886,8 @@ class AgentRunner(
             }
         }
         val partial = memberReport(member, childId, d?.startIndex ?: 0)
-        return (if (wasRunning) "${member.name} parado. " else "${member.name} já estava parado. ") + partial
+        d?.taskId?.let { tid -> editPlan(sec.id) { SectionPlanEngine.finished(it, tid, ok = true, result = "PARADO: ${reason.take(120)}. $partial", now = System.currentTimeMillis()) } }
+        return (if (d?.taskId != null) "Etapa ${d.taskId} foi para validação: aprove, peça redo ou bloqueie com team_review. " else "") + (if (wasRunning) "${member.name} parado. " else "${member.name} já estava parado. ") + partial
     }
 
     private fun teamStatus(sessionId: String): String {
@@ -709,7 +904,8 @@ class AgentRunner(
             }
             val last = (child?.items?.lastOrNull { it is ChatItem.Assistant } as? ChatItem.Assistant)?.text?.take(300)?.replace('\n', ' ')
             "${idx + 1}. ${a.name} — $state" + (last?.let { "\n   Última resposta: $it" } ?: "")
-        }.joinToString("\n").ifBlank { "Time vazio." }
+        }.joinToString("\n").ifBlank { "Time vazio." } +
+            (if (sec.plan.isNotEmpty()) "\n\n" + SectionPlanEngine.describe(sec.plan) else "")
     }
 
     /** Resposta do card de confirmação. */
@@ -1530,6 +1726,10 @@ class AgentRunner(
     /** Detectores puros de loop/degeneração (sem Android) — testáveis na JVM. */
     companion object LoopGuards {
         const val MAX_PARALLEL_MEMBERS = 4
+        /** Prefixo de retorno do team_delegate quando o agente realmente começou (o despacho do plano confere). */
+        const val DELEGATION_STARTED = "OK:"
+        /** Lembretes ao coordenador sem nenhuma mudança no plano antes de declarar o plano travado. */
+        const val MAX_PLAN_NUDGES = 2
         const val MEMBER_SLOW_MINUTES = 30L
         private val STRICT_REPEAT_TOOLS = setOf("connector_validate", "connector_test", "connector_propose", "connector_edit_propose")
         /** Leituras de conteúdo: o mesmo texto longo voltando por caminhos diferentes é falta de progresso. */
@@ -2044,7 +2244,9 @@ class AgentRunner(
                 store.section(session.sectionId)?.takeIf { it.coordinatorAgentId == agent?.id }?.let { sec ->
                     appendLine(); appendLine("## Você coordena a seção ${sec.name}")
                     appendLine("- Time: " + sec.agentIds.mapNotNull { store.agent(it)?.name }.joinToString(", ") + ".")
-                    appendLine("- Delegue com team_delegate (não bloqueia; acione vários em paralelo quando fizer sentido). O usuário vê cada agente trabalhando numa pílula ao vivo.")
+                    appendLine("- Pedido com mais de uma etapa: PRIMEIRO chame team_plan (etapas, agente e dependências). O app inicia as etapas sozinho e, a cada [Relatório automático], você valida com team_review (approve/redo/block). Aprovou → as próximas começam sozinhas. Não espere o usuário mandar \"continue\".")
+                    appendLine("- team_delegate fica para tarefas avulsas fora do plano (não bloqueia; acione vários em paralelo quando fizer sentido). O usuário vê cada agente trabalhando numa pílula ao vivo.")
+                    if (sec.plan.isNotEmpty()) appendLine("- PLANO ATUAL (persistido):\n" + SectionPlanEngine.describe(sec.plan))
                     appendLine("- Entre as ações, mande feedbacks CURTOS (5 a 30 palavras) e siga trabalhando. Nada de terminal/browser: o trabalho é dos agentes.")
                     appendLine("- Ao receber [Relatório automático], avalie, cobre ajustes ou passe a próxima etapa; entregue o progresso em lista numerada.")
                     appendLine("- Nunca re-delegue uma tarefa já entregue (o app recusa): use o resultado ou peça um ajuste específico. Quando TODAS as etapas estiverem entregues e revisadas, envie o relatório final e PARE — não recomece o pedido original.")
@@ -2218,6 +2420,20 @@ class AgentRunner(
                     put("wait", bool("true = espera o resultado (até timeout_minutes). Padrão false"))
                     put("timeout_minutes", int("Com wait=true: espera máxima (1-30; padrão 15)"))
                 }, listOf("agent", "task")))
+            add(tool("team_plan",
+                "Registra o PLANO da seção: etapas, agente responsável e dependências. O app salva o plano (sobrevive ao app fechar), inicia na hora as etapas sem dependência " +
+                    "e, a cada etapa que você aprovar com team_review, inicia SOZINHO as seguintes, passando as entregas anteriores como insumo. Use no começo de todo pedido com mais de uma etapa.",
+                buildJsonObject {
+                    put("goal", str("Objetivo final do usuário em 1 frase"))
+                    put("tasks_json", str("Array JSON: [{\"id\":\"T1\",\"agent\":\"Pesquisador\",\"task\":\"tarefa completa com entregável e critério de pronto\",\"depends_on\":[]}, {\"id\":\"T2\",\"agent\":\"Separador\",\"task\":\"...\",\"depends_on\":[\"T1\"]}]. Etapas sem dependência entre si rodam em paralelo."))
+                }, listOf("goal", "tasks_json")))
+            add(tool("team_review",
+                "Valida a entrega de uma etapa do plano. approve = aprovada (as dependentes começam sozinhas); redo = refazer com o ajuste em note (máx. 3 tentativas); block = precisa do usuário; cancel = não é mais necessária.",
+                buildJsonObject {
+                    put("task_id", str("Id da etapa (ex.: T2)"))
+                    put("verdict", str("approve | redo | block | cancel"))
+                    put("note", str("Motivo curto; em redo, exatamente o que ajustar"))
+                }, listOf("task_id", "verdict")))
             add(tool("team_status", "Mostra o estado de cada Agent do time (trabalhando, aguardando usuário, concluído) e a última resposta de cada um.", buildJsonObject {}))
             add(tool("team_message",
                 "Envia AGORA uma orientação/correção a um agente do time (ele recebe no próximo passo, sem parar). Use quando um checkpoint mostrar desvio, travamento ou falta de insumo.",
@@ -2834,6 +3050,8 @@ class AgentRunner(
                 s("first_task"), s("suggested_android_caps"), b("suggest_wallet"))
             "team_delegate" -> return ToolResult(teamDelegate(sessionId, s("agent"), s("task"), b("wait"), (i("timeout_minutes") ?: 15).coerceIn(1, 30)))
             "team_status" -> return ToolResult(teamStatus(sessionId))
+            "team_plan" -> return ToolResult(teamPlan(sessionId, s("goal"), s("tasks_json")))
+            "team_review" -> return ToolResult(teamReview(sessionId, s("task_id"), s("verdict"), s("note")))
             "team_message" -> return ToolResult(teamMessage(sessionId, s("agent"), s("message")))
             "team_stop" -> return ToolResult(teamStop(sessionId, s("agent"), s("reason")))
             "update_plan" -> {
@@ -3783,7 +4001,7 @@ class AgentRunner(
         if (isError) executions.fail(executionId, safeExecutionOutput) else executions.finish(executionId, safeExecutionOutput)
         if (isError || markerError) {
             val safeLog = if (accessibilityTool) "Falha de ferramenta Android; conteúdo de tela omitido por privacidade."
-                else if (call.name.startsWith("browser_") && isError)
+                else if (call.name.startsWith("browser_") && isError && !out.contains("não vale mais"))  // índice velho já se recupera sozinho
                     // Falha de browser: grava o diagnóstico completo para a próxima correção ser certeira.
                     out.take(900) + "\n\n" + runCatching { browserFor(sessionId).diagnostics() }.getOrDefault("(diagnóstico indisponível)")
                 else out.take(1000)

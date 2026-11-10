@@ -327,6 +327,30 @@ data class Section(
     val createdAt: Long = now(),
     /** Chat onde a seção foi criada: seus dados seguros e o pedido original são herdados pela seção. */
     val originSessionId: String? = null,
+    /** Plano persistido (team_plan): tarefas, dependências e estados. Sobrevive ao fechamento do app. */
+    val planGoal: String = "",
+    val plan: List<SectionTask> = emptyList(),
+    /** Item ChatItem.Plan do chat do coordenador que espelha o plano (progresso real). */
+    val planItemId: String? = null,
+)
+
+/** Estados de uma tarefa do plano. REVIEW = o agente entregou e o coordenador precisa validar. */
+@Serializable
+enum class TaskStatus { PENDING, RUNNING, REVIEW, DONE, FAILED, BLOCKED, CANCELLED }
+
+@Serializable
+data class SectionTask(
+    val id: String,
+    val agentId: String,
+    val agentName: String,
+    val task: String,
+    val dependsOn: List<String> = emptyList(),
+    val status: TaskStatus = TaskStatus.PENDING,
+    val attempts: Int = 0,
+    val result: String = "",
+    val note: String = "",
+    val startedAt: Long? = null,
+    val endedAt: Long? = null,
 )
 
 /** Conector MCP remoto (OAuth público com registro dinâmico de cliente, sem API key). */

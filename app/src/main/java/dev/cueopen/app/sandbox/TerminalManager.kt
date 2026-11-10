@@ -101,6 +101,7 @@ class TerminalManager(private val ctx: Context, private val sandbox: Sandbox) {
                     // Reuses the installed Alpine base; this only prepares the per-session workspace.
                     if (!sandbox.ensureEnvironment(key)) false else {
                         File(sandbox.publicFor(key), cwd.removePrefix("/root/")).mkdirs()
+                        envToken = currentEnvToken(create = true)
                         installShellHook(key)
                         if (replayTranscript) runCatching { stageTranscriptForReplay() }
                             .onFailure { android.util.Log.e("CueOpenTerminal", "Falha ao preparar o histórico visual.", it) }
@@ -154,6 +155,19 @@ class TerminalManager(private val ctx: Context, private val sandbox: Sandbox) {
             pending?.cancel(kotlinx.coroutines.CancellationException("Comando interrompido pelo usuário"))
             main.post { if (_alive.value) term.write("\u0003") }
         }
+
+        /**
+         * Marca do ambiente com que este processo do proot foi iniciado. Se o workspace for apagado e
+         * recriado (Limpar contexto/Reiniciar), o processo antigo continua preso ao diretório APAGADO: tudo
+         * o que ele escreve some e a captura de saída "não é criada". Marca diferente = reinicia o terminal.
+         */
+        @Volatile private var envToken: String? = null
+        private fun currentEnvToken(create: Boolean): String? = runCatching {
+            val f = File(sandbox.publicFor(key), ".cue/env_token")
+            if (!f.isFile && create) { f.parentFile?.mkdirs(); f.writeText(java.util.UUID.randomUUID().toString()) }
+            if (f.isFile) f.readText().trim() else null
+        }.getOrNull()
+        private fun environmentReplaced(): Boolean = _alive.value && envToken != null && currentEnvToken(create = false) != envToken
 
         fun kill() {
             startJob?.cancel()
@@ -267,6 +281,7 @@ class TerminalManager(private val ctx: Context, private val sandbox: Sandbox) {
          */
         suspend fun runAgentCommand(command: String, timeoutSec: Long, background: Boolean): Sandbox.ExecResult =
             agentLock.withLock {
+                if (environmentReplaced()) withContext(Dispatchers.Main) { kill() }
                 val startup = withContext(Dispatchers.Main) { if (!_alive.value) start(); startResult }
                 // A preparação é assíncrona; iniciar o processo não significa que o prompt do bash já apareceu.
                 val ready = withTimeoutOrNull(12_000) {
@@ -325,8 +340,15 @@ class TerminalManager(private val ctx: Context, private val sandbox: Sandbox) {
                     // O out.log é escrito no filesystem do Android via bind-mount do proot; aguarda
                     // brevemente a visibilidade do arquivo antes de ler (evita leitura prematura vazia).
                     var waited = 0
-                    while (!outputFile.isFile && waited < 500) { delay(40); waited += 40 }
-                    ShellOutput.readCapturedFile(outputFile)
+                    while (!outputFile.isFile && waited < 3_000) { delay(50); waited += 50 }
+                    if (!outputFile.isFile) {
+                        // Captura sumiu: o processo provavelmente está preso a um workspace antigo. Reinicia o
+                        // terminal para o próximo comando funcionar e diz isso ao agente (sem repetir sozinho:
+                        // o comando pode ter efeitos).
+                        withContext(Dispatchers.Main) { kill() }
+                        "Erro: a saída do comando não pôde ser capturada (terminal preso a um ambiente antigo). " +
+                            "O terminal foi REINICIADO; confira com ls se o comando teve efeito e execute de novo se necessário."
+                    } else ShellOutput.readCapturedFile(outputFile)
                 }
                 // Em segundo plano o nohup ainda vai ler o script: apagar aqui causava
                 // "bash: …/run_x.sh: No such file or directory" e o servidor nunca subia.

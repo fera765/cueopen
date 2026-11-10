@@ -117,6 +117,7 @@ class CueApp : Application() {
         terminals = dev.cueopen.app.sandbox.TerminalManager(this, sandbox)
         agent = AgentRunner(store, sandbox, ::browserFor, llm, terminals, this)
         agent.resumeSleeping()
+        agent.recoverSections()  // planos de seção interrompidos continuam sozinhos
         agent.startAutonomy()
         dev.cueopen.app.scheduler.AutonomyWorker.ensure(this)
         // terminal já ativo em segundo plano assim que o app abre (se o sandbox estiver instalado)

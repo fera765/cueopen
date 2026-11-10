@@ -1220,12 +1220,24 @@ class BrowserHost(private val appCtx: Context, sessionId: String = "__legacy__")
         }.getOrElse { "Falha ao ler página: $raw" }
     }
 
+    /**
+     * Índice velho (a página navegou/re-renderizou ou a aba mudou): em vez de só devolver erro — o que
+     * custava uma volta extra do modelo e gerava cliques repetidos —, já lê a aba ativa e devolve o
+     * snapshot NOVO junto, para o agente escolher o índice certo na próxima ação.
+     */
+    private suspend fun staleRefRecovery(index: Int, why: String): String {
+        val fresh = runCatching { read(6_000, trackRepeat = false) }.getOrDefault("")
+        return "ERRO: o índice $index não vale mais ($why). Nada foi clicado/digitado. " +
+            "Snapshot ATUALIZADO abaixo — escolha o índice nele (não repita o $index):\n\n$fresh"
+    }
+
     suspend fun click(index: Int): String {
         val tab = onMain { activeTab()?.takeIf { lastReadTabId == it.id } }
-            ?: return "ERRO: leia novamente a aba ativa antes de usar um índice; referências não passam entre abas."
+            ?: return staleRefRecovery(index, "a aba ativa mudou desde a última leitura")
         val r = eval("""(function(){var e=document.querySelector('[data-cue="$index"]');if(!e)return 'elemento $index não encontrado: referência obsoleta; execute browser_read novamente, escolha um índice novo e não repita este';e.scrollIntoView({block:'center'});e.click();return 'ok: clicou em '+(e.innerText||e.value||e.tagName).slice(0,60);})()""", tab = tab)
+        if (r.contains("não encontrado")) return staleRefRecovery(index, "a página mudou e o elemento sumiu")
         awaitLoadIfNavigating(tab)
-        if (!r.contains("não encontrado")) waitForStable(tab, 6_000)  // modais/listas que abrem por JS
+        waitForStable(tab, 6_000)  // modais/listas que abrem por JS
         return r
     }
 
@@ -1248,7 +1260,7 @@ class BrowserHost(private val appCtx: Context, sessionId: String = "__legacy__")
 
     suspend fun type(index: Int, text: String, submit: Boolean): String {
         val tab = onMain { activeTab()?.takeIf { lastReadTabId == it.id } }
-            ?: return "ERRO: leia novamente a aba ativa antes de usar um índice; referências não passam entre abas."
+            ?: return staleRefRecovery(index, "a aba ativa mudou desde a última leitura")
         val t = JSONObject.quote(text)
         val r = eval("""
             (function(){var e=document.querySelector('[data-cue="$index"]');if(!e)return 'elemento $index não encontrado';
@@ -1258,6 +1270,7 @@ class BrowserHost(private val appCtx: Context, sessionId: String = "__legacy__")
             ${if (submit) "if(e.form){e.form.requestSubmit?e.form.requestSubmit():e.form.submit();}else{e.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',keyCode:13,bubbles:true}));}" else ""}
             return 'ok';})()
         """.trimIndent(), tab = tab)
+        if (r.contains("não encontrado")) return staleRefRecovery(index, "a página mudou e o campo sumiu")
         if (submit) awaitLoadIfNavigating(tab)
         return r
     }
