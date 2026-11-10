@@ -6,7 +6,7 @@ package dev.cueopen.app.browser
  * // ==UserScript==
  * // @name         Meu script
  * // @version      1.0
- * // @match        https://*.exemplo.com/*
+ * // @match        https://exemplo.com/(caminho)   — curingas com asterisco como no Chrome
  * // @grant        GM_addStyle
  * // ==/UserScript==
  *
