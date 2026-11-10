@@ -417,6 +417,8 @@ class BrowserHost(private val appCtx: Context, private val sessionId: String = "
         }
         val isolated = true
         _ui.value = _ui.value.copy(profileIsolated = isolated)
+        // Ponte do GM_xmlhttpRequest para os User Scripts (só responde a quem tem o token do envelope).
+        if (sessionId != BrowserFeatures.LOGIN_BROWSER_KEY) BrowserFeatures.installBridge(v)
         runCatching {
             val cm = cookieManagerFor(v)
             cm.setAcceptCookie(true)
@@ -490,6 +492,8 @@ class BrowserHost(private val appCtx: Context, private val sessionId: String = "
                 // tratado como prontidão funcional.
                 tab.pageDone?.complete(tab.navigationStatus.pageCommitted(url))
                 persistWebViewState(tab, view)
+                // @run-at document-start: roda no primeiro quadro (o WebView não permite antes disso de forma confiável).
+                runCatching { BrowserFeatures.applyUserScripts(view, url, sessionId, early = true) }
             }
             override fun onPageFinished(view: WebView, url: String) {
                 tab.diag.add("onPageFinished $url")
@@ -1236,6 +1240,14 @@ class BrowserHost(private val appCtx: Context, private val sessionId: String = "
         val fresh = runCatching { read(6_000, trackRepeat = false) }.getOrDefault("")
         return "ERRO: o índice $index não vale mais ($why). Nada foi clicado/digitado. " +
             "Snapshot ATUALIZADO abaixo — escolha o índice nele (não repita o $index):\n\n$fresh"
+    }
+
+    /** Roda um userscript (já envelopado) na aba ativa — usado pelo criador de scripts com IA para testar. */
+    suspend fun runUserScriptForTest(script: dev.cueopen.app.data.UserScript): String {
+        val tab = onMain { activeTab() } ?: return "ERROR: não há aba aberta; navegue primeiro."
+        val view = onMain { tab.webView } ?: return "ERROR: a aba não tem página carregada."
+        val wrapped = BrowserPolicies.wrap(script.copy(id = script.id + System.nanoTime().toString(36)), BrowserFeatures.tokenFor(view))
+        return BrowserPolicies.parseResult(eval(wrapped, tab = tab)).let { if (it.isBlank() || it == "null") "err:erro de sintaxe no script" else it }
     }
 
     suspend fun click(index: Int): String {

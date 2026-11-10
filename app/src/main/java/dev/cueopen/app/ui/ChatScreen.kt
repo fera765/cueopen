@@ -422,6 +422,7 @@ fun TimelineItem(item: ChatItem, onOpenComputer: (String) -> Unit, onOpenMedia: 
         is ChatItem.Media -> MediaCard(item, onOpenMedia)
         is ChatItem.Error -> InfoRow(Icons.Rounded.ErrorOutline, item.text, Cue.c.err)
         is ChatItem.ConnectorProposal -> ConnectorProposalCard(item, sessionId, nav)
+        is ChatItem.UserScriptProposal -> UserScriptProposalCard(item, sessionId, nav)
         is ChatItem.ConnectorEditProposal -> ConnectorEditProposalCard(item, sessionId)
         is ChatItem.Question -> QuestionCard(item, sessionId)
         is ChatItem.SecureForm -> SecureFormCard(item, sessionId)
@@ -809,6 +810,7 @@ fun sessionMarkdown(s: Session): String = buildString {
             is ChatItem.Step -> appendLine("> ${i.title}: `${i.args}`")
             is ChatItem.Plan -> { appendLine("**Plano:** ${i.goal}"); i.phases.forEach { appendLine("- [${if (it.done) "x" else " "}] ${it.title}") }; appendLine() }
             is ChatItem.Error -> appendLine("⚠️ ${i.text}\n")
+            is ChatItem.UserScriptProposal -> appendLine("📜 User Script ${i.name} ${i.version}${if (i.installed) " — instalado" else ""}\n")
             is ChatItem.ConnectorProposal -> appendLine("🧩 Conector ${i.name} (${i.host})${if (i.installed) " — instalado" else ""}\n")
             is ChatItem.ConnectorEditProposal -> appendLine("⚙️ Atualização de ${i.connectorName}: ${i.summary}${if (i.applied) " — aplicada" else " — pendente"}\n")
             is ChatItem.Question -> { i.questions.forEachIndexed { n, q -> appendLine("❓ ${q.question} → ${i.answers.getOrNull(n)?.joinToString().orEmpty().ifBlank { "—" }}") }; appendLine() }
@@ -833,6 +835,35 @@ fun shareSession(ctx: android.content.Context, s: Session) {
     val i = Intent(Intent.ACTION_SEND_MULTIPLE).setType("*/*").putParcelableArrayListExtra(Intent.EXTRA_STREAM, uris)
         .putExtra(Intent.EXTRA_TEXT, sessionMarkdown(s).take(4000)).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
     ctx.startActivity(Intent.createChooser(i, "Compartilhar tarefa"))
+}
+
+/** Card "Instalar no Browser" de um userscript criado e testado pela IA. */
+@Composable
+private fun UserScriptProposalCard(p: ChatItem.UserScriptProposal, sessionId: String?, nav: NavController?) {
+    val c = Cue.c
+    val app = CueApp.instance
+    val scope = rememberCoroutineScope()
+    var busy by remember(p.id) { mutableStateOf(false) }
+    var error by remember(p.id) { mutableStateOf<String?>(null) }
+    Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(20.dp)).background(c.surface).border(1.dp, c.line, RoundedCornerShape(20.dp)).padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Text("📜 " + p.name + if (p.version.isNotBlank()) " · v" + p.version else "", fontWeight = FontWeight.SemiBold, color = c.ink, fontSize = 16.sp)
+        if (p.description.isNotBlank()) Text(p.description, fontSize = 13.sp, color = c.ink2)
+        Text("Roda em: " + p.where, fontSize = 12.sp, color = c.ink3)
+        error?.let { Text(it, fontSize = 12.sp, color = c.accent) }
+        if (p.installed) Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("✓ Instalado no Browser", color = c.ok, fontSize = 13.sp, modifier = Modifier.weight(1f))
+            TextButton({ nav?.navigate("browserhub") }) { Text("Abrir Browser") }
+        } else Button(enabled = !busy && sessionId != null, onClick = {
+            busy = true
+            scope.launch {
+                val r = dev.cueopen.app.browser.UserScriptInstaller.install(p.code, "ia")
+                busy = false
+                if (r.script == null) error = r.error
+                else sessionId?.let { sid -> app.store.replaceItem(sid, p.copy(installed = true, scriptId = r.script.id)) }
+            }
+        }) { Text(if (busy) "Instalando…" else "Instalar no Browser") }
+    }
 }
 
 /** Card de instalação de um UI Connector que o agente criou e validou. */

@@ -66,6 +66,20 @@ sealed class ChatItem {
         val caption: String = "",
     ) : ChatItem()
 
+    /** User Script criado pela IA (padrão Tampermonkey), aguardando o usuário tocar em Instalar. */
+    @Serializable
+    data class UserScriptProposal(
+        override val id: String = newId(),
+        override val time: Long = now(),
+        val name: String,
+        val version: String = "",
+        val description: String = "",
+        val where: String = "",
+        val code: String,
+        val installed: Boolean = false,
+        val scriptId: String? = null,
+    ) : ChatItem()
+
     /** Conector UI aprovado em dry-run offline, aguardando o usuário tocar em Instalar. */
     @Serializable
     data class ConnectorProposal(
@@ -239,6 +253,8 @@ data class Session(
     val autoCompact: Boolean = true,
     /** Sessão aberta pelo criador de UI Connectors: só nela as ferramentas connector_* existem. */
     val connectorBuilder: Boolean = false,
+    /** Sessão aberta pelo "Criar com IA" dos User Scripts: ferramentas userscript_test/userscript_propose. */
+    val scriptBuilder: Boolean = false,
     /** Seção (time de Agents) a que este chat pertence; null = chat comum. */
     val sectionId: String? = null,
     /** Chat de edição vinculado a um único UI Connector; não habilita ferramentas gerais nem outros conectores. */
@@ -510,4 +526,20 @@ data class UserScript(
     val lastRunAt: Long? = null,
     /** Últimas execuções: "hh:mm host · ok|erro: …" */
     val history: List<String> = emptyList(),
+    // ── Metadados extraídos do cabeçalho // ==UserScript== (padrão Tampermonkey) ──
+    val namespace: String = "",
+    val version: String = "",
+    val author: String = "",
+    val matches: List<String> = emptyList(),
+    val includes: List<String> = emptyList(),
+    val excludes: List<String> = emptyList(),
+    val grants: List<String> = emptyList(),
+    val requires: List<String> = emptyList(),
+    /** Código baixado dos @require na instalação (roda antes do script). */
+    val requireCode: String = "",
+    /** document-start | document-end | document-idle */
+    val runAt: String = "document-idle",
+    /** manual | arquivo | ia */
+    val source: String = "manual",
+    val installedAt: Long = now(),
 )

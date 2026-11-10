@@ -55,7 +55,7 @@ fun BrowserHubScreen(nav: NavController) {
             when (tab) {
                 0 -> AgentBrowsersTab(nav)
                 1 -> LoginsTab(nav)
-                2 -> UserScriptsTab()
+                2 -> UserScriptsTab(nav)
                 else -> BrowserSettingsTab()
             }
         }
@@ -223,82 +223,154 @@ fun BrowserLoginScreen(nav: NavController, loginId: String) {
 }
 
 @Composable
-private fun UserScriptsTab() {
+private fun UserScriptsTab(nav: NavController) {
     val app = CueApp.instance
     val st by app.store.state.collectAsStateWithLifecycle()
     val c = Cue.c
+    val ctx = androidx.compose.ui.platform.LocalContext.current
+    val scope = rememberCoroutineScope()
     var editing by remember { mutableStateOf<UserScript?>(null) }
-    var creating by remember { mutableStateOf(false) }
+    var menu by remember { mutableStateOf(false) }
+    var pasting by remember { mutableStateOf(false) }
+    var aiDialog by remember { mutableStateOf(false) }
+    var notice by remember { mutableStateOf<String?>(null) }
+    fun install(code: String, source: String) = scope.launch {
+        val r = dev.cueopen.app.browser.UserScriptInstaller.install(code, source)
+        notice = r.error?.let { "Não instalado: $it" } ?: "${if (r.updated) "Atualizado" else "Instalado"}: ${r.script?.name} ${r.script?.version.orEmpty()}"
+    }
+    // Importar arquivo .js (Storage Access Framework): lê o texto e instala direto.
+    val picker = androidx.activity.compose.rememberLauncherForActivityResult(androidx.activity.result.contract.ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) {
+            val text = runCatching { ctx.contentResolver.openInputStream(uri)?.use { it.readBytes().decodeToString() } }.getOrNull()
+            if (text == null) notice = "Não consegui ler o arquivo." else install(text, "arquivo")
+        }
+    }
     LazyColumn(contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
         item {
-            Text("Scripts rodam sozinhos nos browsers dos agentes, só nos domínios que você definir (nunca em todos os sites). Rodam uma vez por página; 3 erros seguidos desligam o script.",
+            Text("Padrão Tampermonkey: nome, versão e sites saem do cabeçalho // ==UserScript== (@name, @version, @match). Rodam sozinhos nos browsers dos agentes, uma vez por página; 3 erros seguidos desligam o script.",
                 fontSize = 13.sp, color = c.ink2, lineHeight = 18.sp)
             Spacer(Modifier.height(10.dp))
-            PillButton("Novo script", Icons.Rounded.Add) { creating = true }
+            PillButton("Novo script", Icons.Rounded.Add) { menu = true }
+            notice?.let { Spacer(Modifier.height(8.dp)); Text(it, fontSize = 13.sp, color = if (it.startsWith("Não")) c.accent else c.ok) }
         }
-        if (st.userScripts.isEmpty()) item { EmptyState(Icons.Rounded.Code, "Nenhum script", "Ex.: esconder anúncios ou banners de cookies num site específico.") }
-        items(st.userScripts.sortedByDescending { it.priority }, key = { it.id }) { u ->
+        if (st.userScripts.isEmpty()) item { EmptyState(Icons.Rounded.Code, "Nenhum script", "Crie com IA, cole um userscript ou importe um arquivo .js.") }
+        items(st.userScripts.sortedByDescending { it.installedAt }, key = { it.id }) { u ->
             CueCard(onClick = { editing = u }) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Column(Modifier.weight(1f)) {
-                        Text(u.name, fontWeight = FontWeight.SemiBold, color = c.ink)
-                        Text(u.domains.joinToString(), fontSize = 12.sp, color = c.ink3, fontFamily = FontFamily.Monospace, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Text(u.name + if (u.version.isNotBlank()) "  v${u.version}" else "", fontWeight = FontWeight.SemiBold, color = c.ink)
+                        Text((u.matches + u.includes).ifEmpty { u.domains }.joinToString(), fontSize = 12.sp, color = c.ink3, fontFamily = FontFamily.Monospace, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     }
                     Switch(u.enabled, { on -> app.store.editUserScript(u.id) { it.copy(enabled = on, consecutiveErrors = if (on) 0 else it.consecutiveErrors) } })
                 }
-                if (u.description.isNotBlank()) Text(u.description, fontSize = 12.sp, color = c.ink2)
-                Text("Execuções ${u.runs} · erros ${u.errors} · prioridade ${u.priority} · última ${ago(u.lastRunAt)}", fontSize = 12.sp, color = c.ink2)
+                if (u.description.isNotBlank()) Text(u.description, fontSize = 12.sp, color = c.ink2, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                Text("Execuções ${u.runs} · erros ${u.errors} · última ${ago(u.lastRunAt)} · " + when (u.source) { "ia" -> "criado com IA"; "arquivo" -> "importado"; else -> "colado" },
+                    fontSize = 12.sp, color = c.ink2)
                 if (u.lastError.isNotBlank()) Text("Último erro: ${u.lastError}", fontSize = 12.sp, color = c.accent)
                 if (!u.enabled && u.consecutiveErrors >= BrowserPolicies.AUTO_DISABLE_AFTER_ERRORS) Text("Desligado automaticamente após erros seguidos.", fontSize = 12.sp, color = c.accent)
             }
         }
         item { Spacer(Modifier.height(40.dp)) }
     }
-    if (creating) ScriptEditDialog(null, st.agents, onDismiss = { creating = false }) { creating = false; app.store.upsertUserScript(it) }
-    editing?.let { e -> ScriptEditDialog(e, st.agents, onDismiss = { editing = null }, onDelete = { app.store.deleteUserScript(e.id); editing = null }) { editing = null; app.store.upsertUserScript(it) } }
+    if (menu) AlertDialog(onDismissRequest = { menu = false }, title = { Text("Novo User Script") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                CueCard(onClick = { menu = false; aiDialog = true }) {
+                    Text("✨ Criar com IA", fontWeight = FontWeight.SemiBold); Text("Descreva o que quer; a IA cria e testa no browser e mostra o card de instalar.", fontSize = 12.sp, color = c.ink2)
+                }
+                CueCard(onClick = { menu = false; pasting = true }) {
+                    Text("📋 Colar script", fontWeight = FontWeight.SemiBold); Text("Cole um userscript completo (com cabeçalho ==UserScript==).", fontSize = 12.sp, color = c.ink2)
+                }
+                CueCard(onClick = { menu = false; picker.launch(arrayOf("*/*")) }) {
+                    Text("📂 Importar arquivo .js", fontWeight = FontWeight.SemiBold); Text("Escolha um arquivo .user.js / .js do aparelho.", fontSize = 12.sp, color = c.ink2)
+                }
+            }
+        },
+        confirmButton = { TextButton({ menu = false }) { Text("Fechar") } })
+    if (pasting) PasteScriptDialog(onDismiss = { pasting = false }) { code ->
+        scope.launch {
+            val r = dev.cueopen.app.browser.UserScriptInstaller.install(code, "manual")
+            if (r.script != null) { pasting = false; notice = "${if (r.updated) "Atualizado" else "Instalado"}: ${r.script.name} ${r.script.version}" }
+            else notice = "Não instalado: ${r.error}"
+        }
+    }
+    if (aiDialog) {
+        var what by remember { mutableStateOf("") }
+        AlertDialog(onDismissRequest = { aiDialog = false }, title = { Text("Criar script com IA") },
+            text = { OutlinedTextField(what, { what = it }, minLines = 3, modifier = Modifier.fillMaxWidth(),
+                placeholder = { Text("Ex.: na Biblioteca de Anúncios do Facebook, mostrar há quantos dias cada anúncio está ativo") }) },
+            confirmButton = { TextButton(enabled = what.isNotBlank(), onClick = {
+                aiDialog = false
+                val sess = dev.cueopen.app.data.Session(title = "Script: " + what.trim().take(40), scriptBuilder = true)
+                app.store.upsertSession(sess)
+                app.agent.send(sess.id, "Crie, teste no browser e proponha um userscript (Tampermonkey, javascript/DOM) para: " + what.trim())
+                nav.navigate("chat/${sess.id}")
+            }) { Text("Criar") } },
+            dismissButton = { TextButton({ aiDialog = false }) { Text("Cancelar") } })
+    }
+    editing?.let { e -> ScriptEditDialog(e, st.agents, onDismiss = { editing = null }, onDelete = { app.store.deleteUserScript(e.id); editing = null }) { code, agentIds ->
+        scope.launch {
+            val r = dev.cueopen.app.browser.UserScriptInstaller.install(code, e.source)
+            if (r.script == null) notice = "Não salvo: ${r.error}"
+            else {
+                // Mesmo @name/@namespace: atualiza o próprio registro; se o nome mudou, o antigo sai.
+                if (r.script.id != e.id) app.store.deleteUserScript(e.id)
+                app.store.editUserScript(r.script.id) { it.copy(agentIds = agentIds) }
+                editing = null; notice = "Salvo: ${r.script.name} ${r.script.version}"
+            }
+        }
+    } }
 }
 
 @Composable
-private fun ScriptEditDialog(existing: UserScript?, agents: List<AgentProfile>, onDismiss: () -> Unit, onDelete: (() -> Unit)? = null, onSave: (UserScript) -> Unit) {
-    var name by remember { mutableStateOf(existing?.name.orEmpty()) }
-    var desc by remember { mutableStateOf(existing?.description.orEmpty()) }
-    var domains by remember { mutableStateOf(existing?.domains?.joinToString(", ").orEmpty()) }
-    var path by remember { mutableStateOf(existing?.pathContains.orEmpty()) }
-    var priority by remember { mutableStateOf((existing?.priority ?: 0).toString()) }
-    var code by remember { mutableStateOf(existing?.code ?: "document.querySelectorAll('[aria-label=\"Patrocinado\"]').forEach(e => e.remove());") }
-    var agentIds by remember { mutableStateOf(existing?.agentIds.orEmpty()) }
-    val domainList = domains.split(',', '\n', ' ').map { it.trim() }.filter { it.isNotEmpty() }
-    val error = BrowserPolicies.validateScript(name, code, domainList)
-    AlertDialog(onDismissRequest = onDismiss,
-        title = { Text(if (existing == null) "Novo User Script" else "Editar script") },
+private fun PasteScriptDialog(onDismiss: () -> Unit, onInstall: (String) -> Unit) {
+    var code by remember { mutableStateOf("") }
+    val (meta, err) = remember(code) { if (code.isBlank()) null to null else dev.cueopen.app.browser.UserScriptMeta.parse(code) }
+    AlertDialog(onDismissRequest = onDismiss, title = { Text("Colar userscript") },
         text = {
             Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedTextField(name, { name = it }, label = { Text("Nome") }, singleLine = true)
-                OutlinedTextField(desc, { desc = it }, label = { Text("Descrição") })
-                OutlinedTextField(domains, { domains = it }, label = { Text("Domínios (ex.: facebook.com, *.exemplo.com)") })
-                OutlinedTextField(path, { path = it }, label = { Text("Só se a URL contiver (opcional)") }, singleLine = true)
-                OutlinedTextField(priority, { priority = it.filter { ch -> ch.isDigit() || ch == '-' }.take(4) }, label = { Text("Prioridade (maior roda primeiro)") }, singleLine = true)
-                OutlinedTextField(code, { code = it }, label = { Text("JavaScript") }, minLines = 6,
+                OutlinedTextField(code, { code = it }, minLines = 8, modifier = Modifier.fillMaxWidth(),
+                    placeholder = { Text(dev.cueopen.app.browser.UserScriptMeta.EXAMPLE + "\n\n// seu código…", fontFamily = FontFamily.Monospace, fontSize = 11.sp) },
                     textStyle = LocalTextStyle.current.copy(fontFamily = FontFamily.Monospace, fontSize = 12.sp))
+                when {
+                    err != null -> Text("Formato inválido: $err", color = Cue.c.accent, fontSize = 12.sp)
+                    meta != null -> Text("✓ ${meta.name} ${meta.version} · roda em ${meta.whereLabel}" +
+                        if (meta.allSites) " (TODOS os sites)" else "", color = Cue.c.ok, fontSize = 12.sp)
+                }
+            }
+        },
+        confirmButton = { TextButton({ onInstall(code) }, enabled = meta != null) { Text("Instalar") } },
+        dismissButton = { TextButton(onDismiss) { Text("Cancelar") } })
+}
+
+@Composable
+private fun ScriptEditDialog(existing: UserScript, agents: List<AgentProfile>, onDismiss: () -> Unit, onDelete: () -> Unit, onSave: (String, List<String>) -> Unit) {
+    var code by remember { mutableStateOf(existing.code) }
+    var agentIds by remember { mutableStateOf(existing.agentIds) }
+    // Scripts antigos (antes do cabeçalho) ganham um cabeçalho gerado a partir dos domínios.
+    LaunchedEffect(existing.id) {
+        if (dev.cueopen.app.browser.UserScriptMeta.parse(code).first == null && existing.domains.isNotEmpty())
+            code = "// ==UserScript==\n// @name         ${existing.name}\n// @version      1.0\n" +
+                existing.domains.joinToString("") { d -> "// @match        *://${if (d.startsWith("*.")) d else "*.$d"}/*\n// @match        *://${d.removePrefix("*.")}/*\n" } +
+                "// ==/UserScript==\n" + existing.code
+    }
+    val (meta, err) = remember(code) { dev.cueopen.app.browser.UserScriptMeta.parse(code) }
+    AlertDialog(onDismissRequest = onDismiss, title = { Text(existing.name) },
+        text = {
+            Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedTextField(code, { code = it }, minLines = 10, modifier = Modifier.fillMaxWidth(),
+                    textStyle = LocalTextStyle.current.copy(fontFamily = FontFamily.Monospace, fontSize = 12.sp))
+                if (err != null) Text("Formato inválido: $err", color = Cue.c.accent, fontSize = 12.sp)
+                else if (meta != null) Text("${meta.name} ${meta.version} · ${meta.whereLabel} · ${meta.runAt}", fontSize = 12.sp, color = Cue.c.ink2)
                 AgentPicker(agents, agentIds) { agentIds = it }
-                if (error != null) Text(error, color = Cue.c.accent, fontSize = 12.sp)
-                existing?.history?.takeIf { it.isNotEmpty() }?.let { h ->
+                existing.history.takeIf { it.isNotEmpty() }?.let { h ->
                     Text("Histórico:", fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
                     h.asReversed().forEach { Text(it, fontSize = 11.sp, fontFamily = FontFamily.Monospace) }
                 }
-                if (onDelete != null) TextButton(onDelete) { Text("Excluir script", color = Cue.c.accent) }
+                TextButton(onDelete) { Text("Excluir script", color = Cue.c.accent) }
             }
         },
-        confirmButton = {
-            TextButton({
-                val base = existing ?: UserScript(name = name, code = code)
-                onSave(base.copy(name = name.trim(), description = desc.trim(), code = code,
-                    domains = domainList.map { BrowserPolicies.normalizeDomain(it) }.distinct(), pathContains = path.trim(),
-                    priority = priority.toIntOrNull() ?: 0, agentIds = agentIds,
-                    // Editou: zera a sequência de erros para dar nova chance.
-                    consecutiveErrors = 0, enabled = existing?.enabled ?: true))
-            }, enabled = error == null) { Text("Salvar") }
-        },
+        confirmButton = { TextButton({ onSave(code, agentIds) }, enabled = meta != null) { Text("Salvar") } },
         dismissButton = { TextButton(onDismiss) { Text("Cancelar") } })
 }
 

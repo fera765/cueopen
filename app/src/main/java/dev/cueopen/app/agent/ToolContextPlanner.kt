@@ -48,7 +48,7 @@ object ToolContextPlanner {
 
     /** Palavras do pedido que ativam cada grupo (sem acento, minúsculas). */
     private val TRIGGERS: Map<String, List<String>> = mapOf(
-        "web_dev" to listOf("javascript", "console", "network", "rede do site", "requisic", "devtools", "api do site", "scrap", "raspar", "depur", "debug", "xhr", "fetch", "cookie", "dom"),
+        "web_dev" to listOf("javascript", "console", "network", "rede do site", "requisic", "devtools", "api do site", "scrap", "raspar", "depur", "debug", "xhr", "fetch", "cookie", "dom", "userscript", "user script", "tampermonkey"),
         "agents" to listOf("subagente", "sub-agente", "multi agente", "multiagente", "paralel", "em paralelo", "varios agentes", "workers", "pesquisa ampla", "wide research"),
         "schedule" to listOf("monitor", "acompanh", "a cada", "agend", "todo dia", "toda hora", "de hora em hora", "continu", "periodic", "lembr", "aguard", "espera", "minutos", "vela"),
         "skills_admin" to listOf("crie uma skill", "criar skill", "nova skill", "salve como skill"),
