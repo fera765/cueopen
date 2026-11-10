@@ -33,7 +33,7 @@ import org.json.JSONTokener
  * entre a UI e as ferramentas do agente (navigate/read/click/type/scroll); o usuário vê ao vivo
  * o que o agente faz e pode assumir o controle tocando na página.
  */
-class BrowserHost(private val appCtx: Context, sessionId: String = "__legacy__") {
+class BrowserHost(private val appCtx: Context, private val sessionId: String = "__legacy__") {
 
     private val persistence = BrowserSessionPersistence(appCtx, sessionId)
     /** Perfil WebView compartilhado (contas logadas); abas/histórico continuam por chat em [persistence]. */
@@ -501,6 +501,13 @@ class BrowserHost(private val appCtx: Context, sessionId: String = "__legacy__")
                 persistWebViewState(tab, view)
                 // grava o login no disco a cada página carregada: sobrevive a o app ser morto pelo Android
                 runCatching { cookieManagerFor(view).flush() }
+                // User Scripts do usuário (seção Browser) que valem para este domínio/agente.
+                runCatching { BrowserFeatures.applyUserScripts(view, url, sessionId) }
+            }
+            override fun doUpdateVisitedHistory(view: WebView, url: String, isReload: Boolean) {
+                // SPA (pushState) muda a URL sem recarregar: scripts com filtro de caminho podem passar a valer.
+                // O envelope evita injeção duplicada no mesmo documento.
+                if (!isReload) runCatching { BrowserFeatures.applyUserScripts(view, url, sessionId) }
             }
             override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): android.webkit.WebResourceResponse? {
                 // só observa (não intercepta): alimenta o painel de rede

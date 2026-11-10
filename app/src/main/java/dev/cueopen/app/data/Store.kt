@@ -235,6 +235,18 @@ class Store(context: Context) {
     fun deleteMemory(id: String) = update { it.copy(memories = it.memories.filterNot { m -> m.id == id }) }
 
     fun updateSettings(fn: (Settings) -> Settings) = update { it.copy(settings = fn(it.settings)) }
+
+    fun upsertBrowserLogin(l: BrowserLogin) = update { st ->
+        st.copy(browserLogins = if (st.browserLogins.any { it.id == l.id }) st.browserLogins.map { if (it.id == l.id) l else it } else st.browserLogins + l)
+    }
+    fun deleteBrowserLogin(id: String) = update { it.copy(browserLogins = it.browserLogins.filterNot { l -> l.id == id }) }
+    fun editBrowserLogin(id: String, fn: (BrowserLogin) -> BrowserLogin) = update { st -> st.copy(browserLogins = st.browserLogins.map { if (it.id == id) fn(it) else it }) }
+
+    fun upsertUserScript(u: UserScript) = update { st ->
+        st.copy(userScripts = if (st.userScripts.any { it.id == u.id }) st.userScripts.map { if (it.id == u.id) u else it } else st.userScripts + u)
+    }
+    fun deleteUserScript(id: String) = update { it.copy(userScripts = it.userScripts.filterNot { u -> u.id == id }) }
+    fun editUserScript(id: String, fn: (UserScript) -> UserScript) = update { st -> st.copy(userScripts = st.userScripts.map { if (it.id == id) fn(it) else it }) }
 }
 
 internal fun AppState.withConnectorLastErrorCleared(id: String): AppState {

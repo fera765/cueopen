@@ -47,6 +47,8 @@ class CueApp : Application() {
     val browserProxyStatus: StateFlow<String> = _browserProxyStatus.asStateFlow()
     /** Cada chat recebe WebView, perfil de dados e arquivo de restauração próprios. */
     fun browserFor(sessionId: String): BrowserHost = browsers.computeIfAbsent(sessionId) { BrowserHost(this, sessionId) }
+    /** Browsers já abertos (um por chat/agente), sem criar novos — para a seção Browser listar. */
+    fun openBrowsers(): Map<String, BrowserHost> = HashMap(browsers)
     /** Descarta a instância; dados persistidos só são removidos quando o chat é apagado. */
     fun closeBrowser(sessionId: String, clearPersistentData: Boolean = false) {
         val host = browsers.remove(sessionId)

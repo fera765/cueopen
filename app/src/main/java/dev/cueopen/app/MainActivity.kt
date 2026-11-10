@@ -219,6 +219,8 @@ fun CueNav(nav: NavHostController, startOnboarding: Boolean) {
         composable("knowledge/{id}") { e -> KnowledgeEditScreen(nav, e.arguments!!.getString("id")!!) }
         composable("files") { FilesScreen(nav) }
         composable("memory") { MemoryScreen(nav) }
+        composable("browserhub") { BrowserHubScreen(nav) }
+        composable("browserlogin/{id}") { e -> BrowserLoginScreen(nav, e.arguments!!.getString("id")!!) }
         composable("connectors") { ConnectorsScreen(nav) }
         composable("mcpconnector/{id}") { e -> McpConnectorSettingsScreen(nav, e.arguments!!.getString("id")!!) }
         composable("uiconnector/edit/{id}") { e -> UiConnectorEditorScreen(nav, e.arguments!!.getString("id")!!) }

@@ -2260,6 +2260,9 @@ class AgentRunner(
                     visits.forEach { appendLine(it) }
                     appendLine("- Não reabra páginas já abertas nem refaça a mesma busca: aprofunde (browser_read, browser_scroll, abra cada anúncio/link) ou mude a consulta. Página que falhou 2× não deve ser repetida.")
                 }
+                if (agent?.useBrowser != false) store.state.value.browserLogins.filter { l -> l.status == "active" && (l.allowedAgentIds.isEmpty() || agent?.id in l.allowedAgentIds) }
+                    .takeIf { it.isNotEmpty() }?.let { ls -> appendLine("- Sessões de login salvas pelo usuário e liberadas para você (já entra logado; NÃO tente logar nem peça senha): " +
+                        ls.joinToString { it.domain } + ". Se o site pedir login mesmo assim, a sessão expirou: avise o usuário para renovar em Browser › Sessões.") }
                 if (agent?.useBrowser != false) appendLine("- Browser: usa as contas em que o usuário já entrou (login salvo e compartilhado entre chats e Agents). Se um site pedir login, não invente credenciais: peça ao usuário com ask_user para entrar uma vez pela aba Browser e continue depois.")
                 if (agent?.useBrowser != false) appendLine("- Fluxo de pesquisa no browser: abra a busca UMA vez → browser_read → para mais resultados use browser_scroll + browser_read (o snapshot mostra quantas páginas faltam) → browser_click para abrir cada item → analise → browser_back. Nunca reabra a mesma URL para \"atualizar\"; se o snapshot avisar conteúdo IGUAL, mude de ação.")
             }
@@ -3807,10 +3810,18 @@ class AgentRunner(
                         "ERROR: arquivo não existe no workspace: $guest. Use file_list para achar o caminho certo (arquivos de conectores ficam em /root/connectors/<id>/workspace)."
                     } else {
                         val url = hostF?.let { "file://" + it.absolutePath } ?: BrowserVisitLog.canonical(raw)
+                        // Sessão de login salva (Browser › Sessões): só agentes autorizados entram com ela.
+                        val loginDenied = if (hostF != null) null else runCatching {
+                            val login = dev.cueopen.app.browser.BrowserPolicies.loginFor(dev.cueopen.app.browser.BrowserPolicies.hostOf(url), store.state.value.browserLogins)
+                            if (login == null || login.status == "revoked") null
+                            else dev.cueopen.app.browser.BrowserPolicies.loginDenial(login, store.session(sessionId)?.agentId)
+                                ?.let { "RECUSADO: $it. Não tente entrar por conta própria; peça ao usuário para liberar em Browser › Sessões ou siga sem esse site." }
+                                ?: run { store.editBrowserLogin(login.id) { it.copy(lastUsedAt = System.currentTimeMillis(), useCount = it.useCount + 1) }; null }
+                        }.getOrNull()
                         // Guarda-corpo: não reabrir a mesma busca/página em looping (mesmo com parâmetros reordenados).
                         val current = runCatching { browserFor(sessionId).ui.value.url }.getOrNull()
                         val repeated = BrowserVisitLog.check(sessionId, url, current)
-                        if (repeated != null) repeated else run {
+                        if (loginDenied != null) loginDenied else if (repeated != null) repeated else run {
                         val navigation = browserFor(sessionId).navigate(url)
                         BrowserVisitLog.record(sessionId, url, navigation)
                         if (navigation.startsWith("ERROR:")) navigation

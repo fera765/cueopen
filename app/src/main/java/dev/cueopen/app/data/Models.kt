@@ -462,4 +462,52 @@ data class AppState(
     val sections: List<Section> = emptyList(),
     val settings: Settings = Settings(),
     val onboarded: Boolean = false,
+    /** Seção Browser: sessões de login salvas (só metadados; cookies ficam no perfil do WebView). */
+    val browserLogins: List<BrowserLogin> = emptyList(),
+    /** Seção Browser: scripts do usuário injetados nos browsers dos agentes, por domínio. */
+    val userScripts: List<UserScript> = emptyList(),
+)
+
+/**
+ * Sessão de login salva. NÃO guarda senha nem cookie: o login fica no perfil persistente do WebView
+ * (armazenamento do próprio Chromium). Aqui ficam domínio, estado, uso e quais agentes podem usá-la.
+ */
+@Serializable
+data class BrowserLogin(
+    val id: String = newId(),
+    val name: String,
+    val url: String,
+    val domain: String,
+    val createdAt: Long = now(),
+    val lastVerifiedAt: Long? = null,
+    val lastUsedAt: Long? = null,
+    val useCount: Int = 0,
+    /** active | expired | revoked */
+    val status: String = "active",
+    /** Vazio = todos os agentes podem usar. */
+    val allowedAgentIds: List<String> = emptyList(),
+)
+
+@Serializable
+data class UserScript(
+    val id: String = newId(),
+    val name: String,
+    val description: String = "",
+    val code: String,
+    /** Domínios onde roda (ex.: facebook.com, *.exemplo.com). Vazio = não roda em lugar nenhum. */
+    val domains: List<String> = emptyList(),
+    /** Só roda se a URL contiver este trecho (opcional). */
+    val pathContains: String = "",
+    /** Maior roda primeiro. */
+    val priority: Int = 0,
+    val enabled: Boolean = true,
+    /** Vazio = todos os agentes. */
+    val agentIds: List<String> = emptyList(),
+    val runs: Int = 0,
+    val errors: Int = 0,
+    val consecutiveErrors: Int = 0,
+    val lastError: String = "",
+    val lastRunAt: Long? = null,
+    /** Últimas execuções: "hh:mm host · ok|erro: …" */
+    val history: List<String> = emptyList(),
 )
