@@ -1487,7 +1487,7 @@ class AgentRunner(
                 val ctxOut = ctxMgr.storeToolOutput(
                     sessionId, call.id, SecretVault.redact(sessionId, result.output),
                     limit = if (call.name == "connector_spec") 60_000 else 8_000,
-                    persistLongOutput = !accessibilityOutput)
+                    persistLongOutput = !accessibilityOutput, toolName = call.name)
                 if (accessibilityOutput) {
                     transientAccessibilityOutputs.remove(call.id)
                     transientAccessibilityOutputs[call.id] = ctxOut
@@ -1894,6 +1894,8 @@ class AgentRunner(
         /** Lembretes ao coordenador sem nenhuma mudança no plano antes de declarar o plano travado. */
         const val MAX_PLAN_NUDGES = 2
         const val MAX_AUTO_NUDGES = 3
+        /** Depois disso, um snapshot de browser arquivado é tratado como antigo e não é relido sem pedido explícito. */
+        const val STALE_SNAPSHOT_MINUTES = 3L
         const val MEMBER_SLOW_MINUTES = 30L
         private val STRICT_REPEAT_TOOLS = setOf("connector_validate", "connector_test", "connector_propose", "connector_edit_propose")
         /** Leituras de conteúdo: o mesmo texto longo voltando por caminhos diferentes é falta de progresso. */
@@ -2276,6 +2278,7 @@ class AgentRunner(
             appendLine("2b. Quando uma ferramenta falhar: leia a mensagem, identifique a causa e mude a abordagem (outro caminho, comando ou argumento). Repetir a mesma chamada produz o mesmo erro. Se ficar bloqueado de verdade, finalize explicando o motivo em vez de insistir.")
             appendLine("2b1. Permissões do sistema: `Permission denied` em `/vendor`, `/system`, `/proc`, `/sys` ou `/dev` é um limite do ambiente, não uma falha do `find`. Não use `sudo`, não repita a varredura e não tente contornar. Restrinja as buscas ao workspace autorizado e, se o dado necessário estiver fora dele, relate esse limite.")
             appendLine("2c. Servidores locais e browser: `localhost`/`127.0.0.1` apontam para o ambiente que hospeda o WebView, então não presuma que shell, navegador, emulador e computador remoto compartilham a mesma rede. Antes de abrir um servidor local: (1) identifique no projeto o comando e a porta; (2) verifique o processo/listener e faça uma sonda HTTP curta no mesmo ambiente de rede do navegador; (3) se o serviço não estiver pronto, inicie-o em segundo plano com o comando correto e aguarde uma resposta HTTP saudável com tentativas limitadas (sem `sleep` fixo); (4) confirme que o WebView alcança o endereço. `CONNECTION_REFUSED` significa listener, porta ou ambiente errado: corrija isso antes de chamar `browser_navigate` de novo. Depois de navegar, diferencie resposta HTTP, DOM carregado e prontidão funcional — `PARTIAL` ou texto visível não provam que a página está hidratada e pronta. Em timeout, inspecione URL, estado do DOM, console, requisições e logs do servidor e escolha uma recuperação específica; aumentar o prazo ou tentar de novo às cegas não resolve.")
+            appendLine("3z. Estado atual primeiro: páginas e arquivos mudam enquanto você trabalha. Decida sempre com a leitura mais recente (browser_read para a página, file_read para o arquivo vivo) e registre em notes_write os dados que vai precisar depois. Snapshots antigos do browser e saídas antigas arquivadas em .cue/out são histórico, não o estado de agora: não os releia para seguir a tarefa; só volte a eles quando o usuário ou o coordenador pedir exatamente aquele conteúdo.")
             appendLine("3. Economize contexto: leia só o necessário (head/grep) e mande saídas longas para um arquivo.")
             appendLine("3a. Trabalhe somente no seu workspace (${sandbox.guestPath(sessionId)}). O /root/workspace de outras tarefas pertence a elas; não leia.")
             appendLine("3b. Caminhos de arquivo: use caminhos relativos ao workspace da tarefa ou o alias /root/workspace/.... Caminhos Android (/data/user/...), /storage, /sdcard e outros absolutos ficam fora do seu alcance. file_write e file_edit alteram apenas o workspace da tarefa; file_read e file_list também leem /root/connectors/<id>/workspace/.... Se um arquivo não existir, liste o diretório pai uma vez em vez de repetir o mesmo caminho; se ele realmente não estiver disponível, peça-o ao usuário. Para alterar um trecho, prefira file_edit com old_text/new_text (o trecho precisa ser único). Use file_write para criar ou sobrescrever o arquivo inteiro, com append=true para conteúdo grande em partes, e confira depois com file_read.")
@@ -2723,7 +2726,7 @@ class AgentRunner(
             put("path", str("Caminho do arquivo")); put("caption", str("Legenda curta"))
         }, listOf("path")))
         add(tool("file_read", "Lê um arquivo de texto por partes. Aceita arquivos do workspace da tarefa (relativos ou /root/workspace/...) e, somente para leitura, de /root/connectors/<id>/workspace/.... Se o arquivo não existir, liste o diretório pai em vez de repetir o mesmo caminho.", buildJsonObject {
-            put("path", str("Caminho do arquivo")); put("offset", int("Linha inicial (1 = início; padrão 1)")); put("limit", int("Quantidade de linhas (padrão 250, máx. 1000)"))
+            put("path", str("Caminho do arquivo")); put("offset", int("Linha inicial (1 = início; padrão 1)")); put("limit", int("Quantidade de linhas (padrão 250, máx. 1000)")); put("stale_ok", bool("true apenas quando o usuário ou o coordenador pediu para reler um snapshot antigo do browser arquivado em .cue/out; por padrão snapshots antigos são recusados"))
         }, listOf("path")))
         add(tool("file_list", "Lista um diretório do workspace da tarefa ou, somente para leitura, de /root/connectors/<id>/workspace/.", buildJsonObject { put("path", str("Diretório relativo ao workspace, ou /root/workspace/, ou /root/connectors/<id>/workspace/")) }))
         if (web) {
@@ -4065,7 +4068,16 @@ class AgentRunner(
                         sandbox.workspaceFor(sessionId), sandbox.connectorsDir, path,
                     )
                     if (target == null) "ERRO: caminho inválido (recebido: \"${path.take(160)}\"). Use caminho relativo ao workspace ou /root/workspace/...; para conector, informe o ID completo em /root/connectors/<id>/workspace/.... Não tente caminhos absolutos Android ou caminhos alternativos fora dessas raízes."
-                    else readFileChunk(target, path, i("offset") ?: 1, i("limit") ?: 250)
+                    else {
+                        val staleMin = ctxMgr.staleBrowserSnapshotMinutes(path)
+                        // Continuação de uma saída recém-cortada (mesmo passo de trabalho) é leitura atual, não releitura.
+                        if (staleMin != null && staleMin >= STALE_SNAPSHOT_MINUTES && !b("stale_ok"))
+                            "RECUSADO: este arquivo é um snapshot ANTIGO do browser (capturado há $staleMin min) e a página pode ter mudado. " +
+                                "Para o estado atual, use browser_read (ou browser_navigate, se precisar reabrir). " +
+                                "Só releia este snapshot se o usuário ou o coordenador pediu exatamente esse conteúdo antigo — nesse caso repita com stale_ok=true."
+                        else (if (staleMin != null && staleMin >= STALE_SNAPSHOT_MINUTES) "[Snapshot antigo do browser, capturado há $staleMin min — pode não refletir a página atual]\n" else "") +
+                            readFileChunk(target, path, i("offset") ?: 1, i("limit") ?: 250)
+                    }
                 }
                 "file_list" -> {
                     val path = s("path").trim()

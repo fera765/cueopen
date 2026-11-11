@@ -36,7 +36,29 @@ class ContextManager(private val store: Store, private val sandbox: Sandbox, pri
 
     // ---------- Camada 1 ----------
     /** Salva saídas comuns e devolve a versão de contexto; acessibilidade usa persistLongOutput=false. */
-    fun storeToolOutput(sessionId: String, callId: String, output: String, limit: Int = 8_000, persistLongOutput: Boolean = true): String {
+    /**
+     * Arquivos de .cue/out que guardam SNAPSHOTS DO BROWSER (nome do arquivo → quando foi capturado). Uma página
+     * muda; reler um snapshot velho faz o agente agir sobre um estado que não existe mais. O file_read consulta
+     * este registro para barrar a releitura, a não ser que ela seja pedida de propósito.
+     */
+    private val browserSnapshots = java.util.concurrent.ConcurrentHashMap<String, Long>()
+
+    /** Ferramentas cujo resultado é um retrato da página naquele instante. */
+    fun isBrowserSnapshotTool(name: String?): Boolean = name != null && name.startsWith("browser_") && name != "browser_network" && name != "browser_console"
+
+    private fun markBrowserSnapshot(path: String) {
+        browserSnapshots.putIfAbsent(path.substringAfterLast('/'), System.currentTimeMillis())
+        if (browserSnapshots.size > 600) browserSnapshots.entries.sortedBy { it.value }.take(200).forEach { browserSnapshots.remove(it.key) }
+    }
+
+    /** Minutos desde a captura, se [path] aponta para um snapshot de browser arquivado; null caso contrário. */
+    fun staleBrowserSnapshotMinutes(path: String): Long? {
+        if (!path.contains(".cue/out/")) return null
+        val at = browserSnapshots[path.substringAfterLast('/')] ?: return null
+        return (System.currentTimeMillis() - at) / 60_000
+    }
+
+    fun storeToolOutput(sessionId: String, callId: String, output: String, limit: Int = 8_000, persistLongOutput: Boolean = true, toolName: String? = null): String {
         if (output.length <= limit) return output
         if (!persistLongOutput) {
             val head = output.take(limit / 2)
@@ -52,6 +74,7 @@ class ContextManager(private val store: Store, private val sandbox: Sandbox, pri
             return "$head\n…[${output.length - limit} caracteres omitidos; a saída completa não pôde ser arquivada neste workspace]…\n$tail"
         }
         cleanupArchivedOutputs(sessionId, dir)
+        if (isBrowserSnapshotTool(toolName)) markBrowserSnapshot(f.name)
         val head = output.take(limit / 2)
         val tail = output.takeLast(limit / 2)
         val headLines = head.count { it == '\n' } + 1
@@ -76,12 +99,18 @@ class ContextManager(private val store: Store, private val sandbox: Sandbox, pri
                     val full = m.content ?: ""
                     if (m.name?.startsWith("device_accessibility_") == true) {
                         m.copy(content = "[Saída antiga de acessibilidade omitida do contexto; releia a tela atual se precisar.]")
+                    } else if (isBrowserSnapshotTool(m.name)) {
+                        // Snapshot antigo do browser: fica só o cabeçalho (URL/título). Não há ponteiro de releitura no
+                        // contexto — o estado que vale é o da página agora. A cópia continua arquivada para pedidos explícitos.
+                        if (sessionId != null) stash(sessionId, full)?.let { markBrowserSnapshot(it) }
+                        m.copy(content = full.take(200).trimEnd() + "\n…[snapshot antigo do browser recolhido: a página pode ter mudado desde então. " +
+                            "Para o estado atual, use browser_read; o que você precisava guardar dele deve estar nas suas anotações.]")
                     } else {
                         val ptr = if (sessionId != null) stash(sessionId, full) else null
                         if (sessionId != null && ptr == null) m else {
                             val head = full.take(200).trimEnd()
-                            m.copy(content = head + "\n…[resultado antigo recolhido para não inflar o contexto" +
-                                (if (ptr != null) " — recupere o conteúdo completo com file_read path=$ptr" else "") + "]")
+                            m.copy(content = head + "\n…[resultado antigo recolhido para não inflar o contexto. Trabalhe com as informações mais recentes" +
+                                (if (ptr != null) "; recupere este conteúdo com file_read path=$ptr somente se precisar exatamente dele e não houver versão mais nova" else "") + "]")
                         }
                     }
                 }
