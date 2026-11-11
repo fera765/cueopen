@@ -144,7 +144,7 @@ class AgentRunner(
         synchronized(childJobsByParent) { childJobsByParent.remove(sessionId)?.forEach { it.cancel() } }
         val quote = quotedReply?.trim()?.take(800)?.takeIf { it.isNotBlank() }
         if (showUserMessage) store.addItem(sessionId, ChatItem.User(text = text, attachments = attachments, replyTo = quote))
-        if (showUserMessage) store.session(sessionId)?.sectionId?.let { autoNudges.remove(it) }
+        if (showUserMessage) store.session(sessionId)?.sectionId?.let { autoNudges.remove(it); autoDone.remove(it) }
         var content = if (attachments.isEmpty()) text
         else text + "\n\n[Arquivos anexados no workspace: ${attachments.joinToString()}]"
         if (quote != null) content += "\n\n[Contexto: o usuário está respondendo à mensagem anterior do agente; o texto citado é histórico, não uma nova instrução.]\n" + quote.lineSequence().joinToString("\n") { "> $it" }
@@ -308,11 +308,17 @@ class AgentRunner(
     )
 
     private val WAIT_TASK = Regex("^\\W*(aguard|esper|wait|await|fico no aguardo)", RegexOption.IGNORE_CASE)
+    private fun scheduleLabel(m: Int): String = when {
+        m % 1440 == 0 -> if (m == 1440) "uma vez por dia" else "a cada ${m / 1440} dias"
+        m % 60 == 0 -> if (m == 60) "a cada hora" else "a cada ${m / 60} horas"
+        else -> "a cada $m min"
+    }
     private val sectionColors = listOf(0xFFFF6B3DL, 0xFF4D8DFFL, 0xFF2FBF71L, 0xFFFFC53DL, 0xFFB57BFFL, 0xFFFF5C8AL, 0xFF2EC4C4L, 0xFF9C978EL)
 
     private fun createSection(
         sessionId: String, name: String, description: String, coordinatorInstructions: String,
         agentsJson: String, firstTask: String, capsCsv: String, suggestWallet: Boolean,
+        autonomous: Boolean = false, scheduleMinutes: Int = 0,
     ): ToolResult {
         val title = name.trim().take(40)
         if (title.isBlank()) return ToolResult("ERRO: informe o nome da seção.")
@@ -369,12 +375,13 @@ class AgentRunner(
             store.session(sessionId)?.llm?.lastOrNull { it.role == "user" && it.content?.startsWith("[") != true }?.content.orEmpty()
         }
         store.upsertSection(Section(id = sectionId, name = title, description = description.trim(), coordinatorAgentId = coordinator.id,
-            agentIds = members.map { it.id }, sessionId = chat.id, configured = false, firstTask = task, originSessionId = sessionId))
+            agentIds = members.map { it.id }, sessionId = chat.id, configured = false, firstTask = task, originSessionId = sessionId,
+            autonomous = autonomous || scheduleMinutes > 0, scheduleMinutes = scheduleMinutes.coerceIn(0, 10_080)))
         val allowedCaps = setOf(dev.cueopen.app.device.DeviceCapPolicy.BACKGROUND, dev.cueopen.app.device.DeviceCapPolicy.POST_NOTIFICATIONS,
             dev.cueopen.app.device.DeviceCapPolicy.PHONE_NOTIFICATIONS, dev.cueopen.app.device.DeviceCapPolicy.ACCESSIBILITY, dev.cueopen.app.device.DeviceCapPolicy.SCREEN)
-        val caps = capsCsv.split(',').map { it.trim() }.filter { it in allowedCaps }.distinct()
+        val caps = (capsCsv.split(',').map { it.trim() } + (if (scheduleMinutes > 0) listOf(dev.cueopen.app.device.DeviceCapPolicy.BACKGROUND) else emptyList())).filter { it in allowedCaps }.distinct()
         store.addItem(sessionId, ChatItem.SectionSetup(sectionId = sectionId, sectionName = title,
-            agentNames = listOf(coordinator.name) + members.map { it.name }, suggestedCaps = caps, suggestWallet = suggestWallet))
+            agentNames = listOf(coordinator.name) + members.map { it.name }, suggestedCaps = caps, suggestWallet = suggestWallet, suggestAuto = autonomous || scheduleMinutes > 0))
         return ToolResult("Seção \"$title\" criada com ${members.size} agentes + coordenador. O card de autorização está na tela: o usuário escolhe as permissões e toca em Ativar. " +
             "Ao ativar, o primeiro agente começa a trabalhar na hora. Responda em 1-2 frases o que foi criado e aguarde; não delegue nada daqui.", SessionStatus.WAITING_USER)
     }
@@ -401,6 +408,14 @@ class AgentRunner(
         }
         store.replaceItem(sessionId, cur.copy(state = "activated"))
         store.upsertSection(sec.copy(configured = true))
+        if (sec.scheduleMinutes > 0) store.agent(sec.coordinatorAgentId)?.let { c ->
+            // Agendamento feito pelo app (não depende de o modelo lembrar de chamar set_schedule).
+            store.upsertAgent(c.copy(autonomous = true, heartbeatMinutes = sec.scheduleMinutes, homeSessionId = sec.sessionId,
+                mission = sec.description.ifBlank { sec.firstTask }.take(600), lastBeatAt = System.currentTimeMillis(),
+                dailyTokenBudget = maxOf(c.dailyTokenBudget, 20_000_000L)))
+            runCatching { dev.cueopen.app.scheduler.Heartbeat.schedule(ctx, c.id, sec.scheduleMinutes) }
+            store.addItem(sec.sessionId, ChatItem.Step(tool = "set_schedule", title = "Agendado: " + scheduleLabel(sec.scheduleMinutes), args = "", result = "", status = StepStatus.OK))
+        }
         startSection(sec)
         return sec.sessionId
     }
@@ -572,24 +587,38 @@ class AgentRunner(
 
     // ───────── Modo autônomo da seção: ninguém espera o usuário ─────────
 
-    private val autoNudges = java.util.concurrent.ConcurrentHashMap<String, Int>()
-    private val ASKS_USER = Regex("\\?\\s*$|\\b(me diga|me avise|me informe|me fale|qual (oferta|opção|delas|deles)|você (quer|prefere|deseja)|quer que eu|gostaria que|posso (seguir|continuar|prosseguir)|devo (seguir|continuar|prosseguir)|aguardo|aguardando (sua|a sua|você|o seu)|confirme|confirma\\b|envie \"?continu)", RegexOption.IGNORE_CASE)
+    private val autoNudges = java.util.concurrent.ConcurrentHashMap<String, Pair<String, Int>>()
+    /** Seções autônomas cujo coordenador declarou o objetivo inteiro entregue (section_done). */
+    private val autoDone = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
 
     private fun sectionAuto(sec: Section): Boolean = store.agent(sec.coordinatorAgentId)?.confirmMode == "auto"
     /** Chat de seção (coordenador ou agente) configurada como 100% autônoma. */
     private fun autoSectionSession(sessionId: String): Boolean =
         store.session(sessionId)?.let { s -> s.sectionId != null && store.agent(s.agentId)?.confirmMode == "auto" } == true
 
-    /** Coordenador autônomo parou numa pergunta com o time ocioso → ordem oculta para decidir sozinho e seguir. */
-    private fun autoContinue(sec: Section): String? {
-        if (!sectionAuto(sec)) return null
+    /**
+     * Seção autônoma: o coordenador parou (feedback, pergunta ou fim de um plano) com o time ocioso e sem declarar
+     * o objetivo concluído → ordem oculta para seguir sozinho. No máximo [MAX_AUTO_NUDGES] vezes sem o plano mudar.
+     */
+    private fun autoContinue(secIn: Section): String? {
+        val sec = store.section(secIn.id) ?: return null
+        if (!sectionAuto(sec) || sec.id in autoDone) return null
         if (store.state.value.sessions.any { it.sectionId == sec.id && it.id != sec.sessionId && isRunning(it.id) }) return null
         if (delegations.values.any { it.sectionId == sec.id }) return null
-        val last = store.session(sec.sessionId)?.items?.lastOrNull { it is ChatItem.Assistant || it is ChatItem.User } as? ChatItem.Assistant ?: return null
-        if (!ASKS_USER.containsMatchIn(last.text.trim().takeLast(600))) return null
-        if ((autoNudges.merge(sec.id, 1, Int::plus) ?: 1) > MAX_AUTO_NUDGES) return null
-        return "[Sistema — modo autônomo] O usuário NÃO vai responder: esta seção é 100% autônoma. Tome você mesmo a decisão que acabou de pedir (use a sua própria sugestão/a melhor opção pelos dados), registre a escolha em 1 frase e CONTINUE o fluxo agora com team_plan/team_delegate até o objetivo inteiro estar entregue. " +
-            "Se o objetivo da seção já estiver 100% entregue, envie só o relatório final, SEM perguntas nem ofertas de próximos passos, e pare."
+        if (sec.plan.any { it.status == TaskStatus.RUNNING || it.status == TaskStatus.REVIEW }) return null
+        val sig = SectionPlanEngine.signature(sec.plan)
+        val (prev, n) = autoNudges[sec.id] ?: ("" to 0)
+        val count = if (prev == sig) n + 1 else 1
+        autoNudges[sec.id] = sig to count
+        if (count > MAX_AUTO_NUDGES) {
+            if (count == MAX_AUTO_NUDGES + 1) store.addItem(sec.sessionId, ChatItem.Error(text =
+                "Seção autônoma parada: o coordenador não avançou depois de $MAX_AUTO_NUDGES tentativas. Envie uma mensagem para orientar."))
+            return null
+        }
+        return "[Sistema — modo autônomo] Você parou, mas esta seção é 100% autônoma: o usuário NÃO vai responder nem mandar \"continue\". " +
+            "Objetivo completo da seção: " + sec.description.ifBlank { sec.firstTask }.take(500) + "\n" +
+            "Se ainda falta QUALQUER fase desse objetivo, continue AGORA: tome você mesmo a decisão pendente (use a sua própria sugestão/a melhor opção pelos dados, diga a escolha em 1 frase) e chame team_plan com as próximas etapas. " +
+            "Somente quando o objetivo INTEIRO estiver entregue, chame section_done(summary) com o relatório final. Não faça perguntas."
     }
 
 
@@ -686,7 +715,8 @@ class AgentRunner(
                         plan.filter { it.status == TaskStatus.REVIEW }.joinToString("\n") { "- ${it.id} (${it.agentName}): ${it.result.replace(Regex("\\s+"), " ").take(400)}" } +
                         "\nChame team_review para cada uma (approve, redo com o ajuste, ou block). O plano só avança depois."
                     SectionPlanEngine.State.COMPLETED -> if (finalReportAsked.add(sectionId))
-                        "[Sistema] Todas as etapas do plano foram aprovadas. Envie AGORA ao usuário o relatório final consolidado (entregáveis, arquivos, números) e pare." else null
+                        (if (sectionAuto(sec)) "[Sistema — modo autônomo] Todas as etapas deste plano foram aprovadas. Se o objetivo completo da seção ainda tem fases além deste plano, siga direto para a próxima com um novo team_plan (decida sozinho, sem perguntar). Se o objetivo INTEIRO já foi entregue, chame section_done(summary) com o relatório final consolidado (entregáveis, arquivos, números)."
+                        else "[Sistema] Todas as etapas do plano foram aprovadas. Envie AGORA ao usuário o relatório final consolidado (entregáveis, arquivos, números) e pare.") else null
                     SectionPlanEngine.State.FAILED, SectionPlanEngine.State.BLOCKED ->
                         "[Sistema] O plano está ${SectionPlanEngine.label(state)}:\n${SectionPlanEngine.describe(plan)}\n" +
                             "Decida: reorganize com team_plan (outra estratégia/agente) ou explique ao usuário exatamente o que falta e pare."
@@ -1827,7 +1857,7 @@ class AgentRunner(
         const val DELEGATION_STARTED = "OK:"
         /** Lembretes ao coordenador sem nenhuma mudança no plano antes de declarar o plano travado. */
         const val MAX_PLAN_NUDGES = 2
-        const val MAX_AUTO_NUDGES = 12
+        const val MAX_AUTO_NUDGES = 3
         const val MEMBER_SLOW_MINUTES = 30L
         private val STRICT_REPEAT_TOOLS = setOf("connector_validate", "connector_test", "connector_propose", "connector_edit_propose")
         /** Leituras de conteúdo: o mesmo texto longo voltando por caminhos diferentes é falta de progresso. */
@@ -1908,9 +1938,13 @@ class AgentRunner(
         val llmMark = before.llm.size; val itemsMark = before.items.size
         val tokMark = before.tokensIn + before.tokensOut
         val stamp = SimpleDateFormat("dd/MM HH:mm", Locale.getDefault()).format(Date())
+        val cycleSection = store.state.value.sections.firstOrNull { it.sessionId == sid && it.configured }
+        cycleSection?.let { autoDone.remove(it.id); autoNudges.remove(it.id); planNudges.remove(it.id); finalReportAsked.remove(it.id) }
         store.editSession(sid) {
             it.copy(status = SessionStatus.RUNNING, continuous = false,
-                llm = it.llm + LlmMessage("user", "[Heartbeat $stamp] Verifique sua missão e faça o que for necessário agora. Se nada precisar ser feito, responda NO_REPLY."))
+                llm = it.llm + LlmMessage("user", if (cycleSection != null)
+                    "[Heartbeat $stamp] Novo ciclo agendado desta seção. Execute o objetivo de novo AGORA, do início: monte um novo team_plan para este ciclo e ponha o time para trabalhar (aproveite o que já existe no workspace; traga só o que é novo). Não espere o usuário. Ao terminar o ciclo inteiro, chame section_done com o relatório do ciclo."
+                    else "[Heartbeat $stamp] Verifique sua missão e faça o que for necessário agora. Se nada precisar ser feito, responda NO_REPLY."))
         }
         dev.cueopen.app.sandbox.SandboxService.start(ctx, "${a.name}: heartbeat")
         val job = scope.launch {
@@ -2364,7 +2398,9 @@ class AgentRunner(
                     appendLine("- Pedido com mais de uma etapa: PRIMEIRO chame team_plan (etapas, agente e dependências). O app inicia as etapas sozinho e, a cada [Relatório automático], você valida com team_review (approve/redo/block). Aprovou → as próximas começam sozinhas. Não espere o usuário mandar \"continue\".")
                     appendLine("- team_delegate fica para tarefas avulsas fora do plano (não bloqueia; acione vários em paralelo quando fizer sentido). O usuário vê cada agente trabalhando numa pílula ao vivo.")
                     if (sec.plan.isNotEmpty()) appendLine("- PLANO ATUAL (persistido):\n" + SectionPlanEngine.describe(sec.plan))
-                    if (agent?.confirmMode == "auto") appendLine("- MODO 100% AUTÔNOMO: o usuário NÃO acompanha o chat e não vai responder. Nunca faça perguntas, não peça escolha nem confirmação e não termine com \"me diga\"/\"quer que eu\": em toda decisão escolha você mesmo a melhor opção pelos dados, diga a escolha em 1 frase e siga para a próxima etapa, até o objetivo inteiro estar entregue. Só pare no relatório final.")
+                    if (agent?.confirmMode == "auto") appendLine("- MODO 100% AUTÔNOMO: o usuário NÃO acompanha o chat e não vai responder. Nunca faça perguntas, não peça escolha nem confirmação e não termine com \"me diga\"/\"quer que eu\": em toda decisão escolha você mesmo a melhor opção pelos dados, diga a escolha em 1 frase e siga para a próxima etapa, até o objetivo inteiro estar entregue. Um feedback NÃO encerra o trabalho: depois de cada entrega, passe para a fase seguinte (novo team_plan). Só termine chamando section_done(summary) quando o objetivo INTEIRO estiver entregue.")
+                    if (sec.scheduleMinutes > 0) appendLine("- Esta seção roda sozinha ${scheduleLabel(sec.scheduleMinutes)}: o app acorda você com [Heartbeat] e você executa o ciclo completo de novo. Não precisa chamar set_schedule.")
+                    else appendLine("- Se o usuário pedir repetição (ex.: \"uma vez por dia\"), chame set_schedule(minutes, mission) — 1440 = diário; o Android acorda você sozinho.")
                     appendLine("- Entre as ações, mande feedbacks CURTOS (5 a 30 palavras) e siga trabalhando. Nada de terminal/browser: o trabalho é dos agentes.")
                     appendLine("- Ao receber [Relatório automático], avalie, cobre ajustes ou passe a próxima etapa; entregue o progresso em lista numerada.")
                     appendLine("- Nunca re-delegue uma tarefa já entregue (o app recusa): use o resultado ou peça um ajuste específico. Quando TODAS as etapas estiverem entregues e revisadas, envie o relatório final e PARE — não recomece o pedido original.")
@@ -2551,6 +2587,8 @@ class AgentRunner(
                 put("first_task", str("Primeira tarefa EXECUTÁVEL que o time começa a fazer no instante em que a seção for ativada (normalmente o pedido do usuário, como ação concreta). PROIBIDO \"aguardar o usuário\"/\"esperar instruções\": se faltar detalhe, a primeira tarefa é o primeiro agente iniciar o levantamento/pesquisa com o que já se sabe."))
                 put("suggested_android_caps", str("IDs separados por vírgula entre: background, notif_post, notif_read, accessibility, screen (opcional)"))
                 put("suggest_wallet", bool("true se o time precisa da carteira"))
+                put("autonomous", bool("true quando o usuário pedir que a seção funcione de forma autônoma / sozinha / sem intervenção / 100% automática"))
+                put("schedule_minutes", int("Repetição pedida pelo usuário, em minutos: 1440 = uma vez por dia, 60 = a cada hora, 10080 = semanal. 0 = roda uma vez só. O app agenda sozinho; não use set_schedule para isso."))
             }, listOf("name", "agents_json")))
         if (allowMultiAgent && sectionHere != null && agent?.id == sectionHere.coordinatorAgentId) {
             add(tool("team_delegate",
@@ -2577,6 +2615,8 @@ class AgentRunner(
                     put("verdict", str("approve | redo | block | cancel"))
                     put("note", str("Motivo curto; em redo, exatamente o que ajustar"))
                 }, listOf("task_id", "verdict")))
+            add(tool("section_done", "Seção autônoma: declara que o objetivo INTEIRO da seção foi entregue e encerra o ciclo com o relatório final. Só chame quando não restar nenhuma fase; enquanto isso o app manda você continuar.",
+                buildJsonObject { put("summary", str("Relatório final consolidado: entregáveis, arquivos, números")) }, listOf("summary")))
             add(tool("team_status", "Mostra o estado de cada Agent do time (trabalhando, aguardando usuário, concluído) e a última resposta de cada um.", buildJsonObject {}))
             add(tool("team_message",
                 "Envia AGORA uma orientação/correção a um agente do time (ele recebe no próximo passo, sem parar). Use quando um checkpoint mostrar desvio, travamento ou falta de insumo.",
@@ -3190,10 +3230,18 @@ class AgentRunner(
         // Ferramentas "silenciosas" com card próprio
         when (call.name) {
             "create_section" -> return createSection(sessionId, s("name"), s("description"), s("coordinator_instructions"), s("agents_json"),
-                s("first_task"), s("suggested_android_caps"), b("suggest_wallet"))
+                s("first_task"), s("suggested_android_caps"), b("suggest_wallet"), b("autonomous"), i("schedule_minutes") ?: 0)
             "team_delegate" -> return ToolResult(teamDelegate(sessionId, s("agent"), s("task"), b("wait"), (i("timeout_minutes") ?: 15).coerceIn(1, 30)))
             "team_status" -> return ToolResult(teamStatus(sessionId))
             "team_plan" -> return ToolResult(teamPlan(sessionId, s("goal"), s("tasks_json")))
+            "section_done" -> {
+                val sec = store.section(store.session(sessionId)?.sectionId) ?: return ToolResult("ERRO: esta conversa não é uma seção.")
+                val open = sec.plan.filter { it.status == TaskStatus.PENDING || it.status == TaskStatus.RUNNING || it.status == TaskStatus.REVIEW }
+                if (open.isNotEmpty()) return ToolResult("RECUSADO: ainda há etapas em aberto no plano (${open.joinToString { it.id }}). Conclua/valide essas etapas (ou cancele com team_review) antes de encerrar.")
+                autoDone.add(sec.id)
+                store.addItem(sessionId, ChatItem.Assistant(text = s("summary").ifBlank { "Objetivo da seção concluído." }, final = true))
+                return ToolResult("ok", SessionStatus.DONE)
+            }
             "userscript_inspect" -> {
                 val url = s("url").trim()
                 if (url.isNotBlank()) {

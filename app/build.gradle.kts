@@ -29,6 +29,14 @@ android {
         ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64") }
     }
     signingConfigs {
+        // Chave de debug FIXA (versionada, credenciais padrão do Android): todo APK debug do CI sai com a
+        // mesma assinatura e instala por cima do anterior. Não é a chave de release.
+        create("ciDebug") {
+            storeFile = file("debug-ci.keystore")
+            storePassword = "android"
+            keyAlias = "androiddebugkey"
+            keyPassword = "android"
+        }
         // Chave estável lida de um caminho externo e credenciais locais; nunca use a chave versionada antiga.
         create("cueopen") {
             if (cueopenSigningStore != null) {
@@ -42,7 +50,7 @@ android {
     buildTypes {
         debug {
             // Use a keystore externa aprovada em builds locais de entrega, quando configurada.
-            if (cueopenSigningStore != null) signingConfig = signingConfigs.getByName("cueopen")
+            signingConfig = signingConfigs.getByName(if (cueopenSigningStore != null) "cueopen" else "ciDebug")
         }
         release {
             // build otimizado: R8 (minify + otimização) deixa o Compose bem mais fluido que o debug

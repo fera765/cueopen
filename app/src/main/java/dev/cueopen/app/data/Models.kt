@@ -200,6 +200,7 @@ sealed class ChatItem {
         val state: String = "pending",
         val suggestedCaps: List<String> = emptyList(),
         val suggestWallet: Boolean = false,
+        val suggestAuto: Boolean = false,
     ) : ChatItem()
 
     @Serializable
@@ -368,6 +369,10 @@ data class Section(
     /** Item ChatItem.Plan do chat do coordenador que espelha o plano (progresso real). */
     val planItemId: String? = null,
     /** Agent que constrói o app visual da seção num contexto próprio (em segundo plano). */
+    /** Pedido no prompt de criação: trabalhar sem intervenção (pré-marca "100% autônomo" no card). */
+    val autonomous: Boolean = false,
+    /** Repetição pedida no prompt (minutos; 1440 = uma vez por dia; 0 = sem repetição). O app agenda sozinho na ativação. */
+    val scheduleMinutes: Int = 0,
     val appAgentId: String = "",
     /** Contrato de dados do app (chaves de state.data e formato), definido por quem construiu o app. */
     val appContract: String = "",

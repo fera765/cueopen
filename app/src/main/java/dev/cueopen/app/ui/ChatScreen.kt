@@ -1110,7 +1110,7 @@ private fun SectionSetupCard(item: ChatItem.SectionSetup, sessionId: String?, na
     var wallet by remember(item.id) { mutableStateOf(item.suggestWallet) }
     var caps by remember(item.id) { mutableStateOf(item.suggestedCaps.toSet()) }
     var connectors by remember(item.id) { mutableStateOf(emptySet<String>()) }
-    var fullAuto by remember(item.id) { mutableStateOf(false) }
+    var fullAuto by remember(item.id) { mutableStateOf(item.suggestAuto) }
     val section = app.store.section(item.sectionId)
     Column(
         Modifier.fillMaxWidth().padding(vertical = 6.dp).clip(RoundedCornerShape(16.dp))
@@ -1141,7 +1141,7 @@ private fun SectionSetupCard(item: ChatItem.SectionSetup, sessionId: String?, na
                 dev.cueopen.app.device.DeviceCaps.all.forEach { cap ->
                     ToggleRow(cap.title, cap.desc, cap.id in caps) { on -> caps = if (on) caps + cap.id else caps - cap.id }
                 }
-                ToggleRow("100% autônomo", "Não pedir confirmação para comprar, pagar, apagar, enviar ou transferir", fullAuto) { fullAuto = it }
+                ToggleRow("100% autônomo", "Trabalha sozinho até o fim: não faz perguntas nem pede confirmação (inclusive para comprar, pagar, apagar, enviar ou transferir)", fullAuto) { fullAuto = it }
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     OutlinedButton({ sessionId?.let { app.agent.cancelSectionSetup(it, item) } }, Modifier.weight(1f)) { Text("Agora não") }
                     Button({
