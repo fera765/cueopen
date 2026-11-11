@@ -24,6 +24,7 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.focus.focusRequester
 import dev.cueopen.app.CueApp
 import dev.cueopen.app.agent.AskTools
 import dev.cueopen.app.data.ChatItem
@@ -81,7 +82,13 @@ fun QuestionCard(item: ChatItem.Question, sessionId: String?) {
                 if (!q.multiSelect && otherOn[page]) sel.clear()
                 tick++
             }
-            if (otherOn[page]) OutlinedTextField(other[page], { other[page] = it }, Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 4.dp),
+            // Marcou "Outra resposta": o campo já ganha foco e o teclado abre para digitar.
+            val otherFocus = remember(item.id, page) { androidx.compose.ui.focus.FocusRequester() }
+            val keyboard = androidx.compose.ui.platform.LocalSoftwareKeyboardController.current
+            LaunchedEffect(otherOn[page], page) {
+                if (otherOn[page]) { kotlinx.coroutines.delay(80); runCatching { otherFocus.requestFocus() }; keyboard?.show() }
+            }
+            if (otherOn[page]) OutlinedTextField(other[page], { other[page] = it }, Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 4.dp).focusRequester(otherFocus),
                 placeholder = { Text("Escreva sua resposta") }, singleLine = false, maxLines = 4, shape = RoundedCornerShape(12.dp))
         }
         HorizontalDivider(Modifier.padding(top = 8.dp), color = c.line)

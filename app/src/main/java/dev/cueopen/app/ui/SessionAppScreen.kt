@@ -84,10 +84,14 @@ fun SessionAppPane(sec: Section, modifier: Modifier = Modifier, onGoChat: () -> 
         Column(modifier, verticalArrangement = Arrangement.Center, horizontalAlignment = Alignment.CenterHorizontally) {
             EmptyState(Icons.Rounded.Dashboard, "Esta seção ainda não tem app",
                 "O coordenador cria uma interface própria para o objetivo da seção e a alimenta com os resultados reais dos agentes.") {
+              Column(horizontalAlignment = Alignment.CenterHorizontally) {
                 PillButton("Criar o app agora", Icons.Rounded.AutoAwesome) {
                     app.agent.sessionAppAction(sec.id, "criar o app visual desta seção", "Use app_publish com uma interface sob medida para o objetivo da seção.")
                     onGoChat()
                 }
+                Spacer(Modifier.height(8.dp))
+                TextButton({ app.agent.installBaseSessionApp(sec.id) }) { Text("Usar o app base agora") }
+              }
             }
         }
         return

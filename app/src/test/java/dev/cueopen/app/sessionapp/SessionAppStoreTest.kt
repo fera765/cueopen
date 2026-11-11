@@ -87,4 +87,9 @@ class SessionAppStoreTest {
         assertTrue(hint.contains("2| fun total(a: Int) = a * 2"))
         assertEquals("", EditHint.nearest(file, "zzzz qqqq"))
     }
+
+    @Test fun `the base app is a valid session app`() {
+        assertNull(SessionAppValidator.validate(SessionAppTemplate.HTML))
+        assertTrue(SessionAppTemplate.HTML.contains("SessionApp.onUpdate(render)"))
+    }
 }

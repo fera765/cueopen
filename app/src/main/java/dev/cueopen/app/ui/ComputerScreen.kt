@@ -89,7 +89,8 @@ fun ComputerScreen(nav: NavController, sessionId: String, initialTab: String?) {
                     Spacer(Modifier.width(12.dp))
                 }
             }
-            Row(Modifier.padding(horizontal = 16.dp, vertical = 6.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            // Abas com rolagem horizontal: nunca espremem nem quebram em telas estreitas.
+            Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 16.dp, vertical = 6.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 tabs.forEach { (k, l) -> Chip(l, selected = tab == k, icon = when (k) { "terminal" -> Icons.Rounded.Terminal; "history" -> Icons.Rounded.History; "browser" -> Icons.Rounded.Language; else -> Icons.Rounded.FolderOpen }) { changeTab(k) } }
             }
         }

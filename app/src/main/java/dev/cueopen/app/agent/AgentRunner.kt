@@ -399,7 +399,7 @@ class AgentRunner(
         }
         store.replaceItem(sessionId, cur.copy(state = "activated"))
         store.upsertSection(sec.copy(configured = true))
-        send(sec.sessionId, sec.firstTask.ifBlank { "Apresente o time, proponha o plano inicial e comece." })
+        send(sec.sessionId, sectionKickoff(sec))
         return sec.sessionId
     }
 
@@ -477,7 +477,7 @@ class AgentRunner(
         val sec = store.section(sectionId) ?: return
         scope.launch {
             wipeSection(sec)
-            if (sec.configured) send(sec.sessionId, sec.firstTask.ifBlank { "Apresente o time, proponha o plano inicial e comece." })
+            if (sec.configured) send(sec.sessionId, sectionKickoff(sec))
         }
     }
 
@@ -515,6 +515,7 @@ class AgentRunner(
                                      taskId: String? = null): String {
         val sec = store.section(store.session(sessionId)?.sectionId) ?: return "ERRO: esta conversa não é uma seção."
         if (!sec.configured) return "A seção ainda não foi ativada pelo usuário."
+        if (taskId == null) appGate(sec)?.let { return it }
         val team = sec.agentIds.mapNotNull { store.agent(it) }
         val wanted = agentName.trim()
         val member = team.firstOrNull { it.name.equals(wanted, ignoreCase = true) }
@@ -641,9 +642,42 @@ class AgentRunner(
         else send(sec.sessionId, text, showUserMessage = false)
     }
 
+    /** Primeira mensagem ao coordenador: o app da seção vem ANTES de qualquer trabalho. */
+    private fun sectionKickoff(sec: Section): String {
+        val task = sec.firstTask.ifBlank { "Apresente o time, proponha o plano inicial e comece." }
+        return if (sessionApps.exists(sec.id)) task
+        else "[Sistema] ETAPA 0 — criar o app da seção (obrigatória, antes de tudo): chame app_publish AGORA com o app visual desta seção, " +
+            "feito sob medida para o objetivo e para este time, já funcional com estados vazios (os dados chegam depois por app_set_data). " +
+            "Não planeje nem delegue antes: o app recusa. Publicado o app, avise o usuário em 1 frase e comece o pedido abaixo.\n\nPedido do usuário:\n$task"
+    }
+
+    private val appRejects = java.util.concurrent.ConcurrentHashMap<String, Int>()
+
+    /** A seção só começa a trabalhar com o app pronto: sem app, planejar/delegar é recusado. */
+    private fun appGate(sec: Section): String? =
+        if (sessionApps.exists(sec.id)) null
+        else "RECUSADO: a seção ainda não tem o APP. Primeiro publique-o com app_publish (interface sob medida para o objetivo, usando SessionApp). Só depois planeje e delegue."
+
+    /** Instala o app base (funcional, com dados reais) quando o coordenador não consegue publicar o próprio. */
+    private fun installBaseApp(sec: Section) {
+        sessionApps.publish(sec.id, dev.cueopen.app.sessionapp.SessionAppTemplate.HTML, sec.name)
+        sessionAppTick.value = System.currentTimeMillis()
+    }
+
+    /** Botão "Usar app base" da aba APP. */
+    fun installBaseSessionApp(sectionId: String) { store.section(sectionId)?.let { installBaseApp(it) } }
+
     private fun appPublish(sessionId: String, html: String, title: String): String {
         val sec = store.section(store.session(sessionId)?.sectionId) ?: return "ERRO: esta conversa não é uma seção."
-        dev.cueopen.app.sessionapp.SessionAppValidator.validate(html)?.let { return "RECUSADO: $it. Corrija e publique de novo." }
+        dev.cueopen.app.sessionapp.SessionAppValidator.validate(html)?.let { why ->
+            val n = appRejects.merge(sec.id, 1, Int::plus) ?: 1
+            if (n >= 3 && !sessionApps.exists(sec.id)) {
+                installBaseApp(sec); appRejects.remove(sec.id)
+                return "Seu app foi recusado 3 vezes ($why). Instalei o APP BASE da seção para não atrasar o trabalho: siga agora com team_plan. Depois você pode substituí-lo com app_publish ou ajustar com app_edit."
+            }
+            return "RECUSADO: $why. Corrija e publique de novo."
+        }
+        appRejects.remove(sec.id)
         sessionAppErrors.remove(sec.id)
         val m = sessionApps.publish(sec.id, html, title.ifBlank { sec.name })
         sessionAppTick.value = System.currentTimeMillis()
@@ -802,6 +836,7 @@ class AgentRunner(
 
     private suspend fun teamPlan(sessionId: String, goal: String, tasksJson: String): String {
         val sec = store.section(store.session(sessionId)?.sectionId) ?: return "ERRO: esta conversa não é uma seção."
+        appGate(sec)?.let { return it }
         if (sec.plan.any { it.status == TaskStatus.RUNNING })
             return "ERRO: há etapas em execução (${sec.plan.filter { it.status == TaskStatus.RUNNING }.joinToString { it.id }}). Espere os relatórios ou pare com team_stop antes de trocar o plano."
         val arr = runCatching { json.parseToJsonElement(tasksJson).jsonArray }.getOrNull()
@@ -2435,7 +2470,7 @@ class AgentRunner(
                     if (sec.plan.isNotEmpty()) appendLine("- PLANO ATUAL (persistido):\n" + SectionPlanEngine.describe(sec.plan))
                     val appMeta = sessionApps.meta(sec.id)
                     appendLine(); appendLine("## App visual da seção (Session App Runtime)")
-                    appendLine(if (appMeta == null) "- Esta seção AINDA NÃO TEM APP. Logo depois do team_plan, crie-o com app_publish: uma interface própria para ESTE objetivo (não um dashboard genérico) — ex.: catálogo com filtros para garimpo de ofertas, estúdio com editor/versões para copy, sala com avatares dos agentes para trading."
+                    appendLine(if (appMeta == null) "- Esta seção AINDA NÃO TEM APP e nada mais funciona sem ele (team_plan/team_delegate são recusados). Crie-o AGORA com app_publish: uma interface própria para ESTE objetivo (não um dashboard genérico) — ex.: catálogo com filtros para garimpo de ofertas, estúdio com editor/versões para copy, sala com avatares dos agentes para trading."
                         else "- App publicado: \"${appMeta.title}\" v${appMeta.version} (${appMeta.bytes / 1000} KB). Dados atuais: ${sessionApps.data(sec.id).keys.joinToString().ifBlank { "nenhum" }}. Evolua com app_edit quando o usuário pedir mudanças; mantenha os dados em dia com app_set_data.")
                     sessionAppErrors[sec.id]?.let { appendLine("- ⚠ O app publicado está com ERRO de JavaScript: \"$it\". Corrija com app_read + app_edit.") }
                     appendLine("- Formato: UM arquivo HTML (CSS e JS inline, sem frameworks externos obrigatórios), responsivo para celular, tema escuro, com identidade visual própria, estados vazios/carregando e animações leves.")
