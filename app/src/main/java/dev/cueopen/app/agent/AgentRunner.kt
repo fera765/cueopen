@@ -536,6 +536,9 @@ class AgentRunner(
     }
 
 
+    private val scriptPolicies = java.util.concurrent.ConcurrentHashMap<String, ScriptBuilderPolicy>()
+    private fun scriptPolicy(sessionId: String) = scriptPolicies.getOrPut(sessionId) { ScriptBuilderPolicy() }
+
     // ───────────────────────── Plano persistido da seção (continuidade automática) ─────────────────────────
 
     private val planLocks = java.util.concurrent.ConcurrentHashMap<String, Any>()
@@ -1051,7 +1054,8 @@ class AgentRunner(
             }
             // Planejamento contextual: decide quais ferramentas/conectores e quanto conhecimento/memória entram neste passo
             val allTools = tools(agent, allowMultiAgent = tokenBudgetOverride == null, builder = s.connectorBuilder, connectorEditId = s.connectorEditId, sectionId = s.sectionId, scriptBuilder = s.scriptBuilder)
-            val (contextPlan, stepTools) = toolContextPlan(sessionId, s, allTools)
+            if (s.scriptBuilder) ToolContextPlanner.load(sessionId, listOf("web_dev"))  // browser_js/network/console sempre à mão
+        val (contextPlan, stepTools) = toolContextPlan(sessionId, s, allTools)
             // O schema enviado ao provider também é uma allowlist de execução para esta volta.
             val exposedToolNames = stepTools.mapNotNull(::toolName).toSet()
             val sys = LlmMessage("system", systemPrompt(sessionId, agent, s, contextPlan, allowDeviceTools = tokenBudgetOverride == null))
@@ -2192,11 +2196,17 @@ class AgentRunner(
             }
             if (session.scriptBuilder) {
                 appendLine(); appendLine("## Criar User Scripts (esta conversa é o criador de scripts do Browser)")
-                appendLine("- Formato obrigatório: padrão Tampermonkey. Comece SEMPRE com o cabeçalho:\n" + dev.cueopen.app.browser.UserScriptMeta.EXAMPLE +
-                    "\n  Use @match (ou @include/@exclude), @run-at (document-start|document-end|document-idle), @grant e @require (URLs https de bibliotecas) quando precisar.")
-                appendLine("- API disponível: GM_addStyle, GM_setValue/GM_getValue/GM_deleteValue/GM_listValues, GM_xmlhttpRequest (qualquer site da internet, com cookies do destino; rede local é bloqueada), GM_openInTab, GM_setClipboard, GM_notification, GM_log, GM_info, unsafeWindow e as versões GM.* com Promise. Recursos amplos são permitidos: manipular DOM, observar mudanças (MutationObserver), interceptar fetch/XHR da página, criar botões e painéis, automatizar cliques.")
-                appendLine("- Fluxo: entenda o site com browser_navigate/browser_read (e browser_js para inspecionar o DOM) → escreva o script → userscript_test na página real → corrija até dar ok e o efeito aparecer na página → userscript_propose com a versão final. Não invente seletores: confira no DOM real.")
-                appendLine("- Scripts rodam só no frame principal; use seletores robustos e trate elementos que carregam depois (observer/intervalo com limite). Evite loops infinitos e observers sem filtro.")
+                appendLine("Você é resolutivo: descobre, desenvolve, prova e entrega — sem rodeios e sem testar no escuro.")
+                appendLine("FLUXO OBRIGATÓRIO:")
+                appendLine("1. DESCOBRIR — userscript_inspect na página-alvo com seletores candidatos e um texto visível do alvo. Entenda: onde está o elemento/dado, atributos estáveis (data-*, aria-*, role; classes com hash mudam), se é dinâmico, se está em iframe/shadow DOM. Se o dado não está no DOM, veja browser_network (vem de API?) e browser_js. Nunca invente seletor.")
+                appendLine("2. DESENVOLVER — escreva o script completo de uma vez, pequeno e direto, usando só o que a descoberta confirmou. Conteúdo dinâmico: MutationObserver com filtro ou setInterval com limite. Marque o que criar com um atributo próprio (ex.: data-fluwy) para não duplicar e para provar no teste.")
+                appendLine("3. PROVAR — userscript_test com verify = expressão que comprova o efeito (ex.: contar os elementos que o script criou). PASSOU → userscript_propose com o MESMO código, 1-2 frases ao usuário e finish.")
+                appendLine("4. FALHOU — leia o motivo devolvido (erro, verify falso). Não reenvie variações às cegas: volte ao passo 1 com outra hipótese (inspect/browser_js no ponto exato que falhou). Se não souber a técnica, PESQUISE: browser_navigate em https://duckduckgo.com/?q=<site+problema+userscript> ou greasyfork.org e leia uma solução existente. Depois reescreva e teste.")
+                appendLine("Limites do app: teste sem descoberta é recusado; 2 falhas seguidas exigem nova descoberta; código que já falhou não roda de novo; máx. ${ScriptBuilderPolicy.MAX_TESTS} testes — aí explique o bloqueio ao usuário.")
+                appendLine("Formato: padrão Tampermonkey, SEMPRE com o cabeçalho:\n" + dev.cueopen.app.browser.UserScriptMeta.EXAMPLE +
+                    "\nTambém: @include/@exclude, @run-at (document-start|document-end|document-idle), @require (https).")
+                appendLine("API: GM_addStyle, GM_setValue/getValue/deleteValue/listValues, GM_xmlhttpRequest (qualquer site, com cookies do destino; rede local bloqueada), GM_openInTab, GM_setClipboard, GM_log, GM_info, unsafeWindow, GM.*. Vale tudo de DOM: observers, interceptar fetch/XHR, botões, painéis, automação. Roda só no frame principal.")
+                appendLine("Economia: não baixe nem faça grep nos bundles JS minificados do site (caro e quase nunca necessário) — inspecione o DOM e a rede. No shell do sandbox, grep aceita repetição só até 255 ({0,255}).")
             }
             if (session.connectorBuilder) appendLine()
             if (session.connectorBuilder) appendLine("## Criar UI Connectors (esta conversa é o criador de conectores)")
@@ -2404,14 +2414,25 @@ class AgentRunner(
     private fun tools(agentIn: AgentProfile?, allowMultiAgent: Boolean = true, builder: Boolean = false, connectorEditId: String? = null, sectionId: String? = null,
                       scriptBuilder: Boolean = false) = buildJsonArray {
         if (scriptBuilder) {
+            add(tool("userscript_inspect",
+                "DESCOBERTA (obrigatória antes de escrever/testar): abre a url (ou usa a página atual) e devolve fatos do DOM REAL — quantos elementos cada seletor acha, com amostras de HTML; " +
+                    "onde aparece um texto visível (caminho CSS e atributos estáveis); iframes, shadow DOM e se o conteúdo é dinâmico. Barato: use quantas vezes precisar.",
+                buildJsonObject {
+                    put("url", str("Página a inspecionar (vazio = página atual)"))
+                    put("selectors", str("Seletores CSS candidatos, um por linha (máx. 8)"))
+                    put("text", str("Texto visível do elemento-alvo, para achar onde ele fica no DOM (opcional)"))
+                }, emptyList()))
             add(tool("userscript_test",
-                "Testa um userscript (padrão Tampermonkey, com cabeçalho // ==UserScript==) numa página REAL: abre a url no seu browser, injeta o script com a API GM_* e devolve " +
-                    "o resultado (ok ou o erro) + a página depois da execução. Itere até funcionar.",
-                buildJsonObject { put("code", str("Script completo, com cabeçalho ==UserScript== (@name, @version, @match…)")); put("url", str("Página real para testar (precisa casar com @match)")) },
-                listOf("code", "url")))
+                "Testa o userscript numa página REAL (recarrega, injeta com a API GM_*, espera 2,5 s) e dá o veredito: PASSOU só se não houve erro (síncrono, assíncrono, console.error) " +
+                    "E a expressão verify for verdadeira. Devolve erros, GM_log e o valor de verify. Exige userscript_inspect antes; após 2 falhas seguidas exige nova descoberta.",
+                buildJsonObject {
+                    put("code", str("Script completo, com cabeçalho ==UserScript== (@name, @version, @match…)"))
+                    put("url", str("Página real para testar (precisa casar com @match)"))
+                    put("verify", str("UMA expressão JS que PROVA o efeito na página, ex.: document.querySelectorAll('.meu-badge').length  ou  !document.querySelector('.banner-cookies')"))
+                }, listOf("code", "url", "verify")))
             add(tool("userscript_propose",
-                "Mostra ao usuário o card \"Instalar no Browser\" com o script final testado. Ao tocar, ele é instalado e passa a rodar sozinho nos browsers dos agentes.",
-                buildJsonObject { put("code", str("Script final completo, com cabeçalho ==UserScript==")) }, listOf("code")))
+                "Mostra ao usuário o card \"Instalar no Browser\". Só aceita o MESMO código que PASSOU no userscript_test.",
+                buildJsonObject { put("code", str("Script final completo (idêntico ao que passou no teste)")) }, listOf("code")))
         }
         // ---------- Seções (time de Agents com coordenador)
         val sectionHere = store.section(sectionId)
@@ -3073,27 +3094,55 @@ class AgentRunner(
             "team_delegate" -> return ToolResult(teamDelegate(sessionId, s("agent"), s("task"), b("wait"), (i("timeout_minutes") ?: 15).coerceIn(1, 30)))
             "team_status" -> return ToolResult(teamStatus(sessionId))
             "team_plan" -> return ToolResult(teamPlan(sessionId, s("goal"), s("tasks_json")))
+            "userscript_inspect" -> {
+                val url = s("url").trim()
+                if (url.isNotBlank()) {
+                    val current = runCatching { browserFor(sessionId).ui.value.url }.getOrDefault("")
+                    if (BrowserVisitLog.canonical(url) != BrowserVisitLog.canonical(current)) {
+                        val nav = browserFor(sessionId).navigate(BrowserVisitLog.canonical(url))
+                        if (nav.startsWith("ERROR")) return ToolResult(nav)
+                    }
+                }
+                val selectors = s("selectors").split('\n').map { it.trim() }.filter { it.isNotEmpty() }
+                val out = browserFor(sessionId).inspectForScript(selectors, s("text").trim())
+                if (!out.startsWith("ERROR")) scriptPolicy(sessionId).onInspect()
+                return ToolResult(out + if (selectors.isEmpty() && s("text").isBlank()) "\n(Dica: passe selectors e/ou text para localizar o alvo.)" else "")
+            }
             "userscript_test" -> {
-                val code = s("code"); val url = s("url").trim()
+                val code = s("code"); val url = s("url").trim(); val verify = s("verify").trim().trimEnd(';')
                 val (meta, err) = dev.cueopen.app.browser.UserScriptMeta.parse(code)
                 if (meta == null) return ToolResult("ERRO no cabeçalho: $err\nFormato:\n${dev.cueopen.app.browser.UserScriptMeta.EXAMPLE}")
+                if (verify.isBlank()) return ToolResult("ERRO: informe verify — uma expressão JS que prove o efeito do script na página.")
                 if (!dev.cueopen.app.browser.UserScriptMatcher.matches(meta, url))
                     return ToolResult("ERRO: a url $url não casa com @match/@include (${meta.whereLabel}). Ajuste o @match ou teste numa página certa.")
-                val requireCode = if (meta.requires.isEmpty()) "" else "/* @require é baixado na instalação; no teste ele não roda */"
-                val nav = browserFor(sessionId).navigate(url)
+                val policy = scriptPolicy(sessionId)
+                (policy.beforeTest(code) as? ScriptBuilderPolicy.Gate.Deny)?.let { deny ->
+                    if (deny.stop) { policy.newRound(); return ToolResult(deny.message, SessionStatus.WAITING_USER) }
+                    return ToolResult(deny.message)
+                }
+                val requireCode = if (meta.requires.isEmpty()) "" else runCatching { dev.cueopen.app.browser.UserScriptInstaller.downloadRequires(meta.requires) }
+                    .getOrElse { return ToolResult("ERRO: não consegui baixar um @require: ${it.message}") }
+                val nav = browserFor(sessionId).navigate(BrowserVisitLog.canonical(url))
                 if (nav.startsWith("ERROR")) return ToolResult(nav)
-                val result = browserFor(sessionId).runUserScriptForTest(
-                    dev.cueopen.app.browser.BrowserPolicies.fromMeta(meta, code, requireCode, "ia", null))
-                kotlinx.coroutines.delay(1_200)  // efeitos assíncronos (observers, requisições)
-                val after = runCatching { browserFor(sessionId).read(4_000, trackRepeat = false) }.getOrDefault("")
-                return ToolResult((if (result == "ok") "OK: o script rodou sem erro síncrono." else "FALHOU: $result") +
-                    (if (meta.requires.isNotEmpty()) "\n(Atenção: @require não roda no teste; se o script depende dele, o resultado pode diferir.)" else "") +
-                    "\n\n[Página depois do script]\n$after")
+                val r = browserFor(sessionId).runUserScriptForTest(dev.cueopen.app.browser.BrowserPolicies.fromMeta(meta, code, requireCode, "ia", null), verify)
+                val passed = ScriptBuilderPolicy.passed(r.sync, r.asyncErrors, r.verifyTruthy)
+                policy.afterTest(code, passed)
+                return ToolResult(buildString {
+                    appendLine(if (passed) "PASSOU ✓ (teste ${policy.testsRun}/${ScriptBuilderPolicy.MAX_TESTS}). Chame userscript_propose com ESTE MESMO código."
+                        else "FALHOU ✕ (teste ${policy.testsRun}/${ScriptBuilderPolicy.MAX_TESTS}).")
+                    appendLine("Execução: " + if (r.sync == "ok") "sem erro síncrono" else r.sync.removePrefix("err:"))
+                    if (r.asyncErrors.isNotEmpty()) appendLine("Erros na página após o script: " + r.asyncErrors.joinToString(" | "))
+                    if (r.logs.isNotEmpty()) appendLine("GM_log: " + r.logs.joinToString(" | "))
+                    appendLine("verify → " + (r.verifyError?.let { "ERRO: $it" } ?: "${r.verifyValue} (${if (r.verifyTruthy) "verdadeiro" else "falso/vazio"})"))
+                    if (!passed) append("Diagnostique a causa exata antes de mudar o código: use userscript_inspect/browser_js no ponto que falhou (o seletor acha algo? o elemento existe quando o script roda?).")
+                }.trimEnd())
             }
             "userscript_propose" -> {
                 val code = s("code")
                 val (meta, err) = dev.cueopen.app.browser.UserScriptMeta.parse(code)
                 if (meta == null) return ToolResult("ERRO no cabeçalho: $err")
+                if (!scriptPolicy(sessionId).canPropose(code))
+                    return ToolResult("RECUSADO: este código não é o que passou no userscript_test. Teste esta versão (com verify) e proponha exatamente o código aprovado.")
                 store.addItem(sessionId, ChatItem.UserScriptProposal(name = meta.name, version = meta.version, description = meta.description,
                     where = meta.whereLabel, code = code))
                 return ToolResult("Card \"Instalar no Browser\" exibido. Diga ao usuário em 1-2 frases o que o script faz e onde roda, e finalize.")

@@ -1242,12 +1242,68 @@ class BrowserHost(private val appCtx: Context, private val sessionId: String = "
             "Snapshot ATUALIZADO abaixo — escolha o índice nele (não repita o $index):\n\n$fresh"
     }
 
-    /** Roda um userscript (já envelopado) na aba ativa — usado pelo criador de scripts com IA para testar. */
-    suspend fun runUserScriptForTest(script: dev.cueopen.app.data.UserScript): String {
-        val tab = onMain { activeTab() } ?: return "ERROR: não há aba aberta; navegue primeiro."
-        val view = onMain { tab.webView } ?: return "ERROR: a aba não tem página carregada."
+    data class ScriptTestResult(val sync: String, val asyncErrors: List<String>, val logs: List<String>, val verifyValue: String,
+                                val verifyError: String?, val verifyTruthy: Boolean)
+
+    /**
+     * Testa um userscript na aba ativa (criador de scripts com IA): captura erros assíncronos e console,
+     * espera os efeitos e avalia a expressão [verify], que PROVA se o script fez o que devia.
+     */
+    suspend fun runUserScriptForTest(script: dev.cueopen.app.data.UserScript, verify: String): ScriptTestResult {
+        val tab = onMain { activeTab() } ?: return ScriptTestResult("err:não há aba aberta", emptyList(), emptyList(), "", null, false)
+        val view = onMain { tab.webView } ?: return ScriptTestResult("err:a aba não tem página carregada", emptyList(), emptyList(), "", null, false)
+        eval("""(function(){var T=window.__cueT={errs:[],logs:[]};
+            window.addEventListener('error',function(e){T.errs.push(String(e.message||e).slice(0,200));});
+            window.addEventListener('unhandledrejection',function(e){T.errs.push('promise: '+String((e.reason&&e.reason.message)||e.reason).slice(0,200));});
+            var ce=console.error,cl=console.log;
+            console.error=function(){try{T.errs.push('console.error: '+[].slice.call(arguments).join(' ').slice(0,200));}catch(x){}return ce.apply(console,arguments);};
+            console.log=function(){try{var m=[].slice.call(arguments).join(' ');if(m.indexOf('[userscript')===0)T.logs.push(m.slice(0,200));}catch(x){}return cl.apply(console,arguments);};
+            return 'ok';})()""", tab = tab)
         val wrapped = BrowserPolicies.wrap(script.copy(id = script.id + System.nanoTime().toString(36)), BrowserFeatures.tokenFor(view))
-        return BrowserPolicies.parseResult(eval(wrapped, tab = tab)).let { if (it.isBlank() || it == "null") "err:erro de sintaxe no script" else it }
+        val sync = BrowserPolicies.parseResult(eval(wrapped, tab = tab)).let { if (it.isBlank() || it == "null") "err:erro de sintaxe no script" else it }
+        delay(2_500)  // observers, requisições e timers do script
+        val raw = eval("""(function(){var T=window.__cueT||{errs:[],logs:[]},v=null,ve=null;
+            try{v=(function(){return ($verify
+            );})();}catch(e){ve=String((e&&e.message)||e).slice(0,200);}
+            var truthy=!!v&&!(Array.isArray(v)&&!v.length)&&!(typeof v==='object'&&v!==null&&typeof v.length==='number'&&!v.length);
+            var show;try{show=(typeof v==='object'&&v!==null)?JSON.stringify(v):String(v);}catch(e){show=String(v);}
+            return JSON.stringify({errs:T.errs.slice(0,6),logs:T.logs.slice(-6),value:(show||'').slice(0,400),verr:ve,truthy:truthy});})()""", tab = tab)
+        return runCatching {
+            val o = JSONObject(raw)
+            fun list(k: String) = o.optJSONArray(k)?.let { a -> (0 until a.length()).map { a.optString(it) } }.orEmpty()
+            ScriptTestResult(sync, list("errs"), list("logs"), o.optString("value"), if (o.isNull("verr")) null else o.optString("verr"), o.optBoolean("truthy"))
+        }.getOrElse { ScriptTestResult(sync, emptyList(), emptyList(), "", "a expressão verify tem erro de sintaxe (use UMA expressão JS, sem ponto e vírgula nem return)", false) }
+    }
+
+    /**
+     * Descoberta para o criador de scripts: fatos do DOM REAL da aba ativa — quantos elementos cada seletor
+     * acha (com amostras), onde aparece um texto visível (caminho CSS, atributos estáveis), iframes,
+     * shadow DOM e se a página continua mudando sozinha (conteúdo dinâmico).
+     */
+    suspend fun inspectForScript(selectors: List<String>, text: String): String {
+        val tab = onMain { activeTab() } ?: return "ERROR: não há aba aberta; informe url."
+        waitForStable(tab, 5_000)
+        val sel = selectors.take(8).joinToString(",", "[", "]") { BrowserPolicies.js(it) }
+        val raw = eval("""(function(){var S=$sel,T=${BrowserPolicies.js(text.take(80))};
+            function cut(h){return (h||'').replace(/\s+/g,' ').slice(0,300);}
+            function path(e){var p=[];while(e&&e.nodeType===1&&p.length<5){var s=e.tagName.toLowerCase();if(e.id){p.unshift(s+'#'+e.id);break;}
+              var c=(e.getAttribute('class')||'').trim().split(/\s+/).filter(Boolean).slice(0,2).join('.');if(c)s+='.'+c;p.unshift(s);e=e.parentElement;}return p.join(' > ');}
+            var all=document.getElementsByTagName('*'),sh=0;for(var i=0;i<all.length&&i<20000;i++)if(all[i].shadowRoot)sh++;
+            var out={url:location.href.slice(0,200),title:document.title.slice(0,80),nodes:all.length,iframes:document.querySelectorAll('iframe').length,shadowRoots:sh,selectors:[],text:[]};
+            S.forEach(function(s){try{var n=document.querySelectorAll(s);out.selectors.push({sel:s,count:n.length,samples:[].slice.call(n,0,2).map(function(e){return cut(e.outerHTML);})});}
+              catch(e){out.selectors.push({sel:s,error:'seletor inválido'});}});
+            if(T&&document.body){var w=document.createTreeWalker(document.body,NodeFilter.SHOW_TEXT),n,k=0,low=T.toLowerCase();
+              while((n=w.nextNode())&&k<5){if(n.nodeValue&&n.nodeValue.toLowerCase().indexOf(low)>=0&&n.parentElement){var e=n.parentElement;
+                out.text.push({path:path(e),attrs:[].slice.call(e.attributes).filter(function(a){return /^(data-|aria-|role|href|name|type)/.test(a.name);}).map(function(a){return a.name+'='+a.value.slice(0,60);}).join(' '),
+                  html:cut(e.outerHTML),parent:cut(e.parentElement?e.parentElement.outerHTML:'').slice(0,200)});k++;}}}
+            return JSON.stringify(out);})()""", tab = tab)
+        if (raw == "null" || raw.startsWith("ERROR") || raw.startsWith("timeout")) return "ERROR: não consegui inspecionar a página ($raw)."
+        delay(1_500)
+        val later = eval("document.getElementsByTagName('*').length", tab = tab).toIntOrNull()
+        val before = runCatching { JSONObject(raw).optInt("nodes") }.getOrDefault(0)
+        val dyn = if (later != null && later != before) "\nDINÂMICA: o DOM foi de $before para $later nós em 1,5 s — o conteúdo chega/muda depois do carregamento: use MutationObserver (com filtro) ou intervalo com limite."
+            else "\nDOM estável em 1,5 s ($before nós)."
+        return raw + dyn
     }
 
     suspend fun click(index: Int): String {

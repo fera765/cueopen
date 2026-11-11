@@ -26,7 +26,7 @@ object UserScriptInstaller {
         return Result(script, null, updated = existing != null)
     }
 
-    private suspend fun downloadRequires(urls: List<String>): String = withContext(Dispatchers.IO) {
+    suspend fun downloadRequires(urls: List<String>): String = withContext(Dispatchers.IO) {
         val client = okhttp3.OkHttpClient.Builder().callTimeout(30, java.util.concurrent.TimeUnit.SECONDS).build()
         val out = StringBuilder()
         for (u in urls.take(10)) {

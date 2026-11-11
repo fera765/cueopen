@@ -26,6 +26,8 @@ object ToolOutcomeAdvisor {
             "verifique a URL; se estiver correta, tente uma única vez depois de um intervalo e, se persistir, avise o usuário."),
         TIMEOUT("tempo esgotado",
             "a ação pode ainda estar em andamento. Leia o estado atual (browser_read/arquivo/saída) antes de repetir; não repita às cegas."),
+        BAD_REGEX("expressão regular inválida",
+            "não repita o padrão. No grep do sandbox (busybox) a repetição vai só até 255 — use {0,255} ou menos, ou grep -o com contexto menor; no Python, escape os caracteres especiais (re.escape) ou procure com str.find. Para achar um trecho num arquivo grande, prefira python com índice e fatia."),
         MISSING_DEPENDENCY("biblioteca/comando não instalado no sandbox",
             "tente instalar UMA vez (pip install <pacote> --break-system-packages, apk add <pacote> ou npm i <pacote>). Se a instalação falhar, use uma alternativa já instalada ou entregue no formato possível (ex.: o SVG em vez do PNG) — não repita o mesmo import/comando."),
         BLOCKED("bloqueado por política de segurança",
@@ -34,6 +36,7 @@ object ToolOutcomeAdvisor {
 
     private val rules: List<Pair<Reason, Regex>> = listOf(
         Reason.CHALLENGE to Regex("(?i)verify (that )?you are (a )?human|cf-mitigated|checking your browser|just a moment\\.\\.\\.|captcha|attention required.{0,20}cloudflare|confirme que você não é um robô|não sou um robô"),
+        Reason.BAD_REGEX to Regex("(?i)bad regex|invalid contents of \\{\\}|re\\.error|re/_parser\\.py|patternsyntaxexception|invalid regular expression"),
         Reason.MISSING_DEPENDENCY to Regex("(?i)modulenotfounderror|no module named|cannot find module|: command not found|: not found\\s*$|importerror: cannot import"),
         Reason.BLOCKED to Regex("(?i)^\\s*recusado\\b|bloquead[oa] (pela|por) pol[ií]tica|ssrf|blocked by (policy|guard)|host (interno|privado) bloqueado"),
         Reason.PERMISSION to Regex("(?i)permission denied|securityexception|eacces|operation not permitted|permissão negada|not granted|não concedid[oa]|http(/\\d\\.\\d)? 40[13]\\b|status[:= ]+40[13]\\b"),
