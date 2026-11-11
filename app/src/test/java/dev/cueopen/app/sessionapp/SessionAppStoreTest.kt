@@ -51,8 +51,9 @@ class SessionAppStoreTest {
         assertNotNull(s.setData("A", "Chave Inválida", "1"))
         assertNotNull(s.setData("A", "ok", "x".repeat(SessionAppStore.MAX_DATA_VALUE + 1)))
         assertFalse(s.saveState("A", "x".repeat(SessionAppStore.MAX_STATE + 1)))
-        assertNull(s.setData("../B", "k", "1"))
-        assertTrue(s.data("B").isEmpty())   // id sanitizado: não escapa para outra seção
+        // id com "../" é sanitizado: nunca grava fora da pasta base
+        assertNull(s.setData("../../fora", "k", "1"))
+        assertEquals("1", s.data("fora")["k"])
     }
 
     @Test fun `validator rejects empty shells and apps without the session api`() {
