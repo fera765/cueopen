@@ -850,56 +850,6 @@ class BrowserHost(private val appCtx: Context, private val sessionId: String = "
 
     suspend fun navigate(url: String): String = navigateInTab(url, null)
 
-    /**
-     * App em segundo plano sem permissão de sobreposição: o WebView não tem janela e o Chromium pausa a página.
-     * Para o agente não ficar travado (nem entrar em loop de browser_navigate), a página é lida por HTTP direto:
-     * título, texto e links — sem JavaScript e sem os cookies/logins do browser.
-     */
-    private suspend fun httpFallback(url: String): String = withContext(Dispatchers.IO) {
-        val howTo = "Para o browser completo (JavaScript, cliques, login), o usuário precisa abrir o app ou conceder 'Sobrepor a outros apps'."
-        val host = runCatching { java.net.URL(url).host.orEmpty().lowercase() }.getOrDefault("")
-        val local = host == "localhost" || host.startsWith("127.") || host.startsWith("10.") || host.startsWith("192.168.") || host == "0.0.0.0" || host.endsWith(".local")
-        if (!url.startsWith("http", true) || host.isBlank() || local)
-            return@withContext "ERROR: browser indisponível com o app fechado (o Android pausa páginas fora de janela). $howTo Para página local, use curl no shell. Não repita browser_navigate agora."
-        runCatching {
-            val c = (java.net.URL(url).openConnection() as java.net.HttpURLConnection).apply {
-                connectTimeout = 15_000; readTimeout = 20_000; instanceFollowRedirects = true
-                setRequestProperty("User-Agent", "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Mobile Safari/537.36")
-                setRequestProperty("Accept", "text/html,application/xhtml+xml,application/json;q=0.9,*/*;q=0.5")
-                setRequestProperty("Accept-Language", "pt-BR,pt;q=0.9,en;q=0.8")
-            }
-            try {
-                val code = c.responseCode
-                val stream = if (code >= 400) c.errorStream else c.inputStream
-                val bytes = java.io.ByteArrayOutputStream()
-                stream?.use { input -> val buf = ByteArray(16_384); while (bytes.size() < 700_000) { val n = input.read(buf); if (n < 0) break; bytes.write(buf, 0, n) } }
-                val html = bytes.toString("UTF-8")
-                if (code >= 400) return@runCatching "ERROR: HTTP $code ao abrir $url (leitura por HTTP direto, app em segundo plano). Não repita a mesma URL; tente outra fonte."
-                val opts = setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL)
-                fun clean(s: String) = s.replace(Regex("<[^>]+>"), " ").replace("&nbsp;", " ").replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">")
-                    .replace("&quot;", "\"").replace("&#39;", "'").replace(Regex("[ \\t\\r]+"), " ").replace(Regex("\\n\\s*\\n+"), "\n").trim()
-                val title = Regex("<title[^>]*>(.*?)</title>", opts).find(html)?.groupValues?.get(1)?.let { clean(it) }.orEmpty().take(160)
-                val body = html.replace(Regex("<(script|style|noscript|svg|template)\\b.*?</\\1>", opts), " ").replace(Regex("<!--.*?-->", opts), " ")
-                val text = clean(body.replace(Regex("</(p|div|h[1-6]|li|tr|section|article|header|footer)>|<br[^>]*>", opts), "\n")).take(9_000)
-                val base = java.net.URL(c.url.toString())
-                val links = Regex("<a\\b[^>]*href=[\"']([^\"'#]+)[\"'][^>]*>(.*?)</a>", opts).findAll(body).mapNotNull { m ->
-                    val label = clean(m.groupValues[2]).take(70)
-                    val abs = runCatching { java.net.URL(base, m.groupValues[1]).toString() }.getOrNull()
-                    if (label.length < 2 || abs == null || !abs.startsWith("http")) null else "- $label → $abs"
-                }.distinct().take(40).toList()
-                buildString {
-                    appendLine("MODO SEM JANELA (HTTP $code): o app está em segundo plano, então li a página por HTTP direto. É o texto estático: sem JavaScript, sem login, e browser_read/click/type/scroll não funcionam neste modo. Para abrir outra página, chame browser_navigate com a URL dela (os links estão abaixo). $howTo")
-                    appendLine("URL: ${c.url}")
-                    if (title.isNotBlank()) appendLine("Título: $title")
-                    appendLine()
-                    if (text.length < 200) appendLine("(Quase nenhum texto veio no HTML: a página depende de JavaScript. Use outra fonte, uma API pública via shell/curl, ou siga com o que já tem e registre essa limitação — não repita esta URL.)")
-                    appendLine(text)
-                    if (links.isNotEmpty()) { appendLine(); appendLine("Links:"); links.forEach { appendLine(it) } }
-                }.trim()
-            } finally { runCatching { c.disconnect() } }
-        }.getOrElse { "ERROR: não consegui ler $url por HTTP direto (${it.javaClass.simpleName}: ${it.message?.take(120)}). O browser está indisponível em segundo plano. $howTo Não repita a mesma URL agora; siga com outra fonte ou com shell/curl." }
-    }
-
     private suspend fun navigateInTab(url: String, tabId: String?): String {
         val normalized = when {
             url.startsWith("http://", true) || url.startsWith("https://", true) || url.startsWith("file:") || url.startsWith("about:") -> url
@@ -955,16 +905,17 @@ class BrowserHost(private val appCtx: Context, private val sessionId: String = "
                 targetTab.pageDone = CompletableDeferred()
                 if (targetTab.id == activeTabId) _ui.value = _ui.value.copy(loading = true, progress = 0)
                 val v = (targetTab.webView ?: ensureTabView(targetTab, appCtx)).also { ensureSized(it) }
-                if (!v.isAttachedToWindow) {
-                    targetTab.diag.add("sem janela: app fechado e sem permissão de sobreposição — navegação abortada")
+                // Recém-colocado no palco, o WebView só reporta "anexado" no próximo quadro: estar no palco já basta.
+                if (!v.isAttachedToWindow && !OffscreenStage.isStaged(v)) {
+                    targetTab.diag.add("sem janela: display virtual e sobreposição indisponíveis — navegação abortada")
                     null
                 } else { v.loadUrl(normalized); normalized }
             }
             if (target == null) {
                 if (targetTab.id == activeTabId) onMain { _ui.value = _ui.value.copy(loading = false) }
                 runCatching { dev.cueopen.app.diag.ErrorLog.log("browser", "Navegação abortada sem janela: $normalized") }
-                // Sem janela não há WebView utilizável: em vez de falhar, lê a página por HTTP direto (texto estático).
-                return httpFallback(normalized)
+                return "ERROR: browser indisponível com o app fechado (o aparelho recusou o display virtual e não há permissão de sobreposição). " +
+                    "Peça ao usuário para abrir o app ou conceder 'Sobrepor a outros apps'. Para página local use curl no shell. Não tente navegar de novo agora."
             }
             val result = awaitLoad(targetTab, target)
             // Aba travada: nem primeiro quadro nem fim em 30 s (o motor dela parou). Recria e tenta 1×.

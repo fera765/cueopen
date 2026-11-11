@@ -2410,7 +2410,7 @@ class AgentRunner(
                     appendLine("- Se faltar um insumo (arquivo, ID, acesso), diga exatamente o que falta e encerre com a resposta final: o coordenador resolve e devolve a tarefa. Insistir por conta própria só gasta tempo e tokens.")
                     appendLine("- Você só tem as ferramentas que aparecem nesta chamada. Se a tarefa pedir uma plataforma, conta ou conector que você não tem (ex.: Google Search Console, Analytics, um painel com login), não fique tentando acessá-la: diga isso logo na primeira resposta, faça a melhor versão possível com fontes públicas e marque o que é dado observado e o que é inferência.")
                     appendLine("- Quando a tarefa pedir um arquivo, salve-o em /root/workspace com file_write e confira com file_list antes de responder; cite o caminho exato na entrega. O coordenador recebe a lista real dos arquivos criados.")
-                    appendLine("- Se o browser responder MODO SEM JANELA, o texto e os links já vieram na resposta: trabalhe com eles e abra outras páginas por browser_navigate. Se responder ERROR de browser indisponível, mude de fonte ou use o shell; repetir a mesma navegação não resolve.")
+                    appendLine("- O browser funciona com o app em segundo plano. Se mesmo assim responder ERROR de browser indisponível, mude de fonte ou use o shell; repetir a mesma navegação não resolve.")
                     appendLine("- Mensagens marcadas [Coordenador] têm prioridade sobre o seu plano. Ao concluir, responda com o entregável (caminhos de arquivo, links, números) e pare.")
                     if (agent?.confirmMode == "auto") appendLine("- Seção 100% autônoma: ninguém vai responder perguntas, então ask_user e ask_question não ajudam aqui. Diante de uma dúvida, escolha você mesmo o melhor caminho, registre na entrega a premissa que adotou e conclua a tarefa.")
                     sectionSharedContext(sec, session.id, coordinator = false).takeIf { it.isNotBlank() }?.let { appendLine(); appendLine(it) }
@@ -4103,7 +4103,7 @@ class AgentRunner(
                                     "siga com o que não depende do browser ou use sleep (10+ min) e tente depois. O usuário pode liberar 'Sobrepor a outros apps' para o browser rodar com o app fechado."
                         }
                         BrowserVisitLog.record(sessionId, url, navigation)
-                        if (navigation.startsWith("ERROR:") || navigation.startsWith("MODO SEM JANELA")) navigation
+                        if (navigation.startsWith("ERROR:")) navigation
                         else if (navigation.startsWith("TIMEOUT:")) {
                             // Como o Playwright MCP: mesmo lento, devolve o que a página mostra agora.
                             val now = runCatching { browserFor(sessionId).read(2500, trackRepeat = false) }.getOrDefault("")
