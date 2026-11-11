@@ -667,13 +667,35 @@ class AgentRunner(
     /** Botão "Usar app base" da aba APP. */
     fun installBaseSessionApp(sectionId: String) { store.section(sectionId)?.let { installBaseApp(it) } }
 
-    private fun appPublish(sessionId: String, html: String, title: String): String {
+    private val appErrorNotified = java.util.concurrent.ConcurrentHashMap<String, Int>()
+
+    /**
+     * Erro de JavaScript no app em uso: guarda para o prompt e avisa o coordenador para corrigir sozinho
+     * (no máximo 2 avisos por versão, para nunca virar ciclo).
+     */
+    fun sessionAppJsError(sectionId: String, message: String) {
+        val sec = store.section(sectionId) ?: return
+        sessionAppErrors[sectionId] = message
+        val key = sectionId + ":" + (sessionApps.meta(sectionId)?.version ?: 0)
+        if ((appErrorNotified.merge(key, 1, Int::plus) ?: 1) > 2) return
+        val text = "[Sistema] O app da seção está com ERRO de JavaScript na tela do usuário: \"${message.take(200)}\". Corrija agora: app_read para achar o trecho, app_edit para consertar (o app é testado antes de publicar). Não mexa no resto."
+        if (isRunning(sec.sessionId)) coordinatorInbox.getOrPut(sec.sessionId) { java.util.Collections.synchronizedList(mutableListOf()) }.add(text)
+        else send(sec.sessionId, text, showUserMessage = false)
+    }
+
+    /** Validação estática + teste de renderização real (WebView oculto): erro de sintaxe/execução barra a publicação. */
+    private suspend fun appProblem(sec: Section, html: String): String? =
+        dev.cueopen.app.sessionapp.SessionAppValidator.validate(html)
+            ?: runCatching { dev.cueopen.app.sessionapp.SessionAppTester.test(ctx, html, sessionAppSnapshot(sec.id)) }.getOrNull()
+                ?.let { "o app foi carregado num teste e deu erro de JavaScript: $it" }
+
+    private suspend fun appPublish(sessionId: String, html: String, title: String): String {
         val sec = store.section(store.session(sessionId)?.sectionId) ?: return "ERRO: esta conversa não é uma seção."
-        dev.cueopen.app.sessionapp.SessionAppValidator.validate(html)?.let { why ->
+        appProblem(sec, html)?.let { why ->
             val n = appRejects.merge(sec.id, 1, Int::plus) ?: 1
             if (n >= 3 && !sessionApps.exists(sec.id)) {
                 installBaseApp(sec); appRejects.remove(sec.id)
-                return "Seu app foi recusado 3 vezes ($why). Instalei o APP BASE da seção para não atrasar o trabalho: siga agora com team_plan. Depois você pode substituí-lo com app_publish ou ajustar com app_edit."
+                return "Seu app foi recusado 3 vezes (${why.take(200)}). Instalei o APP BASE da seção para não atrasar o trabalho: siga agora com team_plan. Depois você pode substituí-lo com app_publish ou ajustar com app_edit."
             }
             return "RECUSADO: $why. Corrija e publique de novo."
         }
@@ -685,14 +707,14 @@ class AgentRunner(
             "Alimente-o com app_set_data conforme os agentes entregarem; para ajustes pequenos use app_edit (não reenvie o arquivo inteiro)."
     }
 
-    private fun appEdit(sessionId: String, oldText: String, newText: String): String {
+    private suspend fun appEdit(sessionId: String, oldText: String, newText: String): String {
         val sec = store.section(store.session(sessionId)?.sectionId) ?: return "ERRO: esta conversa não é uma seção."
         val cur = sessionApps.html(sec.id) ?: return "ERRO: a seção ainda não tem app. Use app_publish."
         val n = cur.split(oldText).size - 1
         if (oldText.isEmpty() || n == 0) return "ERRO: trecho não encontrado no app.\n" + EditHint.nearest(cur, oldText)
         if (n > 1) return "ERRO: o trecho aparece $n vezes; inclua mais contexto para ficar único."
         val next = cur.replace(oldText, newText)
-        dev.cueopen.app.sessionapp.SessionAppValidator.validate(next)?.let { return "RECUSADO: a edição deixaria o app inválido ($it). Nada foi alterado." }
+        appProblem(sec, next)?.let { return "RECUSADO: a edição deixaria o app com problema ($it). Nada foi alterado; ajuste o trecho e tente de novo." }
         sessionAppErrors.remove(sec.id)
         val m = sessionApps.publish(sec.id, next, "")
         sessionAppTick.value = System.currentTimeMillis()
@@ -1928,6 +1950,8 @@ class AgentRunner(
     /** Detectores puros de loop/degeneração (sem Android) — testáveis na JVM. */
     companion object LoopGuards {
         const val MAX_PARALLEL_MEMBERS = 4
+        /** Quanto o browser_navigate espera o app voltar ao primeiro plano antes de desistir. */
+        const val BROWSER_WAIT_FOREGROUND_MS = 15 * 60_000L
         /** Prefixo de retorno do team_delegate quando o agente realmente começou (o despacho do plano confere). */
         const val DELEGATION_STARTED = "OK:"
         /** Lembretes ao coordenador sem nenhuma mudança no plano antes de declarar o plano travado. */
@@ -4157,7 +4181,17 @@ class AgentRunner(
                         val current = runCatching { browserFor(sessionId).ui.value.url }.getOrNull()
                         val repeated = BrowserVisitLog.check(sessionId, url, current)
                         if (loginDenied != null) loginDenied else if (repeated != null) repeated else run {
-                        val navigation = browserFor(sessionId).navigate(url)
+                        var navigation = browserFor(sessionId).navigate(url)
+                        // App fechado e sem permissão de sobreposição: em vez de devolver o erro (o agente insistia
+                        // e gastava tokens), ESPERA o app voltar para a tela — sem custo — e navega de novo sozinho.
+                        if (navigation.contains("browser indisponível com o app fechado")) {
+                            setActivity(sessionId, Activity(Activity.Kind.BROWSER, "Browser em espera: abra o app para continuar"))
+                            val deadline = System.currentTimeMillis() + BROWSER_WAIT_FOREGROUND_MS
+                            while (!dev.cueopen.app.browser.OffscreenStage.foreground && System.currentTimeMillis() < deadline) kotlinx.coroutines.delay(1_500)
+                            navigation = if (dev.cueopen.app.browser.OffscreenStage.foreground) { kotlinx.coroutines.delay(800); browserFor(sessionId).navigate(url) }
+                                else "ERROR: o app ficou fechado por ${BROWSER_WAIT_FOREGROUND_MS / 60_000} min e o browser não funciona assim. NÃO navegue de novo: " +
+                                    "siga com o que não depende do browser ou use sleep (10+ min) e tente depois. O usuário pode liberar 'Sobrepor a outros apps' para o browser rodar com o app fechado."
+                        }
                         BrowserVisitLog.record(sessionId, url, navigation)
                         if (navigation.startsWith("ERROR:")) navigation
                         else if (navigation.startsWith("TIMEOUT:")) {

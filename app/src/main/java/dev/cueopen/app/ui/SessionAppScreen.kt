@@ -120,7 +120,7 @@ fun SessionAppPane(sec: Section, modifier: Modifier = Modifier, onGoChat: () -> 
                 setBackgroundColor(android.graphics.Color.TRANSPARENT)
                 addJavascriptInterface(SessionAppBridge(sec.id) { e ->
                     jsError = e
-                    app.agent.sessionAppErrors[sec.id] = e
+                    app.agent.sessionAppJsError(sec.id, e)
                     runCatching { dev.cueopen.app.diag.ErrorLog.log("app", "Erro de JS no app da seção ${sec.name}: $e", sec.sessionId, "session_app") }
                 }, "__sar")
                 webViewClient = object : WebViewClient() {
