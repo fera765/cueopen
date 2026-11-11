@@ -78,8 +78,6 @@ fun SessionAppPane(sec: Section, modifier: Modifier = Modifier, onGoChat: () -> 
     val c = Cue.c
     val tick by app.agent.sessionAppTick.collectAsStateWithLifecycle()
     val meta = remember(sec.id, tick) { app.agent.sessionApps.meta(sec.id) }
-    var jsError by remember(sec.id, meta?.version) { mutableStateOf<String?>(null) }
-    var versionsOpen by remember { mutableStateOf(false) }
     if (meta == null) {
         Column(modifier, verticalArrangement = Arrangement.Center, horizontalAlignment = Alignment.CenterHorizontally) {
             EmptyState(Icons.Rounded.Dashboard, "Esta seção ainda não tem app",
@@ -97,14 +95,9 @@ fun SessionAppPane(sec: Section, modifier: Modifier = Modifier, onGoChat: () -> 
         return
     }
     Column(modifier) {
-        Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
-            Text("${meta.title.ifBlank { sec.name }} · v${meta.version}", fontSize = 12.sp, color = c.ink3, modifier = Modifier.weight(1f), maxLines = 1)
-            TextButton({ versionsOpen = true }) { Text("Versões", fontSize = 12.sp) }
-            TextButton({ SessionAppViews.release(); app.agent.sessionAppTick.value = System.currentTimeMillis() }) { Text("Recarregar", fontSize = 12.sp) }
-        }
-        jsError?.let { Text("Erro no app: $it", fontSize = 11.sp, color = c.accent, modifier = Modifier.padding(horizontal = 16.dp)) }
         AndroidView(modifier = Modifier.weight(1f).fillMaxWidth(), factory = { ctx ->
-            if (SessionAppViews.sectionId != sec.id) SessionAppViews.release()
+            // Outra seção, ou a tela foi recriada (o WebView antigo ficaria preto): começa um novo.
+            if (SessionAppViews.sectionId != sec.id || SessionAppViews.view?.context !== ctx) SessionAppViews.release()
             val existing = SessionAppViews.view
             if (existing != null) { (existing.parent as? ViewGroup)?.removeView(existing); return@AndroidView existing }
             WebView(ctx).apply {
@@ -119,7 +112,6 @@ fun SessionAppPane(sec: Section, modifier: Modifier = Modifier, onGoChat: () -> 
                 settings.mediaPlaybackRequiresUserGesture = true
                 setBackgroundColor(android.graphics.Color.TRANSPARENT)
                 addJavascriptInterface(SessionAppBridge(sec.id) { e ->
-                    jsError = e
                     app.agent.sessionAppJsError(sec.id, e)
                     runCatching { dev.cueopen.app.diag.ErrorLog.log("app", "Erro de JS no app da seção ${sec.name}: $e", sec.sessionId, "session_app") }
                 }, "__sar")
@@ -149,23 +141,19 @@ fun SessionAppPane(sec: Section, modifier: Modifier = Modifier, onGoChat: () -> 
         SessionAppViews.view?.onResume()
         onDispose { SessionAppViews.view?.onPause() }
     }
-    // Sincronização: qualquer mudança real da sessão (agentes, plano, dados) chega ao app, com folga de 600 ms.
-    LaunchedEffect(sec.id) {
-        app.store.state.collectLatest { delay(600); SessionAppViews.view?.evaluateJavascript("window.__sarEmit&&window.__sarEmit()", null) }
-    }
-    LaunchedEffect(tick) { delay(300); SessionAppViews.view?.evaluateJavascript("window.__sarEmit&&window.__sarEmit()", null) }
-    if (versionsOpen) {
-        val versions = remember(tick) { app.agent.sessionApps.versions(sec.id) }
-        AlertDialog(onDismissRequest = { versionsOpen = false }, title = { Text("Versões do app") },
-            text = {
-                Column {
-                    Text("Atual: v${meta.version}. Restaurar não apaga dados nem o estado do app.", fontSize = 12.sp, color = c.ink2)
-                    if (versions.isEmpty()) Text("Nenhuma versão anterior.", fontSize = 13.sp, modifier = Modifier.padding(top = 8.dp))
-                    versions.forEach { n ->
-                        TextButton({ app.agent.sessionApps.rollback(sec.id, n); app.agent.sessionAppTick.value = System.currentTimeMillis(); versionsOpen = false }) { Text("Restaurar v$n") }
-                    }
-                }
-            },
-            confirmButton = { TextButton({ versionsOpen = false }) { Text("Fechar") } })
+    // TEMPO REAL: a cada segundo monta o retrato da seção fora da thread principal e, se algo mudou, entrega ao
+    // app (SessionApp.onUpdate). Não depende de "silêncio" no estado — antes, com agentes ativos, a atualização
+    // era sempre adiada e o app só mudava no fim.
+    LaunchedEffect(sec.id, meta.version) {
+        var last = ""
+        while (true) {
+            val snap = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) { app.agent.sessionAppSnapshot(sec.id) }
+            val sig = snap.replace(Regex("\"updatedAt\":\\d+"), "")
+            if (sig != last && snap.length > 2) {
+                last = sig
+                SessionAppViews.view?.evaluateJavascript("window.__sarEmit&&window.__sarEmit($snap)", null)
+            }
+            delay(1_000)
+        }
     }
 }

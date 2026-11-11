@@ -399,7 +399,7 @@ class AgentRunner(
         }
         store.replaceItem(sessionId, cur.copy(state = "activated"))
         store.upsertSection(sec.copy(configured = true))
-        send(sec.sessionId, sectionKickoff(sec))
+        startSection(sec)
         return sec.sessionId
     }
 
@@ -477,7 +477,7 @@ class AgentRunner(
         val sec = store.section(sectionId) ?: return
         scope.launch {
             wipeSection(sec)
-            if (sec.configured) send(sec.sessionId, sectionKickoff(sec))
+            if (sec.configured) startSection(sec)
         }
     }
 
@@ -561,6 +561,7 @@ class AgentRunner(
 
     val sessionApps = dev.cueopen.app.sessionapp.SessionAppStore(java.io.File(ctx.filesDir, "session_apps"))
     private val appActionAt = java.util.concurrent.ConcurrentHashMap<String, Long>()
+    private val snapshotFiles = java.util.concurrent.ConcurrentHashMap<String, Pair<Long, List<Triple<String, Long, Long>>>>()
     /** Muda a cada publicação/dado novo: a tela do App observa para recarregar/atualizar. */
     val sessionAppTick = MutableStateFlow(0L)
     /** Último erro de JavaScript do app de cada seção (o coordenador vê e corrige com app_edit). */
@@ -594,10 +595,23 @@ class AgentRunner(
                         put("task", delegations[child?.id]?.task?.lineSequence()?.firstOrNull()?.take(160).orEmpty())
                         put("lastMessage", (child?.items?.lastOrNull { it is ChatItem.Assistant } as? ChatItem.Assistant)?.text?.take(300).orEmpty())
                         put("tokens", (child?.tokensIn ?: 0) + (child?.tokensOut ?: 0))
+                        put("steps", buildJsonArray {
+                            child?.items.orEmpty().takeLast(30).filterIsInstance<ChatItem.Step>().takeLast(5).forEach { st ->
+                                add(kotlinx.serialization.json.JsonPrimitive(st.title.take(90) + if (st.status == StepStatus.ERROR) " ✕" else ""))
+                            }
+                        })
                     })
                 }
             })
             put("plan", buildJsonArray {
+                // Sem team_plan: o plano mostrado são as delegações reais feitas até agora (nunca fica vazio à toa).
+                if (sec.plan.isEmpty()) coord?.items.orEmpty().filterIsInstance<ChatItem.Step>().filter { it.tool == TEAM_MEMBER_STEP }.takeLast(30).forEachIndexed { i, st ->
+                    add(buildJsonObject {
+                        put("id", "D${i + 1}"); put("agent", store.agent(st.args.substringAfter('|'))?.name ?: "Agente"); put("task", st.title.take(300))
+                        put("status", when (st.status) { StepStatus.RUNNING -> "running"; StepStatus.ERROR -> "failed"; else -> "done" })
+                        put("dependsOn", buildJsonArray { }); put("attempts", 0); put("result", st.result.take(300)); put("note", "")
+                    })
+                }
                 sec.plan.forEach { t -> add(buildJsonObject {
                     put("id", t.id); put("agent", t.agentName); put("task", t.task.take(300)); put("status", t.status.name.lowercase())
                     put("dependsOn", buildJsonArray { t.dependsOn.forEach { add(kotlinx.serialization.json.JsonPrimitive(it)) } })
@@ -605,10 +619,14 @@ class AgentRunner(
                 }) }
             })
             put("files", buildJsonArray {
-                val root = sandbox.workspaceFor(sec.sessionId)
-                root.walkTopDown().maxDepth(3).filter { it.isFile && !it.path.contains("/.cue/") }.sortedByDescending { it.lastModified() }.take(60).forEach { f ->
-                    add(buildJsonObject { put("path", f.relativeTo(root).path); put("size", f.length()); put("modified", f.lastModified()) })
+                // Listar o workspace é caro: o resultado vale por 4 s (o retrato é montado a cada segundo).
+                val now = System.currentTimeMillis()
+                val cached = snapshotFiles[sec.id]?.takeIf { now - it.first < 4_000 }?.second ?: run {
+                    val root = sandbox.workspaceFor(sec.sessionId)
+                    root.walkTopDown().maxDepth(3).filter { it.isFile && !it.path.contains("/.cue/") }.sortedByDescending { it.lastModified() }.take(60)
+                        .map { Triple(it.relativeTo(root).path, it.length(), it.lastModified()) }.toList().also { snapshotFiles[sec.id] = now to it }
                 }
+                cached.forEach { (path, size, modified) -> add(buildJsonObject { put("path", path); put("size", size); put("modified", modified) }) }
             })
             put("data", buildJsonObject {
                 sessionApps.data(sec.id).forEach { (k, v) -> put(k, runCatching { json.parseToJsonElement(v) }.getOrDefault(kotlinx.serialization.json.JsonPrimitive(v))) }
@@ -642,21 +660,27 @@ class AgentRunner(
         else send(sec.sessionId, text, showUserMessage = false)
     }
 
-    /** Primeira mensagem ao coordenador: o app da seção vem ANTES de qualquer trabalho. */
-    private fun sectionKickoff(sec: Section): String {
+    private fun isBaseApp(sectionId: String): Boolean = runCatching {
+        val f = sessionApps.appFile(sectionId)
+        f.isFile && f.length() == dev.cueopen.app.sessionapp.SessionAppTemplate.HTML.toByteArray().size.toLong()
+    }.getOrDefault(false)
+
+    /**
+     * Largada da seção: o app já existe desde o primeiro segundo (app base, em tempo real) e o coordenador o
+     * troca pelo app sob medida em segundo plano, sem nenhuma mensagem sobre isso no chat. O usuário só vê o pedido.
+     */
+    private fun startSection(sec: Section) {
+        if (!sessionApps.exists(sec.id)) installBaseApp(sec)
         val task = sec.firstTask.ifBlank { "Apresente o time, proponha o plano inicial e comece." }
-        return if (sessionApps.exists(sec.id)) task
-        else "[Sistema] ETAPA 0 — criar o app da seção (obrigatória, antes de tudo): chame app_publish AGORA com o app visual desta seção, " +
-            "feito sob medida para o objetivo e para este time, já funcional com estados vazios (os dados chegam depois por app_set_data). " +
-            "Não planeje nem delegue antes: o app recusa. Publicado o app, avise o usuário em 1 frase e comece o pedido abaixo.\n\nPedido do usuário:\n$task"
+        store.addItem(sec.sessionId, ChatItem.User(text = task))
+        send(sec.sessionId, task + (if (isBaseApp(sec.id)) "\n\n[Sistema — não mostre nem comente isto no chat] Sua PRIMEIRA ação, em silêncio: app_publish com o app visual sob medida desta seção " +
+            "(veja \"App visual da seção\"). Não diga ao usuário que criou/publicou o app; siga direto para o trabalho (team_plan)." else ""), showUserMessage = false)
     }
 
     private val appRejects = java.util.concurrent.ConcurrentHashMap<String, Int>()
 
-    /** A seção só começa a trabalhar com o app pronto: sem app, planejar/delegar é recusado. */
-    private fun appGate(sec: Section): String? =
-        if (sessionApps.exists(sec.id)) null
-        else "RECUSADO: a seção ainda não tem o APP. Primeiro publique-o com app_publish (interface sob medida para o objetivo, usando SessionApp). Só depois planeje e delegue."
+    /** Toda seção tem app: se por algum motivo não houver, o app base entra na hora (nunca bloqueia o trabalho). */
+    private fun appGate(sec: Section): String? { if (!sessionApps.exists(sec.id)) installBaseApp(sec); return null }
 
     /** Instala o app base (funcional, com dados reais) quando o coordenador não consegue publicar o próprio. */
     private fun installBaseApp(sec: Section) {
@@ -727,6 +751,23 @@ class AgentRunner(
         sessionApps.setData(sec.id, key.trim(), SecretVault.redact(sessionId, value))?.let { return "ERRO: $it" }
         sessionAppTick.value = System.currentTimeMillis()
         return "OK: dado \"$key\" publicado no app (SessionApp.getState().data.$key). Chaves atuais: ${sessionApps.data(sec.id).keys.joinToString()}."
+    }
+
+    /** Acrescenta UM item a uma lista do app (publicação incremental: o app mostra cada achado na hora). */
+    private fun appAppendData(sessionId: String, key: String, item: String): String {
+        val sec = store.section(store.session(sessionId)?.sectionId) ?: return "ERRO: esta conversa não é uma seção."
+        val el = runCatching { json.parseToJsonElement(item) }.getOrElse { return "ERRO: item não é JSON válido (${it.message?.take(100)})." }
+        val k = key.trim()
+        synchronized(sessionApps) {
+            val cur = sessionApps.data(sec.id)[k]?.let { runCatching { json.parseToJsonElement(it) as? kotlinx.serialization.json.JsonArray }.getOrNull() }
+            if (sessionApps.data(sec.id).containsKey(k) && cur == null) return "ERRO: \"$k\" já existe e não é uma lista; use app_set_data ou outra chave."
+            val list = cur.orEmpty()
+            if (list.any { it == el }) return "OK: item já estava em \"$k\" (${list.size} itens)."
+            val next = kotlinx.serialization.json.JsonArray((list + el).takeLast(500))
+            sessionApps.setData(sec.id, k, SecretVault.redact(sessionId, next.toString()))?.let { return "ERRO: $it" }
+            sessionAppTick.value = System.currentTimeMillis()
+            return "OK: item publicado em \"$k\" (${next.size} itens). O app já mostra."
+        }
     }
 
     private val scriptPolicies = java.util.concurrent.ConcurrentHashMap<String, ScriptBuilderPolicy>()
@@ -2483,7 +2524,7 @@ class AgentRunner(
                     appendLine("- Arquivos do time ficam em /root/workspace (compartilhado entre os agentes). Liste com file_list; nunca vasculhe o sistema (find /).")
                     appendLine("- Se faltar um insumo (arquivo, ID, acesso), diga exatamente o que falta e ENCERRE com resposta final — o coordenador resolve. Não fique tentando por horas.")
                     appendLine("- Mensagens [Coordenador] têm prioridade sobre o seu plano. Ao concluir, responda com o entregável (caminhos de arquivo, links, números) e pare.")
-                    appendLine("- A seção tem um app visual: quando produzir resultados estruturados (lista de itens, métricas, textos finais), publique-os também com app_set_data(key, json) — só dados reais.")
+                    appendLine("- A seção tem um app visual que o usuário acompanha EM TEMPO REAL. Publique cada resultado NA HORA em que o obtiver, não no fim: app_append_data(key, item) para acrescentar um item a uma lista (ex.: cada oferta/lead/texto encontrado) e app_set_data(key, json) para métricas/objetos. Use a chave e o formato que o coordenador indicar. Só dados reais.")
                     sectionSharedContext(sec, session.id, coordinator = false).takeIf { it.isNotBlank() }?.let { appendLine(); appendLine(it) }
                 }
                 store.section(session.sectionId)?.takeIf { it.coordinatorAgentId == agent?.id }?.let { sec ->
@@ -2494,12 +2535,15 @@ class AgentRunner(
                     if (sec.plan.isNotEmpty()) appendLine("- PLANO ATUAL (persistido):\n" + SectionPlanEngine.describe(sec.plan))
                     val appMeta = sessionApps.meta(sec.id)
                     appendLine(); appendLine("## App visual da seção (Session App Runtime)")
-                    appendLine(if (appMeta == null) "- Esta seção AINDA NÃO TEM APP e nada mais funciona sem ele (team_plan/team_delegate são recusados). Crie-o AGORA com app_publish: uma interface própria para ESTE objetivo (não um dashboard genérico) — ex.: catálogo com filtros para garimpo de ofertas, estúdio com editor/versões para copy, sala com avatares dos agentes para trading."
+                    appendLine(if (appMeta == null) "- Esta seção ainda não tem app sob medida. Crie-o com app_publish: uma interface própria para ESTE objetivo (não um dashboard genérico) — ex.: catálogo com filtros para garimpo de ofertas, estúdio com editor/versões para copy, sala com avatares dos agentes para trading."
+                        else if (isBaseApp(sec.id)) "- O app atual é o APP BASE genérico (provisório). Na sua próxima ação, EM SILÊNCIO (sem comentar no chat), substitua-o com app_publish por uma interface própria para ESTE objetivo — ex.: catálogo com filtros para garimpo de ofertas, estúdio de copy, sala com avatares dos agentes, cérebro com ramificações para um segundo cérebro."
                         else "- App publicado: \"${appMeta.title}\" v${appMeta.version} (${appMeta.bytes / 1000} KB). Dados atuais: ${sessionApps.data(sec.id).keys.joinToString().ifBlank { "nenhum" }}. Evolua com app_edit quando o usuário pedir mudanças; mantenha os dados em dia com app_set_data.")
                     sessionAppErrors[sec.id]?.let { appendLine("- ⚠ O app publicado está com ERRO de JavaScript: \"$it\". Corrija com app_read + app_edit.") }
                     appendLine("- Formato: UM arquivo HTML (CSS e JS inline, sem frameworks externos obrigatórios), responsivo para celular, tema escuro, com identidade visual própria, estados vazios/carregando e animações leves.")
                     appendLine("- API no JS do app: SessionApp.onUpdate(fn) chama fn(state) agora e a cada mudança; SessionApp.getState(); SessionApp.send(acao, dados) manda uma ação do usuário para você (chega como \"[App da seção]\"); SessionApp.saveState(obj)/loadState() guardam o estado da interface (filtros, favoritos).")
-                    appendLine("- state = {section:{name,goal}, planState, coordinator:{running,lastMessage}, agents:[{name,role,status(working|idle|waiting_user|error|recovering),activity,task,lastMessage,color}], plan:[{id,agent,task,status,result}], files:[{path,size,modified}], data:{<chave>: valor de app_set_data}, events:[{time,type,text}]}.")
+                    appendLine("- state = {section:{name,goal}, planState, coordinator:{running,lastMessage}, agents:[{name,role,status(working|idle|waiting_user|error|recovering),activity,task,lastMessage,color,steps:[últimas ações]}], plan:[{id,agent,task,status(pending|running|review|done|failed|blocked),result}] (sempre preenchido: plano do team_plan ou as delegações feitas), files:[{path,size,modified}], data:{<chave>: valor de app_set_data}, events:[{time,type,text}]}.")
+                    appendLine("- TEMPO REAL: o app recebe o state novo sozinho (a cada ~1 s quando algo muda) por SessionApp.onUpdate — desenhe TUDO a partir do state dentro do onUpdate. PROIBIDO botão de atualizar/recarregar/sincronizar e PROIBIDO botão que só finge iniciar algo; botões só para ações reais via SessionApp.send (ex.: pedir nova busca, aprovar item). Atualize a tela sem piscar (troque só o que mudou; preserve rolagem, aba e filtros).")
+                    appendLine("- Para o app ficar vivo desde o primeiro minuto: ao delegar, diga a cada agente a CHAVE e o formato dos dados (ex.: ofertas = lista de {nome, anuncios_ativos, desde, link, status_fr}) e mande publicar CADA item assim que encontrar com app_append_data — não só no final. state.plan e state.agents[].steps já chegam sozinhos.")
                     appendLine("- Regra de ouro: o app só mostra DADOS REAIS do state. Nada de números, preços, lucros ou itens inventados no HTML — sem dado, mostre o estado vazio. Animações (avatares andando, etc.) devem refletir agents[].status reais.")
                     appendLine("- Entre as ações, mande feedbacks CURTOS (5 a 30 palavras) e siga trabalhando. Nada de terminal/browser: o trabalho é dos agentes.")
                     appendLine("- Ao receber [Relatório automático], avalie, cobre ajustes ou passe a próxima etapa; entregue o progresso em lista numerada.")
@@ -2737,6 +2781,9 @@ class AgentRunner(
             "Publica um DADO REAL no app visual da seção (aparece em SessionApp.getState().data.<key>). Use para resultados estruturados: listas de produtos/ofertas, métricas, textos produzidos, operações. " +
                 "Só dados observados de verdade — nunca invente; marque estimativas como estimativa.",
             buildJsonObject { put("key", str("Chave em minúsculas, ex.: ofertas, metricas, copys")); put("json", str("Valor em JSON (objeto ou lista)")) }, listOf("key", "json")))
+        if (allowMultiAgent && sectionHere != null) add(tool("app_append_data",
+            "Acrescenta UM item a uma lista do app da seção, na hora (o usuário vê em tempo real). Use a cada achado: oferta, lead, texto, operação. Só dados reais.",
+            buildJsonObject { put("key", str("Chave da lista, ex.: ofertas")); put("item", str("O item em JSON, ex.: {\"nome\":\"X\",\"anuncios_ativos\":42}")) }, listOf("key", "item")))
         if (!connectorEditId.isNullOrBlank()) {
             add(tool("connector_edit_propose", "Propõe um card de atualização somente para o conector já associado a esta conversa. Não aplica alterações. settings_json é um objeto JSON com IDs listados; definition_yaml é opcional e só serve para alterações funcionais do conector customizado. Não inclua segredos.", buildJsonObject {
                 put("summary", str("Resumo curto do que será alterado"))
@@ -3347,6 +3394,7 @@ class AgentRunner(
             "app_publish" -> return ToolResult(appPublish(sessionId, s("html"), s("title")))
             "app_edit" -> return ToolResult(appEdit(sessionId, s("old_text"), s("new_text")))
             "app_set_data" -> return ToolResult(appSetData(sessionId, s("key"), s("json")))
+            "app_append_data" -> return ToolResult(appAppendData(sessionId, s("key"), s("item")))
             "app_read" -> {
                 val sec = store.section(store.session(sessionId)?.sectionId) ?: return ToolResult("ERRO: esta conversa não é uma seção.")
                 val f = sessionApps.appFile(sec.id).takeIf { it.isFile } ?: return ToolResult("A seção ainda não tem app. Crie com app_publish.")

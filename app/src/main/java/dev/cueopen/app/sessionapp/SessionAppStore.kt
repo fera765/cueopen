@@ -119,13 +119,13 @@ object SessionAppValidator {
         Regex("<script\\b").findAll(low).count() != Regex("</script\\s*>").findAll(low).count()
 
     /** Script da API, inserido no começo do documento ao carregar (a ponte nativa é window.__sar). */
-    const val BOOTSTRAP = """<script>(function(){var B=window.__sar,cbs=[];
-function st(){try{return JSON.parse(B.getState());}catch(e){return {};}}
+    const val BOOTSTRAP = """<script>(function(){var B=window.__sar,cbs=[],cur=null;
+function st(){if(cur)return cur;try{cur=JSON.parse(B.getState());}catch(e){cur={};}return cur;}
 window.SessionApp={getState:st,onUpdate:function(cb){cbs.push(cb);try{cb(st());}catch(e){console.error(e);}},
 send:function(action,payload){try{B.send(String(action||''),payload==null?'':(typeof payload==='string'?payload:JSON.stringify(payload)));}catch(e){}},
 saveState:function(o){try{return B.saveState(JSON.stringify(o));}catch(e){return false;}},
 loadState:function(){try{return JSON.parse(B.loadState());}catch(e){return null;}}};
-window.__sarEmit=function(){var s=st();cbs.forEach(function(cb){try{cb(s);}catch(e){console.error(e);}});};
+window.__sarEmit=function(n){if(n&&typeof n==='object')cur=n;else cur=null;var s=st();cbs.forEach(function(cb){try{cb(s);}catch(e){console.error(e);}});};
 window.addEventListener('error',function(e){try{B.reportError(String(e.message||e).slice(0,300));}catch(x){}});})();</script>"""
 
     fun withBootstrap(html: String): String {
