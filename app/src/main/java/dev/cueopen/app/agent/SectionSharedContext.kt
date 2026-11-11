@@ -30,7 +30,7 @@ object SectionSharedContext {
             .filter { it != originalRequest.trim() }.takeLast(MAX_MESSAGES)
         if (originalRequest.isBlank() && msgs.isEmpty() && answers.isEmpty() && secretNames.isEmpty() && deliveries.isEmpty()) return ""
         val out = buildString {
-            appendLine("## Contexto compartilhado da seção (vale para TODOS os agentes; use sem pedir de novo)")
+            appendLine("## Contexto compartilhado da seção (vale para todos os agentes; use sem pedir de novo)")
             if (originalRequest.isNotBlank()) appendLine("- Pedido original: " + clip(originalRequest, 900))
             if (msgs.isNotEmpty()) {
                 appendLine("- Informações do usuário (em ordem):")
@@ -38,9 +38,9 @@ object SectionSharedContext {
             }
             answers.takeLast(10).forEach { (q, a) -> appendLine("- Resposta do usuário — " + clip(q, 160) + " → " + clip(a, 300)) }
             if (secretNames.isNotEmpty()) appendLine("- Dados seguros da seção (e-mail, senha, chaves…): " + secretNames.joinToString { "{{secret:$it}}" } +
-                ". Use o marcador nos argumentos (browser_type, shell, http…); o app troca pelo valor real. NÃO peça de novo ao usuário.")
+                ". Use o marcador nos argumentos (browser_type, shell, http…) e o app o troca pelo valor real. Esses dados já foram informados; não peça de novo ao usuário.")
             deliveries.takeLast(8).forEach { appendLine("- Entrega de ${it.agent} (${clip(it.task, 120)}): " + clip(it.result, 400)) }
-            appendLine("- Se a informação que você precisa está aqui, use-a. Se não está, diga ao coordenador exatamente o que falta.")
+            appendLine("- Se a informação de que você precisa está aqui, use-a diretamente. Se não está, diga ao coordenador exatamente o que falta.")
         }
         return if (out.length <= MAX_CHARS) out.trimEnd() else out.take(MAX_CHARS).trimEnd() + "\n…"
     }

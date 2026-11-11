@@ -80,13 +80,13 @@ class GmailConnector(private val ctx: Context) : UiConnector {
             SettingSpec("inbox_count", "E-mails na tela", "Quantos e-mails recentes da caixa de entrada mostrar (1–25).", SettingType.NUMBER, "10"),
         ),
         tools = listOf(
-            ToolSpec("unread", "Quantidade de e-mails não lidos na caixa de entrada e o endereço da conta."),
+            ToolSpec("unread", "Informa quantos e-mails não lidos há na caixa de entrada e qual é o endereço da conta."),
             ToolSpec("search", "Busca e-mails com a sintaxe do Gmail (ex.: \"from:banco is:unread newer_than:2d\"). Devolve id, remetente, assunto, data e trecho.", listOf(
                 ParamSpec("query", "Consulta no formato da busca do Gmail. Padrão: in:inbox", required = false),
                 ParamSpec("max", "Quantidade (1–25). Padrão 10.", "integer", required = false),
             )),
-            ToolSpec("read", "Lê o conteúdo de um e-mail pelo id (obtido em search).", listOf(ParamSpec("id", "Id do e-mail"))),
-            ToolSpec("send", "Envia um e-mail de texto em nome do usuário. Só funciona se o usuário liberou o envio nas configurações do conector.", listOf(
+            ToolSpec("read", "Lê o conteúdo completo de um e-mail pelo id devolvido por search.", listOf(ParamSpec("id", "Id do e-mail"))),
+            ToolSpec("send", "Envia um e-mail de texto em nome do usuário. Funciona somente se ele liberou o envio nas configurações do conector; confira destinatário, assunto e texto antes de enviar.", listOf(
                 ParamSpec("to", "Destinatário (e-mail)"),
                 ParamSpec("subject", "Assunto"),
                 ParamSpec("body", "Corpo em texto puro"),

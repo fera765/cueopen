@@ -24,12 +24,12 @@ class PolymarketPublicConnector(
         tools = listOf(
             ToolSpec(
                 name = "list_wallets",
-                description = "Busca carteiras públicas nos leaderboards mensal e acumulado da Polymarket com curl no terminal Linux. Não consulta nem usa a Wallet Solana.",
+                description = "Busca carteiras públicas nos leaderboards mensal e acumulado da Polymarket, via curl no terminal Linux. Somente leitura; não consulta nem usa a Wallet Solana.",
                 params = listOf(ParamSpec("limit", "Número de carteiras por leaderboard (1 a 10; padrão 10).", "integer", required = false)),
             ),
             ToolSpec(
                 name = "analyze_wallets",
-                description = "Analisa via curl uma amostra de carteiras públicas da Polymarket: PnL realizado de posições encerradas dentro da janela móvel de 90 dias. Nunca envia ou copia ordens; não usa a Wallet Solana.",
+                description = "Analisa, via curl, uma amostra de carteiras públicas da Polymarket: PnL realizado das posições encerradas dentro da janela móvel de 90 dias. Somente leitura: não envia nem copia ordens e não usa a Wallet Solana.",
                 params = listOf(ParamSpec("limit", "Número de carteiras por leaderboard (1 a 10; padrão 10).", "integer", required = false)),
             ),
         ),

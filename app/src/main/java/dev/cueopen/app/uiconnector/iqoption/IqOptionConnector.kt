@@ -94,22 +94,22 @@ class IqOptionConnector(
             SettingSpec("forex_monitor_interval_sec", "Atualizar posições Forex a cada (s)", "Frequência configurável para consultar e atualizar posições Forex (5–300 s; padrão 30). SL/TP são enviados na abertura; adjust_forex_stops solicita alteração depois.", SettingType.NUMBER, "30"),
         ),
         tools = listOf(
-            ToolSpec("open_assets", "Lista todos os ativos abertos agora: opções Turbo/binárias (inclui OTC) e Forex.", listOf(
+            ToolSpec("open_assets", "Lista os ativos abertos neste momento: opções Turbo/binárias (incluindo OTC) e Forex.", listOf(
                 ParamSpec("filter", "Filtro opcional pelo ticker (ex.: EUR)", required = false),
                 ParamSpec("kind", "Tipo: all, options, turbo, binary ou forex. Padrão all.", required = false, allowed = listOf("all", "options", "turbo", "binary", "forex")),
             )),
-            ToolSpec("get_candles", "Busca candles OHLCV reais de um ativo aberto, sem análise ou recomendação de direção.", listOf(
+            ToolSpec("get_candles", "Busca candles OHLCV reais de um ativo aberto. Devolve apenas os dados, sem análise nem recomendação de direção.", listOf(
                 ParamSpec("asset", "Ticker do ativo (ex.: EURUSD ou EURUSD-OTC)"),
                 ParamSpec("timeframe", "Período em segundos (60=M1, 120=M2, 300=M5, 600=M10) ou 1m/2m/5m/10m. Padrão 60.", required = false),
                 ParamSpec("count", "Quantidade de candles (1–200). Padrão 30.", "integer", required = false),
             )),
-            ToolSpec("open_option", "Abre imediatamente uma operação CALL/PUT Turbo ou binária no ativo aberto. Não analisa nem escolhe ativos. Resultado final é consultado em get_trade_result; não há fechamento antecipado binário exposto.", listOf(
+            ToolSpec("open_option", "Abre imediatamente uma operação CALL/PUT, Turbo ou binária, no ativo aberto informado. A ferramenta não analisa nem escolhe ativos. O resultado final é consultado com get_trade_result; opções binárias não têm fechamento antecipado nesta integração.", listOf(
                 ParamSpec("asset", "Ticker Turbo/binário aberto"),
                 ParamSpec("direction", "call (alta) ou put (baixa)", allowed = listOf("call", "put")),
                 ParamSpec("amount", "Valor da operação na moeda da conta", "number"),
                 ParamSpec("minutes", "Expiração em minutos (1–60). Até 5 min é Turbo.", "integer", required = false),
             ), risky = true, opensOrder = true),
-            ToolSpec("open_forex", "Abre uma posição Forex a mercado com stop loss e take profit obrigatórios. Só atua em Forex, não CFD nem cripto.", listOf(
+            ToolSpec("open_forex", "Abre uma posição Forex a mercado, sempre com stop loss e take profit. Atua somente em Forex; CFD e cripto ficam de fora.", listOf(
                 ParamSpec("asset", "Ticker Forex aberto (ex.: EURUSD)"),
                 ParamSpec("side", "buy ou sell", allowed = listOf("buy", "sell")),
                 ParamSpec("amount", "Valor investido (margem) na moeda da conta", "number"),
@@ -117,16 +117,16 @@ class IqOptionConnector(
                 ParamSpec("stop_loss_pct", "Stop loss obrigatório em % do valor investido", "number"),
                 ParamSpec("take_profit_pct", "Take profit obrigatório em % do valor investido", "number"),
             ), risky = true, opensOrder = true),
-            ToolSpec("close_position", "Solicita o fechamento de uma posição Forex aberta, informando seu id. Não fecha opções binárias.", listOf(
+            ToolSpec("close_position", "Solicita o fechamento de uma posição Forex aberta, pelo id. Não se aplica a opções binárias.", listOf(
                 ParamSpec("id", "Id da posição Forex aberta", "integer"),
             ), risky = true),
-            ToolSpec("adjust_forex_stops", "Solicita a alteração do stop loss e take profit percentuais de uma posição Forex aberta pelo id. Só reporta aceitação após ACK tpsl-changed 2000; protocolo comunitário não oficial.", listOf(
+            ToolSpec("adjust_forex_stops", "Solicita a alteração do stop loss e do take profit percentuais de uma posição Forex aberta, pelo id. A aceitação só é reportada depois do ACK tpsl-changed 2000; o protocolo é comunitário, não oficial.", listOf(
                 ParamSpec("id", "Id da posição Forex aberta", "integer"),
                 ParamSpec("stop_loss_pct", "Novo stop loss (%) dentro do limite configurado", "number"),
                 ParamSpec("take_profit_pct", "Novo take profit (%) dentro do limite configurado", "number"),
             ), risky = true),
-            ToolSpec("positions", "Lista opções acompanhadas por esta sessão e posições Forex abertas com o P/L atual informado pela corretora."),
-            ToolSpec("get_trade_result", "Consulta o estado ou resultado final de uma opção acompanhada por esta sessão. O histórico final de posições Forex fechadas não é confirmado pelo protocolo disponível.", listOf(
+            ToolSpec("positions", "Lista as opções acompanhadas por esta sessão e as posições Forex abertas, com o P/L atual informado pela corretora."),
+            ToolSpec("get_trade_result", "Consulta o estado ou o resultado final de uma opção acompanhada por esta sessão. O protocolo disponível não confirma o histórico final de posições Forex já fechadas.", listOf(
                 ParamSpec("id", "Id da opção retornado na abertura", "integer"),
             )),
         ),
