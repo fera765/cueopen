@@ -200,6 +200,106 @@ fun CueWidgetView(w: CueWidget, onSend: ((String) -> Unit)?) {
             }
         }
 
+        is CueWidget.Checklist -> Column(card) {
+            title(w.title)
+            w.items.forEach { (text, done) ->
+                Row(Modifier.padding(vertical = 3.dp), verticalAlignment = Alignment.Top) {
+                    Text(if (done) "☑" else "☐", color = if (done) c.ok else c.ink3, fontSize = 15.sp); Spacer(Modifier.width(8.dp))
+                    Text(text, fontSize = 14.sp, color = if (done) c.ink2 else c.ink)
+                }
+            }
+        }
+        is CueWidget.Timeline -> Column(card) {
+            title(w.title)
+            w.items.forEachIndexed { i, (whenLabel, t, text) ->
+                Row {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Box(Modifier.padding(top = 5.dp).size(9.dp).clip(RoundedCornerShape(5.dp)).background(c.accent))
+                        if (i < w.items.lastIndex) Box(Modifier.width(2.dp).height(34.dp).background(c.line))
+                    }
+                    Spacer(Modifier.width(10.dp))
+                    Column(Modifier.padding(bottom = 8.dp)) {
+                        if (whenLabel.isNotBlank()) Text(whenLabel, fontSize = 11.sp, color = c.ink3)
+                        if (t.isNotBlank()) Text(t, fontSize = 14.sp, fontWeight = FontWeight.Medium, color = c.ink)
+                        if (text.isNotBlank()) Text(text, fontSize = 13.sp, color = c.ink2)
+                    }
+                }
+            }
+        }
+        is CueWidget.Badges -> FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.fillMaxWidth()) {
+            w.items.forEach { b ->
+                val col = if (b.tone == "neutral" || b.tone.isBlank()) c.ink2 else tone(b.tone)
+                Box(Modifier.clip(RoundedCornerShape(50)).background(col.copy(alpha = 0.14f)).padding(horizontal = 10.dp, vertical = 4.dp)) {
+                    Text(b.label, fontSize = 12.sp, color = col, fontWeight = FontWeight.Medium)
+                }
+            }
+        }
+        is CueWidget.Compare -> Column(card) {
+            title(w.title)
+            Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                w.options.forEach { o ->
+                    val col = if (o.tone == "neutral" || o.tone.isBlank()) c.line else tone(o.tone)
+                    Column(Modifier.width(190.dp).clip(RoundedCornerShape(12.dp)).background(c.surface2).border(1.dp, col, RoundedCornerShape(12.dp)).padding(12.dp)) {
+                        Text(o.name, fontWeight = FontWeight.SemiBold, fontSize = 14.sp, color = c.ink)
+                        Spacer(Modifier.height(6.dp))
+                        o.items.forEach { Text("• $it", fontSize = 13.sp, color = c.ink2, lineHeight = 18.sp) }
+                    }
+                }
+            }
+        }
+        is CueWidget.Files -> {
+            val clip = LocalClipboardManager.current
+            Column(card) {
+                title(w.title.ifBlank { "Arquivos" })
+                w.items.forEach { (path, note) ->
+                    Row(Modifier.fillMaxWidth().padding(vertical = 3.dp).clip(RoundedCornerShape(10.dp)).background(c.surface2)
+                        .clickable { clip.setText(AnnotatedString(path)) }.padding(10.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Text("📄", fontSize = 16.sp); Spacer(Modifier.width(8.dp))
+                        Column(Modifier.weight(1f)) {
+                            Text(path.substringAfterLast('/'), fontSize = 14.sp, color = c.ink, fontWeight = FontWeight.Medium)
+                            Text(note.ifBlank { path }, fontSize = 11.sp, color = c.ink3, maxLines = 2)
+                        }
+                        Icon(Icons.Rounded.ContentCopy, "Copiar caminho", Modifier.size(16.dp), tint = c.ink3)
+                    }
+                }
+            }
+        }
+        is CueWidget.Accordion -> Column(card) {
+            w.items.forEachIndexed { i, (t, text) ->
+                var open by remember(i, t) { mutableStateOf(false) }
+                Row(Modifier.fillMaxWidth().clickable { open = !open }.padding(vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Text(t, Modifier.weight(1f), fontSize = 14.sp, fontWeight = FontWeight.Medium, color = c.ink)
+                    Icon(if (open) Icons.Rounded.ExpandLess else Icons.Rounded.ExpandMore, null, Modifier.size(18.dp), tint = c.ink3)
+                }
+                if (open) Text(text, fontSize = 13.sp, color = c.ink2, lineHeight = 19.sp, modifier = Modifier.padding(bottom = 8.dp))
+                if (i < w.items.lastIndex) Box(Modifier.fillMaxWidth().height(1.dp).background(c.line))
+            }
+        }
+        is CueWidget.Tabs -> Column(card) {
+            var sel by remember(w.tabs.size) { mutableIntStateOf(0) }
+            Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                w.tabs.forEachIndexed { i, (t, _) ->
+                    Box(Modifier.clip(RoundedCornerShape(50)).background(if (sel == i) c.ink else c.surface2).clickable { sel = i }.padding(horizontal = 12.dp, vertical = 6.dp)) {
+                        Text(t, fontSize = 12.sp, color = if (sel == i) c.bg else c.ink2, fontWeight = FontWeight.Medium)
+                    }
+                }
+            }
+            Spacer(Modifier.height(10.dp))
+            Text(w.tabs.getOrNull(sel)?.second.orEmpty(), fontSize = 14.sp, color = c.ink, lineHeight = 20.sp)
+        }
+        is CueWidget.Summary -> Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(c.accent.copy(alpha = 0.10f)).border(1.dp, c.accent.copy(alpha = 0.35f), RoundedCornerShape(14.dp)).padding(14.dp)) {
+            Text(w.title.uppercase(), fontSize = 11.sp, color = c.accent, fontWeight = FontWeight.Bold)
+            if (w.text.isNotBlank()) { Spacer(Modifier.height(6.dp)); Text(w.text, fontSize = 14.sp, color = c.ink, lineHeight = 20.sp) }
+            w.bullets.forEach { Spacer(Modifier.height(4.dp)); Text("• $it", fontSize = 13.sp, color = c.ink2, lineHeight = 18.sp) }
+        }
+        is CueWidget.Divider -> Row(Modifier.fillMaxWidth().padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+            Box(Modifier.weight(1f).height(1.dp).background(c.line))
+            if (w.label.isNotBlank()) { Text(w.label.uppercase(), fontSize = 10.sp, color = c.ink3, modifier = Modifier.padding(horizontal = 10.dp)); Box(Modifier.weight(1f).height(1.dp).background(c.line)) }
+        }
+        is CueWidget.Group -> Column(verticalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
+            if (w.title.isNotBlank()) Text(w.title, fontWeight = FontWeight.Bold, fontSize = 17.sp, color = c.ink)
+            w.blocks.forEach { CueWidgetView(it, onSend) }
+        }
         is CueWidget.KeyValue -> Column(card) {
             title(w.title)
             w.items.forEachIndexed { i, (k, v) ->

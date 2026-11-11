@@ -49,6 +49,9 @@ import kotlinx.coroutines.withContext
 import java.io.File
 
 private val imageExt = setOf("png", "jpg", "jpeg", "gif", "webp", "bmp")
+/** Contêineres que o player do Android costuma abrir; o codec interno ainda pode não ser suportado (tratado com mensagem). */
+private val videoExt = setOf("mp4", "m4v", "webm", "mkv", "3gp", "mov")
+private val audioExt = setOf("mp3", "m4a", "aac", "ogg", "wav", "flac", "opus")
 
 /**
  * Visualizador nativo dos artefatos do agente (nunca usa o browser do agente):
@@ -86,6 +89,7 @@ fun FileViewer(f: File, onClose: () -> Unit, onEdit: () -> Unit) {
         Box(Modifier.fillMaxSize().padding(8.dp).clip(RoundedCornerShape(16.dp)).background(c.surface)) {
             when {
                 ext in imageExt -> ImageView(f)
+                ext in videoExt || ext in audioExt -> MediaPlayerView(f, isVideo = ext in videoExt)
                 ext == "svg" -> SvgView(f)
                 ext == "pdf" -> PdfView(f)
                 ext in listOf("zip","jar","apk") -> ZipView(f)
@@ -336,3 +340,73 @@ private fun ZipView(f: File) {
         }
     }
 }
+
+/**
+ * Player nativo de vídeo/áudio: reproduz direto do arquivo (streaming do disco, nada é carregado inteiro na
+ * memória), com play/pausa, barra de progresso, avançar/voltar 10 s e tempo. Codec não suportado vira mensagem.
+ */
+@Composable
+private fun MediaPlayerView(f: File, isVideo: Boolean) {
+    val c = Cue.c
+    val ctx = LocalContext.current
+    var error by remember(f) { mutableStateOf<String?>(null) }
+    var playing by remember(f) { mutableStateOf(false) }
+    var position by remember(f) { mutableIntStateOf(0) }
+    var duration by remember(f) { mutableIntStateOf(0) }
+    var info by remember(f) { mutableStateOf("") }
+    val holder = remember(f) { arrayOfNulls<android.widget.VideoView>(1) }
+    fun fmt(ms: Int): String { val s = ms / 1000; return "%d:%02d".format(s / 60, s % 60) }
+    LaunchedEffect(f) {
+        info = withContext(Dispatchers.IO) {
+            runCatching {
+                val r = android.media.MediaMetadataRetriever()
+                try {
+                    r.setDataSource(f.absolutePath)
+                    val w = r.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)
+                    val h = r.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)
+                    val mime = r.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_MIMETYPE).orEmpty()
+                    listOfNotNull(f.extension.uppercase(), mime.ifBlank { null }, if (w != null && h != null) "${w}×$h" else null, "%.1f MB".format(f.length() / 1_048_576.0)).joinToString(" · ")
+                } finally { r.release() }
+            }.getOrDefault(f.extension.uppercase() + " · %.1f MB".format(f.length() / 1_048_576.0))
+        }
+    }
+    LaunchedEffect(f, playing) {
+        while (playing) { holder[0]?.let { position = it.currentPosition; if (!it.isPlaying && position >= duration - 300) playing = false }; kotlinx.coroutines.delay(300) }
+    }
+    DisposableEffect(f) { onDispose { runCatching { holder[0]?.stopPlayback() } } }
+    Column(Modifier.fillMaxSize().background(androidx.compose.ui.graphics.Color.Black)) {
+        Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
+            val e = error
+            if (e != null) Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.padding(24.dp)) {
+                Text("Não foi possível reproduzir", color = androidx.compose.ui.graphics.Color.White, fontWeight = FontWeight.SemiBold)
+                Text(e, color = androidx.compose.ui.graphics.Color.LightGray, fontSize = 12.sp)
+                TextButton({ openExternal(ctx, f) }) { Text("Abrir com outro app", color = c.accent) }
+            } else androidx.compose.ui.viewinterop.AndroidView(modifier = if (isVideo) Modifier.fillMaxWidth() else Modifier.size(1.dp), factory = { vctx ->
+                android.widget.VideoView(vctx).apply {
+                    setVideoURI(android.net.Uri.fromFile(f))
+                    setOnPreparedListener { mp -> duration = mp.duration.coerceAtLeast(0); seekTo(1) }
+                    setOnCompletionListener { playing = false; position = duration }
+                    setOnErrorListener { _, what, extra ->
+                        error = "Formato ou codec não suportado por este aparelho (${f.extension.uppercase()}, erro $what/$extra)."; playing = false; true
+                    }
+                    holder[0] = this
+                }
+            })
+            if (!isVideo && error == null) Icon(Icons.Rounded.MusicNote, null, Modifier.size(72.dp), tint = androidx.compose.ui.graphics.Color.White)
+        }
+        if (error == null) Column(Modifier.fillMaxWidth().background(c.surface).padding(horizontal = 12.dp, vertical = 6.dp)) {
+            Slider(value = if (duration > 0) position.toFloat() / duration else 0f,
+                onValueChange = { v -> position = (v * duration).toInt(); holder[0]?.seekTo(position) }, enabled = duration > 0)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("${fmt(position)} / ${fmt(duration)}", fontSize = 12.sp, color = c.ink2, modifier = Modifier.weight(1f))
+                IconButton({ holder[0]?.let { v -> position = (v.currentPosition - 10_000).coerceAtLeast(0); v.seekTo(position) } }) { Icon(Icons.Rounded.Replay10, "Voltar 10 s") }
+                IconButton({ holder[0]?.let { v -> if (v.isPlaying) { v.pause(); playing = false } else { if (position >= duration - 300) v.seekTo(0); v.start(); playing = true } } }) {
+                    Icon(if (playing) Icons.Rounded.Pause else Icons.Rounded.PlayArrow, if (playing) "Pausar" else "Reproduzir", Modifier.size(32.dp))
+                }
+                IconButton({ holder[0]?.let { v -> position = (v.currentPosition + 10_000).coerceAtMost(duration); v.seekTo(position) } }) { Icon(Icons.Rounded.Forward10, "Avançar 10 s") }
+            }
+            Text(info, fontSize = 11.sp, color = c.ink3, maxLines = 1)
+        }
+    }
+}
+

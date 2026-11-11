@@ -731,6 +731,7 @@ fun previewOf(i: dev.cueopen.app.data.ChatItem): String = when (i) {
     is dev.cueopen.app.data.ChatItem.Error -> i.text
     is dev.cueopen.app.data.ChatItem.ConnectorProposal -> "🧩 Conector " + i.name
     is dev.cueopen.app.data.ChatItem.UserScriptProposal -> "📜 User Script " + i.name
+    is dev.cueopen.app.data.ChatItem.LlmRecovery -> "⚠ Falha do modelo: " + i.category
     is dev.cueopen.app.data.ChatItem.ConnectorEditProposal -> "Atualização de " + i.connectorName
     is dev.cueopen.app.data.ChatItem.Question -> "❓ " + (i.questions.firstOrNull()?.question ?: "Pergunta")
     is dev.cueopen.app.data.ChatItem.SecureForm -> "🔒 " + i.title
@@ -846,6 +847,7 @@ private fun SectionRow(
                     "restart" -> app.agent.restartSection(sec.id)
                     else -> {
                         (sec.agentIds + sec.coordinatorAgentId).forEach { dev.cueopen.app.scheduler.Heartbeat.cancel(app, it) }
+                        runCatching { app.agent.sessionApps.delete(sec.id) }
                         app.store.deleteSection(sec.id).forEach { app.deleteChat(it) }
                         runCatching { app.sandbox.deleteEnvironment("section_${sec.id}") }  // workspace compartilhado do time
                     }

@@ -28,6 +28,18 @@ sealed class CueWidget {
     data class Callout(val tone: String, val title: String, val text: String) : CueWidget()
     data class KeyValue(val title: String, val items: List<Pair<String, String>>) : CueWidget()
     data class ConnectorPanel(val id: String, val title: String, val collapsed: Boolean) : CueWidget()
+    data class Checklist(val title: String, val items: List<Pair<String, Boolean>>) : CueWidget()
+    data class Timeline(val title: String, val items: List<Triple<String, String, String>>) : CueWidget()
+    data class Badges(val items: List<Stat>) : CueWidget()
+    data class Compare(val title: String, val options: List<Opt>) : CueWidget()
+    data class Files(val title: String, val items: List<Pair<String, String>>) : CueWidget()
+    data class Accordion(val items: List<Pair<String, String>>) : CueWidget()
+    data class Tabs(val tabs: List<Pair<String, String>>) : CueWidget()
+    data class Summary(val title: String, val text: String, val bullets: List<String>) : CueWidget()
+    data class Divider(val label: String) : CueWidget()
+    /** Composição: vários componentes num só bloco (relatório final). */
+    data class Group(val title: String, val blocks: List<CueWidget>) : CueWidget()
+    data class Opt(val name: String, val items: List<String>, val tone: String)
     object Skeleton : CueWidget() // JSON ainda chegando (stream)
 
     data class Btn(val label: String, val send: String, val copy: String, val url: String, val tone: String)
@@ -41,7 +53,8 @@ object CueUi {
     private val json = Json { isLenient = true; ignoreUnknownKeys = true }
 
     /** Tipos conhecidos — basta ver o "type" para mostrar o esqueleto certo durante o stream. */
-    val TYPES = setOf("buttons", "choices", "chart", "calculator", "calc", "table", "stats", "steps", "progress", "callout", "note", "keyvalue", "kv", "connector", "painel")
+    val TYPES = setOf("buttons", "choices", "chart", "calculator", "calc", "table", "stats", "steps", "progress", "callout", "note", "keyvalue", "kv", "connector", "painel",
+        "checklist", "timeline", "badges", "compare", "files", "accordion", "tabs", "summary", "divider", "report", "group")
 
     private fun JsonObject.str(vararg k: String, def: String = "") = k.firstNotNullOfOrNull { this[it] as? JsonPrimitive }?.contentOrNull ?: def
     private fun JsonObject.num(vararg k: String): Double? = k.firstNotNullOfOrNull { (this[it] as? JsonPrimitive)?.let { p -> p.doubleOrNull ?: p.contentOrNull?.toDoubleOrNull() } }
@@ -122,6 +135,28 @@ object CueUi {
         "keyvalue", "kv" -> CueWidget.KeyValue(o.str("title"), o.arr("items", "pairs")?.mapNotNull { it as? JsonObject }?.map {
             it.str("key", "label", "name", def = "—") to it.str("value", "val", def = "—") }
             ?: (o["data"] as? JsonObject)?.entries?.map { it.key to ((it.value as? JsonPrimitive)?.contentOrNull ?: "") }.orEmpty())
+        "checklist" -> CueWidget.Checklist(o.str("title"), o.arr("items")?.map { e ->
+            when (e) { is JsonObject -> e.str("text", "label", "title") to e.str("done", "checked", def = "false").equals("true", true); else -> ((e as? JsonPrimitive)?.contentOrNull ?: "") to false }
+        }.orEmpty().filter { it.first.isNotBlank() })
+        "timeline" -> CueWidget.Timeline(o.str("title"), o.arr("items", "events")?.mapNotNull { it as? JsonObject }?.map {
+            Triple(it.str("when", "time", "date"), it.str("title", "label"), it.str("text", "description")) }.orEmpty())
+        "badges" -> CueWidget.Badges(o.arr("items")?.map { e ->
+            when (e) { is JsonObject -> CueWidget.Stat(e.str("label", "text", def = ""), "", e.str("tone", def = "neutral")); else -> CueWidget.Stat((e as? JsonPrimitive)?.contentOrNull ?: "", "", "neutral") }
+        }.orEmpty().filter { it.label.isNotBlank() })
+        "compare" -> CueWidget.Compare(o.str("title"), o.arr("options", "items")?.mapNotNull { it as? JsonObject }?.map {
+            CueWidget.Opt(it.str("name", "title", def = "—"), strList(it.arr("items", "points")).filter { p -> p.isNotBlank() }, it.str("tone", def = "neutral")) }.orEmpty())
+        "files" -> CueWidget.Files(o.str("title"), o.arr("items", "files")?.map { e ->
+            when (e) { is JsonObject -> e.str("path", "name") to e.str("note", "description"); else -> ((e as? JsonPrimitive)?.contentOrNull ?: "") to "" }
+        }.orEmpty().filter { it.first.isNotBlank() })
+        "accordion" -> CueWidget.Accordion(o.arr("items", "sections")?.mapNotNull { it as? JsonObject }?.map { it.str("title", "label", def = "—") to it.str("text", "body", "content") }.orEmpty())
+        "tabs" -> CueWidget.Tabs(o.arr("tabs", "items")?.mapNotNull { it as? JsonObject }?.map { it.str("title", "label", def = "—") to it.str("text", "body", "content") }.orEmpty())
+        "summary" -> CueWidget.Summary(o.str("title", def = "Resumo executivo"), o.str("text", "body"), strList(o.arr("bullets", "items")).filter { it.isNotBlank() })
+        "divider" -> CueWidget.Divider(o.str("label", "text"))
+        "report", "group" -> CueWidget.Group(o.str("title"), o.arr("blocks", "items")?.mapNotNull { it as? JsonObject }?.take(12)?.mapNotNull { b ->
+            val t = b.str("type").lowercase()
+            // Sem recursão de grupos: um relatório não contém outro (limita profundidade e tamanho).
+            if (t in TYPES && t != "report" && t != "group") runCatching { build(t, b) }.getOrNull() else null
+        }.orEmpty())
         else -> CueWidget.Skeleton
     }
 

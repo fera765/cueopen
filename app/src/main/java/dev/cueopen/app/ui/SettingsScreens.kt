@@ -69,13 +69,27 @@ fun SettingsScreen(nav: NavController) {
             SectionLabel("Provedor de modelos")
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 val isOR = s.baseUrl.contains("openrouter", ignoreCase = true)
-                Chip("OpenRouter", isOR) { app.store.updateSettings { it.copy(baseUrl = "https://openrouter.ai/api/v1") } }
-                Chip("Personalizado", !isOR) { app.store.updateSettings { it.copy(baseUrl = if (it.baseUrl.contains("openrouter", true)) "https://" else it.baseUrl) } }
+// Trocar de provedor guarda a configuração atual e restaura a do outro; um provedor personalizado
+                // NOVO começa com todos os campos vazios (sem "https://", sem chave nem modelo herdados).
+                fun switch(toOpenRouter: Boolean) = app.store.updateSettings {
+                    val fromKey = if (it.baseUrl.contains("openrouter", true)) "openrouter" else "custom"
+                    val toKey = if (toOpenRouter) "openrouter" else "custom"
+                    if (fromKey == toKey) it else {
+                        val saved = it.savedProviders + (fromKey to listOf(it.apiKey, it.baseUrl, it.model, it.fastModel))
+                        val r = saved[toKey]
+                        if (toOpenRouter) it.copy(savedProviders = saved, apiKey = r?.getOrNull(0).orEmpty(), baseUrl = "https://openrouter.ai/api/v1",
+                            model = r?.getOrNull(2)?.ifBlank { null } ?: "deepseek/deepseek-v4-flash", fastModel = r?.getOrNull(3)?.ifBlank { null } ?: "deepseek/deepseek-v4-flash")
+                        else it.copy(savedProviders = saved, apiKey = r?.getOrNull(0).orEmpty(), baseUrl = r?.getOrNull(1).orEmpty(),
+                            model = r?.getOrNull(2).orEmpty(), fastModel = r?.getOrNull(3).orEmpty())
+                    }
+                }
+                Chip("OpenRouter", isOR) { switch(true) }
+                Chip("Personalizado", !isOR) { switch(false) }
             }
             Text("OpenRouter é o exemplo recomendado. Personalizado aceita endpoints OpenAI-compatible; por exemplo, OpenCode Go usa https://opencode.ai/inference/go/openai/v1. O catálogo é carregado do provedor; famílias OpenCode que exigem outra API são ocultadas, e function calling depende do modelo escolhido.", fontSize = 12.sp, color = Cue.c.ink2)
             SectionLabel("Credenciais")
             CueField(s.apiKey, { v -> app.store.updateSettings { it.copy(apiKey = v.trim()) } }, "Chave da API", password = true)
-            CueField(s.baseUrl, { v -> app.store.updateSettings { it.copy(baseUrl = v.trim()) } }, "Base URL (compatível OpenAI)")
+            CueField(s.baseUrl, { v -> app.store.updateSettings { it.copy(baseUrl = v.trim()) } }, if (s.baseUrl.contains("openrouter", true)) "Base URL (compatível OpenAI)" else "Base URL — ex.: https://api.exemplo.com/v1")
             ModelPicker(s.model, { v -> app.store.updateSettings { it.copy(model = v) } }, "Modelo do agente", baseUrl = s.baseUrl, apiKey = s.apiKey)
             ModelPicker(s.fastModel, { v -> app.store.updateSettings { it.copy(fastModel = v) } }, "Modelo rápido (títulos e resumos de contexto)", baseUrl = s.baseUrl, apiKey = s.apiKey)
             ToggleRow("Desativar thinking", "Zero raciocínio estendido — respostas mais rápidas", s.disableThinking) { v -> app.store.updateSettings { it.copy(disableThinking = v) } }

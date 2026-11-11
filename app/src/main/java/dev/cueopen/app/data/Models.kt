@@ -66,6 +66,25 @@ sealed class ChatItem {
         val caption: String = "",
     ) : ChatItem()
 
+    /** Falha do provedor de modelos depois das tentativas automáticas: card com detalhes e ações reais. */
+    @Serializable
+    data class LlmRecovery(
+        override val id: String = newId(),
+        override val time: Long = now(),
+        val provider: String,
+        val model: String,
+        val category: String,
+        val detail: String = "",
+        val attempts: Int = 1,
+        val advice: String = "",
+        val permanent: Boolean = false,
+        /** Quando o app vai tentar de novo sozinho (null = não vai). */
+        val resumeAt: Long? = null,
+        val round: Int = 0,
+        /** waiting | resolved | cancelled */
+        val state: String = "waiting",
+    ) : ChatItem()
+
     /** User Script criado pela IA (padrão Tampermonkey), aguardando o usuário tocar em Instalar. */
     @Serializable
     data class UserScriptProposal(
@@ -447,6 +466,8 @@ data class Settings(
     val baseUrl: String = "https://openrouter.ai/api/v1",
     val model: String = "deepseek/deepseek-v4-flash",
     val fastModel: String = "deepseek/deepseek-v4-flash",
+    /** Configuração do OpenRouter guardada ao trocar para "Personalizado" (e vice-versa), para nada se perder. */
+    val savedProviders: Map<String, List<String>> = emptyMap(),
     val disableThinking: Boolean = true,
     val maxSteps: Int = 1000,
     val theme: ThemeMode = ThemeMode.SYSTEM,

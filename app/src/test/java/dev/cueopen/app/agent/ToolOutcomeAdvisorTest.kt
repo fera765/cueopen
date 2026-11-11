@@ -55,7 +55,7 @@ class LlmTransientErrorTest {
         org.junit.Assert.assertTrue(dev.cueopen.app.llm.LlmRetryPolicy.isTransientHttp(404, "Upstream request failed: Endpoint is unavailable."))
         org.junit.Assert.assertFalse(dev.cueopen.app.llm.LlmRetryPolicy.isTransientHttp(401, "Invalid API key"))
         org.junit.Assert.assertFalse(dev.cueopen.app.llm.LlmRetryPolicy.isTransientHttp(404, "model not found"))
-        org.junit.Assert.assertEquals(120_000L, dev.cueopen.app.llm.LlmRetryPolicy.autoResumeDelayMillis(1))
-        org.junit.Assert.assertNull(dev.cueopen.app.llm.LlmRetryPolicy.autoResumeDelayMillis(5))
+        org.junit.Assert.assertEquals(20 * 60_000L, dev.cueopen.app.llm.LlmRecovery.autoResumeDelayMillis(1, dev.cueopen.app.llm.LlmRecovery.Category.SERVER))
+        org.junit.Assert.assertNull(dev.cueopen.app.llm.LlmRecovery.autoResumeDelayMillis(4, dev.cueopen.app.llm.LlmRecovery.Category.SERVER))
     }
 }

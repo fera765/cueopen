@@ -82,6 +82,7 @@ fun ChatScreen(nav: NavController, sessionId: String) {
     val sectionRunning = homeSection != null && st.sessions.any { it.sectionId == homeSection.id && it.status == SessionStatus.RUNNING }
     val list = rememberLazyListState()
     var draft by remember { mutableStateOf("") }
+    var appMode by androidx.compose.runtime.saveable.rememberSaveable(sessionId) { mutableStateOf(false) }
     var copyingAttachments by remember { mutableStateOf(false) }
     var replyingTo by remember(sessionId) { mutableStateOf<ChatItem.Assistant?>(null) }
     var menu by remember { mutableStateOf(false) }
@@ -173,6 +174,13 @@ fun ChatScreen(nav: NavController, sessionId: String) {
         )
     }) { pad ->
         Column(Modifier.fillMaxSize().padding(pad).imePadding()) {
+          // Só no chat do coordenador de uma seção: alternância entre a conversa e o app visual da seção.
+          if (homeSection != null) {
+              val appTick by app.agent.sessionAppTick.collectAsStateWithLifecycle()
+              ChatAppToggle(appMode, hasApp = remember(homeSection.id, appTick) { app.agent.sessionApps.exists(homeSection.id) }) { appMode = it }
+          }
+          if (homeSection != null && appMode) SessionAppPane(homeSection, Modifier.weight(1f).fillMaxWidth()) { appMode = false }
+          else {
           Box(Modifier.weight(1f).fillMaxWidth()) {
             androidx.compose.runtime.CompositionLocalProvider(LocalChatPersona provides ChatPersona.of(agent)) {
             LazyColumn(Modifier.fillMaxSize(), state = list, contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -301,6 +309,7 @@ fun ChatScreen(nav: NavController, sessionId: String) {
                     }
                 },
             )
+          }
         }
     }
     if (connectorsDialog) {
@@ -423,6 +432,7 @@ fun TimelineItem(item: ChatItem, onOpenComputer: (String) -> Unit, onOpenMedia: 
         is ChatItem.Error -> InfoRow(Icons.Rounded.ErrorOutline, item.text, Cue.c.err)
         is ChatItem.ConnectorProposal -> ConnectorProposalCard(item, sessionId, nav)
         is ChatItem.UserScriptProposal -> UserScriptProposalCard(item, sessionId, nav)
+        is ChatItem.LlmRecovery -> LlmRecoveryCard(item, sessionId, nav)
         is ChatItem.ConnectorEditProposal -> ConnectorEditProposalCard(item, sessionId)
         is ChatItem.Question -> QuestionCard(item, sessionId)
         is ChatItem.SecureForm -> SecureFormCard(item, sessionId)
@@ -810,6 +820,7 @@ fun sessionMarkdown(s: Session): String = buildString {
             is ChatItem.Step -> appendLine("> ${i.title}: `${i.args}`")
             is ChatItem.Plan -> { appendLine("**Plano:** ${i.goal}"); i.phases.forEach { appendLine("- [${if (it.done) "x" else " "}] ${it.title}") }; appendLine() }
             is ChatItem.Error -> appendLine("⚠️ ${i.text}\n")
+            is ChatItem.LlmRecovery -> appendLine("⚠ Falha do modelo ${i.model} (${i.category}) — ${i.state}\n")
             is ChatItem.UserScriptProposal -> appendLine("📜 User Script ${i.name} ${i.version}${if (i.installed) " — instalado" else ""}\n")
             is ChatItem.ConnectorProposal -> appendLine("🧩 Conector ${i.name} (${i.host})${if (i.installed) " — instalado" else ""}\n")
             is ChatItem.ConnectorEditProposal -> appendLine("⚙️ Atualização de ${i.connectorName}: ${i.summary}${if (i.applied) " — aplicada" else " — pendente"}\n")
@@ -835,6 +846,38 @@ fun shareSession(ctx: android.content.Context, s: Session) {
     val i = Intent(Intent.ACTION_SEND_MULTIPLE).setType("*/*").putParcelableArrayListExtra(Intent.EXTRA_STREAM, uris)
         .putExtra(Intent.EXTRA_TEXT, sessionMarkdown(s).take(4000)).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
     ctx.startActivity(Intent.createChooser(i, "Compartilhar tarefa"))
+}
+
+/** Falha do provedor de modelos: o que houve, o que o app vai fazer e ações que funcionam de verdade. */
+@Composable
+private fun LlmRecoveryCard(p: ChatItem.LlmRecovery, sessionId: String?, nav: NavController?) {
+    val c = Cue.c
+    val app = CueApp.instance
+    val fmt = remember { java.text.SimpleDateFormat("HH:mm", java.util.Locale.ROOT) }
+    if (p.state != "waiting") {
+        Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(c.surface2).padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
+            Text((if (p.state == "resolved") "✓ Modelo voltou a responder" else "Execução cancelada") + " · ${p.category} às ${fmt.format(java.util.Date(p.time))}", fontSize = 12.sp, color = c.ink2)
+        }
+        return
+    }
+    Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(20.dp)).background(c.surface).border(1.dp, c.line, RoundedCornerShape(20.dp)).padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Text("⚠ " + p.category.replaceFirstChar { it.uppercase() }, fontWeight = FontWeight.SemiBold, color = c.ink, fontSize = 16.sp)
+        Text("Provedor: ${p.provider}\nModelo: ${p.model}\nFalha às ${fmt.format(java.util.Date(p.time))} · ${p.attempts} tentativa(s)" +
+            (if (p.round > 0) " · retomada ${p.round}/${dev.cueopen.app.llm.LlmRecovery.AUTO_RESUME_ROUNDS}" else ""), fontSize = 12.sp, color = c.ink2, lineHeight = 17.sp)
+        if (p.detail.isNotBlank()) Text(p.detail, fontSize = 12.sp, color = c.ink3, fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace)
+        Text(p.advice, fontSize = 13.sp, color = c.ink)
+        Text(when {
+            p.resumeAt != null -> "Estado: suspenso. O app tenta de novo sozinho às ${fmt.format(java.util.Date(p.resumeAt))} e continua de onde parou."
+            p.permanent -> "Estado: aguardando você. Este erro não se resolve sozinho."
+            else -> "Estado: aguardando você. As retomadas automáticas se esgotaram."
+        }, fontSize = 12.sp, color = if (p.resumeAt != null) c.ok else c.accent)
+        Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+            TextButton({ sessionId?.let { app.agent.retryAfterLlmFailure(it) } }) { Text("Tentar agora") }
+            TextButton({ nav?.navigate("settings") }) { Text("Trocar modelo/provedor") }
+            TextButton({ sessionId?.let { app.agent.cancelLlmRecovery(it) } }) { Text("Cancelar", color = c.accent) }
+        }
+    }
 }
 
 /** Card "Instalar no Browser" de um userscript criado e testado pela IA. */

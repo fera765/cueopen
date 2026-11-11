@@ -341,7 +341,13 @@ class TerminalManager(private val ctx: Context, private val sandbox: Sandbox) {
                     // brevemente a visibilidade do arquivo antes de ler (evita leitura prematura vazia).
                     var waited = 0
                     while (!outputFile.isFile && waited < 3_000) { delay(50); waited += 50 }
-                    if (!outputFile.isFile) {
+                    if (!outputFile.isFile && exit == null) {
+                        // O prompt nunca voltou e a captura não existe: havia OUTRO processo em primeiro plano
+                        // (ex.: servidor) recebendo o que foi digitado. O Ctrl+C acima o interrompeu; não mata o
+                        // terminal inteiro (isso derrubaria processos em segundo plano que estão funcionando).
+                        "Erro: o terminal estava ocupado por um processo em primeiro plano, então este comando NÃO rodou. " +
+                            "O processo foi interrompido (Ctrl+C). Rode o comando de novo; servidores devem ir com background=true."
+                    } else if (!outputFile.isFile) {
                         // Captura sumiu: o processo provavelmente está preso a um workspace antigo. Reinicia o
                         // terminal para o próximo comando funcionar e diz isso ao agente (sem repetir sozinho:
                         // o comando pode ter efeitos).

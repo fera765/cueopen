@@ -62,7 +62,7 @@ import java.io.File
 @Composable
 fun ComputerScreen(nav: NavController, sessionId: String, initialTab: String?) {
     val app = CueApp.instance
-    val tabs = listOf("terminal" to "Terminal", "browser" to "Browser", "files" to "Arquivos")
+    val tabs = listOf("terminal" to "Terminal", "history" to "Comandos", "browser" to "Browser", "files" to "Arquivos")
     var tab by remember { mutableStateOf(initialTab ?: "terminal") }
     val tabHistory = remember(sessionId) { mutableStateListOf<String>() }
     fun changeTab(next: String) {
@@ -90,7 +90,7 @@ fun ComputerScreen(nav: NavController, sessionId: String, initialTab: String?) {
                 }
             }
             Row(Modifier.padding(horizontal = 16.dp, vertical = 6.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                tabs.forEach { (k, l) -> Chip(l, selected = tab == k, icon = when (k) { "terminal" -> Icons.Rounded.Terminal; "browser" -> Icons.Rounded.Language; else -> Icons.Rounded.FolderOpen }) { changeTab(k) } }
+                tabs.forEach { (k, l) -> Chip(l, selected = tab == k, icon = when (k) { "terminal" -> Icons.Rounded.Terminal; "history" -> Icons.Rounded.History; "browser" -> Icons.Rounded.Language; else -> Icons.Rounded.FolderOpen }) { changeTab(k) } }
             }
         }
     }) { pad ->
@@ -98,7 +98,63 @@ fun ComputerScreen(nav: NavController, sessionId: String, initialTab: String?) {
             when (tab) {
                 "terminal" -> TerminalPane(sessionId)
                 "browser" -> BrowserPane(sessionId)
+                "history" -> ExecutionsPane(sessionId)
                 else -> FilesPane(app.sandbox.workspaceFor(sessionId), "/root/workspace/$sessionId")
+            }
+        }
+    }
+}
+
+/**
+ * Histórico de execuções do agente neste chat: cada comando com estado (executando, concluído, falhou,
+ * cancelado), duração, código de saída e a saída completa ao tocar. Fica na memória até o app fechar.
+ */
+@Composable
+private fun ExecutionsPane(sessionId: String) {
+    val app = CueApp.instance
+    val c = Cue.c
+    val all by app.agent.executions.state.collectAsStateWithLifecycle()
+    var onlyShell by remember { mutableStateOf(true) }
+    var query by remember { mutableStateOf("") }
+    var open by remember { mutableStateOf<String?>(null) }
+    val now by produceState(System.currentTimeMillis()) { while (true) { delay(1_000); value = System.currentTimeMillis() } }
+    val list = all.filter { it.sessionId == sessionId && (!onlyShell || it.tool == "shell") && (query.isBlank() || it.arguments.contains(query, true) || it.tool.contains(query, true)) }.asReversed()
+    Column(Modifier.fillMaxSize()) {
+        Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            OutlinedTextField(query, { query = it }, Modifier.weight(1f), singleLine = true, shape = RoundedCornerShape(14.dp),
+                placeholder = { Text("Buscar no histórico", fontSize = 13.sp) }, textStyle = androidx.compose.ui.text.TextStyle(fontSize = 13.sp, color = c.ink))
+            Chip(if (onlyShell) "Só terminal" else "Todas", selected = onlyShell) { onlyShell = !onlyShell }
+        }
+        if (list.isEmpty()) EmptyState(Icons.Rounded.History, "Nenhuma execução", "Os comandos que o agente rodar neste chat aparecem aqui, com estado, duração e saída.")
+        LazyColumn(contentPadding = PaddingValues(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            items(list, key = { it.id }) { e ->
+                val running = e.status == dev.cueopen.app.agent.ToolExecutionManager.Status.RUNNING || e.status == dev.cueopen.app.agent.ToolExecutionManager.Status.QUEUED
+                val exit = Regex("\\[exit (-?\\d+)\\]").findAll(e.output + (e.error ?: "")).lastOrNull()?.groupValues?.get(1)
+                val (label, color) = when (e.status) {
+                    dev.cueopen.app.agent.ToolExecutionManager.Status.QUEUED -> "aguardando" to c.ink3
+                    dev.cueopen.app.agent.ToolExecutionManager.Status.RUNNING -> "executando" to c.accent
+                    dev.cueopen.app.agent.ToolExecutionManager.Status.COMPLETED -> (if (exit != null && exit != "0") "concluído com avisos" else "concluído") to c.ok
+                    dev.cueopen.app.agent.ToolExecutionManager.Status.FAILED -> "falhou" to c.err
+                    dev.cueopen.app.agent.ToolExecutionManager.Status.CANCELLED -> "cancelado" to c.ink3
+                }
+                val secs = ((if (running) now else e.updatedAt) - e.startedAt).coerceAtLeast(0) / 1000.0
+                Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(c.surface).clickable { open = if (open == e.id) null else e.id }.padding(10.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Box(Modifier.size(8.dp).clip(CircleShape).background(color)); Spacer(Modifier.width(8.dp))
+                        Text(label, fontSize = 11.sp, color = color, modifier = Modifier.weight(1f))
+                        Text((if (exit != null) "exit $exit · " else "") + "%.1fs · ".format(secs) +
+                            java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.ROOT).format(java.util.Date(e.startedAt)), fontSize = 11.sp, color = c.ink3)
+                    }
+                    Text((if (e.tool == "shell") "$ " else e.tool + " ") + e.arguments.replace('\n', ' ').take(if (open == e.id) 1000 else 140),
+                        fontFamily = FontFamily.Monospace, fontSize = 12.sp, color = c.ink, maxLines = if (open == e.id) 20 else 2, overflow = TextOverflow.Ellipsis)
+                    if (open == e.id) {
+                        Spacer(Modifier.height(6.dp))
+                        androidx.compose.foundation.text.selection.SelectionContainer {
+                            Text((e.error ?: e.output).ifBlank { if (running) "(em execução…)" else "(sem saída)" }.takeLast(6_000), fontFamily = FontFamily.Monospace, fontSize = 11.sp,
+                                color = if (e.error != null) c.err else c.ink2, modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp)).background(c.bg).padding(8.dp))
+                        }
+                    }
+                }
             }
         }
     }
@@ -444,7 +500,23 @@ fun FilesPane(root: File, guestRoot: String) {
             delay(2_500)
         }
     }
-    val files = listing.files
+    var query by remember(root) { mutableStateOf("") }
+    var sort by remember(root) { mutableStateOf("nome") }
+    var newFolder by remember { mutableStateOf<String?>(null) }
+    // Busca: recursiva a partir da pasta atual (até 4 níveis, 300 resultados), fora da thread principal.
+    val found by produceState<List<File>?>(null, dir, query, listing) {
+        value = if (query.isBlank()) null else withContext(Dispatchers.IO) {
+            runCatching { dir.walkTopDown().maxDepth(4).filter { it != dir && !it.path.contains("/.cue/") && it.name.contains(query.trim(), true) }.take(300).toList() }.getOrDefault(emptyList())
+        }
+    }
+    val files = (found ?: listing.files).let { base ->
+        when (sort) {
+            "data" -> base.sortedWith(compareBy<File> { !it.isDirectory }.thenByDescending { it.lastModified() })
+            "tamanho" -> base.sortedWith(compareBy<File> { !it.isDirectory }.thenByDescending { it.length() })
+            "tipo" -> base.sortedWith(compareBy<File>({ !it.isDirectory }, { it.extension.lowercase() }, { it.name.lowercase() }))
+            else -> base.sortedWith(compareBy({ !it.isDirectory }, { it.name.lowercase() }))
+        }
+    }
     val e = editing
     if (e != null) { FileEditor(e, onClose = { editing = null }); return }
     val v = viewing
@@ -455,13 +527,34 @@ fun FilesPane(root: File, guestRoot: String) {
             Text(guestRoot + dir.absolutePath.removePrefix(root.absolutePath), fontFamily = FontFamily.Monospace, fontSize = 12.sp, color = c.ink3,
                 maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
         }
-        if (files.isEmpty()) EmptyState(Icons.Rounded.FolderOpen, "Pasta vazia", "Os arquivos criados pelo agente aparecem aqui.")
+        Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+            OutlinedTextField(query, { query = it }, Modifier.weight(1f), singleLine = true, shape = RoundedCornerShape(14.dp),
+                placeholder = { Text("Buscar nesta pasta", fontSize = 13.sp) }, leadingIcon = { Icon(Icons.Rounded.Search, null, Modifier.size(18.dp)) },
+                trailingIcon = { if (query.isNotEmpty()) IconButton({ query = "" }) { Icon(Icons.Rounded.Close, "Limpar", Modifier.size(16.dp)) } },
+                textStyle = androidx.compose.ui.text.TextStyle(fontSize = 13.sp, color = c.ink))
+            IconButton({ newFolder = "" }) { Icon(Icons.Rounded.CreateNewFolder, "Nova pasta") }
+        }
+        Row(Modifier.horizontalScroll(rememberScrollState()).padding(horizontal = 12.dp, vertical = 4.dp), horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+            listOf("nome", "data", "tamanho", "tipo").forEach { k -> Chip(k.replaceFirstChar { it.uppercase() }, selected = sort == k) { sort = k } }
+            Text("${files.size} ${if (query.isBlank()) "itens" else "resultados"}", fontSize = 11.sp, color = c.ink3)
+        }
+        if (files.isEmpty()) EmptyState(Icons.Rounded.FolderOpen, if (query.isBlank()) "Pasta vazia" else "Nada encontrado", if (query.isBlank()) "Os arquivos criados pelo agente aparecem aqui." else "Nenhum arquivo com \"$query\" nesta pasta.")
         LazyColumn(contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
             items(files, key = { it.absolutePath }) { f ->
                 FileRow(f, onClick = { if (f.isDirectory) { dirHistory.add(dir); dir = f } else viewing = f },
                     onLongClick = { actionFile = f }, onShare = { openExternal(ctx, f, share = true) })
             }
         }
+    }
+    newFolder?.let { name ->
+        AlertDialog(onDismissRequest = { newFolder = null }, title = { Text("Nova pasta") },
+            text = { OutlinedTextField(name, { newFolder = it.replace("/", "").take(60) }, singleLine = true, placeholder = { Text("Nome da pasta") }) },
+            confirmButton = { TextButton(enabled = name.isNotBlank() && name != "." && name != "..", onClick = {
+                val ok = runCatching { File(dir, name.trim()).mkdir() }.getOrDefault(false)
+                if (!ok) fileError = "Não foi possível criar a pasta (já existe?)."
+                newFolder = null; tick++
+            }) { Text("Criar") } },
+            dismissButton = { TextButton({ newFolder = null }) { Text("Cancelar") } })
     }
     val target = actionFile
     if (target != null) AlertDialog(
