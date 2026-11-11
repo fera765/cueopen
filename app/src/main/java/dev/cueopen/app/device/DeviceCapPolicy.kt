@@ -83,7 +83,7 @@ object DeviceCapPolicy {
         return buildList {
             add("Ferramentas Android disponíveis neste agente: ${tools.sorted().joinToString(", ")}. Use a ferramenta adequada quando o pedido corresponder a ela. Uma capacidade que não está na lista não está autorizada: não tente obtê-la por outro caminho.")
             if ("device_contacts" in tools) add("Contatos: use device_contacts para localizar uma pessoa por nome ou número quando o usuário pedir. A busca é específica e limitada; se pedirem a agenda inteira, pergunte qual pessoa ou subconjunto interessa. Devolva somente os dados necessários, sem exportação ou listagem em massa e sem citar contatos que não têm relação com o pedido.")
-            if ("device_notifications" in tools) add("Notificações: device_notifications lê apenas as notificações permitidas pela política de privacidade do app. Se um conteúdo estiver restrito, aceite a restrição em vez de buscar outro acesso.")
+            if ("device_notifications" in tools) add("Notificações: device_notifications lê apenas as notificações permitidas pela política de privacidade do app. Se um conteúdo estiver restrito, aceite a restrição; não tente contornar o acesso.")
             if ("device_bluetooth" in tools) add("Bluetooth: device_bluetooth lista somente os dispositivos já pareados e não inicia varredura.")
             if ("device_bluetooth_pair" in tools) add("Bluetooth: device_bluetooth_pair apenas abre as Configurações; o pareamento e as alterações ficam nas mãos do usuário.")
             if ("device_accessibility_read_screen" in tools) add(
