@@ -529,6 +529,36 @@ fun ProxyScreen(nav: NavController) {
     var rotation by remember { mutableStateOf(app.proxyStore.rotationSettings()) }
     var intervalText by remember(rotation.intervalMinutes) { mutableStateOf(rotation.intervalMinutes.toString()) }
     var editing by remember { mutableStateOf<dev.cueopen.app.proxy.ProxyProfile?>(null) }
+    var importResult by remember { mutableStateOf<String?>(null) }
+    val importCtx = androidx.compose.ui.platform.LocalContext.current
+    val importPicker = androidx.activity.compose.rememberLauncherForActivityResult(androidx.activity.result.contract.ActivityResultContracts.GetContent()) { uri ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        val text = runCatching {
+            importCtx.contentResolver.openInputStream(uri)?.use { ins ->
+                val out = java.io.ByteArrayOutputStream(); val buf = ByteArray(16_384)
+                while (out.size() < 2_000_000) { val n = ins.read(buf); if (n < 0) break; out.write(buf, 0, n) }
+                out.toString("UTF-8")
+            }
+        }.getOrNull()
+        if (text == null) { importResult = "Não consegui ler o arquivo."; return@rememberLauncherForActivityResult }
+        val r = dev.cueopen.app.proxy.ProxyImport.parse(text, profiles)
+        if (r.profiles.isNotEmpty()) {
+            profiles = profiles + r.profiles
+            app.proxyStore.saveProfiles(profiles)
+            // Com a rotação ligada, os importados já entram nos pools do Browser e do Terminal.
+            if (rotation.enabled) {
+                val ids = r.profiles.map { it.id }
+                val next = rotation.copy(browserProfileIds = rotation.browserProfileIds + ids, terminalProfileIds = rotation.terminalProfileIds + ids)
+                rotation = next; app.configureProxyRotation(next)
+            }
+            app.connectorDebugLog.recordEvent("proxy", "profile", "imported count=${r.profiles.size}")
+            app.applyBrowserProxy()
+        }
+        importResult = "${r.profiles.size} proxy(s) importado(s)" +
+            listOfNotNull("${r.duplicates} repetido(s)".takeIf { r.duplicates > 0 }, "${r.withCredentials} com login/senha ignorado(s)".takeIf { r.withCredentials > 0 },
+                "${r.invalid} linha(s) inválida(s)".takeIf { r.invalid > 0 }).joinToString(", ").let { if (it.isBlank()) "." else " — $it." } +
+            (if (r.profiles.isNotEmpty() && rotation.enabled) " Já estão nos pools de rotação." else if (r.profiles.isNotEmpty()) " Selecione um deles por escopo ou ligue a rotação." else "")
+    }
     fun saveRotation(next: dev.cueopen.app.proxy.ProxyRotationSettings) {
         rotation = next
         intervalText = next.intervalMinutes.toString()
@@ -625,6 +655,9 @@ fun ProxyScreen(nav: NavController) {
                 }
             }
             PillButton("Adicionar perfil", Icons.Rounded.Add, modifier = Modifier.fillMaxWidth()) { editing = dev.cueopen.app.proxy.ProxyProfile() }
+            PillButton("Importar lista (.txt)", Icons.Rounded.Download, modifier = Modifier.fillMaxWidth()) { importResult = null; runCatching { importPicker.launch("text/*") } }
+            Text("Um proxy por linha, sem login e senha: ip:porta, http://ip:porta ou socks5://ip:porta.", color = c.ink3, fontSize = 12.sp)
+            importResult?.let { Text(it, color = c.ink2, fontSize = 13.sp) }
             ConnectorDebugSection("proxy")
         }
     }

@@ -616,6 +616,17 @@ class AgentRunner(
         else "\n[Verificado pelo app] Arquivos criados ou alterados em /root/workspace nesta tarefa: " + files.joinToString { it.relativeTo(root).path + " (" + it.length() + " B)" }
     }.getOrDefault("")
 
+    /** true se uma das últimas respostas do chat já traz praticamente o mesmo relatório (evita feedback final em dobro). */
+    private fun alreadyReported(sessionId: String, text: String): Boolean {
+        fun words(t: String) = t.lowercase().split(Regex("[^\\p{L}\\p{N}]+")).filter { it.length > 3 }.toSet()
+        val mine = words(text)
+        if (mine.size < 12) return false
+        return store.session(sessionId)?.items.orEmpty().takeLast(8).filterIsInstance<ChatItem.Assistant>().any { prev ->
+            val theirs = words(prev.text)
+            theirs.size >= 12 && mine.intersect(theirs).size.toDouble() / minOf(mine.size, theirs.size) >= 0.7
+        }
+    }
+
     private fun sectionAuto(sec: Section): Boolean = store.agent(sec.coordinatorAgentId)?.confirmMode == "auto"
     /** Chat de seção (coordenador ou agente) configurada como 100% autônoma. */
     private fun autoSectionSession(sessionId: String): Boolean =
@@ -643,7 +654,7 @@ class AgentRunner(
         return "[Sistema] Modo autônomo: você parou, mas esta seção é 100% autônoma — o usuário não vai responder nem mandar \"continue\". " +
             "Objetivo completo da seção: " + sec.description.ifBlank { sec.firstTask }.take(500) + "\n" +
             "Se ainda falta alguma fase desse objetivo, continue agora: tome você mesmo a decisão pendente (adote a sua própria sugestão ou a melhor opção segundo os dados e registre a escolha em uma frase) e chame team_plan com as próximas etapas. " +
-            "Quando o objetivo inteiro estiver entregue, e só então, chame section_done(summary) com o relatório final. Não faça perguntas: ninguém vai respondê-las."
+            "Quando o objetivo inteiro estiver entregue, e só então, chame section_done(summary) com o relatório final — se você já enviou o relatório no chat, não o repita: passe em summary apenas uma linha de encerramento. Não faça perguntas: ninguém vai respondê-las."
     }
 
 
@@ -740,7 +751,7 @@ class AgentRunner(
                         plan.filter { it.status == TaskStatus.REVIEW }.joinToString("\n") { "- ${it.id} (${it.agentName}): ${it.result.replace(Regex("\\s+"), " ").take(400)}" } +
                         "\nO agente já terminou e está parado: não há nada a aguardar. Chame team_review agora para cada entrega — approve se serve; redo dizendo exatamente o que falta (ex.: salvar o arquivo X); block se depende do usuário. O plano só avança depois da sua revisão."
                     SectionPlanEngine.State.COMPLETED -> if (finalReportAsked.add(sectionId))
-                        (if (sectionAuto(sec)) "[Sistema] Modo autônomo: todas as etapas deste plano foram aprovadas. Se o objetivo completo da seção ainda tem fases além deste plano, siga direto para a próxima com um novo team_plan, decidindo sozinho e sem perguntar. Se o objetivo inteiro já foi entregue, chame section_done(summary) com o relatório final consolidado (entregáveis, arquivos, números)."
+                        (if (sectionAuto(sec)) "[Sistema] Modo autônomo: todas as etapas deste plano foram aprovadas. Se o objetivo completo da seção ainda tem fases além deste plano, siga direto para a próxima com um novo team_plan, decidindo sozinho e sem perguntar. Se o objetivo inteiro já foi entregue, chame section_done(summary) com o relatório final consolidado (entregáveis, arquivos, números). O relatório vai dentro de summary; não o escreva antes como mensagem no chat, para não aparecer duas vezes."
                         else "[Sistema] Todas as etapas do plano foram aprovadas. Envie agora ao usuário o relatório final consolidado (entregáveis, arquivos, números) e pare.") else null
                     SectionPlanEngine.State.FAILED, SectionPlanEngine.State.BLOCKED ->
                         "[Sistema] O plano está ${SectionPlanEngine.label(state)}:\n${SectionPlanEngine.describe(plan)}\n" +
@@ -3283,7 +3294,9 @@ class AgentRunner(
                 val open = sec.plan.filter { it.status == TaskStatus.PENDING || it.status == TaskStatus.RUNNING || it.status == TaskStatus.REVIEW }
                 if (open.isNotEmpty()) return ToolResult("RECUSADO: ainda há etapas em aberto no plano (${open.joinToString { it.id }}). Conclua/valide essas etapas (ou cancele com team_review) antes de encerrar.")
                 autoDone.add(sec.id)
-                store.addItem(sessionId, ChatItem.Assistant(text = s("summary").ifBlank { "Objetivo da seção concluído." }, final = true))
+                val summary = s("summary").ifBlank { "Objetivo da seção concluído." }
+                // O coordenador costuma escrever o relatório no chat e depois repeti-lo aqui: não mostra duas vezes.
+                if (!alreadyReported(sessionId, summary)) store.addItem(sessionId, ChatItem.Assistant(text = summary, final = true))
                 return ToolResult("ok", SessionStatus.DONE)
             }
             "userscript_inspect" -> {
@@ -3509,7 +3522,7 @@ class AgentRunner(
                 }
                 val files = a["files"]?.jsonArray?.map { it.jsonPrimitive.content }.orEmpty()
                 val text = s("summary") + if (files.isNotEmpty()) "\n\n📎 " + files.joinToString("\n📎 ") else ""
-                store.addItem(sessionId, ChatItem.Assistant(text = text, final = true))
+                if (!alreadyReported(sessionId, text)) store.addItem(sessionId, ChatItem.Assistant(text = text, final = true))
                 return ToolResult("ok", SessionStatus.DONE)
             }
         }
