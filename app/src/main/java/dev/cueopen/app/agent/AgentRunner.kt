@@ -591,6 +591,15 @@ class AgentRunner(
     /** Seções autônomas cujo coordenador declarou o objetivo inteiro entregue (section_done). */
     private val autoDone = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
 
+    /** Fato verificado pelo app para o coordenador: o que mudou no workspace durante a tarefa delegada. */
+    private fun workspaceChanges(sessionId: String, since: Long): String = runCatching {
+        val root = sandbox.workspaceFor(sessionId)
+        val files = root.walkTopDown().maxDepth(3).onEnter { !it.name.startsWith(".") && it.name != "node_modules" }
+            .filter { it.isFile && it.lastModified() >= since - 2_000 }.take(300).toList().sortedByDescending { it.lastModified() }.take(15)
+        if (files.isEmpty()) "\n[Verificado pelo app] Nenhum arquivo foi criado ou alterado em /root/workspace durante esta tarefa. Se a etapa exigia um arquivo, use team_review redo pedindo que ele seja salvo."
+        else "\n[Verificado pelo app] Arquivos criados ou alterados em /root/workspace nesta tarefa: " + files.joinToString { it.relativeTo(root).path + " (" + it.length() + " B)" }
+    }.getOrDefault("")
+
     private fun sectionAuto(sec: Section): Boolean = store.agent(sec.coordinatorAgentId)?.confirmMode == "auto"
     /** Chat de seção (coordenador ou agente) configurada como 100% autônoma. */
     private fun autoSectionSession(sessionId: String): Boolean =
@@ -713,7 +722,7 @@ class AgentRunner(
                 val msg = when (state) {
                     SectionPlanEngine.State.VALIDATING -> "[Sistema] Há entregas aguardando a sua validação:\n" +
                         plan.filter { it.status == TaskStatus.REVIEW }.joinToString("\n") { "- ${it.id} (${it.agentName}): ${it.result.replace(Regex("\\s+"), " ").take(400)}" } +
-                        "\nChame team_review para cada uma (approve, redo com o ajuste necessário, ou block). O plano só avança depois da sua revisão."
+                        "\nO agente já terminou e está parado: não há nada a aguardar. Chame team_review agora para cada entrega — approve se serve; redo dizendo exatamente o que falta (ex.: salvar o arquivo X); block se depende do usuário. O plano só avança depois da sua revisão."
                     SectionPlanEngine.State.COMPLETED -> if (finalReportAsked.add(sectionId))
                         (if (sectionAuto(sec)) "[Sistema] Modo autônomo: todas as etapas deste plano foram aprovadas. Se o objetivo completo da seção ainda tem fases além deste plano, siga direto para a próxima com um novo team_plan, decidindo sozinho e sem perguntar. Se o objetivo inteiro já foi entregue, chame section_done(summary) com o relatório final consolidado (entregáveis, arquivos, números)."
                         else "[Sistema] Todas as etapas do plano foram aprovadas. Envie agora ao usuário o relatório final consolidado (entregáveis, arquivos, números) e pare.") else null
@@ -731,6 +740,17 @@ class AgentRunner(
                 val (prev, n) = planNudges[sectionId] ?: ("" to 0)
                 val count = if (prev == sig) n + 1 else 1
                 planNudges[sectionId] = sig to count
+                if (count > MAX_PLAN_NUDGES && state == SectionPlanEngine.State.VALIDATING && sectionAuto(sec)) {
+                    // Seção autônoma não pode parar esperando revisão: o app decide (refaz entrega vazia, aprova o resto).
+                    plan.filter { it.status == TaskStatus.REVIEW }.forEach { t ->
+                        val verdict = if (t.result.trim().length < 80 && t.attempts < 2) "redo" else "approve"
+                        runCatching { teamReview(sec.sessionId, t.id, verdict, "Validação automática do app: o coordenador não revisou a entrega." + (if (verdict == "redo") " Entregue o resultado completo e salve os arquivos pedidos em /root/workspace." else "")) }
+                    }
+                    store.addItem(sec.sessionId, ChatItem.Assistant(text = "⚙ Entregas pendentes validadas automaticamente para o plano seguir."))
+                    planNudges.remove(sectionId)
+                    planWatchdog(sectionId)
+                    return@withLock
+                }
                 if (count > MAX_PLAN_NUDGES) {
                     if (count == MAX_PLAN_NUDGES + 1) store.addItem(sec.sessionId, ChatItem.Error(text =
                         "O plano não avançou depois de $MAX_PLAN_NUDGES lembretes ao coordenador (${SectionPlanEngine.label(state)}). Parei para não gastar tokens. Envie uma mensagem para orientar."))
@@ -870,7 +890,7 @@ class AgentRunner(
                 if ((sectionGeneration[sec.id] ?: 0) != generation) return@withLock  // seção pausada depois deste relatório
                 var waited = 0
                 while (isRunning(sec.sessionId) && waited < 1_800) { kotlinx.coroutines.delay(2_000); waited += 2 }
-                send(sec.sessionId, "[Relatório automático — ${member.name}${if (waitingUser) " parou e aguarda o usuário" else " terminou"}]\n$report",
+                send(sec.sessionId, "[Relatório automático — ${member.name}${if (waitingUser) " parou e aguarda o usuário" else " terminou"}]\n$report" + workspaceChanges(child.id, d.startedAt),
                     showUserMessage = false).join()
             }
         }
@@ -2388,13 +2408,18 @@ class AgentRunner(
                     appendLine("- A cada etapa, escreva 1–2 frases de feedback (o que fez, o que vai fazer, o que falta). É por elas que o coordenador e o usuário acompanham você; não encadeie ferramentas em silêncio.")
                     appendLine("- Os arquivos do time ficam em /root/workspace, compartilhado entre os agentes. Liste com file_list; varrer o sistema inteiro (find /) é lento e não traz nada útil.")
                     appendLine("- Se faltar um insumo (arquivo, ID, acesso), diga exatamente o que falta e encerre com a resposta final: o coordenador resolve e devolve a tarefa. Insistir por conta própria só gasta tempo e tokens.")
+                    appendLine("- Você só tem as ferramentas que aparecem nesta chamada. Se a tarefa pedir uma plataforma, conta ou conector que você não tem (ex.: Google Search Console, Analytics, um painel com login), não fique tentando acessá-la: diga isso logo na primeira resposta, faça a melhor versão possível com fontes públicas e marque o que é dado observado e o que é inferência.")
+                    appendLine("- Quando a tarefa pedir um arquivo, salve-o em /root/workspace com file_write e confira com file_list antes de responder; cite o caminho exato na entrega. O coordenador recebe a lista real dos arquivos criados.")
+                    appendLine("- Se o browser responder MODO SEM JANELA, o texto e os links já vieram na resposta: trabalhe com eles e abra outras páginas por browser_navigate. Se responder ERROR de browser indisponível, mude de fonte ou use o shell; repetir a mesma navegação não resolve.")
                     appendLine("- Mensagens marcadas [Coordenador] têm prioridade sobre o seu plano. Ao concluir, responda com o entregável (caminhos de arquivo, links, números) e pare.")
                     if (agent?.confirmMode == "auto") appendLine("- Seção 100% autônoma: ninguém vai responder perguntas, então ask_user e ask_question não ajudam aqui. Diante de uma dúvida, escolha você mesmo o melhor caminho, registre na entrega a premissa que adotou e conclua a tarefa.")
                     sectionSharedContext(sec, session.id, coordinator = false).takeIf { it.isNotBlank() }?.let { appendLine(); appendLine(it) }
                 }
                 store.section(session.sectionId)?.takeIf { it.coordinatorAgentId == agent?.id }?.let { sec ->
                     appendLine(); appendLine("## Você coordena a seção ${sec.name}")
-                    appendLine("- Time: " + sec.agentIds.mapNotNull { store.agent(it)?.name }.joinToString(", ") + ".")
+                    appendLine("- Time e o que cada um consegue usar: " + sec.agentIds.mapNotNull { store.agent(it) }.joinToString("; ") { a -> a.name + " [" + listOfNotNull("browser".takeIf { a.useBrowser }, "terminal".takeIf { a.useTerminal }).joinToString(" + ").ifBlank { "sem browser nem terminal" } + "]" } + ".")
+                    appendLine("- Planeje apenas com o que o time alcança de verdade: páginas públicas pelo browser, o terminal e os conectores instalados. Painéis e contas privadas (Google Search Console, Analytics, gerenciadores de anúncios, CRMs) só existem para o time se houver conector ou login salvo; sem isso, a etapa deve usar fontes públicas e deixar explícito o que é dado observado e o que é inferência, em vez de mandar o agente acessar algo que ele não tem.")
+                    appendLine("- Cada [Relatório automático] traz uma linha \"[Verificado pelo app]\" com os arquivos realmente criados na tarefa. Use-a para validar a entrega; não é preciso listar o workspace de novo. Depois de um relatório, o agente está parado: a sua próxima ação é team_review (ou team_delegate), nunca \"aguardar\".")
                     appendLine("- Para um pedido com mais de uma etapa, comece por team_plan (etapas, agente responsável e dependências). O app inicia as etapas sozinho; a cada [Relatório automático] você valida a entrega com team_review (approve, redo ou block), e ao aprovar as etapas seguintes começam sozinhas. O fluxo não depende de o usuário mandar \"continue\".")
                     appendLine("- team_delegate serve para tarefas avulsas fora do plano; ele não bloqueia, então acione vários agentes em paralelo quando fizer sentido. O usuário vê cada agente trabalhando numa pílula ao vivo.")
                     if (sec.plan.isNotEmpty()) appendLine("- Plano atual (persistido):\n" + SectionPlanEngine.describe(sec.plan))
@@ -4078,7 +4103,7 @@ class AgentRunner(
                                     "siga com o que não depende do browser ou use sleep (10+ min) e tente depois. O usuário pode liberar 'Sobrepor a outros apps' para o browser rodar com o app fechado."
                         }
                         BrowserVisitLog.record(sessionId, url, navigation)
-                        if (navigation.startsWith("ERROR:")) navigation
+                        if (navigation.startsWith("ERROR:") || navigation.startsWith("MODO SEM JANELA")) navigation
                         else if (navigation.startsWith("TIMEOUT:")) {
                             // Como o Playwright MCP: mesmo lento, devolve o que a página mostra agora.
                             val now = runCatching { browserFor(sessionId).read(2500, trackRepeat = false) }.getOrDefault("")
