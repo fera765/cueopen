@@ -203,7 +203,7 @@ fun CueNav(nav: NavHostController, startOnboarding: Boolean) {
         )) { e ->
             HomeScreen(nav, initialDraft = e.arguments?.getString("draft"), initialAgent = e.arguments?.getString("agent"))
         }
-        composable("chat/{id}") { e -> ChatScreen(nav, e.arguments!!.getString("id")!!) }
+        composable("chat/{id}") { e -> WithSessionDrawer(nav) { openDrawer -> ChatScreen(nav, e.arguments!!.getString("id")!!, onMenu = openDrawer) } }
         composable("computer/{id}?tab={tab}", arguments = listOf(
             navArgument("id") { type = NavType.StringType },
             navArgument("tab") { type = NavType.StringType; nullable = true; defaultValue = null },

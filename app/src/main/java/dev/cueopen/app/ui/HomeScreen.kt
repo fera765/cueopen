@@ -584,6 +584,27 @@ fun RoundIcon(icon: ImageVector, desc: String, onClick: () -> Unit) {
     }
 }
 
+/** Envolve uma tela (ex.: o chat) com a mesma sidebar da Home; `content` recebe a ação que abre a sidebar. */
+@Composable
+fun WithSessionDrawer(nav: NavController, content: @Composable (openDrawer: () -> Unit) -> Unit) {
+    val app = CueApp.instance
+    val st by app.store.state.collectAsStateWithLifecycle()
+    val drawer = rememberDrawerState(DrawerValue.Closed)
+    val scope = rememberCoroutineScope()
+    androidx.activity.compose.BackHandler(enabled = drawer.isOpen) { scope.launch { drawer.close() } }
+    ModalNavigationDrawer(
+        drawerState = drawer,
+        gesturesEnabled = drawer.isOpen,
+        drawerContent = {
+            ModalDrawerSheet(drawerContainerColor = Cue.c.bg, modifier = Modifier.width(310.dp)) {
+                if (drawer.isOpen || drawer.isAnimationRunning) SessionDrawer(nav, st.sessions, st.agents, st.connectors.count { it.connectedAt != null }, drawer.isOpen,
+                    onClose = { scope.launch { drawer.close() } },
+                    onNew = { scope.launch { drawer.close() }; nav.navigate("home") { popUpTo(0) { inclusive = true }; launchSingleTop = true } })
+            }
+        },
+    ) { content { scope.launch { drawer.open() } } }
+}
+
 @Composable
 private fun SessionDrawer(nav: NavController, sessions: List<Session>, agents: List<AgentProfile>, connectedConnectorCount: Int, drawerOpen: Boolean, onClose: () -> Unit, onNew: () -> Unit) {
     val c = Cue.c
@@ -847,7 +868,6 @@ private fun SectionRow(
                     "restart" -> app.agent.restartSection(sec.id)
                     else -> {
                         (sec.agentIds + sec.coordinatorAgentId).forEach { dev.cueopen.app.scheduler.Heartbeat.cancel(app, it) }
-                        runCatching { app.agent.sessionApps.delete(sec.id) }
                         app.store.deleteSection(sec.id).forEach { app.deleteChat(it) }
                         runCatching { app.sandbox.deleteEnvironment("section_${sec.id}") }  // workspace compartilhado do time
                     }

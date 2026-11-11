@@ -60,7 +60,7 @@ import kotlinx.coroutines.withContext
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun ChatScreen(nav: NavController, sessionId: String) {
+fun ChatScreen(nav: NavController, sessionId: String, onMenu: () -> Unit = {}) {
     val app = CueApp.instance
     val st by app.store.state.collectAsStateWithLifecycle()
     val session = st.sessions.firstOrNull { it.id == sessionId } ?: run { LaunchedEffect(Unit) { nav.popBackStack() }; return }
@@ -82,7 +82,6 @@ fun ChatScreen(nav: NavController, sessionId: String) {
     val sectionRunning = homeSection != null && st.sessions.any { it.sectionId == homeSection.id && it.status == SessionStatus.RUNNING }
     val list = rememberLazyListState()
     var draft by remember { mutableStateOf("") }
-    var appMode by androidx.compose.runtime.saveable.rememberSaveable(sessionId) { mutableStateOf(false) }
     var copyingAttachments by remember { mutableStateOf(false) }
     var replyingTo by remember(sessionId) { mutableStateOf<ChatItem.Assistant?>(null) }
     var menu by remember { mutableStateOf(false) }
@@ -135,7 +134,7 @@ fun ChatScreen(nav: NavController, sessionId: String) {
     Scaffold(containerColor = c.bg, topBar = {
         TopAppBar(
             colors = TopAppBarDefaults.topAppBarColors(containerColor = c.bg),
-            navigationIcon = { IconButton({ goBack() }) { Icon(Icons.AutoMirrored.Rounded.ArrowBack, "Voltar") } },
+            navigationIcon = { IconButton({ onMenu() }) { Icon(Icons.Rounded.Menu, "Menu") } },
             title = {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     if (agent != null) { AnimatedAgentFace(Color(agent.color), agent.face, 24.dp, state = when { running -> dev.cueopen.app.ui.mascot.MascotState.THINKING; session.status == SessionStatus.SLEEPING -> dev.cueopen.app.ui.mascot.MascotState.SLEEPING; else -> dev.cueopen.app.ui.mascot.MascotState.IDLE }); Spacer(Modifier.width(8.dp)) }
@@ -174,13 +173,7 @@ fun ChatScreen(nav: NavController, sessionId: String) {
         )
     }) { pad ->
         Column(Modifier.fillMaxSize().padding(pad).imePadding()) {
-          // Só no chat do coordenador de uma seção: alternância entre a conversa e o app visual da seção.
-          if (homeSection != null) {
-              val appTick by app.agent.sessionAppTick.collectAsStateWithLifecycle()
-              ChatAppToggle(appMode, hasApp = remember(homeSection.id, appTick) { app.agent.sessionApps.exists(homeSection.id) }) { appMode = it }
-          }
-          if (homeSection != null && appMode) SessionAppPane(homeSection, Modifier.weight(1f).fillMaxWidth()) { appMode = false }
-          else {
+          run {
           Box(Modifier.weight(1f).fillMaxWidth()) {
             androidx.compose.runtime.CompositionLocalProvider(LocalChatPersona provides ChatPersona.of(agent)) {
             LazyColumn(Modifier.fillMaxSize(), state = list, contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
