@@ -367,6 +367,10 @@ data class Section(
     val plan: List<SectionTask> = emptyList(),
     /** Item ChatItem.Plan do chat do coordenador que espelha o plano (progresso real). */
     val planItemId: String? = null,
+    /** Agent que constrói o app visual da seção num contexto próprio (em segundo plano). */
+    val appAgentId: String = "",
+    /** Contrato de dados do app (chaves de state.data e formato), definido por quem construiu o app. */
+    val appContract: String = "",
 )
 
 /** Estados de uma tarefa do plano. REVIEW = o agente entregou e o coordenador precisa validar. */

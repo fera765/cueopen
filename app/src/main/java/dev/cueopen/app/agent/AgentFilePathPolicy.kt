@@ -17,7 +17,7 @@ internal object AgentFilePathPolicy {
                 val alias = taskAliases.first { path.startsWith("$it/") }
                 path.removePrefix("$alias/")
             }
-            path.startsWith("/") -> return null
+            path.startsWith("/") -> hostRelative(root, path) ?: return null
             else -> path
         }
         return confined(root, relative, allowRoot)
@@ -28,9 +28,9 @@ internal object AgentFilePathPolicy {
      * ".", "./x", "~", "~/workspace/x", "/root", "workspace/x" (o cwd do shell é /root/workspace).
      */
     fun normalize(rawPath: String): String {
-        // URIs (file://, content://…) seguem intactas e são recusadas mais adiante.
-        if (rawPath.contains(':')) return rawPath.trim()
-        var p = rawPath.trim().trim('"', '\'').replace(Regex("/{2,}"), "/")
+        // URIs (file://, content://…) seguem intactas e são recusadas mais adiante. Um ":" comum (ex.: "nota 10:30.md") é só nome de arquivo.
+        if ("://" in rawPath) return rawPath.trim()
+        var p = rawPath.trim().trim('"', '\'', '`').trim().replace(Regex("/{2,}"), "/")
         if (p == "~" || p == "~/" || p == "/root" || p == "/root/" || p == "." || p == "./" || p == "workspace" || p == "workspace/") return ""
         if (p.startsWith("~/workspace")) p = "/root/workspace" + p.removePrefix("~/workspace")
         else if (p.startsWith("~/")) p = p.removePrefix("~/")
@@ -47,11 +47,9 @@ internal object AgentFilePathPolicy {
         rawPath: String,
         allowRoot: Boolean = false,
     ): File? {
-        taskWorkspace(taskRoot, rawPath, allowRoot)?.let { return it }
-        val path = rawPath.trim()
+        val path = connectorPath(connectorsRoot, rawPath) ?: return taskWorkspace(taskRoot, rawPath, allowRoot)
         if (path == "/root/connectors") return if (allowRoot) canonical(connectorsRoot) else null
         val prefix = "/root/connectors/"
-        if (!path.startsWith(prefix)) return null
 
         val segments = path.removePrefix(prefix).split('/')
         if (segments.size < 2 || segments.any { it.isEmpty() || it == "." || it == ".." }) return null
@@ -63,6 +61,29 @@ internal object AgentFilePathPolicy {
         if (!isWithin(connectorsBase, workspace)) return null
         val relative = segments.drop(2).joinToString("/")
         return confined(workspace, relative, allowRoot)
+    }
+
+    /** Caminho absoluto do Android que aponta para DENTRO da própria raiz (o app mostra esses caminhos ao agente) → relativo. */
+    private fun hostRelative(root: File, path: String): String? {
+        for (base in setOf(root.absolutePath.trimEnd('/'), canonical(root).path.trimEnd('/'))) {
+            if (base.isEmpty()) continue
+            if (path == base) return ""
+            if (path.startsWith("$base/")) return path.removePrefix("$base/")
+        }
+        return null
+    }
+
+    /** Normaliza as formas de "/root/connectors/..." (aspas, barras repetidas/finais, ~, /home, /public, caminho Android). */
+    private fun connectorPath(connectorsRoot: File, rawPath: String): String? {
+        if ("://" in rawPath) return null
+        var p = rawPath.trim().trim('"', '\'', '`').trim().replace(Regex("/{2,}"), "/")
+        if (p.length > 1) p = p.trimEnd('/')
+        hostRelative(connectorsRoot, p)?.let { return if (it.isEmpty()) "/root/connectors" else "/root/connectors/$it" }
+        for (alias in listOf("/root/connectors", "~/connectors", "/home/connectors", "/public/connectors")) {
+            if (p == alias) return "/root/connectors"
+            if (p.startsWith("$alias/")) return "/root/connectors/" + p.removePrefix("$alias/")
+        }
+        return null
     }
 
     private fun confined(root: File, relativePath: String, allowRoot: Boolean): File? {

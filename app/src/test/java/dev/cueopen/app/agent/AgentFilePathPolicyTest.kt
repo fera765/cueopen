@@ -55,6 +55,28 @@ class AgentFilePathPolicyTest {
         assertNotNull(AgentFilePathPolicy.readableWorkspace(taskWorkspace, connectorsRoot, "own.txt"))
     }
 
+    @Test fun `common model path shapes resolve instead of being rejected`() = withTempDir { temp ->
+        val workspace = File(temp, "env/public/workspace").apply { mkdirs() }
+        val connectorsRoot = File(temp, "connectors").apply { mkdirs() }
+        val connectorWorkspace = File(connectorsRoot, "ytbaixar/workspace").apply { mkdirs() }
+        val expected = File(workspace, "out/data.txt").canonicalFile
+        listOf(
+            "~/workspace/out/data.txt", "./out/data.txt", "workspace/out/data.txt", "/root/workspace//out/data.txt",
+            "\"/root/workspace/out/data.txt\"", "`out/data.txt`", File(workspace, "out/data.txt").absolutePath, expected.path,
+        ).forEach { assertEquals("path=$it", expected, AgentFilePathPolicy.readableWorkspace(workspace, connectorsRoot, it)) }
+        assertEquals(File(workspace, "nota 10:30.md").canonicalFile, AgentFilePathPolicy.taskWorkspace(workspace, "~/workspace/nota 10:30.md"))
+        assertEquals(workspace.canonicalFile, AgentFilePathPolicy.taskWorkspace(workspace, workspace.absolutePath, allowRoot = true))
+
+        val connectorFile = File(connectorWorkspace, "data.txt").canonicalFile
+        listOf(
+            "/root/connectors/ytbaixar/workspace/data.txt/", "/root/connectors//ytbaixar/workspace/data.txt", "~/connectors/ytbaixar/workspace/data.txt",
+            "/home/connectors/ytbaixar/workspace/data.txt", "'/root/connectors/ytbaixar/workspace/data.txt'", File(connectorWorkspace, "data.txt").absolutePath,
+        ).forEach { assertEquals("path=$it", connectorFile, AgentFilePathPolicy.readableWorkspace(workspace, connectorsRoot, it)) }
+        // Caminho Android fora das raízes continua recusado.
+        assertNull(AgentFilePathPolicy.readableWorkspace(workspace, connectorsRoot, File(temp, "env/public/secret.txt").absolutePath))
+        assertNull(AgentFilePathPolicy.readableWorkspace(workspace, connectorsRoot, File(connectorsRoot, "ytbaixar/secret.txt").absolutePath))
+    }
+
     private inline fun withTempDir(block: (File) -> Unit) {
         val dir = Files.createTempDirectory("agent-file-path-policy-").toFile()
         try { block(dir) } finally { dir.deleteRecursively() }

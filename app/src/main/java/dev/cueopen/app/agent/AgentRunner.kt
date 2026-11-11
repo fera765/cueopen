@@ -306,6 +306,7 @@ class AgentRunner(
         val uiConnectorIds: List<String>, val deviceCaps: List<String>, val fullAuto: Boolean,
     )
 
+    private val WAIT_TASK = Regex("^\\W*(aguard|esper|wait|await|fico no aguardo)", RegexOption.IGNORE_CASE)
     private val sectionColors = listOf(0xFFFF6B3DL, 0xFF4D8DFFL, 0xFF2FBF71L, 0xFFFFC53DL, 0xFFB57BFFL, 0xFFFF5C8AL, 0xFF2EC4C4L, 0xFF9C978EL)
 
     private fun createSection(
@@ -374,7 +375,7 @@ class AgentRunner(
         store.addItem(sessionId, ChatItem.SectionSetup(sectionId = sectionId, sectionName = title,
             agentNames = listOf(coordinator.name) + members.map { it.name }, suggestedCaps = caps, suggestWallet = suggestWallet))
         return ToolResult("Seção \"$title\" criada com ${members.size} agentes + coordenador. O card de autorização está na tela: o usuário escolhe as permissões e toca em Ativar. " +
-            "Responda em 1-2 frases o que foi criado e aguarde; não delegue nada daqui.", SessionStatus.WAITING_USER)
+            "Ao ativar, o primeiro agente começa a trabalhar na hora e o app visual é construído em paralelo. Responda em 1-2 frases o que foi criado e aguarde; não delegue nada daqui.", SessionStatus.WAITING_USER)
     }
 
     /** Aplica as permissões do card a todos os Agents da seção e dá a largada no coordenador. Retorna o chat da seção. */
@@ -670,17 +671,71 @@ class AgentRunner(
      * troca pelo app sob medida em segundo plano, sem nenhuma mensagem sobre isso no chat. O usuário só vê o pedido.
      */
     private fun startSection(sec: Section) {
-        if (!sessionApps.exists(sec.id)) installBaseApp(sec)
-        val task = sec.firstTask.ifBlank { "Apresente o time, proponha o plano inicial e comece." }
+        startAppBuilder(sec)
+        val raw = sec.firstTask.trim()
+        val task = if (raw.isBlank() || WAIT_TASK.containsMatchIn(raw))
+            sec.description.trim().takeIf { it.isNotBlank() }?.let { "Começar agora: $it" } ?: "Apresente o time, proponha o plano inicial e comece."
+        else raw
+        val first = sec.agentIds.firstNotNullOfOrNull { store.agent(it)?.name }
         store.addItem(sec.sessionId, ChatItem.User(text = task))
-        send(sec.sessionId, task + (if (isBaseApp(sec.id)) "\n\n[Sistema — não mostre nem comente isto no chat] Sua PRIMEIRA ação, em silêncio: app_publish com o app visual sob medida desta seção " +
-            "(veja \"App visual da seção\"). Não diga ao usuário que criou/publicou o app; siga direto para o trabalho (team_plan)." else ""), showUserMessage = false)
+        send(sec.sessionId, task + "\n\n[Sistema — não mostre nem comente isto no chat] Comece AGORA, sem esperar o usuário: chame team_plan e ponha " +
+            (first?.let { "$it (primeiro agente do time)" } ?: "o primeiro agente do time") + " para trabalhar já na primeira etapa. " +
+            "Se faltar alguma informação, o agente começa pela parte que não depende dela (levantamento/pesquisa inicial) e você pergunta ao usuário em paralelo — nunca fique só aguardando. " +
+            "O app visual da seção está sendo construído por outro agente, em outro contexto: NÃO chame app_publish nem fale do app.", showUserMessage = false)
+    }
+
+    // ───────── Construtor do app: contexto próprio, em paralelo ao trabalho do time ─────────
+
+    private fun appBuilderSession(secIn: Section): String = synchronized(sessionApps) {
+        val sec = store.section(secIn.id) ?: secIn
+        val agent = store.agent(sec.appAgentId) ?: AgentProfile(
+            name = "App · ${sec.name}".take(40), face = "bot", color = sectionColors[1],
+            instructions = "Você constrói e mantém o app visual da seção \"${sec.name}\". Não conversa com o usuário.",
+            useBrowser = false, useTerminal = false, confirmMode = "auto",
+        ).also { store.upsertAgent(it); store.upsertSection(sec.copy(appAgentId = it.id)) }
+        store.state.value.sessions.firstOrNull { it.sectionId == sec.id && it.agentId == agent.id && it.id != sec.sessionId }?.id
+            ?: Session(title = "App · ${sec.name}", agentId = agent.id, sectionId = sec.id).also { store.upsertSession(it) }.id
+    }
+
+    /** true enquanto o construtor está criando/corrigindo o app (a aba APP mostra "Preparando"). */
+    fun sessionAppBuilding(sectionId: String): Boolean {
+        val sec = store.section(sectionId)?.takeIf { it.appAgentId.isNotBlank() } ?: return false
+        return store.state.value.sessions.any { it.sectionId == sec.id && it.agentId == sec.appAgentId && isRunning(it.id) }
+    }
+
+    /** Aba APP aberta sem app pronto: garante que o construtor esteja rodando (ex.: depois de uma pausa ou do app fechado). */
+    fun ensureSessionApp(sectionId: String) {
+        val sec = store.section(sectionId)?.takeIf { it.configured } ?: return
+        if (!sessionApps.exists(sec.id)) startAppBuilder(sec)
+    }
+
+    private fun startAppBuilder(sec: Section, request: String = "") {
+        if (request.isBlank() && sessionApps.exists(sec.id) && !isBaseApp(sec.id)) return
+        val sid = appBuilderSession(sec)
+        if (isRunning(sid)) return
+        val job = send(sid, request.ifBlank { "Construa agora o app visual desta seção e publique com app_publish (com data_contract)." }, showUserMessage = false)
+        scope.launch {
+            job.join()
+            // Falhou de verdade (não foi pausa): o app base entra para a seção nunca ficar sem app.
+            if (!job.isCancelled && !sessionApps.exists(sec.id)) store.section(sec.id)?.let { installBaseApp(it) }
+            sessionAppTick.value = System.currentTimeMillis()
+        }
+        sessionAppTick.value = System.currentTimeMillis()
+    }
+
+    /** Especificação técnica do app (formato, API e state), igual para quem constrói e para quem ajusta. */
+    private fun appSpec(): String = buildString {
+        appendLine("- Formato: UM arquivo HTML (CSS e JS inline, sem frameworks externos obrigatórios), responsivo para celular, tema escuro, com identidade visual própria, estados vazios/carregando e animações leves.")
+        appendLine("- API no JS do app: SessionApp.onUpdate(fn) chama fn(state) agora e a cada mudança; SessionApp.getState(); SessionApp.send(acao, dados) manda uma ação do usuário para você (chega como \"[App da seção]\"); SessionApp.saveState(obj)/loadState() guardam o estado da interface (filtros, favoritos).")
+        appendLine("- state = {section:{name,goal}, planState, coordinator:{running,lastMessage}, agents:[{name,role,status(working|idle|waiting_user|error|recovering),activity,task,lastMessage,color,steps:[últimas ações]}], plan:[{id,agent,task,status(pending|running|review|done|failed|blocked),result}] (sempre preenchido: plano do team_plan ou as delegações feitas), files:[{path,size,modified}], data:{<chave>: valor de app_set_data}, events:[{time,type,text}]}.")
+        appendLine("- TEMPO REAL: o app recebe o state novo sozinho (a cada ~1 s quando algo muda) por SessionApp.onUpdate — desenhe TUDO a partir do state dentro do onUpdate. PROIBIDO botão de atualizar/recarregar/sincronizar e PROIBIDO botão que só finge iniciar algo; botões só para ações reais via SessionApp.send (ex.: pedir nova busca, aprovar item). Atualize a tela sem piscar (troque só o que mudou; preserve rolagem, aba e filtros).")
+        appendLine("- Regra de ouro: o app só mostra DADOS REAIS do state. Nada de números, preços, lucros ou itens inventados no HTML — sem dado, mostre o estado vazio. Animações (avatares andando, etc.) devem refletir agents[].status reais.")
     }
 
     private val appRejects = java.util.concurrent.ConcurrentHashMap<String, Int>()
 
     /** Toda seção tem app: se por algum motivo não houver, o app base entra na hora (nunca bloqueia o trabalho). */
-    private fun appGate(sec: Section): String? { if (!sessionApps.exists(sec.id)) installBaseApp(sec); return null }
+    private fun appGate(sec: Section): String? { if (sec.configured && !sessionApps.exists(sec.id)) startAppBuilder(sec); return null }
 
     /** Instala o app base (funcional, com dados reais) quando o coordenador não consegue publicar o próprio. */
     private fun installBaseApp(sec: Section) {
@@ -703,8 +758,7 @@ class AgentRunner(
         val key = sectionId + ":" + (sessionApps.meta(sectionId)?.version ?: 0)
         if ((appErrorNotified.merge(key, 1, Int::plus) ?: 1) > 2) return
         val text = "[Sistema] O app da seção está com ERRO de JavaScript na tela do usuário: \"${message.take(200)}\". Corrija agora: app_read para achar o trecho, app_edit para consertar (o app é testado antes de publicar). Não mexa no resto."
-        if (isRunning(sec.sessionId)) coordinatorInbox.getOrPut(sec.sessionId) { java.util.Collections.synchronizedList(mutableListOf()) }.add(text)
-        else send(sec.sessionId, text, showUserMessage = false)
+        startAppBuilder(sec, text)
     }
 
     /** Validação estática + teste de renderização real (WebView oculto): erro de sintaxe/execução barra a publicação. */
@@ -713,7 +767,7 @@ class AgentRunner(
             ?: runCatching { dev.cueopen.app.sessionapp.SessionAppTester.test(ctx, html, sessionAppSnapshot(sec.id)) }.getOrNull()
                 ?.let { "o app foi carregado num teste e deu erro de JavaScript: $it" }
 
-    private suspend fun appPublish(sessionId: String, html: String, title: String): String {
+    private suspend fun appPublish(sessionId: String, html: String, title: String, contract: String = ""): String {
         val sec = store.section(store.session(sessionId)?.sectionId) ?: return "ERRO: esta conversa não é uma seção."
         appProblem(sec, html)?.let { why ->
             val n = appRejects.merge(sec.id, 1, Int::plus) ?: 1
@@ -726,6 +780,7 @@ class AgentRunner(
         appRejects.remove(sec.id)
         sessionAppErrors.remove(sec.id)
         val m = sessionApps.publish(sec.id, html, title.ifBlank { sec.name })
+        if (contract.isNotBlank()) store.section(sec.id)?.let { store.upsertSection(it.copy(appContract = contract.trim().take(2_000))) }
         sessionAppTick.value = System.currentTimeMillis()
         return "App publicado (versão ${m.version}, ${m.bytes / 1000} KB). O usuário vê em [APP] no topo do chat da seção. " +
             "Alimente-o com app_set_data conforme os agentes entregarem; para ajustes pequenos use app_edit (não reenvie o arquivo inteiro)."
@@ -2517,7 +2572,7 @@ class AgentRunner(
                 appendLine(); appendLine("## Confirmações")
                 appendLine(if (cats.isEmpty()) "- Este Agent é 100% autônomo: o usuário autorizou executar ações sem pedir confirmação."
                     else "- O app pede confirmação ao usuário automaticamente antes de: ${cats.joinToString("; ")}. Não pergunte por texto: tente a ação normalmente; se voltar AGUARDANDO CONFIRMAÇÃO, pare e espere. Depois de APROVADO, repita a mesma ação uma vez. Se NEGADO, não insista nem contorne.")
-                store.section(session.sectionId)?.takeIf { it.coordinatorAgentId != agent?.id && it.sessionId != session.id }?.let { sec ->
+                store.section(session.sectionId)?.takeIf { it.coordinatorAgentId != agent?.id && it.sessionId != session.id && it.appAgentId != agent?.id }?.let { sec ->
                     appendLine(); appendLine("## Você é agente da seção ${sec.name} (quem manda é o coordenador)")
                     appendLine("- Execute SOMENTE a tarefa recebida do coordenador; não invente etapas novas nem amplie o escopo.")
                     appendLine("- A cada etapa escreva 1-2 frases de feedback (o que fez, o que vai fazer, o que falta). Não encadeie ferramentas em silêncio.")
@@ -2525,7 +2580,21 @@ class AgentRunner(
                     appendLine("- Se faltar um insumo (arquivo, ID, acesso), diga exatamente o que falta e ENCERRE com resposta final — o coordenador resolve. Não fique tentando por horas.")
                     appendLine("- Mensagens [Coordenador] têm prioridade sobre o seu plano. Ao concluir, responda com o entregável (caminhos de arquivo, links, números) e pare.")
                     appendLine("- A seção tem um app visual que o usuário acompanha EM TEMPO REAL. Publique cada resultado NA HORA em que o obtiver, não no fim: app_append_data(key, item) para acrescentar um item a uma lista (ex.: cada oferta/lead/texto encontrado) e app_set_data(key, json) para métricas/objetos. Use a chave e o formato que o coordenador indicar. Só dados reais.")
+                    if (sec.appContract.isNotBlank()) appendLine("- Contrato de dados do app (chaves e formatos que o app lê; publique exatamente assim): ${sec.appContract}")
                     sectionSharedContext(sec, session.id, coordinator = false).takeIf { it.isNotBlank() }?.let { appendLine(); appendLine(it) }
+                }
+                store.section(session.sectionId)?.takeIf { it.appAgentId.isNotBlank() && it.appAgentId == agent?.id }?.let { sec ->
+                    appendLine(); appendLine("## Você constrói o app visual da seção ${sec.name}")
+                    appendLine("- Objetivo da seção: " + sec.description.ifBlank { sec.firstTask.take(400) })
+                    appendLine("- Time (os agentes que o app acompanha):\n" + sec.agentIds.mapNotNull { store.agent(it) }.joinToString("\n") { "  - ${it.name}: ${it.mission.take(160)}" })
+                    appendLine("- Você roda em paralelo ao time, num contexto só seu. Único trabalho: criar com app_publish UM app 100% original, inventado do zero para ESTE objetivo — conceito, metáfora visual, layout e identidade próprios. Nada de dashboard genérico, template ou padrão pré-definido. Ex.: day trade → um escritório visto de cima com o avatar de cada agente sentado ao seu computador operando, telas e balões mudando conforme agents[].status/steps; garimpo de ofertas → vitrine/radar vivo com cada achado entrando na hora.")
+                    appendLine("- O app é o espelho AO VIVO da seção: cada agente do time precisa aparecer com o estado real (trabalhando, parado, aguardando, erro), a tarefa atual e as últimas ações; o plano e os resultados entram sozinhos conforme o state muda. Tem de ficar vivo e útil mesmo com state.data vazio (use agents, plan, events, files).")
+                    appendLine("- Em app_publish preencha data_contract: as chaves de state.data que o app lê e o formato de cada item (poucas chaves, nomes simples). O time passa a publicar exatamente nisso. Chaves que você não previu devem aparecer num bloco genérico — nenhum dado real pode sumir.")
+                    sessionApps.data(sec.id).keys.takeIf { it.isNotEmpty() }?.let { appendLine("- Chaves já publicadas pelo time (mantenha compatível): ${it.joinToString()}.") }
+                    if (sec.appContract.isNotBlank()) appendLine("- Contrato de dados em vigor (não quebre ao editar): ${sec.appContract}")
+                    append(appSpec())
+                    sessionAppErrors[sec.id]?.let { appendLine("- ⚠ O app publicado está com ERRO de JavaScript: \"$it\". Corrija com app_read + app_edit.") }
+                    appendLine("- RECUSADO em app_publish/app_edit → corrija e tente de novo. Não fale com o usuário, não delegue, não use outras ferramentas. Publicado sem erro → responda apenas \"ok\" e PARE.")
                 }
                 store.section(session.sectionId)?.takeIf { it.coordinatorAgentId == agent?.id }?.let { sec ->
                     appendLine(); appendLine("## Você coordena a seção ${sec.name}")
@@ -2535,16 +2604,12 @@ class AgentRunner(
                     if (sec.plan.isNotEmpty()) appendLine("- PLANO ATUAL (persistido):\n" + SectionPlanEngine.describe(sec.plan))
                     val appMeta = sessionApps.meta(sec.id)
                     appendLine(); appendLine("## App visual da seção (Session App Runtime)")
-                    appendLine(if (appMeta == null) "- Esta seção ainda não tem app sob medida. Crie-o com app_publish: uma interface própria para ESTE objetivo (não um dashboard genérico) — ex.: catálogo com filtros para garimpo de ofertas, estúdio com editor/versões para copy, sala com avatares dos agentes para trading."
-                        else if (isBaseApp(sec.id)) "- O app atual é o APP BASE genérico (provisório). Na sua próxima ação, EM SILÊNCIO (sem comentar no chat), substitua-o com app_publish por uma interface própria para ESTE objetivo — ex.: catálogo com filtros para garimpo de ofertas, estúdio de copy, sala com avatares dos agentes, cérebro com ramificações para um segundo cérebro."
+                    appendLine(if (appMeta == null) "- O app visual está sendo construído por OUTRO agente, em outro contexto, em paralelo. NÃO chame app_publish nem comente o app: siga com o trabalho do time."
+                        else if (isBaseApp(sec.id)) "- O app atual é o APP BASE (o construtor não conseguiu publicar o app sob medida). O trabalho do time vem primeiro; se o usuário pedir, substitua com app_publish."
                         else "- App publicado: \"${appMeta.title}\" v${appMeta.version} (${appMeta.bytes / 1000} KB). Dados atuais: ${sessionApps.data(sec.id).keys.joinToString().ifBlank { "nenhum" }}. Evolua com app_edit quando o usuário pedir mudanças; mantenha os dados em dia com app_set_data.")
-                    sessionAppErrors[sec.id]?.let { appendLine("- ⚠ O app publicado está com ERRO de JavaScript: \"$it\". Corrija com app_read + app_edit.") }
-                    appendLine("- Formato: UM arquivo HTML (CSS e JS inline, sem frameworks externos obrigatórios), responsivo para celular, tema escuro, com identidade visual própria, estados vazios/carregando e animações leves.")
-                    appendLine("- API no JS do app: SessionApp.onUpdate(fn) chama fn(state) agora e a cada mudança; SessionApp.getState(); SessionApp.send(acao, dados) manda uma ação do usuário para você (chega como \"[App da seção]\"); SessionApp.saveState(obj)/loadState() guardam o estado da interface (filtros, favoritos).")
-                    appendLine("- state = {section:{name,goal}, planState, coordinator:{running,lastMessage}, agents:[{name,role,status(working|idle|waiting_user|error|recovering),activity,task,lastMessage,color,steps:[últimas ações]}], plan:[{id,agent,task,status(pending|running|review|done|failed|blocked),result}] (sempre preenchido: plano do team_plan ou as delegações feitas), files:[{path,size,modified}], data:{<chave>: valor de app_set_data}, events:[{time,type,text}]}.")
-                    appendLine("- TEMPO REAL: o app recebe o state novo sozinho (a cada ~1 s quando algo muda) por SessionApp.onUpdate — desenhe TUDO a partir do state dentro do onUpdate. PROIBIDO botão de atualizar/recarregar/sincronizar e PROIBIDO botão que só finge iniciar algo; botões só para ações reais via SessionApp.send (ex.: pedir nova busca, aprovar item). Atualize a tela sem piscar (troque só o que mudou; preserve rolagem, aba e filtros).")
+                    if (sec.appContract.isNotBlank()) appendLine("- CONTRATO DE DADOS do app (repasse a chave e o formato a cada agente ao delegar; publiquem EXATAMENTE assim): ${sec.appContract}")
+                    append(appSpec())
                     appendLine("- Para o app ficar vivo desde o primeiro minuto: ao delegar, diga a cada agente a CHAVE e o formato dos dados (ex.: ofertas = lista de {nome, anuncios_ativos, desde, link, status_fr}) e mande publicar CADA item assim que encontrar com app_append_data — não só no final. state.plan e state.agents[].steps já chegam sozinhos.")
-                    appendLine("- Regra de ouro: o app só mostra DADOS REAIS do state. Nada de números, preços, lucros ou itens inventados no HTML — sem dado, mostre o estado vazio. Animações (avatares andando, etc.) devem refletir agents[].status reais.")
                     appendLine("- Entre as ações, mande feedbacks CURTOS (5 a 30 palavras) e siga trabalhando. Nada de terminal/browser: o trabalho é dos agentes.")
                     appendLine("- Ao receber [Relatório automático], avalie, cobre ajustes ou passe a próxima etapa; entregue o progresso em lista numerada.")
                     appendLine("- Nunca re-delegue uma tarefa já entregue (o app recusa): use o resultado ou peça um ajuste específico. Quando TODAS as etapas estiverem entregues e revisadas, envie o relatório final e PARE — não recomece o pedido original.")
@@ -2728,7 +2793,7 @@ class AgentRunner(
                 put("description", str("Objetivo da seção em 1-2 frases"))
                 put("coordinator_instructions", str("Como o coordenador deve agir (dividir tarefas, cobrar prazos, formato do relatório, idioma) — use as palavras do usuário"))
                 put("agents_json", str("JSON array: [{\"name\":\"Radar\",\"role\":\"minerador\",\"description\":\"o que faz\",\"rules\":\"regras fixas\",\"needs_browser\":true,\"needs_terminal\":false}]"))
-                put("first_task", str("Primeira tarefa que o coordenador deve começar quando a seção for ativada (normalmente o pedido do usuário)"))
+                put("first_task", str("Primeira tarefa EXECUTÁVEL que o time começa a fazer no instante em que a seção for ativada (normalmente o pedido do usuário, como ação concreta). PROIBIDO \"aguardar o usuário\"/\"esperar instruções\": se faltar detalhe, a primeira tarefa é o primeiro agente iniciar o levantamento/pesquisa com o que já se sabe."))
                 put("suggested_android_caps", str("IDs separados por vírgula entre: background, notif_post, notif_read, accessibility, screen (opcional)"))
                 put("suggest_wallet", bool("true se o time precisa da carteira"))
             }, listOf("name", "agents_json")))
@@ -2766,10 +2831,12 @@ class AgentRunner(
                 "Para um agente do time imediatamente: tarefa já cumprida, desvio, loop ou insumo ausente. Devolve o que ele entregou até agora. Depois redirecione com team_delegate se preciso.",
                 buildJsonObject { put("agent", str("Nome do agente")); put("reason", str("Motivo curto")) },
                 listOf("agent", "reason")))
+        }
+        if (sectionHere != null && (agent?.id == sectionHere.appAgentId || (allowMultiAgent && agent?.id == sectionHere.coordinatorAgentId))) {
             add(tool("app_publish",
                 "Publica o APP VISUAL desta seção (aba [APP] do chat): UM arquivo HTML completo (HTML+CSS+JS inline), feito sob medida para o objetivo da seção. " +
                     "Precisa usar a API SessionApp para mostrar dados REAIS. Cada publicação vira uma nova versão (as anteriores ficam guardadas).",
-                buildJsonObject { put("html", str("Documento HTML completo e autossuficiente")); put("title", str("Nome curto do app")) }, listOf("html")))
+                buildJsonObject { put("html", str("Documento HTML completo e autossuficiente")); put("title", str("Nome curto do app")); put("data_contract", str("Chaves de state.data que o app lê e o formato de cada uma, ex.: ofertas = lista de {nome, anuncios_ativos, link}. O time publica exatamente nisso.")) }, listOf("html")))
             add(tool("app_edit", "Ajuste pontual no app publicado: troca um trecho único por outro e publica nova versão (preserva dados e estado).",
                 buildJsonObject { put("old_text", str("Trecho exato e único do HTML atual")); put("new_text", str("Novo trecho")) }, listOf("old_text", "new_text")))
             add(tool("app_read", "Lê o HTML atual do app (por partes), para editar com app_edit.",
@@ -3391,7 +3458,7 @@ class AgentRunner(
             "team_delegate" -> return ToolResult(teamDelegate(sessionId, s("agent"), s("task"), b("wait"), (i("timeout_minutes") ?: 15).coerceIn(1, 30)))
             "team_status" -> return ToolResult(teamStatus(sessionId))
             "team_plan" -> return ToolResult(teamPlan(sessionId, s("goal"), s("tasks_json")))
-            "app_publish" -> return ToolResult(appPublish(sessionId, s("html"), s("title")))
+            "app_publish" -> return ToolResult(appPublish(sessionId, s("html"), s("title"), s("data_contract")))
             "app_edit" -> return ToolResult(appEdit(sessionId, s("old_text"), s("new_text")))
             "app_set_data" -> return ToolResult(appSetData(sessionId, s("key"), s("json")))
             "app_append_data" -> return ToolResult(appAppendData(sessionId, s("key"), s("item")))
@@ -4186,7 +4253,7 @@ class AgentRunner(
                     val target = AgentFilePathPolicy.readableWorkspace(
                         sandbox.workspaceFor(sessionId), sandbox.connectorsDir, path,
                     )
-                    if (target == null) "ERRO: caminho inválido. Use caminho relativo ao workspace ou /root/workspace/...; para conector, informe o ID completo em /root/connectors/<id>/workspace/.... Não tente caminhos absolutos Android ou caminhos alternativos fora dessas raízes."
+                    if (target == null) "ERRO: caminho inválido (recebido: \"${path.take(160)}\"). Use caminho relativo ao workspace ou /root/workspace/...; para conector, informe o ID completo em /root/connectors/<id>/workspace/.... Não tente caminhos absolutos Android ou caminhos alternativos fora dessas raízes."
                     else readFileChunk(target, path, i("offset") ?: 1, i("limit") ?: 250)
                 }
                 "file_list" -> {

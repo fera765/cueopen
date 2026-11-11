@@ -79,18 +79,12 @@ fun SessionAppPane(sec: Section, modifier: Modifier = Modifier, onGoChat: () -> 
     val tick by app.agent.sessionAppTick.collectAsStateWithLifecycle()
     val meta = remember(sec.id, tick) { app.agent.sessionApps.meta(sec.id) }
     if (meta == null) {
+        // O app sob medida está sendo construído em outro contexto: só o "Preparando" até ficar pronto.
+        LaunchedEffect(sec.id) { while (true) { app.agent.ensureSessionApp(sec.id); delay(5_000) } }
         Column(modifier, verticalArrangement = Arrangement.Center, horizontalAlignment = Alignment.CenterHorizontally) {
-            EmptyState(Icons.Rounded.Dashboard, "Esta seção ainda não tem app",
-                "O coordenador cria uma interface própria para o objetivo da seção e a alimenta com os resultados reais dos agentes.") {
-              Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                PillButton("Criar o app agora", Icons.Rounded.AutoAwesome) {
-                    app.agent.sessionAppAction(sec.id, "criar o app visual desta seção", "Use app_publish com uma interface sob medida para o objetivo da seção.")
-                    onGoChat()
-                }
-                Spacer(Modifier.height(8.dp))
-                TextButton({ app.agent.installBaseSessionApp(sec.id) }) { Text("Usar o app base agora") }
-              }
-            }
+            CircularProgressIndicator(color = c.accent, strokeWidth = 3.dp, modifier = Modifier.size(44.dp))
+            Spacer(Modifier.height(16.dp))
+            Text("Preparando", color = c.ink, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
         }
         return
     }

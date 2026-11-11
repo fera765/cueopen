@@ -202,7 +202,7 @@ class Store(context: Context) {
     fun deleteSection(id: String): List<String> {
         val sec = section(id) ?: return emptyList()
         val sessionIds = _state.value.sessions.filter { it.sectionId == id || it.id == sec.sessionId }.map { it.id }
-        val agentIds = (sec.agentIds + sec.coordinatorAgentId).toSet()
+        val agentIds = (sec.agentIds + sec.coordinatorAgentId + sec.appAgentId).toSet()
         update { st -> st.copy(sections = st.sections.filterNot { it.id == id }, agents = st.agents.filterNot { it.id in agentIds }) }
         return sessionIds
     }
