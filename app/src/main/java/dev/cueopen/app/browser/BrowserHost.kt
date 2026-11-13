@@ -95,6 +95,33 @@ class BrowserHost(private val appCtx: Context, private val sessionId: String = "
     val net: StateFlow<List<NetEntry>> = _net
     private val _console = MutableStateFlow<List<ConsoleEntry>>(emptyList())
     val console: StateFlow<List<ConsoleEntry>> = _console
+
+    // ───────── Demonstração ("ensine seu agente"): passos do usuário no browser, sem o que ele digita ─────────
+    private val _demoSteps = MutableStateFlow<List<String>?>(null)
+    /** null = não está gravando; lista = passos gravados até agora. */
+    val demoSteps: StateFlow<List<String>?> = _demoSteps
+    @Volatile private var demoPrefix: String? = null
+
+    /** Começa a gravar na aba ativa. O prefixo aleatório identifica os eventos desta gravação no console. */
+    fun startDemo() {
+        val prefix = "__CUE_DEMO_" + java.util.UUID.randomUUID().toString().replace("-", "") + "__"
+        demoPrefix = prefix
+        _demoSteps.value = emptyList()
+        runCatching { activeTab()?.webView?.let { v ->
+            v.url?.takeIf { it.startsWith("http") }?.let { addDemoStep(DemoRecorder.navigation(it)) }
+            v.evaluateJavascript(DemoRecorder.script(prefix), null)
+        } }
+    }
+
+    /** Encerra a gravação e devolve os passos. */
+    fun stopDemo(): List<String> {
+        val steps = _demoSteps.value.orEmpty()
+        demoPrefix = null
+        _demoSteps.value = null
+        return steps
+    }
+
+    private fun addDemoStep(step: String) { _demoSteps.value?.let { _demoSteps.value = DemoRecorder.append(it, step) } }
     private val netSeq = java.util.concurrent.atomic.AtomicLong()
     private val netScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val pendingNet = ArrayList<NetEntry>()
@@ -496,6 +523,7 @@ class BrowserHost(private val appCtx: Context, private val sessionId: String = "
                 runCatching { BrowserFeatures.applyUserScripts(view, url, sessionId, early = true) }
             }
             override fun onPageFinished(view: WebView, url: String) {
+                demoPrefix?.let { p -> runCatching { view.evaluateJavascript(DemoRecorder.script(p), null) } }
                 tab.diag.add("onPageFinished $url")
                 sync(view, loading = false)
                 tab.pageDone?.complete(tab.navigationStatus.pageFinished())
@@ -509,6 +537,7 @@ class BrowserHost(private val appCtx: Context, private val sessionId: String = "
                 runCatching { BrowserFeatures.applyUserScripts(view, url, sessionId) }
             }
             override fun doUpdateVisitedHistory(view: WebView, url: String, isReload: Boolean) {
+                if (demoPrefix != null && !isReload && url.startsWith("http")) addDemoStep(DemoRecorder.navigation(url))
                 // SPA (pushState) muda a URL sem recarregar: scripts com filtro de caminho podem passar a valer.
                 // O envelope evita injeção duplicada no mesmo documento.
                 if (!isReload) runCatching { BrowserFeatures.applyUserScripts(view, url, sessionId) }
@@ -574,6 +603,10 @@ class BrowserHost(private val appCtx: Context, private val sessionId: String = "
             }
             override fun onReceivedTitle(view: WebView, title: String?) { sync(view) }
             override fun onConsoleMessage(m: android.webkit.ConsoleMessage): Boolean {
+                demoPrefix?.let { p ->
+                    val msg = m.message().orEmpty()
+                    if (msg.startsWith(p)) { DemoRecorder.describe(msg.removePrefix(p))?.let { addDemoStep(it) }; return true }
+                }
                 _console.value = (_console.value + ConsoleEntry(System.currentTimeMillis(), m.messageLevel().name.lowercase(),
                     m.message(), "${m.sourceId().substringAfterLast('/')}:${m.lineNumber()}", tab.id)).takeLast(300)
                 return true

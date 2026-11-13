@@ -319,6 +319,7 @@ fun BrowserPane(sessionId: String) {
                 IconButton({ menu = true }) { Icon(Icons.Rounded.MoreVert, "Mais") }
                 DropdownMenu(menu, { menu = false }) {
                     DropdownMenuItem({ Text("Página inicial") }, { menu = false; browser.home() }, leadingIcon = { Icon(Icons.Rounded.Home, null) })
+                    DropdownMenuItem({ Text("Ensinar o agente (gravar demonstração)") }, { menu = false; browser.startDemo() }, leadingIcon = { Icon(Icons.Rounded.School, null) })
                     DropdownMenuItem({ Text(if (devtools) "Ocultar Rede/Console" else "Rede e Console") }, { menu = false; devtools = !devtools }, leadingIcon = { Icon(Icons.Rounded.NetworkCheck, null) })
                     DropdownMenuItem({ Text(if (ui.desktop) "Versão mobile" else "Versão desktop") }, { menu = false; browser.setDesktop(!ui.desktop) }, leadingIcon = { Icon(Icons.Rounded.DesktopWindows, null) })
                     DropdownMenuItem({ Text(if (ui.darkPages) "Páginas no tema claro" else "Páginas no tema escuro") }, { menu = false; browser.setDarkPages(!ui.darkPages) }, leadingIcon = { Icon(if (ui.darkPages) Icons.Rounded.LightMode else Icons.Rounded.DarkMode, null) })
@@ -384,6 +385,26 @@ fun BrowserPane(sessionId: String) {
                 )
             }
             key(ui.selectedTabId) {
+                val demo by browser.demoSteps.collectAsStateWithLifecycle()
+                demo?.let { steps ->
+                    Column(Modifier.fillMaxWidth().background(c.surface2).padding(horizontal = 12.dp, vertical = 6.dp)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Box(Modifier.size(8.dp).clip(CircleShape).background(c.err)); Spacer(Modifier.width(8.dp))
+                            Text("Gravando demonstração · ${steps.size} passo(s)", fontSize = 13.sp, modifier = Modifier.weight(1f))
+                            TextButton({ browser.stopDemo() }) { Text("Descartar", color = c.ink2, fontSize = 13.sp) }
+                            TextButton({
+                                val recorded = browser.stopDemo()
+                                if (recorded.size < 2) android.widget.Toast.makeText(ctx, "Nada foi gravado: faça a tarefa na página antes de concluir.", android.widget.Toast.LENGTH_LONG).show()
+                                else {
+                                    app.agent.send(sessionId, dev.cueopen.app.browser.DemoRecorder.toPrompt(recorded))
+                                    android.widget.Toast.makeText(ctx, "Demonstração enviada: o agente vai montar a skill no chat.", android.widget.Toast.LENGTH_LONG).show()
+                                }
+                            }) { Text("Concluir", color = c.accent, fontSize = 13.sp) }
+                        }
+                        Text(steps.lastOrNull() ?: "Faça a tarefa normalmente. O que você digita não é gravado.", fontSize = 12.sp, color = c.ink3, maxLines = 1,
+                            overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
+                    }
+                }
                 AndroidView(factory = { c2 -> browser.view(c2) }, modifier = Modifier.fillMaxWidth().weight(1f))
             }
         if (devtools) DevToolsPanel(browser, Modifier.fillMaxWidth().height(300.dp))

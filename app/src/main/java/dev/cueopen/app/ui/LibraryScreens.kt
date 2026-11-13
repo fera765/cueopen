@@ -608,6 +608,33 @@ private fun SkillMarketplace() {
             keyboardActions = androidx.compose.foundation.text.KeyboardActions(onSearch = { go() }),
             colors = OutlinedTextFieldDefaults.colors(focusedBorderColor = c.accent, unfocusedBorderColor = c.line, focusedContainerColor = c.surface, unfocusedContainerColor = c.surface)
         )
+        // Direto de um repositório público do GitHub (arquivos SKILL.md).
+        var repo by remember { mutableStateOf("") }
+        var repoLoading by remember { mutableStateOf(false) }
+        fun fromGithub() {
+            if (repo.isBlank() || repoLoading) return
+            repoLoading = true; error = null
+            scope.launch {
+                runCatching { dev.cueopen.app.data.GithubSkills.fetch(repo) }
+                    .onSuccess { results = it; if (it.isEmpty()) error = "Não consegui baixar nenhuma skill desse repositório." }
+                    .onFailure { error = it.message ?: "Falha ao consultar o GitHub." }
+                repoLoading = false
+            }
+        }
+        OutlinedTextField(
+            value = repo, onValueChange = { repo = it }, modifier = Modifier.fillMaxWidth(),
+            singleLine = true, shape = RoundedCornerShape(20.dp),
+            placeholder = { Text("Do GitHub: owner/repo ou link do repositório", maxLines = 1, overflow = TextOverflow.Ellipsis) },
+            leadingIcon = { Icon(Icons.Rounded.Code, null, tint = c.ink2) },
+            trailingIcon = {
+                if (repoLoading) CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp, color = c.accent)
+                else IconButton(onClick = { fromGithub() }, enabled = repo.isNotBlank()) { Icon(Icons.Rounded.Download, "Buscar skills no repositório", tint = if (repo.isNotBlank()) c.ink else c.ink3) }
+            },
+            keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(imeAction = androidx.compose.ui.text.input.ImeAction.Go),
+            keyboardActions = androidx.compose.foundation.text.KeyboardActions(onGo = { fromGithub() }),
+            colors = OutlinedTextFieldDefaults.colors(focusedBorderColor = c.accent, unfocusedBorderColor = c.line, focusedContainerColor = c.surface, unfocusedContainerColor = c.surface)
+        )
+        Text("Skills de repositórios públicos são instruções escritas por terceiros: leia a prévia antes de adicionar.", color = c.ink3, fontSize = 12.sp)
         error?.let { Text(it, color = c.ink2, fontSize = 13.sp) }
         results.forEach { r ->
             val installed = st.skills.any { it.name.equals(r.title.take(60), true) }
