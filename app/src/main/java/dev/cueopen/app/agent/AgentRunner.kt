@@ -627,6 +627,67 @@ class AgentRunner(
         }
     }
 
+    // ───────── Edição de arquivos: quem leu o quê, e falhas seguidas por arquivo ─────────
+    private val editFails = java.util.concurrent.ConcurrentHashMap<String, Int>()
+    private val fileSeen = java.util.concurrent.ConcurrentHashMap<String, Long>()
+    private fun fileKey(sessionId: String, f: java.io.File) = sessionId + "|" + runCatching { f.canonicalPath }.getOrDefault(f.absolutePath)
+    private fun noteFileSeen(sessionId: String, f: java.io.File) {
+        val key = fileKey(sessionId, f)
+        editFails.remove(key)
+        fileSeen[key] = runCatching { f.lastModified() }.getOrDefault(0L)
+        if (fileSeen.size > 4_000) fileSeen.keys.take(1_000).forEach { fileSeen.remove(it) }
+    }
+
+    // ───────── Workers em paralelo: snapshot do projeto e integração de volta ─────────
+    private val HEAVY_DIRS = setOf("node_modules", ".gradle", "__pycache__", ".venv", "venv", ".next", ".turbo", ".cache")
+    private fun fileDigest(f: java.io.File): String = runCatching {
+        val md = java.security.MessageDigest.getInstance("SHA-1")
+        f.inputStream().use { ins -> val buf = ByteArray(65_536); while (true) { val n = ins.read(buf); if (n < 0) break; md.update(buf, 0, n) } }
+        md.digest().joinToString("") { "%02x".format(it) }
+    }.getOrDefault("?" + f.length())
+    private fun projectFiles(root: java.io.File): Sequence<java.io.File> =
+        root.walkTopDown().onEnter { it == root || (it.name != ".git" && it.name != ".cue" && it.name !in HEAVY_DIRS) }
+            .filter { it.isFile && !Regex("\\.worker-\\d+$").containsMatchIn(it.name) }
+    /** Retrato do projeto no momento em que os workers partem: caminho relativo → digest do conteúdo. */
+    private fun projectSnapshot(root: java.io.File): Map<String, String> =
+        runCatching { projectFiles(root).associate { it.relativeTo(root).path to fileDigest(it) } }.getOrDefault(emptyMap())
+
+    private data class WorkerMerge(val applied: List<String>, val deleted: List<String>, val conflicts: List<String>)
+    /**
+     * "Push" de um worker para o projeto principal, arquivo a arquivo, comparando três versões: a base (snapshot de
+     * partida), a do worker e a atual do principal. Só o worker mudou → aplica. Os dois mudaram de formas diferentes →
+     * conflito: o principal fica como está e a versão do worker é salva ao lado como <arquivo>.worker-N.
+     */
+    private fun integrateWorker(base: Map<String, String>, source: java.io.File, dest: java.io.File, n: Int): WorkerMerge {
+        val applied = mutableListOf<String>(); val deleted = mutableListOf<String>(); val conflicts = mutableListOf<String>()
+        val seen = HashSet<String>()
+        projectFiles(source).forEach { file ->
+            val rel = file.relativeTo(source).path; seen += rel
+            val target = java.io.File(dest, rel)
+            val mine = fileDigest(file)
+            if (base[rel] == mine) return@forEach                      // o worker não tocou neste arquivo
+            val theirs = if (target.isFile) fileDigest(target) else null
+            when {
+                theirs == mine -> Unit                                 // já está igual no principal
+                theirs == null && base[rel] == null -> { target.parentFile?.mkdirs(); file.copyTo(target, overwrite = true); applied += rel }
+                theirs == base[rel] -> { target.parentFile?.mkdirs(); file.copyTo(target, overwrite = true); applied += rel }
+                else -> { target.parentFile?.mkdirs(); file.copyTo(java.io.File(target.parentFile, target.name + ".worker-" + n), overwrite = true); conflicts += rel }
+            }
+        }
+        // Arquivos que existiam na base e o worker apagou: apaga no principal se ninguém mais mexeu neles.
+        base.keys.filter { it !in seen && !java.io.File(source, it).exists() }.forEach { rel ->
+            val target = java.io.File(dest, rel)
+            if (target.isFile && fileDigest(target) == base[rel]) { if (target.delete()) deleted += rel }
+        }
+        // Dependências instaladas pelo worker (node_modules etc.): só o que ainda não existe no principal.
+        HEAVY_DIRS.forEach { dir ->
+            val from = java.io.File(source, dir)
+            if (from.isDirectory) runCatching { from.walkTopDown().filter { it.isFile }.forEach { f ->
+                val t = java.io.File(dest, f.relativeTo(source).path); if (!t.exists()) { t.parentFile?.mkdirs(); f.copyTo(t, overwrite = false) } } }
+        }
+        return WorkerMerge(applied, deleted, conflicts)
+    }
+
     private fun sectionAuto(sec: Section): Boolean = store.agent(sec.coordinatorAgentId)?.confirmMode == "auto"
     /** Chat de seção (coordenador ou agente) configurada como 100% autônoma. */
     private fun autoSectionSession(sessionId: String): Boolean =
@@ -1905,6 +1966,8 @@ class AgentRunner(
         /** Lembretes ao coordenador sem nenhuma mudança no plano antes de declarar o plano travado. */
         const val MAX_PLAN_NUDGES = 2
         const val MAX_AUTO_NUDGES = 3
+        /** Falhas seguidas de file_edit no mesmo arquivo antes de exigir uma releitura. */
+        const val MAX_EDIT_FAILS = 2
         /** Depois disso, um snapshot de browser arquivado é tratado como antigo e não é relido sem pedido explícito. */
         const val STALE_SNAPSHOT_MINUTES = 3L
         const val MEMBER_SLOW_MINUTES = 30L
@@ -2292,7 +2355,7 @@ class AgentRunner(
             appendLine("3z. Estado atual primeiro: páginas e arquivos mudam enquanto você trabalha. Decida sempre com a leitura mais recente (browser_read para a página, file_read para o arquivo vivo) e registre em notes_write os dados que vai precisar depois. Snapshots antigos do browser e saídas antigas arquivadas em .cue/out são histórico, não o estado de agora: não os releia para seguir a tarefa; só volte a eles quando o usuário ou o coordenador pedir exatamente aquele conteúdo.")
             appendLine("3. Economize contexto: leia só o necessário (head/grep) e mande saídas longas para um arquivo.")
             appendLine("3a. Trabalhe somente no seu workspace (${sandbox.guestPath(sessionId)}). O /root/workspace de outras tarefas pertence a elas; não leia.")
-            appendLine("3b. Caminhos de arquivo: use caminhos relativos ao workspace da tarefa ou o alias /root/workspace/.... Caminhos Android (/data/user/...), /storage, /sdcard e outros absolutos ficam fora do seu alcance. file_write e file_edit alteram apenas o workspace da tarefa; file_read e file_list também leem /root/connectors/<id>/workspace/.... Se um arquivo não existir, liste o diretório pai uma vez em vez de repetir o mesmo caminho; se ele realmente não estiver disponível, peça-o ao usuário. Para alterar um trecho, prefira file_edit com old_text/new_text (o trecho precisa ser único). Use file_write para criar ou sobrescrever o arquivo inteiro, com append=true para conteúdo grande em partes, e confira depois com file_read.")
+            appendLine("3b. Caminhos de arquivo: use caminhos relativos ao workspace da tarefa ou o alias /root/workspace/.... Caminhos Android (/data/user/...), /storage, /sdcard e outros absolutos ficam fora do seu alcance. file_write e file_edit alteram apenas o workspace da tarefa; file_read e file_list também leem /root/connectors/<id>/workspace/.... Se um arquivo não existir, liste o diretório pai uma vez em vez de repetir o mesmo caminho; se ele realmente não estiver disponível, peça-o ao usuário. Para alterar um trecho, leia-o antes com file_read e use file_edit com old_text copiado do texto lido (o trecho precisa ser único); depois de uma falha, releia em vez de tentar de novo de memória. Para acrescentar no fim do arquivo, use file_write com append=true. Use file_write para criar ou sobrescrever o arquivo inteiro, com append=true para conteúdo grande em partes, e confira depois com file_read.")
             appendLine("3c. Ao gerar imagem, SVG, HTML ou PDF, mostre o resultado ao usuário com `show_file`.")
             appendLine("3d. Com um plano ativo, chame `complete_step` ao concluir cada fase, antes de começar a próxima — é assim que o usuário vê o progresso.")
             appendLine("3e. Leitura eficiente: procure primeiro por símbolos ou termos e leia apenas os trechos necessários; limite as saídas e não despeje arquivos ou logs inteiros no contexto. Preserve requisitos, decisões, evidências, caminhos, erros e pendências. Só cite economia percentual se tiver medido o uso real.")
@@ -2439,6 +2502,7 @@ class AgentRunner(
                     appendLine("- Os arquivos do time ficam em /root/workspace, compartilhado entre os agentes. Liste com file_list; varrer o sistema inteiro (find /) é lento e não traz nada útil.")
                     appendLine("- Se faltar um insumo (arquivo, ID, acesso), diga exatamente o que falta e encerre com a resposta final: o coordenador resolve e devolve a tarefa. Insistir por conta própria só gasta tempo e tokens.")
                     appendLine("- Você só tem as ferramentas que aparecem nesta chamada. Se a tarefa pedir uma plataforma, conta ou conector que você não tem (ex.: Google Search Console, Analytics, um painel com login), não fique tentando acessá-la: diga isso logo na primeira resposta, faça a melhor versão possível com fontes públicas e marque o que é dado observado e o que é inferência.")
+                    appendLine("- /root/workspace é compartilhado e outros agentes escrevem nos mesmos arquivos enquanto você trabalha. Antes de um file_edit, leia o trecho com file_read e copie old_text do que acabou de ler; não edite de memória. Para acrescentar uma seção, linha ou rodada no fim de um arquivo, use file_write com append=true: não depende do conteúdo atual e não conflita com os outros.")
                     appendLine("- Quando a tarefa pedir um arquivo, salve-o em /root/workspace com file_write e confira com file_list antes de responder; cite o caminho exato na entrega. O coordenador recebe a lista real dos arquivos criados.")
                     appendLine("- O browser funciona com o app em segundo plano. Se mesmo assim responder ERROR de browser indisponível, mude de fonte ou use o shell; repetir a mesma navegação não resolve.")
                     appendLine("- Mensagens marcadas [Coordenador] têm prioridade sobre o seu plano. Ao concluir, responda com o entregável (caminhos de arquivo, links, números) e pare.")
@@ -2703,7 +2767,7 @@ class AgentRunner(
             }
             return@buildJsonArray
         }
-        if (allowMultiAgent) add(tool("multi_agents", "Divide o trabalho em subtarefas executadas por workers em paralelo (no máximo cinco ao mesmo tempo). Cada worker trabalha num workspace isolado: os resultados parciais não são integrados automaticamente e os conflitos são preservados para você resolver. tasks_json aceita strings independentes ou objetos {id, task, depends_on}; subtarefas com dependências rodam em ondas. budget_tokens vale por worker.", buildJsonObject {
+        if (allowMultiAgent) add(tool("multi_agents", "Divide o trabalho em subtarefas executadas por workers em paralelo (no máximo cinco ao mesmo tempo). Cada worker parte de um snapshot do projeto e trabalha numa cópia isolada. Ao terminar, as alterações de cada um são aplicadas ao projeto principal: arquivos novos e arquivos que só ele mudou entram direto; se dois alterarem o mesmo arquivo, o principal mantém a primeira versão e a outra fica em <arquivo>.worker-N para você mesclar. Para evitar conflitos, dê a cada worker arquivos ou pastas diferentes. tasks_json aceita strings independentes ou objetos {id, task, depends_on}; subtarefas com dependências rodam em ondas. budget_tokens vale por worker.", buildJsonObject {
             put("tasks_json", str("Array JSON de strings independentes ou de objetos {id, task, depends_on:[ids]}. Dependências rodam em ondas; ciclos são rejeitados"))
             put("repo_path", str("Caminho opcional do repositório Git dentro do sandbox (padrão: workspace atual)"))
             put("max_workers", int("Quantidade de workers (1-5; padrão 3)"))
@@ -2726,7 +2790,7 @@ class AgentRunner(
         add(tool("file_write", "Cria ou sobrescreve um arquivo de texto no workspace da tarefa, criando as pastas necessárias. Use caminho relativo ou /root/workspace/...; caminhos Android e outros absolutos são recusados.", buildJsonObject {
             put("path", str("Caminho relativo ao workspace (ou /root/workspace/arquivo); caminhos Android e outros absolutos não são aceitos")); put("content", str("Conteúdo do arquivo")); put("append", bool("true = acrescenta ao final em vez de sobrescrever"))
         }, listOf("path", "content")))
-        add(tool("file_edit", "Substitui um trecho literal num arquivo existente do workspace da tarefa. old_text e new_text são texto cru; a ferramenta procura primeiro a correspondência exata e, como alternativa, aceita apenas diferenças de espaços em branco. A edição é recusada se o trecho não for encontrado, se houver mais de uma ocorrência (ambiguidade) ou se o arquivo passar de 8 MB. Por padrão allow_multiple=false; com true, todas as ocorrências são alteradas. A gravação é atômica.", buildJsonObject {
+        add(tool("file_edit", "Substitui um trecho literal num arquivo existente do workspace da tarefa. old_text e new_text são texto cru; a ferramenta procura primeiro a correspondência exata e, como alternativa, aceita apenas diferenças de espaços em branco. A edição é recusada se o trecho não for encontrado, se houver mais de uma ocorrência (ambiguidade) ou se o arquivo passar de 8 MB. Copie old_text de uma leitura recente (file_read): depois de 2 falhas seguidas no mesmo arquivo, a ferramenta exige uma releitura antes de aceitar nova edição. Para acrescentar no fim do arquivo, use file_write com append=true. Por padrão allow_multiple=false; com true, todas as ocorrências são alteradas. A gravação é atômica.", buildJsonObject {
             put("path", str("Arquivo existente, relativo ao workspace ou em /root/workspace/...; caminhos Android e outros absolutos não são aceitos"))
             put("old_text", str("Trecho exato a localizar; use \\n para as quebras de linha no argumento JSON"))
             put("new_text", str("Texto de substituição; pode ser vazio para remover o trecho"))
@@ -4064,12 +4128,33 @@ class AgentRunner(
                             else -> {
                                 val oldText = SecretVault.resolve(sessionId, s("old_text"))
                                 val newText = SecretVault.resolve(sessionId, s("new_text"))
+                                val key = fileKey(sessionId, target)
+                                val rel = target.relativeTo(workspace).path
+                                // Duas falhas seguidas no mesmo arquivo: só volta a editar depois de reler (corta o mini-loop).
+                                if ((editFails[key] ?: 0) >= MAX_EDIT_FAILS)
+                                    ("RECUSADO: $MAX_EDIT_FAILS edições seguidas falharam em $rel, então tentar de novo de memória não vai funcionar. " +
+                                        "Releia o trecho com file_read (o arquivo pode ter sido alterado por outro agente) e monte old_text copiando o texto lido. " +
+                                        "Para acrescentar conteúdo no fim do arquivo, use file_write com append=true em vez de file_edit.")
+                                else if (oldText == newText) {
+                                    editFails.merge(key, 1, Int::plus)
+                                    "ERRO: old_text e new_text são iguais, então não há nada a alterar em $rel. Se o arquivo já está como você quer, siga adiante; " +
+                                        "se queria mudar algo, new_text precisa conter o texto novo."
+                                } else {
                                 val result = AtomicTextFile.replace(target, oldText, newText, b("allow_multiple"))
-                                if (!result.success) "ERRO: ${result.error ?: "substituição recusada"}" +
-                                    runCatching { EditHint.nearest(target.readText(), oldText) }.getOrDefault("").let { if (it.isBlank()) "" else "\n$it" }
+                                if (!result.success) {
+                                    val fails = editFails.merge(key, 1, Int::plus) ?: 1
+                                    val changed = fileSeen[key]?.let { seen -> target.lastModified() > seen + 500 } == true
+                                    "ERRO: ${result.error ?: "substituição recusada"}" +
+                                        (if (changed) "\nO arquivo foi modificado depois da sua última leitura (outro agente, um comando ou uma gravação sua escreveu nele): o texto que você tem de memória está desatualizado. Releia com file_read antes de editar."
+                                            else if (fileSeen[key] == null) "\nVocê ainda não leu este arquivo nesta tarefa: leia o trecho com file_read e copie old_text do texto lido." else "") +
+                                        (if (fails >= MAX_EDIT_FAILS) "\nEsta foi a ${fails}ª falha seguida neste arquivo: a próxima edição só será aceita depois de um file_read dele." else "") +
+                                        runCatching { EditHint.nearest(target.readText(), oldText) }.getOrDefault("").let { if (it.isBlank()) "" else "\n$it" }
+                                }
                                 else {
+                                    editFails.remove(key); noteFileSeen(sessionId, target)
                                     val mode = if (result.strategy == "exact") "literal" else "whitespace"
                                     "OK: ${target.relativeTo(workspace).path}: ${result.replacements} ocorrência(s) substituída(s) ($mode)."
+                                }
                                 }
                             }
                         }
@@ -4082,6 +4167,7 @@ class AgentRunner(
                     )
                     if (target == null) "ERRO: caminho inválido (recebido: \"${path.take(160)}\"). Use caminho relativo ao workspace ou /root/workspace/...; para conector, informe o ID completo em /root/connectors/<id>/workspace/.... Não tente caminhos absolutos Android ou caminhos alternativos fora dessas raízes."
                     else {
+                        noteFileSeen(sessionId, target)  // leitura feita: libera novas edições e marca a versão vista
                         val staleMin = ctxMgr.staleBrowserSnapshotMinutes(path)
                         // Continuação de uma saída recém-cortada (mesmo passo de trabalho) é leitura atual, não releitura.
                         if (staleMin != null && staleMin >= STALE_SNAPSHOT_MINUTES && !b("stale_ok"))
@@ -4473,6 +4559,7 @@ class AgentRunner(
         // público diferente, e a pasta de destino já existe. A cópia é feita no filesystem host.
         val gitRoot: String? = null
         val baseSha: String? = null
+        var baseSnapshot: Map<String, String> = emptyMap()
 
         val workers = tasks.take(count).mapIndexed { index, task ->
             Session(
@@ -4516,6 +4603,8 @@ class AgentRunner(
             }
         } else {
             val source = sandbox.workspaceFor(sessionId)
+            // Snapshot do projeto original: é contra ele que as alterações de cada worker serão comparadas na volta.
+            baseSnapshot = projectSnapshot(source)
             for (child in workers) {
                 val target = sandbox.workspaceFor(child.id)
                 val copied = runCatching { source.copyRecursively(target, overwrite = true); true }.getOrElse { false }
@@ -4652,26 +4741,14 @@ class AgentRunner(
                     appendReportLine(report, "Agente " + (index + 1) + ": artefatos não integrados; resultado parcial preservado.")
                     return@forEachIndexed
                 }
-                val source = sandbox.workspaceFor(child.id)
-                val dest = sandbox.workspaceFor(sessionId)
-                val synced = runCatching {
-                    source.walkTopDown()
-                        .filter { it.isFile && !it.toRelativeString(source).startsWith(".git/") && !it.toRelativeString(source).startsWith(".cue/") && !Regex("""\\.worker-\\d+$""").containsMatchIn(it.name) }
-                        .forEach { file ->
-                            val rel = file.relativeTo(source).path
-                            val target = File(dest, rel)
-                            target.parentFile?.mkdirs()
-                            if (!target.exists()) file.copyTo(target, overwrite = false)
-                            else if (target.readBytes().contentEquals(file.readBytes()).not()) {
-                                file.copyTo(File(target.parentFile, target.name + ".worker-" + (index + 1)), overwrite = true)
-                            }
-                        }
-                    true
-                }.getOrElse { false }
-                if (synced) integratedCount++ else integrationFailures++
-                appendReportLine(report, "Agente " + (index + 1) + ": " +
-                    if (synced) "sincronização concluída; divergências com sufixo .worker-" + (index + 1) + "."
-                    else "sincronização parcial; revisar workspace.")
+                val merge = runCatching { integrateWorker(baseSnapshot, sandbox.workspaceFor(child.id), sandbox.workspaceFor(sessionId), index + 1) }.getOrNull()
+                if (merge == null) { integrationFailures++; appendReportLine(report, "Agente " + (index + 1) + ": integração falhou; revise o workspace."); return@forEachIndexed }
+                if (merge.conflicts.isEmpty()) integratedCount++ else integrationFailures++
+                appendReportLine(report, "Agente " + (index + 1) + ": " + merge.applied.size + " arquivo(s) aplicado(s) ao projeto principal" +
+                    (if (merge.applied.isNotEmpty()) " (" + merge.applied.take(12).joinToString() + (if (merge.applied.size > 12) ", …" else "") + ")" else "") +
+                    (if (merge.deleted.isNotEmpty()) "; " + merge.deleted.size + " removido(s)" else "") +
+                    (if (merge.conflicts.isNotEmpty()) ". CONFLITO em " + merge.conflicts.take(12).joinToString() +
+                        ": outro worker (ou você) alterou o mesmo arquivo. O principal ficou como estava e a versão deste worker está em <arquivo>.worker-" + (index + 1) + " — mescle e apague o .worker." else "."))
             }
         }
 
