@@ -277,7 +277,8 @@ fun ChatScreen(nav: NavController, sessionId: String, onMenu: () -> Unit = {}) {
                     val reply = replyingTo?.text
                     val attachments = files.toList()
                     if (attachments.isEmpty()) {
-                        app.agent.send(sessionId, text, emptyList(), quotedReply = reply)
+                        // Agente trabalhando: a mensagem entra na fila e é entregue no próximo passo, sem derrubar o que está em andamento.
+                        app.agent.sendOrQueue(sessionId, text, quotedReply = reply)
                         draft = ""; replyingTo = null
                     } else {
                         if (copyingAttachments) return@Composer

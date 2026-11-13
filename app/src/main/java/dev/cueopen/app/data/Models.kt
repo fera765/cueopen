@@ -426,6 +426,8 @@ data class Skill(
     val icon: String = "sparkles",
     val enabled: Boolean = true,
     val builtIn: Boolean = false,
+    /** Versões anteriores das instruções (mais recente primeiro), guardadas a cada revisão. */
+    val revisions: List<String> = emptyList(),
 )
 
 @Serializable

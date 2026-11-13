@@ -27,7 +27,7 @@ object ToolContextPlanner {
         "web_dev" to setOf("browser_js", "browser_network", "browser_console"),
         "agents" to setOf("multi_agents"),
         "schedule" to setOf("sleep", "set_schedule", "cron_add", "cron_list", "cron_remove"),
-        "skills_admin" to setOf("create_skill"),
+        "skills_admin" to setOf("create_skill", "skill_list", "skill_revise"),
         "wallet" to setOf("wallet_get_address", "wallet_get_balance", "wallet_list_tokens", "wallet_swap",
             "market_price", "market_candles", "market_liquidity", "market_discover", "market_token_info",
             "trade_set_rule", "trade_list", "trade_cancel", "trade_update_rule"),
