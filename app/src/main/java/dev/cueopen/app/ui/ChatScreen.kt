@@ -285,6 +285,7 @@ fun ChatScreen(nav: NavController, sessionId: String, onMenu: () -> Unit = {}) {
                                 app.store.addItem(sessionId, step.copy(title = "Sessão limpa do zero", args = "contexto, histórico e workspace apagados", status = StepStatus.OK))
                             }
                             "/stop" -> if (homeSection != null) app.agent.pauseSection(homeSection.id) else app.agent.stop(sessionId, pauseAutonomy = true)
+                            "/undo" -> app.store.addItem(sessionId, ChatItem.Assistant(text = app.agent.undoLastFileChange(sessionId), final = false))
                             "/usage" -> usage = true
                             "/memory" -> nav.navigate("memory")
                             "/skills" -> nav.navigate("skills")

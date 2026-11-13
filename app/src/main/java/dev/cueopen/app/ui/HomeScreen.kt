@@ -795,6 +795,7 @@ val slashCommands = listOf(
     "/autocompact" to "Liga/desliga a compactação automática ao atingir o limite",
     "/clear" to "Limpa o contexto do modelo (mantém o histórico na tela)",
     "/stop" to "Para o agente",
+    "/undo" to "Desfaz a última alteração de arquivo feita pelo agente",
     "/usage" to "Mostra uso de tokens e contexto",
     "/memory" to "Abre a memória de longo prazo",
     "/skills" to "Abre as skills",

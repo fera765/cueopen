@@ -885,6 +885,9 @@ class BrowserHost(private val appCtx: Context, private val sessionId: String = "
 
     private suspend fun navigateInTab(url: String, tabId: String?): String {
         val normalized = when {
+            // O Reddit recusa (403) os endereços .json sem login; a página normal do mesmo endereço carrega.
+            Regex("^https?://([a-z0-9-]+\\.)?reddit\\.com/", RegexOption.IGNORE_CASE).containsMatchIn(url) && url.substringBefore('?').substringBefore('#').endsWith(".json", true) ->
+                url.substringBefore('?').substringBefore('#').dropLast(5) + (if ('?' in url) "?" + url.substringAfter('?').substringBefore('#') else "")
             url.startsWith("http://", true) || url.startsWith("https://", true) || url.startsWith("file:") || url.startsWith("about:") -> url
             url.contains(".") && !url.contains(" ") -> "https://$url"
             else -> "https://www.google.com/search?q=" + java.net.URLEncoder.encode(url, "UTF-8")
