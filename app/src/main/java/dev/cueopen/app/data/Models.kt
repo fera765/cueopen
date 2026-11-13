@@ -373,6 +373,8 @@ data class Section(
     val autonomous: Boolean = false,
     /** Repetição pedida no prompt (minutos; 1440 = uma vez por dia; 0 = sem repetição). O app agenda sozinho na ativação. */
     val scheduleMinutes: Int = 0,
+    /** Seção arquivada: parada e fora da lista principal, com tudo preservado para restaurar depois. */
+    val archived: Boolean = false,
     val appAgentId: String = "",
     /** Contrato de dados do app (chaves de state.data e formato), definido por quem construiu o app. */
     val appContract: String = "",

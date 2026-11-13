@@ -205,6 +205,26 @@ fun ChatScreen(nav: NavController, sessionId: String, onMenu: () -> Unit = {}) {
                 LiveComputerCard(act, agent?.name ?: "Fluwy Bot", plan, active = running) { nav.navigate("computer/$sessionId") }
             }
             mediaOpen?.let { p -> MediaDialog(java.io.File(p)) { mediaOpen = null } }
+            run {
+                val queues by app.agent.messageQueue.collectAsStateWithLifecycle()
+                val pausedQueues by app.agent.pausedQueues.collectAsStateWithLifecycle()
+                val queued = queues[sessionId].orEmpty()
+                val queuePaused = sessionId in pausedQueues
+                if (queued.isNotEmpty()) Column(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp)
+                    .clip(RoundedCornerShape(14.dp)).background(c.surface).padding(start = 12.dp, end = 4.dp, top = 4.dp, bottom = 6.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("Fila · ${queued.size} mensagem(ns)" + (if (queuePaused) " · pausada" else " · entrega no próximo passo"),
+                            fontSize = 12.sp, color = c.ink3, modifier = Modifier.weight(1f))
+                        TextButton({ app.agent.setQueuePaused(sessionId, !queuePaused) }) { Text(if (queuePaused) "Retomar" else "Pausar", fontSize = 12.sp, color = c.accent) }
+                    }
+                    queued.forEach { q ->
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(q.text, fontSize = 13.sp, color = c.ink2, maxLines = 2, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+                            IconButton({ app.agent.cancelQueued(sessionId, q.id) }, Modifier.size(32.dp)) { Icon(Icons.Rounded.Close, "Cancelar mensagem", Modifier.size(16.dp), tint = c.ink3) }
+                        }
+                    }
+                }
+            }
             Composer(
                 value = draft, onChange = { draft = it },
                 placeholder = if (session.status == SessionStatus.WAITING_USER) "Responda ao agente…" else "Envie uma mensagem",

@@ -137,33 +137,77 @@ class AgentRunner(
         browserFor(sessionId).setAgentControl(false)
     }
 
+    // ───────── Fila de mensagens do usuário (FIFO), com pausar e cancelar ─────────
+    data class QueuedMessage(val id: String, val text: String, val quote: String? = null)
+    /** Mensagens aguardando entrega, por chat (a tela do chat mostra e permite cancelar). */
+    val messageQueue = MutableStateFlow<Map<String, List<QueuedMessage>>>(emptyMap())
+    /** Chats com a fila pausada: nada é entregue até retomar. */
+    val pausedQueues = MutableStateFlow<Set<String>>(emptySet())
+    private val queueLock = Any()
+
     /**
-     * Fila de mensagens do usuário (FIFO): se o agente está no meio de um trabalho, a mensagem não cancela nada —
-     * entra na fila e chega a ele no próximo passo seguro. Agente parado ou em espera: envia na hora, como antes.
+     * Agente no meio de um trabalho: a mensagem não cancela nada — entra na fila e chega a ele no próximo passo seguro.
+     * Agente parado ou em espera: envia na hora, como antes.
      */
     fun sendOrQueue(sessionId: String, text: String, quotedReply: String? = null): Job {
         val session = store.session(sessionId)
         val busy = isRunning(sessionId) && session?.status == SessionStatus.RUNNING
-        if (!busy || text.trim().startsWith("/")) return send(sessionId, text, emptyList(), quotedReply = quotedReply)
+        val hasQueue = messageQueue.value[sessionId].orEmpty().isNotEmpty()
+        if ((!busy && !hasQueue) || text.trim().startsWith("/")) return send(sessionId, text, emptyList(), quotedReply = quotedReply)
         val quote = quotedReply?.trim()?.take(800)?.takeIf { it.isNotBlank() }
-        store.addItem(sessionId, ChatItem.User(text = text, replyTo = quote))
-        session?.sectionId?.let { autoNudges.remove(it); autoDone.remove(it) }
-        coordinatorInbox.getOrPut(sessionId) { java.util.Collections.synchronizedList(mutableListOf()) }
-            .add("[Mensagem do usuário recebida enquanto você trabalhava — tem prioridade sobre o que você estava fazendo; ajuste o rumo se ela pedir]\n$text" +
-                (if (quote != null) "\n[O usuário respondia a esta mensagem sua: $quote]" else ""))
-        val running = jobs[sessionId]
-        // Se o trabalho terminar antes de a fila ser lida, o que sobrou é enviado como mensagem normal (nada se perde).
-        return scope.launch {
-            running?.join()
-            kotlinx.coroutines.delay(300)
-            if (!isRunning(sessionId)) coordinatorInbox.remove(sessionId)?.takeIf { it.isNotEmpty() }?.let { left ->
-                send(sessionId, left.joinToString("\n\n"), showUserMessage = false)
-            }
+        synchronized(queueLock) {
+            val cur = messageQueue.value
+            messageQueue.value = cur + (sessionId to (cur[sessionId].orEmpty() + QueuedMessage(newId(), text, quote)).takeLast(20))
         }
+        val running = jobs[sessionId]
+        // Se o trabalho terminar antes de a fila ser lida, o que sobrou é enviado em seguida (nada se perde).
+        return scope.launch { running?.join(); kotlinx.coroutines.delay(300); flushQueueIfIdle(sessionId) }
     }
 
-    /** Mensagens ainda na fila de um chat (para a interface). */
-    fun queuedCount(sessionId: String): Int = coordinatorInbox[sessionId]?.size ?: 0
+    private fun takeQueue(sessionId: String): List<QueuedMessage> = synchronized(queueLock) {
+        if (sessionId in pausedQueues.value) return emptyList()
+        val cur = messageQueue.value
+        val list = cur[sessionId].orEmpty()
+        if (list.isNotEmpty()) messageQueue.value = cur - sessionId
+        list
+    }
+
+    private fun queuedAsPrompt(q: QueuedMessage) = "[Mensagem do usuário recebida enquanto você trabalhava — tem prioridade sobre o que você estava fazendo; ajuste o rumo se ela pedir]\n${q.text}" +
+        (if (q.quote != null) "\n[O usuário respondia a esta mensagem sua: ${q.quote}]" else "")
+
+    /** Entrega a fila ao agente que está rodando (chamado num ponto seguro do loop). */
+    private fun drainQueueInto(sessionId: String) {
+        val list = takeQueue(sessionId)
+        if (list.isEmpty()) return
+        store.session(sessionId)?.sectionId?.let { autoNudges.remove(it); autoDone.remove(it) }
+        list.forEach { store.addItem(sessionId, ChatItem.User(text = it.text, replyTo = it.quote)) }
+        store.editSession(sessionId) { it.copy(llm = it.llm + list.map { q -> LlmMessage("user", queuedAsPrompt(q)) }) }
+    }
+
+    /** Agente parado com mensagens na fila (e fila não pausada): envia tudo como um novo pedido. */
+    private fun flushQueueIfIdle(sessionId: String) {
+        if (isRunning(sessionId)) return
+        val list = takeQueue(sessionId)
+        if (list.isEmpty()) return
+        list.forEach { store.addItem(sessionId, ChatItem.User(text = it.text, replyTo = it.quote)) }
+        send(sessionId, list.joinToString("\n\n") { it.text }, showUserMessage = false)
+    }
+
+    /** Remove uma mensagem da fila antes de ela chegar ao agente. */
+    fun cancelQueued(sessionId: String, messageId: String) = synchronized(queueLock) {
+        val cur = messageQueue.value
+        val left = cur[sessionId].orEmpty().filterNot { it.id == messageId }
+        messageQueue.value = if (left.isEmpty()) cur - sessionId else cur + (sessionId to left)
+    }
+
+    /** Pausa ou retoma a entrega da fila de um chat. Ao retomar com o agente parado, a fila é enviada na hora. */
+    fun setQueuePaused(sessionId: String, paused: Boolean) {
+        pausedQueues.value = if (paused) pausedQueues.value + sessionId else pausedQueues.value - sessionId
+        if (!paused) flushQueueIfIdle(sessionId)
+    }
+
+    /** Mensagens ainda na fila de um chat. */
+    fun queuedCount(sessionId: String): Int = messageQueue.value[sessionId]?.size ?: 0
 
     /** Envia uma mensagem do usuário e (re)inicia o loop. */
     fun send(sessionId: String, text: String, attachments: List<String> = emptyList(), onDone: (() -> Unit)? = null, quotedReply: String? = null, showUserMessage: Boolean = true): Job {
@@ -173,6 +217,8 @@ class AgentRunner(
         val quote = quotedReply?.trim()?.take(800)?.takeIf { it.isNotBlank() }
         if (showUserMessage) store.addItem(sessionId, ChatItem.User(text = text, attachments = attachments, replyTo = quote))
         if (showUserMessage) store.session(sessionId)?.sectionId?.let { autoNudges.remove(it); autoDone.remove(it) }
+        // Mensagem do usuário numa seção arquivada a traz de volta.
+        if (showUserMessage) store.state.value.sections.firstOrNull { it.sessionId == sessionId && it.archived }?.let { store.upsertSection(it.copy(archived = false)) }
         // Mensagem do usuário retoma a seção pausada, inclusive o ciclo agendado.
         if (showUserMessage) store.state.value.sections.firstOrNull { it.sessionId == sessionId && it.configured && it.scheduleMinutes > 0 }?.let { sec ->
             store.agent(sec.coordinatorAgentId)?.takeIf { !it.autonomous }?.let { c ->
@@ -453,6 +499,18 @@ class AgentRunner(
         }
         startSection(sec)
         return sec.sessionId
+    }
+
+    /** Arquiva a seção: pausa tudo (inclusive o ciclo agendado) e a tira da lista principal. Nada é apagado. */
+    fun archiveSection(sectionId: String) {
+        val sec = store.section(sectionId) ?: return
+        if (sec.configured) pauseSection(sectionId)
+        store.section(sectionId)?.let { store.upsertSection(it.copy(archived = true)) }
+    }
+
+    /** Restaura uma seção arquivada. Ela volta parada; uma mensagem no chat retoma o trabalho e o agendamento. */
+    fun restoreSection(sectionId: String) {
+        store.section(sectionId)?.let { store.upsertSection(it.copy(archived = false)) }
     }
 
     fun cancelSectionSetup(sessionId: String, item: ChatItem.SectionSetup) {
@@ -1135,6 +1193,36 @@ class AgentRunner(
         return "${member.name} retomou com a sua orientação."
     }
 
+    /** Passa uma etapa do plano para outro agente do time (parando quem estava com ela) e a reinicia. */
+    private suspend fun teamReassign(sessionId: String, taskId: String, agentName: String, note: String): String {
+        val sec = store.section(store.session(sessionId)?.sectionId) ?: return "ERRO: esta conversa não é uma seção."
+        val t = sec.plan.firstOrNull { it.id.equals(taskId.trim(), true) } ?: return "ERRO: etapa \"$taskId\" não existe no plano.\n" + SectionPlanEngine.describe(sec.plan)
+        val member = resolveMember(sec, agentName) ?: return "ERRO: não há agente \"$agentName\" no time."
+        if (t.status == TaskStatus.DONE) return "ERRO: a etapa ${t.id} já foi aprovada; não há o que reatribuir."
+        if (t.status == TaskStatus.CANCELLED) return "ERRO: a etapa ${t.id} foi cancelada. Crie outra com team_plan."
+        if (t.agentId == member.id && (t.status == TaskStatus.RUNNING || t.status == TaskStatus.PENDING)) return "A etapa ${t.id} já está com ${member.name}."
+        store.agent(t.agentId)?.takeIf { it.id != member.id }?.let { old ->
+            val childId = memberSession(sec, old)
+            val d = delegations[childId]
+            if (d?.taskId.equals(t.id, true)) {
+                delegations.remove(childId); coordinatorInbox.remove(childId)
+                stop(childId)
+                store.addItem(childId, ChatItem.Error(text = "Etapa ${t.id} reatribuída a ${member.name} pelo coordenador."))
+                (store.session(sec.sessionId)?.items?.firstOrNull { it.id == d?.pillId } as? ChatItem.Step)?.let { p ->
+                    store.replaceItem(sec.sessionId, p.copy(status = StepStatus.OK, result = "reatribuída a ${member.name}"))
+                }
+            }
+        }
+        editPlan(sec.id) { plan -> plan.map { if (it.id != t.id) it else it.copy(agentId = member.id, agentName = member.name, status = TaskStatus.PENDING,
+            attempts = 0, result = "", startedAt = null, endedAt = null,
+            note = ("reatribuída de ${t.agentName}" + (if (note.isNotBlank()) ": ${note.trim()}" else "")).take(300)) } }
+        planNudges.remove(sec.id); autoNudges.remove(sec.id)
+        val started = planDispatch(sec.id)
+        return "Etapa ${t.id} reatribuída de ${t.agentName} para ${member.name}. " +
+            (if (t.id in started || started.any { it.contains(t.id) }) "${member.name} já começou." else "Ela começa quando as dependências forem aprovadas.") +
+            "\n" + SectionPlanEngine.describe(store.section(sec.id)?.plan.orEmpty())
+    }
+
     private fun teamStop(sessionId: String, agentName: String, reason: String): String {
         val sec = store.section(store.session(sessionId)?.sectionId) ?: return "ERRO: esta conversa não é uma seção."
         val member = resolveMember(sec, agentName) ?: return "ERRO: não há agente \"$agentName\" no time."
@@ -1739,6 +1827,7 @@ class AgentRunner(
             coordinatorInbox.remove(sessionId)?.let { msgs ->
                 store.editSession(sessionId) { it.copy(llm = it.llm + msgs.map { m -> LlmMessage("user", m) }) }
             }
+            drainQueueInto(sessionId)  // mensagens do usuário enfileiradas enquanto o agente trabalhava
             // Tarefa delegada por coordenador de seção: entrega com prazo, em vez de trabalhar para sempre.
             if (sectionMember) {
                 if (silentRounds >= MemberSupervision.SILENT_ROUNDS_BEFORE_NUDGE) {
@@ -2583,6 +2672,7 @@ class AgentRunner(
                     appendLine("- Entre uma ação e outra, mande feedbacks curtos (5 a 30 palavras) e continue trabalhando. Terminal e browser ficam com os agentes: o seu papel é coordenar.")
                     appendLine("- Ao receber um [Relatório automático], avalie a entrega e então aprove, peça um ajuste específico ou passe a próxima etapa. Apresente o progresso ao usuário em lista numerada.")
                     appendLine("- Uma tarefa já entregue não é delegada de novo (o app recusa): use o resultado ou peça um ajuste específico. Quando todas as etapas estiverem entregues e revisadas, envie o relatório final e pare, sem recomeçar o pedido original.")
+                    appendLine("- Se um agente não dá conta de uma etapa (travou, falta capacidade ou falhou mais de uma vez), passe-a a outro com team_reassign em vez de insistir no mesmo.")
                     appendLine("- Você supervisiona o tempo todo: chegam mensagens [Checkpoint] com o progresso de cada agente. Se o agente está no caminho certo, responda em 5–30 palavras. Se desviou, travou ou falta insumo, corrija com team_message ou pare com team_stop. Se a etapa já está cumprida, use team_stop e passe para a próxima.")
                     appendLine("- Os agentes compartilham /root/workspace: ao delegar, cite os arquivos exatos que já existem (ex.: copy_frances.md) e diga onde o resultado deve ser salvo.")
                     appendLine("- Tudo o que o usuário informar aqui (mensagens, respostas, dados seguros do ask_secure) chega automaticamente a todos os agentes pelo \"Contexto compartilhado da seção\". Senhas não circulam em texto: cite o marcador {{secret:nome}}.")
@@ -2796,6 +2886,10 @@ class AgentRunner(
                 }, listOf("task_id", "verdict")))
             add(tool("section_done", "Seção autônoma: declara que o objetivo inteiro da seção foi entregue e encerra o ciclo com o relatório final. Chame somente quando não restar nenhuma fase a fazer; até lá, o app continua acionando você para seguir.",
                 buildJsonObject { put("summary", str("Relatório final consolidado: entregáveis, arquivos, números")) }, listOf("summary")))
+            add(tool("team_reassign",
+                "Passa uma etapa do plano para outro agente do time e a reinicia do zero com ele. Se o agente atual estiver trabalhando nela, ele é parado. Use quando o agente travou, não tem a capacidade necessária (ex.: sem browser) ou outro faria melhor. Etapas já aprovadas não podem ser reatribuídas.",
+                buildJsonObject { put("task_id", str("Id da etapa (ex.: T2)")); put("agent", str("Nome do agente que assume a etapa")); put("note", str("Opcional: orientação para o novo responsável (o que mudar em relação à tentativa anterior)")) },
+                listOf("task_id", "agent")))
             add(tool("team_status", "Mostra o estado de cada Agent do time (trabalhando, aguardando o usuário, concluído) e a última resposta de cada um.", buildJsonObject {}))
             add(tool("team_message",
                 "Envia agora uma orientação ou correção a um agente do time; ele a recebe no próximo passo, sem interromper o trabalho. Use quando um checkpoint mostrar desvio, travamento ou falta de insumo.",
@@ -3430,6 +3524,7 @@ class AgentRunner(
             "team_delegate" -> return ToolResult(teamDelegate(sessionId, s("agent"), s("task"), b("wait"), (i("timeout_minutes") ?: 15).coerceIn(1, 30)))
             "team_status" -> return ToolResult(teamStatus(sessionId))
             "team_plan" -> return ToolResult(teamPlan(sessionId, s("goal"), s("tasks_json")))
+            "team_reassign" -> return ToolResult(teamReassign(sessionId, s("task_id"), s("agent"), s("note")))
             "section_done" -> {
                 val sec = store.section(store.session(sessionId)?.sectionId) ?: return ToolResult("ERRO: esta conversa não é uma seção.")
                 val open = sec.plan.filter { it.status == TaskStatus.PENDING || it.status == TaskStatus.RUNNING || it.status == TaskStatus.REVIEW }

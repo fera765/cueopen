@@ -651,12 +651,28 @@ private fun SessionDrawer(nav: NavController, sessions: List<Session>, agents: L
         }
         Divider()
         val live by CueApp.instance.store.state.collectAsStateWithLifecycle()
-        val sections = live.sections
+        val sections = live.sections.filterNot { it.archived }
+        val archivedSections = live.sections.filter { it.archived }
+        var showArchived by androidx.compose.runtime.saveable.rememberSaveable { mutableStateOf(false) }
         LazyColumn(Modifier.weight(1f)) {
             // Seções só aparecem quando existem (criadas pelo chat).
             if (sections.isNotEmpty()) {
                 item { SectionLabel("Seções") }
                 items(sections, key = { "sec-" + it.id }) { sec ->
+                    SectionRow(sec, live.sessions, live.agents, onOpen = { go("chat/$it") }, onOpenAgent = { go("agent/$it") })
+                }
+            }
+            if (archivedSections.isNotEmpty()) {
+                item {
+                    Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp)).clickable { showArchived = !showArchived }.padding(horizontal = 8.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Rounded.Inventory2, null, Modifier.size(16.dp), tint = Cue.c.ink3)
+                        Spacer(Modifier.width(8.dp))
+                        Text("Seções arquivadas (${archivedSections.size})", fontSize = 13.sp, color = Cue.c.ink3, modifier = Modifier.weight(1f))
+                        Icon(if (showArchived) Icons.Rounded.ExpandLess else Icons.Rounded.ExpandMore, null, tint = Cue.c.ink3)
+                    }
+                }
+                if (showArchived) items(archivedSections, key = { "arch-" + it.id }) { sec ->
                     SectionRow(sec, live.sessions, live.agents, onOpen = { go("chat/$it") }, onOpenAgent = { go("agent/$it") })
                 }
             }
@@ -814,7 +830,7 @@ private fun SectionRow(
             Spacer(Modifier.width(10.dp))
             Column(Modifier.weight(1f)) {
                 Text(sec.name, maxLines = 1, overflow = TextOverflow.Ellipsis, fontSize = 15.sp, fontWeight = FontWeight.Medium)
-                Text(if (!sec.configured) "Aguardando ativação" else "${sec.agentIds.size} agentes · coordenador",
+                Text(if (sec.archived) "Arquivada · ${sec.agentIds.size} agentes" else if (!sec.configured) "Aguardando ativação" else "${sec.agentIds.size} agentes · coordenador",
                     fontSize = 12.sp, color = c.ink3, maxLines = 1)
             }
             if (busy) PulsingDot(c.ok) else StatusDot(if (waiting) SessionStatus.WAITING_USER else SessionStatus.IDLE)
@@ -826,6 +842,8 @@ private fun SectionRow(
             DropdownMenuItem(text = { Text("Abrir") }, leadingIcon = { Icon(Icons.Rounded.ChatBubbleOutline, null) }, onClick = { menu = false; onOpen(sec.sessionId) })
             DropdownMenuItem(text = { Text("Limpar contexto") }, leadingIcon = { Icon(Icons.Rounded.CleaningServices, null) }, onClick = { menu = false; confirm = "clear" })
             DropdownMenuItem(text = { Text("Reiniciar") }, leadingIcon = { Icon(Icons.Rounded.RestartAlt, null) }, onClick = { menu = false; confirm = "restart" })
+            if (sec.archived) DropdownMenuItem(text = { Text("Restaurar") }, leadingIcon = { Icon(Icons.Rounded.Unarchive, null) }, onClick = { menu = false; app.agent.restoreSection(sec.id) })
+            else DropdownMenuItem(text = { Text("Arquivar") }, leadingIcon = { Icon(Icons.Rounded.Archive, null) }, onClick = { menu = false; app.agent.archiveSection(sec.id) })
             DropdownMenuItem(text = { Text("Excluir seção", color = c.err) }, leadingIcon = { Icon(Icons.Rounded.DeleteOutline, null, tint = c.err) }, onClick = { menu = false; confirm = "delete" })
         }
     }
