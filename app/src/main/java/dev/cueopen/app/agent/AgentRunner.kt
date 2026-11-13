@@ -977,8 +977,13 @@ class AgentRunner(
             lock.withLock {
                 if ((sectionGeneration[sec.id] ?: 0) != generation) return@withLock  // seção pausada depois deste relatório
                 var waited = 0
-                while (isRunning(sec.sessionId) && waited < 1_800) { kotlinx.coroutines.delay(2_000); waited += 2 }
-                send(sec.sessionId, "[Relatório automático — ${member.name}${if (waitingUser) " parou e aguarda o usuário" else " terminou"}]\n$report" + workspaceChanges(child.id, d.startedAt),
+                // Coordenador em espera (sleep) não segura o relatório: a entrega chegou, então ele é acordado na hora.
+                fun coordSleeping() = store.session(sec.sessionId)?.status == SessionStatus.SLEEPING
+                while (isRunning(sec.sessionId) && !coordSleeping() && waited < 1_800) { kotlinx.coroutines.delay(2_000); waited += 2 }
+                val wokeEarly = coordSleeping()
+                if (wokeEarly) store.editSession(sec.sessionId) { it.copy(wakeAt = null, wakeReason = "") }
+                send(sec.sessionId, "[Relatório automático — ${member.name}${if (waitingUser) " parou e aguarda o usuário" else " terminou"}]\n$report" + workspaceChanges(child.id, d.startedAt) +
+                    (if (wokeEarly) "\n[App] Você estava em espera; como o agente terminou antes do prazo, a espera foi encerrada. Continue agora a partir desta entrega." else ""),
                     showUserMessage = false).join()
             }
         }
@@ -2364,7 +2369,7 @@ class AgentRunner(
             appendLine("4. Use `notes_write` para registrar o que precisa lembrar ao longo da tarefa: achados, progresso e próximos passos.")
             appendLine("5. Fatos duradouros sobre o usuário ou o projeto vão em `memory_save`; para recuperar algo antigo, use `memory_search`.")
             appendLine("6. Para usar uma skill, chame `skill_load` com o nome dela e siga as instruções carregadas.")
-            appendLine("6b. Trabalho recorrente: quando o usuário pedir para monitorar, acompanhar ou repetir algo ao longo do tempo (ex.: \"a cada 20 min verifique o mercado\", \"uma vez por dia\"), chame set_schedule com o intervalo em minutos (1440 = diário). Se ele não disser o intervalo e a tarefa for contínua, escolha um intervalo razoável e econômico. Para parar, set_schedule com minutes=0.")
+            appendLine("6b. Trabalho recorrente: quando o usuário pedir para monitorar, acompanhar ou repetir algo ao longo do tempo (ex.: \"a cada 20 min verifique o mercado\", \"uma vez por dia\"), chame set_schedule com o intervalo em minutos (1440 = diário). Quando o pedido tiver hora marcada (\"todo dia às 8h\", \"amanhã às 15:30\"), use cron_add, que dispara no horário exato numa conversa isolada. Se ele não disser o intervalo e a tarefa for contínua, escolha um intervalo razoável e econômico. Para parar, set_schedule com minutes=0.")
             val requestedCaps = if (allowDeviceTools) agent?.deviceCaps.orEmpty() else emptyList()
             val grantedCaps = requestedCaps.filter { dev.cueopen.app.device.DeviceCaps.granted(ctx, it) }
             val allDeviceTools = dev.cueopen.app.device.DeviceCapPolicy.availableTools(requestedCaps, grantedCaps)
@@ -2520,6 +2525,7 @@ class AgentRunner(
                     if (agent?.confirmMode == "auto") appendLine("- Seção 100% autônoma: o usuário não acompanha o chat e não vai responder. Por isso, não faça perguntas, não peça escolha nem confirmação e não termine com \"me diga\" ou \"quer que eu\". Em cada decisão, escolha a melhor opção com base nos dados, registre a escolha em uma frase e siga para a próxima etapa. Um feedback não encerra o trabalho: depois de cada entrega, passe para a fase seguinte com um novo team_plan. O trabalho só termina quando o objetivo inteiro estiver entregue e você chamar section_done(summary).")
                     if (sec.scheduleMinutes > 0) appendLine("- Esta seção roda sozinha ${scheduleLabel(sec.scheduleMinutes)}: o app acorda você com uma mensagem [Heartbeat] e você executa o ciclo completo de novo. O agendamento já está feito; não chame set_schedule.")
                     else appendLine("- Se o usuário pedir repetição (ex.: \"uma vez por dia\"), chame set_schedule(minutes, mission) — 1440 = diário. A partir daí o Android acorda você sozinho.")
+                    appendLine("- Não use sleep para esperar um agente: o [Relatório automático] chega sozinho assim que ele termina e, se você estiver em espera, o app acorda você na hora. Depois de delegar, basta encerrar a sua resposta.")
                     appendLine("- Entre uma ação e outra, mande feedbacks curtos (5 a 30 palavras) e continue trabalhando. Terminal e browser ficam com os agentes: o seu papel é coordenar.")
                     appendLine("- Ao receber um [Relatório automático], avalie a entrega e então aprove, peça um ajuste específico ou passe a próxima etapa. Apresente o progresso ao usuário em lista numerada.")
                     appendLine("- Uma tarefa já entregue não é delegada de novo (o app recusa): use o resultado ou peça um ajuste específico. Quando todas as etapas estiverem entregues e revisadas, envie o relatório final e pare, sem recomeçar o pedido original.")
@@ -2854,6 +2860,16 @@ class AgentRunner(
         if (allowMultiAgent) add(tool("create_skill", "Cria uma skill nova na biblioteca do usuário, reutilizável em outras tarefas.", buildJsonObject {
             put("name", str("Nome da skill")); put("description", str("Descrição curta: quando usar")); put("instructions", str("Instruções detalhadas, passo a passo"))
         }, listOf("name", "description", "instructions")))
+        if (allowMultiAgent) add(tool("cron_add",
+            "Agenda uma tarefa para rodar sozinha num horário exato, em uma conversa nova e isolada (não mexe nesta). Use quando o usuário pedir algo com hora marcada: \"todo dia às 8h\", \"amanhã às 15:30\", \"toda segunda\". Para repetir por intervalo dentro desta mesma conversa, use set_schedule.",
+            buildJsonObject {
+                put("title", str("Nome curto da tarefa"))
+                put("prompt", str("Instrução completa e autossuficiente que será executada a cada disparo (a conversa nova não vê este chat)"))
+                put("at", str("Primeiro disparo, no horário local do aparelho: \"HH:mm\" (próxima ocorrência) ou \"yyyy-MM-dd HH:mm\""))
+                put("repeat", str("once | half_hour | hourly | daily | weekly (padrão: daily)"))
+            }, listOf("title", "prompt", "at")))
+        if (allowMultiAgent) add(tool("cron_list", "Lista as tarefas agendadas por horário (id, título, repetição, próximo/último disparo, ligada ou não).", buildJsonObject {}))
+        if (allowMultiAgent) add(tool("cron_remove", "Remove uma tarefa agendada, pelo id devolvido por cron_list ou cron_add.", buildJsonObject { put("id", str("Id da tarefa agendada")) }, listOf("id")))
         if (allowMultiAgent) add(tool("set_schedule", "Faz este agente trabalhar de forma autônoma e recorrente: o Android o acorda no intervalo definido, mesmo com o app fechado. Chame quando o usuário pedir para monitorar, acompanhar ou repetir algo ao longo do tempo. minutes é o intervalo entre os ciclos (ex.: 20; 1440 = uma vez por dia); minutes=0 desliga a autonomia.", buildJsonObject {
             put("minutes", int("Minutos entre os ciclos; 0 para parar")); put("mission", str("O que verificar ou fazer a cada ciclo"))
         }, listOf("minutes")))
@@ -3428,6 +3444,51 @@ class AgentRunner(
                 val existing = store.session(sessionId)?.items?.lastOrNull { it is ChatItem.Plan }
                 if (existing != null) store.replaceItem(sessionId, plan.copy(id = existing.id)) else store.addItem(sessionId, plan)
                 return ToolResult("Plano atualizado.")
+            }
+            "cron_add" -> {
+                val title = s("title").trim().take(60); val prompt = s("prompt").trim()
+                if (title.isBlank() || prompt.isBlank()) return ToolResult("ERRO: informe title e prompt.")
+                val at = s("at").trim()
+                val now = java.util.Calendar.getInstance()
+                val start: Long? = runCatching {
+                    if (Regex("^\\d\\d?:\\d\\d$").matches(at)) {
+                        val (h, min) = at.split(":").map { it.toInt() }
+                        require(h in 0..23 && min in 0..59)
+                        (now.clone() as java.util.Calendar).apply {
+                            set(java.util.Calendar.HOUR_OF_DAY, h); set(java.util.Calendar.MINUTE, min); set(java.util.Calendar.SECOND, 0); set(java.util.Calendar.MILLISECOND, 0)
+                            if (timeInMillis <= now.timeInMillis + 30_000) add(java.util.Calendar.DAY_OF_YEAR, 1)
+                        }.timeInMillis
+                    } else SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.US).apply { isLenient = false }.parse(at.replace('T', ' ').take(16))!!.time
+                }.getOrNull()
+                if (start == null) return ToolResult("ERRO: horário inválido em at (recebido: \"${at.take(40)}\"). Use \"HH:mm\" ou \"yyyy-MM-dd HH:mm\", no horário local.")
+                if (start < System.currentTimeMillis() - 60_000) return ToolResult("ERRO: o horário informado já passou. Informe um horário futuro.")
+                val repeat = when (s("repeat").trim().lowercase()) {
+                    "once" -> dev.cueopen.app.data.Repeat.ONCE; "half_hour" -> dev.cueopen.app.data.Repeat.HALF_HOUR; "hourly" -> dev.cueopen.app.data.Repeat.HOURLY
+                    "weekly" -> dev.cueopen.app.data.Repeat.WEEKLY; "", "daily" -> dev.cueopen.app.data.Repeat.DAILY
+                    else -> return ToolResult("ERRO: repeat deve ser once, half_hour, hourly, daily ou weekly.")
+                }
+                if (store.state.value.scheduled.count { it.enabled } >= 30) return ToolResult("RECUSADO: já existem 30 tarefas agendadas ligadas. Remova alguma com cron_remove antes de criar outra.")
+                val task = dev.cueopen.app.data.ScheduledTask(title = title, prompt = prompt, agentId = store.session(sessionId)?.agentId,
+                    repeat = repeat, startAt = start, sourceSessionId = sessionId)
+                store.upsertScheduled(task)
+                dev.cueopen.app.scheduler.Scheduler.schedule(ctx, task)
+                val whenTxt = SimpleDateFormat("dd/MM HH:mm", Locale.getDefault()).format(Date(start))
+                store.addItem(sessionId, ChatItem.Step(tool = "cron_add", title = "Agendado: $title", args = "$whenTxt · ${repeat.name.lowercase()}", result = "", status = StepStatus.OK))
+                return ToolResult("Tarefa agendada (id ${task.id}): primeiro disparo em $whenTxt, repetição ${repeat.name.lowercase()}. Ela roda numa conversa nova a cada disparo e aparece em Agendadas. O Android pode atrasar alguns minutos por economia de bateria.")
+            }
+            "cron_list" -> {
+                val fmt = SimpleDateFormat("dd/MM HH:mm", Locale.getDefault())
+                val list = store.state.value.scheduled
+                return ToolResult(if (list.isEmpty()) "Nenhuma tarefa agendada." else list.joinToString("\n") { t ->
+                    "- ${t.id} · ${t.title} · ${t.repeat.name.lowercase()} · início ${fmt.format(Date(t.startAt))} · último disparo ${t.lastRunAt?.let { fmt.format(Date(it)) } ?: "nunca"} · ${if (t.enabled) "ligada" else "desligada"}"
+                })
+            }
+            "cron_remove" -> {
+                val id = s("id").trim()
+                val t = store.state.value.scheduled.firstOrNull { it.id == id } ?: return ToolResult("ERRO: tarefa agendada não encontrada. Confira o id com cron_list.")
+                dev.cueopen.app.scheduler.Scheduler.cancel(ctx, t.id)
+                store.deleteScheduled(t.id)
+                return ToolResult("Tarefa agendada \"${t.title}\" removida.")
             }
             "set_schedule" -> {
                 val m = i("minutes") ?: 0
