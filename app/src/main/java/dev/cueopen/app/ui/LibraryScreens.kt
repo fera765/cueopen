@@ -298,7 +298,8 @@ fun AgentEditScreen(nav: NavController, id: String) {
                 }
             }
             }
-            SectionLabel("Skills (vazio = todas ativas)")
+            SectionLabel("Skills em destaque (opcional)")
+            Text("Todas as skills ativas da biblioteca já ficam disponíveis para este Agent. Marcar aqui só faz as escolhidas aparecerem primeiro para ele.", fontSize = 12.sp, color = Cue.c.ink3)
             FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 st.skills.forEach { s ->
                     val on = s.id in a.skillIds
