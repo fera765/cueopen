@@ -881,6 +881,51 @@ class AgentRunner(
         }
     }
 
+    // ───────── Espera do coordenador: ciclo pedido pelo usuário x espera por agentes ─────────
+
+    /** Seção cujo chat principal é [sessionId], se este chat for o do coordenador. */
+    private fun coordinatedSection(sessionId: String): Section? = store.state.value.sections.firstOrNull { it.sessionId == sessionId && it.configured }
+
+    /** Nenhum agente do time trabalhando, nenhuma delegação aberta e nenhuma etapa em execução: esperar não adianta. */
+    private fun teamIdle(sec: Section): Boolean =
+        store.state.value.sessions.none { it.sectionId == sec.id && it.id != sec.sessionId && isRunning(it.id) } &&
+            delegations.values.none { it.sectionId == sec.id } &&
+            store.section(sec.id)?.plan.orEmpty().none { it.status == TaskStatus.RUNNING }
+
+    /** O próprio usuário pediu um intervalo ("a cada 30 min…") neste chat. */
+    private fun userAskedInterval(sessionId: String): Boolean =
+        store.session(sessionId)?.llm.orEmpty().filter { it.role == "user" && it.content?.startsWith("[") != true }
+            .takeLast(12).any { SectionWaitPolicy.userAskedInterval(it.content.orEmpty()) }
+
+    /**
+     * Espera que o app pode encerrar sozinho: é do coordenador de uma seção e serve para aguardar o time — o motivo
+     * fala em aguardar/concluir/entrega, ou o usuário não pediu nenhum intervalo. Ciclos pedidos pelo usuário são respeitados.
+     */
+    private fun cuttableWait(sessionId: String, reason: String): Section? {
+        val sec = coordinatedSection(sessionId) ?: return null
+        if (reason.contains("[[IQOPTION_TRADES", true)) return null
+        return sec.takeIf { SectionWaitPolicy.waitsForTeam(reason) || !userAskedInterval(sessionId) }
+    }
+
+    /** Espera em pedaços curtos; se for uma espera pelo time e o time ficou ocioso, encerra antes do prazo. Retorna true se encerrou antes. */
+    private suspend fun waitUntil(sessionId: String, wake: Long, reason: String): Boolean {
+        var idleChecks = 0
+        while (System.currentTimeMillis() < wake) {
+            val sec = cuttableWait(sessionId, reason)
+            if (sec != null) {
+                idleChecks = if (teamIdle(sec)) idleChecks + 1 else 0
+                if (idleChecks >= 2) return true  // ~6 s ocioso: dá tempo de o relatório do agente ser montado
+                kotlinx.coroutines.delay(minOf(3_000L, wake - System.currentTimeMillis()).coerceAtLeast(500))
+            } else kotlinx.coroutines.delay(minOf(30_000L, wake - System.currentTimeMillis()).coerceAtLeast(1000))
+        }
+        return false
+    }
+
+    private fun noteEarlyWake(sessionId: String) {
+        store.editSession(sessionId) { it.copy(wakeAt = null, llm = it.llm + LlmMessage("user",
+            "[App] Todos os agentes do time terminaram, então a espera foi encerrada antes do prazo. Continue agora: valide as entregas recebidas (team_review) ou passe a próxima etapa.")) }
+    }
+
     private fun sectionAuto(sec: Section): Boolean = store.agent(sec.coordinatorAgentId)?.confirmMode == "auto"
     /** Chat de seção (coordenador ou agente) configurada como 100% autônoma. */
     private fun autoSectionSession(sessionId: String): Boolean =
@@ -1954,8 +1999,9 @@ class AgentRunner(
         setActivity(sessionId, Activity(Activity.Kind.IDLE, "Aguardando até ${java.text.SimpleDateFormat(if (seconds < 120) "HH:mm:ss" else "HH:mm", Locale.getDefault()).format(Date(wake))}"))
         dev.cueopen.app.sandbox.SandboxService.start(ctx, if (preserveContinuous) "Agente em modo contínuo" else "Aguardando vencimento da opção")
         store.flush()
-        while (System.currentTimeMillis() < wake) kotlinx.coroutines.delay(minOf(30_000L, wake - System.currentTimeMillis()).coerceAtLeast(1000))
+        val early = waitUntil(sessionId, wake, reason)
         wakeUp(sessionId)
+        if (early) noteEarlyWake(sessionId)
         val ids = afterTradeIds.ifEmpty { tradeIdsFromWakeReason(store.session(sessionId)?.wakeReason.orEmpty()) }
         if (ids.isNotEmpty()) checkExpiredTradesOnce(sessionId, ids)
     }
@@ -2488,9 +2534,10 @@ class AgentRunner(
             val wake = s.wakeAt ?: System.currentTimeMillis()
             jobs[s.id] = scope.launch {
                 try {
-                    while (System.currentTimeMillis() < wake) kotlinx.coroutines.delay(minOf(30_000L, wake - System.currentTimeMillis()).coerceAtLeast(1000))
+                    val early = waitUntil(s.id, wake, s.wakeReason)
                     val tradeIds = tradeIdsFromWakeReason(s.wakeReason)
                     wakeUp(s.id)
+                    if (early) noteEarlyWake(s.id)
                     if (tradeIds.isNotEmpty()) checkExpiredTradesOnce(s.id, tradeIds)
                     loop(s.id)
                 } catch (c: kotlinx.coroutines.CancellationException) { throw c
@@ -3794,6 +3841,11 @@ class AgentRunner(
                     }
                     i("seconds") != null -> { val sc = i("seconds")!!.coerceIn(1, 86_400); Triple(sc, "Aguardando ${sc}s", "") }
                     else -> { val m = (i("minutes") ?: 5).coerceIn(1, 1440); Triple(m * 60, "Aguardando $m min", "") }
+                }
+                cuttableWait(sessionId, s("reason"))?.takeIf { teamIdle(it) }?.let {
+                    return ToolResult("Não há o que esperar: nenhum agente do time está trabalhando agora e todas as entregas já chegaram. " +
+                        "Siga já — valide as entregas com team_review ou passe a próxima etapa com team_plan/team_delegate. " +
+                        "(Ciclos pedidos pelo usuário, como \"a cada 30 min\", continuam valendo; use set_schedule para eles.)")
                 }
                 store.addItem(sessionId, ChatItem.Step(tool = "sleep", title = title, args = s("reason"), result = note, status = StepStatus.OK))
                 return ToolResult(listOf(s("reason").ifBlank { "verificação" }, note).filter { it.isNotBlank() }.joinToString(" — "), sleepSeconds = secs)
