@@ -1146,6 +1146,11 @@ class AgentRunner(
         var err: String? = null
         editPlan(sec.id) { plan -> SectionPlanEngine.review(plan, taskId.trim(), verdict, note).also { err = it.second }.first }
         err?.let { return "ERRO: $it" }
+        // Reflexion: a crítica do coordenador vira uma lição curta na memória do agente, usada nas próximas tarefas dele.
+        if ((verdict == SectionPlanEngine.Verdict.REDO || verdict == SectionPlanEngine.Verdict.BLOCK) && note.isNotBlank())
+            sec.plan.firstOrNull { it.id.equals(taskId.trim(), true) }?.let { t -> store.agent(t.agentId)?.let { a ->
+                store.upsertAgent(a.copy(memory = AgentLessons.add(a.memory, t.task, note)))
+            } }
         val started = planDispatch(sec.id)
         val plan = store.section(sec.id)?.plan.orEmpty()
         return "Etapa $taskId: ${verdict.name.lowercase()}. " + (if (started.isNotEmpty()) "Iniciadas automaticamente: ${started.joinToString()}. " else "") +
@@ -4493,9 +4498,11 @@ class AgentRunner(
                                     if (append && target.exists()) target.appendText(content) else target.writeText(content)
                                     recordChange(sessionId, target, beforeWrite, path)
                                     noteFileSeen(sessionId, target)
+                                    val syntaxWarn = SyntaxCheck.problem(target.name, runCatching { target.readText() }.getOrNull())
+                                        ?.let { "\n⚠ O arquivo foi salvo, mas está com sintaxe inválida: $it. Corrija antes de usá-lo." }.orEmpty()
                                     val lines = target.useLines { it.count() }
                                     val preview = runCatching { target.useLines { seq -> seq.take(10).joinToString("\n") } }.getOrDefault("")
-                                    "OK: ${if (append) "conteúdo acrescentado" else "arquivo salvo"} (${target.relativeTo(root.canonicalFile).path}) — ${target.length()} bytes, $lines linhas.\n[Prévia das primeiras 10 linhas]\n$preview"
+                                    "OK: ${if (append) "conteúdo acrescentado" else "arquivo salvo"} (${target.relativeTo(root.canonicalFile).path}) — ${target.length()} bytes, $lines linhas.$syntaxWarn\n[Prévia das primeiras 10 linhas]\n$preview"
                                 }
                             }
                         }
@@ -4527,6 +4534,12 @@ class AgentRunner(
                                 } else {
                                 val beforeEdit = beforeChange(target)
                                 val result = AtomicTextFile.replace(target, oldText, newText, b("allow_multiple"))
+                                // Como no SWE-agent: uma edição que deixa um arquivo estruturado inválido não passa.
+                                val broke = if (result.success) SyntaxCheck.brokenBy(target.name, beforeEdit.second, runCatching { target.readText() }.getOrNull()) else null
+                                if (broke != null && beforeEdit.second != null) {
+                                    runCatching { target.writeText(beforeEdit.second!!) }
+                                    return ToolResult("ERRO: a edição deixaria $rel com sintaxe inválida ($broke). Nada foi alterado. Corrija new_text (aspas, vírgulas, chaves) e tente de novo.")
+                                }
                                 if (result.success) recordChange(sessionId, target, beforeEdit, rel)
                                 if (!result.success) {
                                     val fails = editFails.merge(key, 1, Int::plus) ?: 1

@@ -1227,12 +1227,21 @@ private fun TeamMemberPill(step: ChatItem.Step, nav: androidx.navigation.NavCont
     val st by app.store.state.collectAsStateWithLifecycle()
     val activity by app.agent.activity.collectAsStateWithLifecycle()
     val member = st.agents.firstOrNull { it.id == memberId }
-    val child = st.sessions.firstOrNull { it.id == childId }
+    // O agente usa sempre o mesmo chat, então todas as pílulas dele apontam para a mesma sessão. Só a pílula da
+    // delegação ATUAL (a mais recente, ainda em andamento) acompanha o estado ao vivo; as anteriores mostram o
+    // estado final que tiveram.
+    val isLatest = remember(st.sessions, step.id, childId) {
+        st.sessions.firstOrNull { s -> s.items.any { it.id == step.id } }?.items
+            ?.lastOrNull { it is ChatItem.Step && it.tool == dev.cueopen.app.agent.TEAM_MEMBER_STEP && it.args.substringBefore('|') == childId }?.id == step.id
+    }
+    val live = step.status == StepStatus.RUNNING && isLatest
+    val child = if (live) st.sessions.firstOrNull { it.id == childId } else null
     val running = child?.status == SessionStatus.RUNNING
-    val waiting = child?.status == SessionStatus.WAITING_USER || step.result == "aguardando você"
+    val waiting = (live && child?.status == SessionStatus.WAITING_USER) || step.result == "aguardando você"
+    val finishedOk = step.status == StepStatus.OK || (step.status == StepStatus.RUNNING && !isLatest)
     val label = if (!running && step.result == "retomando sozinho") "retomando sozinho (falha temporária do modelo)"
         else if (!running && step.result == "pausado") "pausado"
-        else teamActivityLabel(activity[childId], running, waiting && !running, step.status == StepStatus.ERROR, step.status == StepStatus.OK)
+        else teamActivityLabel(if (live) activity[childId] else null, running, waiting && !running, step.status == StepStatus.ERROR, finishedOk)
     Row(
         Modifier.padding(vertical = 4.dp).clip(RoundedCornerShape(18.dp)).background(c.surface)
             .border(1.dp, if (running) c.ok.copy(alpha = .5f) else c.line, RoundedCornerShape(18.dp))
@@ -1255,7 +1264,7 @@ private fun TeamMemberPill(step: ChatItem.Step, nav: androidx.navigation.NavCont
             running -> PulsingDot(c.ok)
             waiting -> Icon(Icons.Rounded.PanTool, null, Modifier.size(14.dp), tint = c.warn)
             step.status == StepStatus.ERROR -> Icon(Icons.Rounded.Close, null, Modifier.size(14.dp), tint = c.err)
-            step.status == StepStatus.OK -> Icon(Icons.Rounded.Check, null, Modifier.size(14.dp), tint = c.ok)
+            finishedOk -> Icon(Icons.Rounded.Check, null, Modifier.size(14.dp), tint = c.ok)
         }
         Icon(Icons.Rounded.ChevronRight, null, Modifier.size(16.dp), tint = c.ink3)
     }
