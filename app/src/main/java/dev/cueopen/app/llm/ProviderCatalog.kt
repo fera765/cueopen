@@ -7,6 +7,9 @@ import dev.cueopen.app.data.Settings
  * "free" descreve o plano gratuito do provedor no momento em que foi catalogado; limites mudam — confira no site dele.
  */
 object ProviderCatalog {
+    /** Login por código (OAuth Device Authorization, RFC 8628) com um app público registrado pelo próprio usuário. */
+    data class DeviceAuth(val deviceUrl: String, val tokenUrl: String, val scope: String, val registerUrl: String, val howTo: String)
+
     data class Preset(
         val id: String,
         val name: String,
@@ -16,6 +19,7 @@ object ProviderCatalog {
         val defaultModel: String = "",
         val needsKey: Boolean = true,
         val oauth: Boolean = false,
+        val device: DeviceAuth? = null,
     )
 
     val all: List<Preset> = listOf(
@@ -27,11 +31,18 @@ object ProviderCatalog {
         Preset("cerebras", "Cerebras", "https://api.cerebras.ai/v1", "https://cloud.cerebras.ai", "Gratuito, ~1M tokens/dia (contexto menor no plano grátis)"),
         Preset("gemini", "Google Gemini", "https://generativelanguage.googleapis.com/v1beta/openai", "https://aistudio.google.com/apikey", "Plano gratuito no AI Studio (indisponível em alguns países)"),
         Preset("mistral", "Mistral", "https://api.mistral.ai/v1", "https://console.mistral.ai/api-keys", "Plano gratuito de experimentação"),
-        Preset("github", "GitHub Models", "https://models.github.ai/inference", "https://github.com/settings/tokens", "Gratuito para experimentação com token do GitHub (limites diários)"),
+        Preset("github", "GitHub Models", "https://models.github.ai/inference", "https://github.com/settings/tokens", "Gratuito para experimentação com a conta do GitHub (limites diários)",
+            oauth = true, device = DeviceAuth("https://github.com/login/device/code", "https://github.com/login/oauth/access_token", "",
+                "https://github.com/settings/apps/new",
+                "Crie um GitHub App (grátis): marque \"Enable Device Flow\", em Account permissions dê Models → Read-only, salve e copie o Client ID.")),
         Preset("nvidia", "NVIDIA NIM", "https://integrate.api.nvidia.com/v1", "https://build.nvidia.com", "Créditos gratuitos para testes"),
-        Preset("huggingface", "Hugging Face", "https://router.huggingface.co/v1", "https://huggingface.co/settings/tokens", "Créditos mensais gratuitos"),
+        Preset("huggingface", "Hugging Face", "https://router.huggingface.co/v1", "https://huggingface.co/settings/tokens", "Créditos mensais gratuitos",
+            oauth = true, device = DeviceAuth("https://huggingface.co/oauth/device", "https://huggingface.co/oauth/token", "openid inference-api",
+                "https://huggingface.co/settings/applications/new",
+                "Crie um app OAuth público (sem secret) com o escopo inference-api e copie o Client ID.")),
         Preset("sambanova", "SambaNova", "https://api.sambanova.ai/v1", "https://cloud.sambanova.ai/apis", "Plano gratuito com limites"),
         Preset("deepseek", "DeepSeek", "https://api.deepseek.com/v1", "https://platform.deepseek.com/api_keys", "Pago, de baixo custo"),
+        Preset("pollinations", "Pollinations", "https://gen.pollinations.ai/v1", "https://enter.pollinations.ai", "Chave gratuita com limite por tempo"),
         Preset("together", "Together AI", "https://api.together.xyz/v1", "https://api.together.xyz/settings/api-keys", "Alguns modelos gratuitos"),
         Preset("ollama", "Ollama (local)", "http://127.0.0.1:11434/v1", "https://ollama.com/download", "Grátis, roda num computador/servidor seu", needsKey = false),
         Preset("lmstudio", "LM Studio (local)", "http://127.0.0.1:1234/v1", "https://lmstudio.ai", "Grátis, roda num computador seu", needsKey = false),

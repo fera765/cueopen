@@ -1629,12 +1629,24 @@ class AgentRunner(
                             continue
                         }
                         if (category == dev.cueopen.app.llm.LlmRecovery.Category.RATE_LIMIT &&
-                            dev.cueopen.app.llm.ModelFallback.onRateLimit(failingModel, store.settings.fallbackModel, primary = primaryNow)) {
+                            dev.cueopen.app.llm.ModelFallback.onRateLimit(failingModel, fallbackChain(), primary = primaryNow)) {
                             val next = stepModel(agent)
                             val back = dev.cueopen.app.llm.ModelFallback.activeUntil(primaryNow)?.let { SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(it)) }.orEmpty()
                             store.addItem(sessionId, ChatItem.Step(tool = "model_switch",
                                 title = if (failingModel == primaryNow) "Limite no modelo principal: usando o alternativo" else "Limite no alternativo: usando o próximo da cadeia",
                                 args = dev.cueopen.app.llm.ProviderRoute.label(next), result = "Testo o principal ($primaryNow) de novo às $back.", status = StepStatus.OK))
+                            attempt = 0
+                            continue
+                        }
+                        // Erro do provedor/modelo que não passou em até 3 tentativas: vai para o próximo provedor da cadeia.
+                        // (Sem internet e contexto estourado não se resolvem trocando de provedor.)
+                        if (llmFailure != null && category != dev.cueopen.app.llm.LlmRecovery.Category.NETWORK &&
+                            category != dev.cueopen.app.llm.LlmRecovery.Category.CONTEXT &&
+                            (attempt >= 3 || !dev.cueopen.app.llm.LlmRecovery.shouldRetry(category, attempt, retryable)) &&
+                            dev.cueopen.app.llm.ModelFallback.onRateLimit(failingModel, fallbackChain(), primary = primaryNow)) {
+                            val next = stepModel(agent)
+                            store.addItem(sessionId, ChatItem.Step(tool = "model_switch", title = "Falha no provedor (${category.label}): usando o próximo da cadeia",
+                                args = dev.cueopen.app.llm.ProviderRoute.label(next), result = "Depois de $attempt tentativa(s) em ${dev.cueopen.app.llm.ProviderRoute.label(failingModel)}. O principal é testado de novo em alguns minutos.", status = StepStatus.OK))
                             attempt = 0
                             continue
                         }
@@ -2618,10 +2630,13 @@ class AgentRunner(
         dev.cueopen.app.share.ChannelSender.Config(s.telegramBotToken, s.telegramChatId, s.discordWebhookUrl, s.slackBotToken, s.slackChannelId)
     }
 
+    /** Alternativos do momento: os provedores da cadeia (cada um com seu modelo) + alternativos por modelo. */
+    private fun fallbackChain(): String = dev.cueopen.app.llm.ProviderChain.fallback(store.settings)
+
     private fun primaryModel(agent: AgentProfile?): String = agent?.model?.takeIf { it.isNotBlank() } ?: store.settings.model
     /** Modelo desta chamada: o principal, ou o alternativo enquanto o principal está em limite de requisições. */
     private fun stepModel(agent: AgentProfile?): String =
-        dev.cueopen.app.llm.ModelFallback.resolve(primaryModel(agent), store.settings.fallbackModel)
+        dev.cueopen.app.llm.ModelFallback.resolve(primaryModel(agent), fallbackChain())
 
     private fun toolName(o: kotlinx.serialization.json.JsonElement): String =
         runCatching { o.jsonObject["function"]!!.jsonObject["name"]!!.jsonPrimitive.content }.getOrDefault("")
@@ -4062,24 +4077,7 @@ class AgentRunner(
         }
 
         val (title, kind) = ToolActivityLabels.of(call.name)
-        val argPreview = when (call.name) {
-            "shell" -> s("command")
-            "file_write", "file_edit", "file_read", "file_list" -> s("path").ifBlank { cwd }
-            "browser_navigate" -> s("url")
-            "browser_new_tab" -> s("url")
-            "browser_select_tab", "browser_close_tab" -> s("tab_id")
-            "browser_type" -> s("text")
-            "browser_click" -> "#${i("index")}"
-            "remember", "memory_save" -> s("fact")
-            "memory_search" -> s("query")
-            "notes_write" -> s("content").take(60)
-            "device_accessibility_open_app" -> s("app").take(60)
-            "device_accessibility_click", "device_accessibility_scroll" -> "element ${i("element_id")?.toString() ?: "?"}"
-            "device_accessibility_type" -> "element ${i("element_id")?.toString() ?: "?"} · texto oculto"
-            "device_accessibility_inspect_image" -> "element ${i("element_id")?.toString() ?: "?"} · recorte efêmero"
-            "create_skill" -> s("name")
-            else -> ""
-        }
+        val argPreview = ToolActivityLabels.preview(call.name, ::s, ::i, cwd)
         val step = ChatItem.Step(tool = call.name, title = title, args = argPreview)
         val executionArguments = if (call.name == "device_accessibility_type") buildJsonObject {
             put("snapshot_id", s("snapshot_id"))

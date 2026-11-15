@@ -147,6 +147,7 @@ class OpenRouter(private val settings: () -> Settings) {
         jsonResponse: Boolean = false,
         conversationId: String? = null,
     ): LlmReply = withContext(Dispatchers.IO) {
+        settings().let { base -> OAuthRefresh.ensureFresh(ProviderRoute.split(model ?: base.model).first ?: ProviderCatalog.activeId(base)) }
         val (s, mdl) = settings().let { base -> ProviderRoute.route(base, model ?: base.model) }
         require(mdl.isNotBlank()) { "Escolha um modelo em Configurações › Provedores." }
         val openRouter = isOpenRouter(s.baseUrl)
@@ -335,7 +336,7 @@ class OpenRouter(private val settings: () -> Settings) {
     /** Pedido simples sem ferramentas (títulos, resumos), no modelo rápido. */
     suspend fun quick(prompt: String, maxTokens: Int = 200, conversationId: String? = null): String {
         val primary = settings().fastModel
-        val fallback = settings().fallbackModel
+        val fallback = ProviderChain.fallback(settings(), fast = true)
         val model = ModelFallback.resolve(primary, fallback)
         return try {
             chat(listOf(LlmMessage("user", prompt)), maxTokens = maxTokens, model = model, conversationId = conversationId).content.orEmpty().trim()

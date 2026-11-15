@@ -50,4 +50,24 @@ object ToolActivityLabels {
         "create_skill" -> "Criando skill" to Activity.Kind.THINKING
         else -> (if (tool.startsWith("mcp_")) "Conector · " + tool.substringAfter("__") else tool) to Activity.Kind.THINKING
     }
+
+    /** Resumo curto dos argumentos mostrado no passo (nunca o texto digitado em campos). */
+    fun preview(tool: String, s: (String) -> String, i: (String) -> Int?, cwd: String): String = when (tool) {
+        "shell" -> s("command")
+        "file_write", "file_edit", "file_read", "file_list" -> s("path").ifBlank { cwd }
+        "browser_navigate" -> s("url")
+        "browser_new_tab" -> s("url")
+        "browser_select_tab", "browser_close_tab" -> s("tab_id")
+        "browser_type" -> s("text")
+        "browser_click" -> "#${i("index")}"
+        "remember", "memory_save" -> s("fact")
+        "memory_search" -> s("query")
+        "notes_write" -> s("content").take(60)
+        "device_accessibility_open_app" -> s("app").take(60)
+        "device_accessibility_click", "device_accessibility_scroll" -> "element ${i("element_id")?.toString() ?: "?"}"
+        "device_accessibility_type" -> "element ${i("element_id")?.toString() ?: "?"} · texto oculto"
+        "device_accessibility_inspect_image" -> "element ${i("element_id")?.toString() ?: "?"} · recorte efêmero"
+        "create_skill" -> s("name")
+        else -> ""
+    }
 }

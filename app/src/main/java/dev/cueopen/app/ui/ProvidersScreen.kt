@@ -68,6 +68,18 @@ fun saveProviderCreds(s: Settings, id: String, keys: String, baseUrl: String): S
 /** Compat: salvar só a chave (usado pelo login OAuth). */
 fun saveProviderKey(s: Settings, p: ProviderCatalog.Preset, key: String): Settings = saveProviderCreds(s, p.id, key, providerCreds(s, p.id).second.ifBlank { p.baseUrl })
 
+/** Modelo do agente guardado num provedor (ativo = campos principais). */
+fun saveProviderModel(s: Settings, id: String, model: String): Settings =
+    if (ProviderCatalog.activeId(s) == id) s.copy(model = model)
+    else {
+        val cur = s.savedProviders[id].orEmpty()
+        s.copy(savedProviders = s.savedProviders + (id to listOf(cur.getOrNull(0).orEmpty(), cur.getOrNull(1)?.ifBlank { null } ?: ProviderCatalog.byId(id)?.baseUrl.orEmpty(),
+            model, cur.getOrNull(3).orEmpty(), cur.getOrNull(4).orEmpty())))
+    }
+
+private fun providerName(id: String) = ProviderCatalog.byId(id)?.name ?: "Personalizado"
+private fun allIds() = ProviderCatalog.ordered.map { it.id } + "custom"
+
 @Composable
 fun ProvidersScreen(nav: NavController) {
     val app = CueApp.instance
@@ -75,22 +87,27 @@ fun ProvidersScreen(nav: NavController) {
     val s = st.settings
     val c = Cue.c
     val activeId = ProviderCatalog.activeId(s)
-    val activeName = ProviderCatalog.byId(activeId)?.name ?: "Personalizado"
+    val connected = allIds().filter { it == activeId || providerConnected(s, it) }
     Scaffold(containerColor = c.bg, topBar = { CueTopBar("Provedores e modelos", { nav.popBackStack() }) }) { pad ->
         Column(Modifier.padding(pad).verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            // ---------- Em uso
-            SectionLabel("Em uso · $activeName")
+            // ---------- Provedor ativo: tocar já ativa
+            SectionLabel("Provedor ativo")
+            Row(Modifier.horizontalScrollSafe(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                connected.forEach { id ->
+                    FilterChip(id == activeId, { if (id != activeId) app.store.updateSettings { switchProvider(it, ProviderCatalog.byId(id)) } },
+                        label = { Text(providerName(id), fontSize = 13.sp) })
+                }
+            }
             val activeKey = KeyPool.current(s.apiKey)
-            ModelPicker(s.model, { v -> app.store.updateSettings { it.copy(model = v) } }, "Modelo do agente", baseUrl = s.baseUrl, apiKey = activeKey)
+            ModelPicker(s.model, { v -> app.store.updateSettings { it.copy(model = v) } }, "Modelo do agente · ${providerName(activeId)}", baseUrl = s.baseUrl, apiKey = activeKey)
             ModelPicker(s.fastModel, { v -> app.store.updateSettings { it.copy(fastModel = v) } }, "Modelo rápido (títulos e resumos de contexto)", baseUrl = s.baseUrl, apiKey = activeKey)
-            FallbackChainEditor(s)
+            ProviderChainEditor(s, connected.filter { it != activeId })
             HorizontalDivider(color = c.line)
 
             // ---------- Conectar
             SectionLabel("Conectar provedores")
-            Text("Regra: quando o provedor oferece login (OAuth), conecte por ele — a chave é criada na sua conta sem copiar nada. " +
-                "Os demais conectam com chave de API; coloque várias chaves (uma por linha) para trocar de conta sozinho quando uma bater o limite. " +
-                "Planos gratuitos têm limites que mudam: confira no site do provedor.", fontSize = 12.sp, color = c.ink3)
+            Text("Regra: quando o provedor oferece login (OAuth), conecte por ele. Os demais usam chave de API — várias chaves (uma por linha) trocam de conta sozinhas no limite. " +
+                "Tocar num provedor conectado já o ativa. Planos gratuitos têm limites que mudam.", fontSize = 12.sp, color = c.ink3)
             ProviderCatalog.ordered.forEach { p -> ProviderCard(s, p, activeId == p.id) }
             ProviderCard(s, null, activeId == "custom")
         }
@@ -98,33 +115,36 @@ fun ProvidersScreen(nav: NavController) {
 }
 
 @Composable
-private fun FallbackChainEditor(s: Settings) {
+private fun ProviderChainEditor(s: Settings, others: List<String>) {
     val app = CueApp.instance
     val c = Cue.c
-    val chain = ModelFallback.chain(s.model, s.fallbackModel).drop(1)
-    fun save(list: List<String>) = app.store.updateSettings { it.copy(fallbackModel = list.joinToString(",")) }
-    Text("Cadeia de modelos alternativos", fontWeight = FontWeight.SemiBold)
-    Text("Quando um modelo bate o limite (429), o agente passa ao próximo da lista — pode ser de outro provedor conectado. O principal é testado de novo depois de alguns minutos.", fontSize = 12.sp, color = c.ink3)
-    chain.forEachIndexed { i, m ->
+    Text("Provedores alternativos", fontWeight = FontWeight.SemiBold)
+    Text("Se o ativo bater o limite ou falhar 3 vezes, o agente passa ao próximo marcado (com o modelo escolhido nele). O ativo é testado de novo em alguns minutos e reassume quando volta.",
+        fontSize = 12.sp, color = c.ink3)
+    if (others.isEmpty()) Text("Conecte outro provedor abaixo para usá-lo como alternativo.", fontSize = 12.sp, color = c.ink2)
+    val order = s.fallbackProviders.filter { it in others } + others.filter { it !in s.fallbackProviders }
+    order.forEach { id ->
+        val on = id in s.fallbackProviders
+        val pos = s.fallbackProviders.filter { it in others }.indexOf(id)
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Text("${i + 1}. " + ProviderRoute.label(m), Modifier.weight(1f), fontSize = 14.sp)
-            if (i > 0) IconButton({ save(chain.toMutableList().also { l -> l.add(i - 1, l.removeAt(i)) }) }) { Icon(Icons.Rounded.ArrowUpward, "Subir", tint = c.ink2) }
-            IconButton({ save(chain.filterIndexed { j, _ -> j != i }) }) { Icon(Icons.Rounded.Close, "Remover", tint = c.ink2) }
+            Checkbox(on, { v -> app.store.updateSettings { cur -> cur.copy(fallbackProviders = if (v) cur.fallbackProviders + id else cur.fallbackProviders - id) } })
+            Column(Modifier.weight(1f)) {
+                Text((if (on) "${pos + 1}. " else "") + providerName(id), fontSize = 14.sp)
+                val m = dev.cueopen.app.llm.ProviderChain.modelOf(s, id)
+                Text(if (m.isBlank()) "Sem modelo: escolha no card do provedor" else "Modelo: $m", fontSize = 12.sp, color = if (m.isBlank()) c.err else c.ink3)
+            }
+            if (on && pos > 0) IconButton({ app.store.updateSettings { cur ->
+                val l = cur.fallbackProviders.filter { it in others }.toMutableList(); l.add(pos - 1, l.removeAt(pos))
+                cur.copy(fallbackProviders = l + cur.fallbackProviders.filter { it !in others })
+            } }) { Icon(Icons.Rounded.ArrowUpward, "Subir", tint = c.ink2) }
         }
     }
-    val connected = (listOf(ProviderCatalog.activeId(s)) + ProviderCatalog.all.map { it.id } + "custom").distinct().filter { it == ProviderCatalog.activeId(s) || providerConnected(s, it) }
-    var pick by remember { mutableStateOf<String?>(null) }
-    Row(Modifier.horizontalScrollSafe(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-        connected.forEach { id ->
-            FilterChip(pick == id, { pick = if (pick == id) null else id }, label = { Text("+ " + (ProviderCatalog.byId(id)?.name ?: "Personalizado"), fontSize = 12.sp) })
+    val legacy = s.fallbackModel.split(',').map { it.trim() }.filter { it.isNotBlank() }
+    legacy.forEach { m ->
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("Modelo alternativo: " + ProviderRoute.label(m), Modifier.weight(1f), fontSize = 13.sp, color = c.ink2)
+            IconButton({ app.store.updateSettings { it.copy(fallbackModel = (legacy - m).joinToString(",")) } }) { Icon(Icons.Rounded.Close, "Remover", tint = c.ink2) }
         }
-    }
-    pick?.let { id ->
-        val (keys, base) = providerCreds(s, id)
-        ModelPicker("", { v ->
-            if (v.isNotBlank()) save(chain + ProviderRoute.encode(if (id == ProviderCatalog.activeId(s)) "" else id, v))
-            pick = null
-        }, "Modelo alternativo em " + (ProviderCatalog.byId(id)?.name ?: "Personalizado"), baseUrl = base, apiKey = KeyPool.current(keys))
     }
 }
 
@@ -140,51 +160,86 @@ private fun ProviderCard(s: Settings, p: ProviderCatalog.Preset?, active: Boolea
     val id = p?.id ?: "custom"
     val (storedKeys, storedBase) = providerCreds(s, id)
     val connected = active || providerConnected(s, id)
-    var open by remember(id) { mutableStateOf(active) }
+    var open by remember(id, active) { mutableStateOf(active) }
     var keys by remember(id, storedKeys) { mutableStateOf(storedKeys) }
     var base by remember(id, storedBase) { mutableStateOf(storedBase.ifBlank { p?.baseUrl.orEmpty() }) }
+    var clientId by remember(id) { mutableStateOf(s.oauthClients[id].orEmpty()) }
     var showKeyField by remember(id) { mutableStateOf(p?.oauth != true || storedKeys.isNotBlank()) }
     var busy by remember { mutableStateOf(false) }
     var msg by remember { mutableStateOf<String?>(null) }
     val dirty = keys.trim() != storedKeys.trim() || base.trim() != storedBase.trim()
+    fun activate() = app.store.updateSettings { cur -> if (ProviderCatalog.activeId(cur) == id) cur else switchProvider(cur, p, base) }
+    fun openUrl(url: String) = runCatching { ctx.startActivity(android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse(url)).addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)) }
     Column(Modifier.fillMaxWidth().border(1.dp, if (active) c.accent else c.line, RoundedCornerShape(16.dp)).padding(12.dp),
         verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        Row(Modifier.fillMaxWidth().clickable { open = !open }, verticalAlignment = Alignment.CenterVertically) {
+        // Tocar no cabeçalho: conectado → ativa; não conectado → abre para conectar.
+        Row(Modifier.fillMaxWidth().clickable { if (connected) { activate(); open = true } else open = !open }, verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
                 Text((p?.name ?: "Personalizado") + (if (p?.oauth == true) " · login" else ""), fontWeight = FontWeight.SemiBold)
-                val status = when {
-                    active -> "Ativo" + KeyPool.describe(storedKeys).let { if (it.isBlank()) "" else " · $it" }
-                    connected -> "Conectado" + KeyPool.describe(storedKeys).let { if (it.isBlank()) "" else " · $it" }
-                    else -> "Não conectado"
-                }
+                val accounts = KeyPool.describe(storedKeys).let { if (it.isBlank()) "" else " · $it" }
+                val status = when { active -> "Ativo$accounts"; connected -> "Conectado$accounts · toque para ativar"; else -> "Não conectado" }
                 Text(status + " · " + (p?.free ?: "Qualquer endpoint OpenAI-compatible (LiteLLM, OmniRoute, one-api…)"), fontSize = 12.sp, color = c.ink3)
             }
             if (active) Icon(Icons.Rounded.CheckCircle, "Ativo", tint = c.ok)
-            else Icon(if (open) Icons.Rounded.ExpandLess else Icons.Rounded.ExpandMore, null, tint = c.ink2)
+            else IconButton({ open = !open }) { Icon(if (open) Icons.Rounded.ExpandLess else Icons.Rounded.ExpandMore, "Detalhes", tint = c.ink2) }
         }
         if (!open) return@Column
-        if (p?.oauth == true) {
+        // ---- Login (OAuth): PKCE do OpenRouter ou login por código
+        if (p?.oauth == true && p.device == null) {
             Button(enabled = !busy, onClick = {
                 busy = true; msg = "Abrindo o login…"
                 scope.launch {
                     runCatching { dev.cueopen.app.llm.OpenRouterOAuth.login(ctx) }
-                        .onSuccess { k ->
-                            app.store.updateSettings { cur -> saveProviderKey(cur, p, k).let { if (ProviderCatalog.activeId(it) == p.id) it else switchProvider(it, p) } }
-                            keys = k; msg = "Conectado e ativado: a chave da sua conta foi criada e salva."
-                        }
-                        .onFailure { msg = it.message ?: "Falha no login." }
+                        .onSuccess { k -> app.store.updateSettings { cur -> saveProviderKey(cur, p, k).let { if (ProviderCatalog.activeId(it) == p.id) it else switchProvider(it, p) } }; keys = k; msg = "Conectado e ativado." }
+                        .onFailure { msg = "Falhou: " + (it.message ?: "login interrompido") }
                     busy = false
                 }
             }, colors = ButtonDefaults.buttonColors(containerColor = c.ink, contentColor = c.bg), modifier = Modifier.fillMaxWidth()) {
                 Text(if (connected) "Entrar de novo com ${p.name}" else "Entrar com ${p.name}")
             }
-            if (!showKeyField) TextButton({ showKeyField = true }) { Text("Usar chave de API em vez do login", color = c.ink2, fontSize = 13.sp) }
         }
+        p?.device?.let { auth ->
+            Text("Login por código: ${auth.howTo}", fontSize = 12.sp, color = c.ink3)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Box(Modifier.weight(1f)) { CueField(clientId, { clientId = it.trim() }, "Client ID do seu app OAuth (público)") }
+                TextButton({ openUrl(auth.registerUrl) }) { Text("Criar app", color = c.ink2, fontSize = 13.sp) }
+            }
+            Button(enabled = !busy && clientId.isNotBlank(), onClick = {
+                busy = true; msg = "Pedindo o código…"
+                scope.launch {
+                    runCatching {
+                        val start = dev.cueopen.app.llm.DeviceFlow.start(auth, clientId)
+                        (ctx.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager)
+                            .setPrimaryClip(android.content.ClipData.newPlainText("código", start.userCode))
+                        msg = "Código ${start.userCode} (copiado). Cole no site que abriu e confirme; o app espera aqui."
+                        openUrl(start.verificationUri)
+                        dev.cueopen.app.llm.DeviceFlow.poll(auth, clientId, start)
+                    }.onSuccess { tokens ->
+                        app.store.updateSettings { cur ->
+                            dev.cueopen.app.llm.OAuthRefresh.saveTokens(cur.copy(oauthClients = cur.oauthClients + (p.id to clientId)), p.id, tokens)
+                                .let { if (ProviderCatalog.activeId(it) == p.id) it else switchProvider(it, p) }
+                        }
+                        keys = tokens.accessToken; msg = "Conectado e ativado pelo login."
+                    }.onFailure { msg = "Falhou: " + (it.message ?: "login interrompido") }
+                    busy = false
+                }
+            }, colors = ButtonDefaults.buttonColors(containerColor = c.ink, contentColor = c.bg), modifier = Modifier.fillMaxWidth()) {
+                Text(if (connected) "Entrar de novo com ${p.name}" else "Entrar com ${p.name}")
+            }
+        }
+        if (p?.oauth == true && !showKeyField) TextButton({ showKeyField = true }) { Text("Usar chave de API em vez do login", color = c.ink2, fontSize = 13.sp) }
+        // ---- Chave / Base URL
         if (p == null || !p.needsKey) CueField(base, { base = it }, if (p == null) "Base URL — ex.: https://api.exemplo.com/v1" else "Base URL (troque 127.0.0.1 pelo IP do computador)")
         if ((p == null || p.needsKey) && showKeyField)
             CueField(keys, { keys = it }, "Chave da API (várias contas: uma por linha)", password = KeyPool.keys(keys).size <= 1, minLines = if (KeyPool.keys(keys).size > 1) 2 else 1)
+        // ---- Modelo deste provedor (o do ativo fica no topo)
+        if (connected && !active) {
+            val (k, b) = providerCreds(s, id)
+            ModelPicker(dev.cueopen.app.llm.ProviderChain.modelOf(s, id), { v -> app.store.updateSettings { saveProviderModel(it, id, v) } },
+                "Modelo deste provedor (ao ativar ou como alternativo)", baseUrl = b, apiKey = KeyPool.current(k))
+        }
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(2.dp)) {
-            if (p != null && p.needsKey) TextButton({ runCatching { ctx.startActivity(android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse(p.keyUrl)).addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)) } }) { Text("Obter chave", color = c.ink2, fontSize = 13.sp) }
+            if (p != null && p.needsKey) TextButton({ openUrl(p.keyUrl) }) { Text("Obter chave", color = c.ink2, fontSize = 13.sp) }
             TextButton(enabled = !busy && base.isNotBlank(), onClick = {
                 busy = true; msg = "Testando…"
                 scope.launch {
