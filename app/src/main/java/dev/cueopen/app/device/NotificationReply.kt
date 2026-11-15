@@ -33,7 +33,7 @@ object NotificationReply {
         if (action != null) targets[id] = Target(app, title, action.actionIntent, action.remoteInputs, System.currentTimeMillis())
         val cutoff = System.currentTimeMillis() - TTL_MS
         targets.entries.removeIf { it.value.at < cutoff }
-        if (keyToId.size > 400) keyToId.entries.filter { it.value !in targets }.take(200).forEach { keyToId.remove(it.key) }
+        if (keyToId.size > 400) keyToId.entries.filter { !targets.containsKey(it.value) }.take(200).forEach { keyToId.remove(it.key) }
         return id
     }
 
