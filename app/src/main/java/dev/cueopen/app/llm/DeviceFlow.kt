@@ -6,7 +6,12 @@ import kotlinx.coroutines.withContext
 import okhttp3.FormBody
 import okhttp3.OkHttpClient
 import okhttp3.Request
-import org.json.JSONObject
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.put
 import java.util.concurrent.TimeUnit
 
 /**
@@ -20,40 +25,47 @@ object DeviceFlow {
 
     private val http = OkHttpClient.Builder().callTimeout(30, TimeUnit.SECONDS).build()
 
-    private fun post(url: String, form: Map<String, String>): Pair<Int, JSONObject> {
+    private fun JsonObject.str(k: String): String = (this[k] as? JsonPrimitive)?.takeIf { it.isString || it.content != "null" }?.content.orEmpty()
+    private fun JsonObject.num(k: String, def: Long): Long = (this[k] as? JsonPrimitive)?.content?.toDoubleOrNull()?.toLong() ?: def
+
+    fun parse(txt: String): JsonObject = runCatching { Json.parseToJsonElement(txt).jsonObject }.getOrElse {
+        buildJsonObject { put("error", "resposta_invalida"); put("error_description", txt.take(160)) }
+    }
+
+    private fun post(url: String, form: Map<String, String>): Pair<Int, JsonObject> {
         val body = FormBody.Builder().apply { form.forEach { (k, v) -> if (v.isNotBlank()) add(k, v) } }.build()
         http.newCall(Request.Builder().url(url).header("Accept", "application/json").post(body).build()).execute().use { r ->
             val txt = r.body?.string().orEmpty()
-            return r.code to (runCatching { JSONObject(txt) }.getOrNull() ?: JSONObject().put("error", "resposta_invalida").put("error_description", txt.take(160)))
+            return r.code to parse(txt)
         }
     }
 
-    fun parseStart(o: JSONObject): Start? {
-        val device = o.optString("device_code"); val user = o.optString("user_code")
-        val uri = o.optString("verification_uri_complete").ifBlank { o.optString("verification_uri") }
+    fun parseStart(o: JsonObject): Start? {
+        val device = o.str("device_code"); val user = o.str("user_code")
+        val uri = o.str("verification_uri_complete").ifBlank { o.str("verification_uri") }
         if (device.isBlank() || user.isBlank() || uri.isBlank()) return null
-        return Start(device, user, uri, o.optInt("interval", 5).coerceIn(1, 30), o.optInt("expires_in", 900))
+        return Start(device, user, uri, o.num("interval", 5).toInt().coerceIn(1, 30), o.num("expires_in", 900).toInt())
     }
 
     /** Resultado de uma consulta: tokens, "continuar esperando" (null + slowDown) ou erro definitivo (exceção). */
-    fun parsePoll(o: JSONObject, now: Long): Pair<Tokens?, Boolean> {
-        val access = o.optString("access_token")
+    fun parsePoll(o: JsonObject, now: Long): Pair<Tokens?, Boolean> {
+        val access = o.str("access_token")
         if (access.isNotBlank()) {
-            val exp = o.optLong("expires_in", 0L).let { if (it > 0) now + it * 1000 else 0L }
-            return Tokens(access, o.optString("refresh_token"), exp) to false
+            val exp = o.num("expires_in", 0L).let { if (it > 0) now + it * 1000 else 0L }
+            return Tokens(access, o.str("refresh_token"), exp) to false
         }
-        return when (o.optString("error")) {
+        return when (o.str("error")) {
             "authorization_pending" -> null to false
             "slow_down" -> null to true
             "access_denied" -> error("Login recusado no site do provedor.")
             "expired_token" -> error("O código expirou. Tente de novo.")
-            else -> error("O provedor recusou o login (${o.optString("error")}: ${o.optString("error_description").take(140)}).")
+            else -> error("O provedor recusou o login (${o.str("error")}: ${o.str("error_description").take(140)}).")
         }
     }
 
     suspend fun start(a: ProviderCatalog.DeviceAuth, clientId: String): Start = withContext(Dispatchers.IO) {
         val (code, o) = post(a.deviceUrl, mapOf("client_id" to clientId.trim(), "scope" to a.scope))
-        parseStart(o) ?: error("O provedor não iniciou o login (HTTP $code: ${o.optString("error_description").ifBlank { o.optString("error") }.take(140)}). Confira o Client ID.")
+        parseStart(o) ?: error("O provedor não iniciou o login (HTTP $code: ${o.str("error_description").ifBlank { o.str("error") }.take(140)}). Confira o Client ID.")
     }
 
     /** Consulta até o usuário confirmar (respeitando interval/slow_down) ou o código expirar. */

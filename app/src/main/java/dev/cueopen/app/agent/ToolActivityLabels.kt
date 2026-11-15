@@ -68,6 +68,9 @@ object ToolActivityLabels {
         "device_accessibility_type" -> "element ${i("element_id")?.toString() ?: "?"} · texto oculto"
         "device_accessibility_inspect_image" -> "element ${i("element_id")?.toString() ?: "?"} · recorte efêmero"
         "create_skill" -> s("name")
+        "send_file" -> s("channel") + " · " + s("path").substringAfterLast('/')
+        "device_share_file" -> s("app") + " · " + s("path").substringAfterLast('/')
+        "device_open_link" -> s("url").take(80)
         else -> ""
     }
 }
