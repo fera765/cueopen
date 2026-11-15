@@ -78,7 +78,7 @@ object ActionGate {
      * @return categoria sensível ou null quando a ação é rotineira.
      */
     fun classify(tool: String, label: String?): Category? = when {
-        tool == "device_notification_reply" -> Category.SEND
+        tool == "device_notification_reply" || tool == "send_file" -> Category.SEND
         tool == "browser_click" || tool == "browser_type" || tool == "device_accessibility_click" || tool == "device_accessibility_tap" -> classifyText(label)
         tool == "browser_js" -> label?.takeIf { Regex("click\\(|submit\\(|requestSubmit|dispatchEvent").containsMatchIn(it) }
             ?.let { code -> Regex("[\"'`]([^\"'`]{2,60})[\"'`]").findAll(code).mapNotNull { classifyText(it.groupValues[1]) }.firstOrNull() }
@@ -93,6 +93,7 @@ object ActionGate {
         val what = label?.replace(Regex("\\s+"), " ")?.trim()?.take(90)?.takeIf { it.isNotEmpty() }
         return when {
             tool == "device_notification_reply" -> "Responder$where: “${what ?: ""}”"
+            tool == "send_file" -> "Enviar o arquivo “${what ?: "arquivo"}”$where"
             tool == "browser_click" || tool == "device_accessibility_click" || tool == "device_accessibility_tap" -> "Tocar em “${what ?: "botão"}”$where"
             tool == "browser_type" -> "Enviar o formulário “${what ?: "campo"}”$where"
             tool == "browser_js" -> "Executar script na página$where que aciona “${category.label.lowercase()}”"

@@ -121,6 +121,14 @@ fun SettingsScreen(nav: NavController) {
                     Chip(l, s.theme == m) { app.store.updateSettings { it.copy(theme = m) } }
                 }
             }
+            SectionLabel("Canais de envio de arquivos")
+            Text("Com um canal configurado, os agentes enviam arquivos e imagens sozinhos (cada envio passa pela confirmação do agente, salvo no modo 100% autônomo). As credenciais ficam só no aparelho.", fontSize = 12.sp, color = Cue.c.ink3)
+            CueField(s.telegramBotToken, { v -> app.store.updateSettings { it.copy(telegramBotToken = v.trim()) } }, "Telegram · token do bot (@BotFather)", password = true)
+            CueField(s.telegramChatId, { v -> app.store.updateSettings { it.copy(telegramChatId = v.trim()) } }, "Telegram · chat_id de destino")
+            CueField(s.discordWebhookUrl, { v -> app.store.updateSettings { it.copy(discordWebhookUrl = v.trim()) } }, "Discord · URL do webhook do canal", password = true)
+            CueField(s.slackBotToken, { v -> app.store.updateSettings { it.copy(slackBotToken = v.trim()) } }, "Slack · token do bot (xoxb-…, escopo files:write)", password = true)
+            CueField(s.slackChannelId, { v -> app.store.updateSettings { it.copy(slackChannelId = v.trim()) } }, "Slack · ID do canal (ex.: C0123…)")
+            Text("WhatsApp não tem envio automático oficial para contas pessoais: o agente abre o WhatsApp com o arquivo pronto e toca em Enviar (precisa da acessibilidade ligada no agente).", fontSize = 12.sp, color = Cue.c.ink3)
             SectionLabel("Notificações")
             ToggleRow("Avisar ao concluir tarefas agendadas", "", s.notifyOnDone) { v -> app.store.updateSettings { it.copy(notifyOnDone = v) } }
             SectionLabel("Rede")

@@ -436,6 +436,7 @@ class AgentRunner(
             "browser_type" -> if (arg("submit") != "true") return null
                 else browserFor(sessionId).describe(arg("index").toIntOrNull() ?: -1)?.let { host = it.first; it.second }
             "device_notification_reply" -> { host = dev.cueopen.app.device.NotificationReply.describe(arg("id")); arg("text") }
+            "send_file" -> { host = dev.cueopen.app.share.ChannelSender.channel(arg("channel"))?.label; arg("path").substringAfterLast('/') }
             "device_accessibility_tap" -> arg("text")
             "device_accessibility_click" -> runCatching {
                 dev.cueopen.app.device.DeviceAccessibilityActions.describe(sessionId, arg("snapshot_id"), arg("element_id").toIntOrNull() ?: -1)
@@ -2625,6 +2626,11 @@ class AgentRunner(
 
     // ------------------------------------------------------------------ planejamento de contexto
     /** Usa o modelo do agente quando definido; caso contrário, o modelo padrão. */
+    /** Credenciais dos canais de envio (Configurações › Canais de envio de arquivos). */
+    private fun channelConfig() = store.settings.let { s ->
+        dev.cueopen.app.share.ChannelSender.Config(s.telegramBotToken, s.telegramChatId, s.discordWebhookUrl, s.slackBotToken, s.slackChannelId)
+    }
+
     private fun primaryModel(agent: AgentProfile?): String = agent?.model?.takeIf { it.isNotBlank() } ?: store.settings.model
     /** Modelo desta chamada: o principal, ou o alternativo enquanto o principal está em limite de requisições. */
     private fun stepModel(agent: AgentProfile?): String =
@@ -3386,6 +3392,13 @@ class AgentRunner(
                 put("element_id", int("ID do contêiner ou item no snapshot atual"))
                 put("direction", str("up ou down"))
             }, listOf("snapshot_id", "element_id", "direction")))
+        if ("device_share_file" in deviceTools)
+            add(tool("device_share_file", "Abre o WhatsApp, Telegram, Slack ou Discord com um arquivo do workspace pronto para envio (no WhatsApp, com phone, direto na conversa do número). O envio final é um toque em \"Enviar\".",
+                buildJsonObject { put("path", str("Arquivo do workspace")); put("app", str("whatsapp | telegram | slack | discord")); put("phone", str("WhatsApp: número com DDI e DDD, ex.: 5511999998888 (opcional)")); put("text", str("Legenda opcional")) }, listOf("path", "app")))
+        if (allowMultiAgent && channelConfig().let { dev.cueopen.app.share.ChannelSender.configured(it).isNotEmpty() })
+            add(tool("send_file", "Envia sozinho um arquivo ou imagem do workspace para um canal configurado pelo usuário, sem tocar no celular. Canais ativos: " +
+                dev.cueopen.app.share.ChannelSender.configured(channelConfig()).joinToString { it.id } + ". Imagens chegam como foto; demais arquivos como documento.",
+                buildJsonObject { put("channel", str("telegram | discord | slack (um dos ativos)")); put("path", str("Arquivo do workspace, ex.: relatorio.pdf")); put("caption", str("Legenda/mensagem opcional")) }, listOf("channel", "path")))
         if ("device_notification_reply" in deviceTools)
             add(tool("device_notification_reply", "Responde uma conversa pelo botão \"Responder\" da própria notificação (WhatsApp, Telegram, Instagram, Messenger…), sem abrir o app nem ler a tela. Use o id de uma conversa marcada [pode responder] em device_notifications.",
                 buildJsonObject { put("id", str("Id da conversa em device_notifications, ex.: n3")); put("text", str("Texto da resposta")) }, listOf("id", "text")))
@@ -4097,6 +4110,8 @@ class AgentRunner(
             "device_accessibility_inspect_image" -> "Analisando recorte visual" to Activity.Kind.THINKING
             "device_accessibility_click", "device_accessibility_tap" -> "Tocando no aplicativo" to Activity.Kind.THINKING
             "device_notification_reply" -> "Respondendo pela notificação" to Activity.Kind.THINKING
+            "send_file" -> "Enviando arquivo" to Activity.Kind.THINKING
+            "device_share_file" -> "Abrindo app para enviar arquivo" to Activity.Kind.THINKING
             "device_open_link" -> "Abrindo link no app" to Activity.Kind.THINKING
             "device_accessibility_type" -> "Preenchendo campo" to Activity.Kind.THINKING
             "device_accessibility_scroll" -> "Rolando aplicativo" to Activity.Kind.THINKING
@@ -4752,6 +4767,15 @@ class AgentRunner(
                     }
                     .ifBlank { "Nenhuma notificação capturada ainda." }
                 "device_notification_reply" -> dev.cueopen.app.device.NotificationReply.send(ctx, s("id"), SecretVault.resolve(sessionId, s("text")))
+                "send_file", "device_share_file" -> {
+                    val f = AgentFilePathPolicy.readableWorkspace(sandbox.workspaceFor(sessionId), sandbox.connectorsDir, s("path"))
+                    if (f == null || !f.isFile) "ERRO: arquivo não encontrado no workspace (recebido: \"${s("path").take(120)}\"). Confira com file_list."
+                    else if (call.name == "send_file") {
+                        val ch = dev.cueopen.app.share.ChannelSender.channel(s("channel"))
+                        if (ch == null) "ERRO: canal inválido. Use: " + dev.cueopen.app.share.ChannelSender.configured(channelConfig()).joinToString { it.id }
+                        else dev.cueopen.app.share.ChannelSender.send(ch, channelConfig(), f, SecretVault.resolve(sessionId, s("caption")))
+                    } else dev.cueopen.app.share.ChannelSender.shareToApp(ctx, s("app"), f, s("text"), s("phone"))
+                }
                 "device_open_link" -> {
                     val url = s("url").trim()
                     val scheme = url.substringBefore(':').lowercase()

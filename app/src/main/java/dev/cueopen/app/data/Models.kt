@@ -481,6 +481,12 @@ data class Settings(
     val fastModel: String = "deepseek/deepseek-v4-flash",
     /** Modelo usado automaticamente quando o modelo do agente ou o rápido batem limite de requisições (429). Vazio = desligado. */
     val fallbackModel: String = "",
+    // ---- Canais de envio de arquivos (credenciais ficam só no aparelho e nunca vão para o modelo)
+    val telegramBotToken: String = "",
+    val telegramChatId: String = "",
+    val discordWebhookUrl: String = "",
+    val slackBotToken: String = "",
+    val slackChannelId: String = "",
     /** Configuração do OpenRouter guardada ao trocar para "Personalizado" (e vice-versa), para nada se perder. */
     val savedProviders: Map<String, List<String>> = emptyMap(),
     val disableThinking: Boolean = true,

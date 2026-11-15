@@ -36,7 +36,7 @@ object DeviceCapPolicy {
             "device_accessibility_open_app", "device_accessibility_read_screen",
             "device_accessibility_click", "device_accessibility_type",
             "device_accessibility_scroll", "device_accessibility_back",
-            "device_accessibility_inspect_image", "device_accessibility_tap", "device_open_link",
+            "device_accessibility_inspect_image", "device_accessibility_tap", "device_open_link", "device_share_file",
         ),
     )
 
@@ -48,7 +48,7 @@ object DeviceCapPolicy {
         "device_accessibility_open_app", "device_accessibility_read_screen",
         "device_accessibility_click", "device_accessibility_type",
         "device_accessibility_scroll", "device_accessibility_back",
-        "device_accessibility_inspect_image", "device_accessibility_tap", "device_open_link",
+        "device_accessibility_inspect_image", "device_accessibility_tap", "device_open_link", "device_share_file",
     )
 
     val allTools: Set<String> = toolsByCapability.values.flatten().toSet()
@@ -85,6 +85,7 @@ object DeviceCapPolicy {
             if ("device_contacts" in tools) add("Contatos: use device_contacts para localizar uma pessoa por nome ou número quando o usuário pedir. A busca é específica e limitada; se pedirem a agenda inteira, pergunte qual pessoa ou subconjunto interessa. Devolva somente os dados necessários, sem exportação ou listagem em massa e sem citar contatos que não têm relação com o pedido.")
             if ("device_notification_reply" in tools) add("Mensagens (WhatsApp, Telegram, Instagram, Messenger e outros): leia com device_notifications — cada conversa traz as últimas mensagens e o id; não é preciso abrir o app. Para responder uma conversa marcada [pode responder], use device_notification_reply(id, texto): é instantâneo e não lê a tela. Uma resposta por pedido do usuário, ao destinatário que ele indicou; envio em massa ou para listas de números não é feito.")
             if ("device_open_link" in tools) add("Apps com links diretos: em vez de navegar pela tela, abra o destino com device_open_link — WhatsApp para um número: https://wa.me/<DDI+DDD+número>?text=<texto codificado> (depois toque em \"Enviar\" com device_accessibility_tap); YouTube: https://www.youtube.com/results?search_query=…; Spotify: spotify:search:…; mapas: geo:0,0?q=…; site ou perfil: o link https dele. Depois de abrir, só leia a tela se precisar.")
+            if ("device_share_file" in tools) add("Arquivos para apps: device_share_file(path, app, phone?, text?) abre o WhatsApp, Telegram, Slack ou Discord com o arquivo pronto; no WhatsApp, com o número, já cai na conversa. Depois toque em \"Enviar\" com device_accessibility_tap. Se houver canal configurado (send_file), prefira send_file: é automático.")
             if ("device_accessibility_tap" in tools) add("Toque por texto: device_accessibility_tap(text) acha o botão ou item pelo texto/rótulo visível e toca nele, sem trazer a tela inteira para o contexto. Use-o para botões conhecidos (\"Enviar\", \"Pesquisar\", \"Próximo\", \"Confirmar\"); use device_accessibility_read_screen só quando não souber o que há na tela.")
             if ("device_notifications" in tools) add("Notificações: device_notifications lê apenas as notificações permitidas pela política de privacidade do app. Se um conteúdo estiver restrito, aceite a restrição; não tente contornar o acesso.")
             if ("device_bluetooth" in tools) add("Bluetooth: device_bluetooth lista somente os dispositivos já pareados e não inicia varredura.")

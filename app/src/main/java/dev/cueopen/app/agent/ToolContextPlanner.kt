@@ -27,6 +27,7 @@ object ToolContextPlanner {
         "web_dev" to setOf("browser_js", "browser_network", "browser_console"),
         "agents" to setOf("multi_agents"),
         "schedule" to setOf("sleep", "set_schedule", "cron_add", "cron_list", "cron_remove"),
+        "channels" to setOf("send_file"),
         "skills_admin" to setOf("create_skill", "skill_list", "skill_revise"),
         "wallet" to setOf("wallet_get_address", "wallet_get_balance", "wallet_list_tokens", "wallet_swap",
             "market_price", "market_candles", "market_liquidity", "market_discover", "market_token_info",
@@ -39,7 +40,7 @@ object ToolContextPlanner {
             "device_accessibility_open_app", "device_accessibility_read_screen",
             "device_accessibility_click", "device_accessibility_type",
             "device_accessibility_scroll", "device_accessibility_back",
-            "device_accessibility_inspect_image", "device_accessibility_tap", "device_open_link", "device_notification_reply"
+            "device_accessibility_inspect_image", "device_accessibility_tap", "device_open_link", "device_notification_reply", "device_share_file"
         ),
         "connector_builder" to setOf("connector_spec", "connector_validate", "connector_test", "connector_propose", "connector_edit_propose"),
     )
@@ -51,6 +52,7 @@ object ToolContextPlanner {
         "web_dev" to listOf("javascript", "console", "network", "rede do site", "requisic", "devtools", "api do site", "scrap", "raspar", "depur", "debug", "xhr", "fetch", "cookie", "dom", "userscript", "user script", "tampermonkey"),
         "agents" to listOf("subagente", "sub-agente", "multi agente", "multiagente", "paralel", "em paralelo", "varios agentes", "workers", "pesquisa ampla", "wide research"),
         "schedule" to listOf("monitor", "acompanh", "a cada", "agend", "todo dia", "toda segunda", "amanhã às", "às ", "toda hora", "de hora em hora", "continu", "periodic", "lembr", "aguard", "espera", "minutos", "vela"),
+        "channels" to listOf("telegram", "discord", "slack", "envie o arquivo", "enviar o arquivo", "mande o arquivo", "mandar o arquivo", "envie a imagem", "mande a imagem", "enviar imagem", "mandar imagem", "envie o pdf", "mande o pdf", "enviar o relatório", "mande o relatório"),
         "skills_admin" to listOf("crie uma skill", "criar skill", "nova skill", "salve como skill"),
         "wallet" to listOf("carteira", "wallet", "solana", "sol ", "token", "swap", "saldo", "comprar", "vender", "day trade", "daytrade", "trade", "cripto", "crypto", "memecoin", "stop loss", "take profit", "liquidez", "pump", "jupiter", "usdc"),
         "device" to listOf("notifica", "whatsapp", "zap", "telegram", "instagram", "messenger", "direct", "responda", "responder", "mensagem", "spotify", "youtube", "uber", "99", "ifood", "abra o app", "abrir o app", "print da tela", "captura de tela", "screenshot", "balao", "overlay", "celular", "aparelho", "bluetooth", "dispositivo pareado", "dispositivos pareados", "dispositivos proximos", "calendario", "ligaçao", "ligacao", "chamada", "contato", "contacts", "contact list", "address book", "agenda telefonica", "agenda de contatos", "telefone", "numero do contato", "localizaçao", "localizacao", "microfone", "navegar no aplicativo", "navegar nos apps", "abrir aplicativo", "abrir app", "acessar app", "acessar aplicativo", "outro aplicativo", "instagram", "whatsapp", "spotify"),
