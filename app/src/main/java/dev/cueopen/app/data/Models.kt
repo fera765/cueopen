@@ -497,12 +497,6 @@ data class Settings(
     val oauthClients: Map<String, String> = emptyMap(),
     /** Renovação do login por código, por provedor: [refresh_token, expira_em_ms]. */
     val oauthTokens: Map<String, List<String>> = emptyMap(),
-    /** Provedores alternativos em ordem: entram quando o ativo falha (limite ou erro após 3 tentativas). */
-    val fallbackProviders: List<String> = emptyList(),
-    /** Client ID público do app OAuth registrado pelo usuário (login por código), por provedor. */
-    val oauthClients: Map<String, String> = emptyMap(),
-    /** Renovação do login por código, por provedor: [refresh_token, expira_em_ms]. */
-    val oauthTokens: Map<String, List<String>> = emptyMap(),
     val disableThinking: Boolean = true,
     val maxSteps: Int = 1000,
     val theme: ThemeMode = ThemeMode.SYSTEM,
