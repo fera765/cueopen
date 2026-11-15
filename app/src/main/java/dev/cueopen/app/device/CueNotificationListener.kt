@@ -11,6 +11,8 @@ import dev.cueopen.app.data.now
  * notificações recentes para a ferramenta device_notifications dos agentes.
  */
 class CueNotificationListener : NotificationListenerService() {
+    override fun onNotificationRemoved(sbn: StatusBarNotification) { runCatching { NotificationReply.forget(sbn.key) } }
+
     override fun onNotificationPosted(sbn: StatusBarNotification) {
         runCatching {
             val notification = sbn.notification
@@ -27,7 +29,12 @@ class CueNotificationListener : NotificationListenerService() {
             if (title.isBlank() && text.isBlank()) return
             val pm = packageManager
             val app = runCatching { pm.getApplicationLabel(pm.getApplicationInfo(sbn.packageName, 0)).toString() }.getOrDefault(sbn.packageName)
-            NotifStore.add(CapturedNotif(now(), sbn.packageName, app, title, text))
+            // Resumo de grupo ("5 mensagens de 2 conversas") não é uma conversa: ignora.
+            if (notification.flags and android.app.Notification.FLAG_GROUP_SUMMARY != 0) return
+            val action = NotificationReply.replyAction(notification)
+            val id = NotificationReply.register(sbn.key, app, title, action)
+            NotifStore.add(CapturedNotif(now(), sbn.packageName, app, title, text, id = id, replyable = action != null,
+                conversation = NotificationReply.conversation(e)))
         }
     }
 }

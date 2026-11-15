@@ -27,7 +27,7 @@ object DeviceCapPolicy {
         LOCATION to setOf("device_location"),
         MICROPHONE to setOf("device_microphone"),
         PHONE_CALLS to setOf("device_dial"),
-        PHONE_NOTIFICATIONS to setOf("device_notifications"),
+        PHONE_NOTIFICATIONS to setOf("device_notifications", "device_notification_reply"),
         POST_NOTIFICATIONS to setOf("device_notify"),
         SCREEN to setOf("device_screenshot"),
         OVERLAY to setOf("device_overlay"),
@@ -36,19 +36,19 @@ object DeviceCapPolicy {
             "device_accessibility_open_app", "device_accessibility_read_screen",
             "device_accessibility_click", "device_accessibility_type",
             "device_accessibility_scroll", "device_accessibility_back",
-            "device_accessibility_inspect_image",
+            "device_accessibility_inspect_image", "device_accessibility_tap", "device_open_link",
         ),
     )
 
     /** Operações que leem dados protegidos ou exigem autorização atual do Android. */
     private val systemGatedTools = setOf(
         "device_bluetooth", "device_calendar_read", "device_call_log", "device_contacts",
-        "device_location", "device_microphone", "device_notifications",
+        "device_location", "device_microphone", "device_notifications", "device_notification_reply",
         "device_notify", "device_screenshot", "device_overlay",
         "device_accessibility_open_app", "device_accessibility_read_screen",
         "device_accessibility_click", "device_accessibility_type",
         "device_accessibility_scroll", "device_accessibility_back",
-        "device_accessibility_inspect_image",
+        "device_accessibility_inspect_image", "device_accessibility_tap", "device_open_link",
     )
 
     val allTools: Set<String> = toolsByCapability.values.flatten().toSet()
@@ -83,6 +83,9 @@ object DeviceCapPolicy {
         return buildList {
             add("Ferramentas Android disponíveis neste agente: ${tools.sorted().joinToString(", ")}. Use a ferramenta adequada quando o pedido corresponder a ela. Uma capacidade que não está na lista não está autorizada: não tente obtê-la por outro caminho.")
             if ("device_contacts" in tools) add("Contatos: use device_contacts para localizar uma pessoa por nome ou número quando o usuário pedir. A busca é específica e limitada; se pedirem a agenda inteira, pergunte qual pessoa ou subconjunto interessa. Devolva somente os dados necessários, sem exportação ou listagem em massa e sem citar contatos que não têm relação com o pedido.")
+            if ("device_notification_reply" in tools) add("Mensagens (WhatsApp, Telegram, Instagram, Messenger e outros): leia com device_notifications — cada conversa traz as últimas mensagens e o id; não é preciso abrir o app. Para responder uma conversa marcada [pode responder], use device_notification_reply(id, texto): é instantâneo e não lê a tela. Uma resposta por pedido do usuário, ao destinatário que ele indicou; envio em massa ou para listas de números não é feito.")
+            if ("device_open_link" in tools) add("Apps com links diretos: em vez de navegar pela tela, abra o destino com device_open_link — WhatsApp para um número: https://wa.me/<DDI+DDD+número>?text=<texto codificado> (depois toque em \"Enviar\" com device_accessibility_tap); YouTube: https://www.youtube.com/results?search_query=…; Spotify: spotify:search:…; mapas: geo:0,0?q=…; site ou perfil: o link https dele. Depois de abrir, só leia a tela se precisar.")
+            if ("device_accessibility_tap" in tools) add("Toque por texto: device_accessibility_tap(text) acha o botão ou item pelo texto/rótulo visível e toca nele, sem trazer a tela inteira para o contexto. Use-o para botões conhecidos (\"Enviar\", \"Pesquisar\", \"Próximo\", \"Confirmar\"); use device_accessibility_read_screen só quando não souber o que há na tela.")
             if ("device_notifications" in tools) add("Notificações: device_notifications lê apenas as notificações permitidas pela política de privacidade do app. Se um conteúdo estiver restrito, aceite a restrição; não tente contornar o acesso.")
             if ("device_bluetooth" in tools) add("Bluetooth: device_bluetooth lista somente os dispositivos já pareados e não inicia varredura.")
             if ("device_bluetooth_pair" in tools) add("Bluetooth: device_bluetooth_pair apenas abre as Configurações; o pareamento e as alterações ficam nas mãos do usuário.")

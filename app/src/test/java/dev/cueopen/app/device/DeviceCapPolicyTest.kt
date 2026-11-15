@@ -34,7 +34,7 @@ class DeviceCapPolicyTest {
             "device_accessibility_open_app", "device_accessibility_read_screen",
             "device_accessibility_click", "device_accessibility_type",
             "device_accessibility_scroll", "device_accessibility_back",
-            "device_accessibility_inspect_image",
+            "device_accessibility_inspect_image", "device_accessibility_tap", "device_open_link",
         )
         assertEquals(emptySet<String>(), DeviceCapPolicy.availableTools(
             setOf(DeviceCapPolicy.ACCESSIBILITY), emptySet()))

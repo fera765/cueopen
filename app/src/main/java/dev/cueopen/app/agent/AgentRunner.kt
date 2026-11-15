@@ -435,6 +435,8 @@ class AgentRunner(
             "browser_click" -> browserFor(sessionId).describe(arg("index").toIntOrNull() ?: -1)?.let { host = it.first; it.second }
             "browser_type" -> if (arg("submit") != "true") return null
                 else browserFor(sessionId).describe(arg("index").toIntOrNull() ?: -1)?.let { host = it.first; it.second }
+            "device_notification_reply" -> { host = dev.cueopen.app.device.NotificationReply.describe(arg("id")); arg("text") }
+            "device_accessibility_tap" -> arg("text")
             "device_accessibility_click" -> runCatching {
                 dev.cueopen.app.device.DeviceAccessibilityActions.describe(sessionId, arg("snapshot_id"), arg("element_id").toIntOrNull() ?: -1)
             }.getOrNull()?.let { host = it.first; it.second }
@@ -3384,6 +3386,15 @@ class AgentRunner(
                 put("element_id", int("ID do contêiner ou item no snapshot atual"))
                 put("direction", str("up ou down"))
             }, listOf("snapshot_id", "element_id", "direction")))
+        if ("device_notification_reply" in deviceTools)
+            add(tool("device_notification_reply", "Responde uma conversa pelo botão \"Responder\" da própria notificação (WhatsApp, Telegram, Instagram, Messenger…), sem abrir o app nem ler a tela. Use o id de uma conversa marcada [pode responder] em device_notifications.",
+                buildJsonObject { put("id", str("Id da conversa em device_notifications, ex.: n3")); put("text", str("Texto da resposta")) }, listOf("id", "text")))
+        if ("device_open_link" in deviceTools)
+            add(tool("device_open_link", "Abre um link no app que o atende (link direto): https://wa.me/<número>?text=<texto> abre a conversa do WhatsApp com o texto pronto; também links https de sites/perfis, spotify:, geo:, mailto:, tel:. Não envia nada sozinho.",
+                buildJsonObject { put("url", str("Link a abrir, ex.: https://wa.me/5511999998888?text=Ol%C3%A1")) }, listOf("url")))
+        if ("device_accessibility_tap" in deviceTools)
+            add(tool("device_accessibility_tap", "Toca no controle da tela atual que tem o texto/rótulo informado (ex.: \"Enviar\", \"Pesquisar\"), sem trazer a tela inteira para o contexto. Se houver vários, use occurrence.",
+                buildJsonObject { put("text", str("Texto ou rótulo visível do controle")); put("occurrence", int("Qual correspondência tocar quando há várias (1 = primeira; padrão 1)")) }, listOf("text")))
         if ("device_accessibility_back" in deviceTools)
             add(tool("device_accessibility_back", "Aciona o Voltar do Android. O snapshot atual deixa de valer.", buildJsonObject {}))
         if (allowMultiAgent) connectorTools().forEach { add(it) }
@@ -4084,7 +4095,9 @@ class AgentRunner(
             "device_accessibility_open_app" -> "Abrindo aplicativo" to Activity.Kind.THINKING
             "device_accessibility_read_screen" -> "Lendo controles visíveis" to Activity.Kind.THINKING
             "device_accessibility_inspect_image" -> "Analisando recorte visual" to Activity.Kind.THINKING
-            "device_accessibility_click" -> "Tocando no aplicativo" to Activity.Kind.THINKING
+            "device_accessibility_click", "device_accessibility_tap" -> "Tocando no aplicativo" to Activity.Kind.THINKING
+            "device_notification_reply" -> "Respondendo pela notificação" to Activity.Kind.THINKING
+            "device_open_link" -> "Abrindo link no app" to Activity.Kind.THINKING
             "device_accessibility_type" -> "Preenchendo campo" to Activity.Kind.THINKING
             "device_accessibility_scroll" -> "Rolando aplicativo" to Activity.Kind.THINKING
             "device_accessibility_back" -> "Voltando no aplicativo" to Activity.Kind.THINKING
@@ -4731,8 +4744,38 @@ class AgentRunner(
                 "browser_back" -> { browserFor(sessionId).back(); "ok" }
                 "browser_js" -> browserFor(sessionId).runJs(SecretVault.resolve(sessionId, s("code")))
                 "device_notifications" -> dev.cueopen.app.device.NotifStore.recent(s("filter"), (i("limit") ?: 30).coerceIn(1, 100))
-                    .joinToString("\n") { "[${java.text.SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(it.time))}] ${it.app}: ${it.title} — ${it.text}".take(300) }
+                    .joinToString("\n") { n ->
+                        val head = "[${java.text.SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(n.time))}]" + (if (n.id.isNotBlank()) " id=${n.id}" else "") +
+                            " ${n.app}: ${n.title}" + (if (n.replyable) " [pode responder]" else "")
+                        if (n.conversation.isNotEmpty()) head + "\n" + n.conversation.joinToString("\n") { "    $it" }.take(1_500)
+                        else "$head — ${n.text}".take(300)
+                    }
                     .ifBlank { "Nenhuma notificação capturada ainda." }
+                "device_notification_reply" -> dev.cueopen.app.device.NotificationReply.send(ctx, s("id"), SecretVault.resolve(sessionId, s("text")))
+                "device_open_link" -> {
+                    val url = s("url").trim()
+                    val scheme = url.substringBefore(':').lowercase()
+                    if (scheme !in setOf("https", "http", "spotify", "geo", "mailto", "tel", "whatsapp", "market", "youtube", "vnd.youtube", "uber", "instagram", "fb", "tg", "sms", "smsto"))
+                        "RECUSADO: tipo de link não permitido ($scheme). Use links https ou de apps conhecidos (spotify:, geo:, mailto:, tel:, whatsapp:)."
+                    else runCatching {
+                        val intent = android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse(url)).addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+                        val target = runCatching { ctx.packageManager.resolveActivity(intent, 0)?.loadLabel(ctx.packageManager)?.toString() }.getOrNull()
+                        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) { ctx.startActivity(intent) }
+                        kotlinx.coroutines.delay(1_500)
+                        "Abri o link" + (target?.let { " em $it" } ?: "") + ". Se precisar tocar em um botão (ex.: Enviar), use device_accessibility_tap."
+                    }.getOrElse { "ERRO: nenhum app do aparelho abriu esse link (${it.javaClass.simpleName})." }
+                }
+                "device_accessibility_tap" -> {
+                    val screen = dev.cueopen.app.device.DeviceAccessibilityActions.readScreen(sessionId)
+                    val hit = dev.cueopen.app.device.ScreenMatch.find(screen, s("text"), i("occurrence") ?: 1)
+                    if (hit == null) {
+                        val labels = dev.cueopen.app.device.ScreenMatch.elements(screen).mapNotNull { it.second.takeIf { l -> l.isNotBlank() } }.distinct().take(25)
+                        "Não achei \"${s("text").take(60)}\" na tela atual. Textos visíveis: " + labels.joinToString(" | ").take(700)
+                    } else {
+                        val out = dev.cueopen.app.device.DeviceAccessibilityActions.click(sessionId, hit.snapshotId, hit.elementId)
+                        "Toquei em \"${hit.label.take(60)}\". " + out.take(200)
+                    }
+                }
                 "device_calendar_read" -> dev.cueopen.app.device.DeviceActions.calendar(ctx, i("days") ?: 7)
                 "device_calendar_create" -> dev.cueopen.app.device.DeviceActions.createCalendarEvent(
                     ctx, s("title"), s("start_epoch_ms").toLongOrNull() ?: 0L, s("end_epoch_ms").toLongOrNull() ?: 0L, s("description"), s("location"))

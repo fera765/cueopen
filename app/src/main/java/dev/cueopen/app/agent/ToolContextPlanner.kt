@@ -39,7 +39,7 @@ object ToolContextPlanner {
             "device_accessibility_open_app", "device_accessibility_read_screen",
             "device_accessibility_click", "device_accessibility_type",
             "device_accessibility_scroll", "device_accessibility_back",
-            "device_accessibility_inspect_image"
+            "device_accessibility_inspect_image", "device_accessibility_tap", "device_open_link", "device_notification_reply"
         ),
         "connector_builder" to setOf("connector_spec", "connector_validate", "connector_test", "connector_propose", "connector_edit_propose"),
     )
@@ -53,7 +53,7 @@ object ToolContextPlanner {
         "schedule" to listOf("monitor", "acompanh", "a cada", "agend", "todo dia", "toda segunda", "amanhã às", "às ", "toda hora", "de hora em hora", "continu", "periodic", "lembr", "aguard", "espera", "minutos", "vela"),
         "skills_admin" to listOf("crie uma skill", "criar skill", "nova skill", "salve como skill"),
         "wallet" to listOf("carteira", "wallet", "solana", "sol ", "token", "swap", "saldo", "comprar", "vender", "day trade", "daytrade", "trade", "cripto", "crypto", "memecoin", "stop loss", "take profit", "liquidez", "pump", "jupiter", "usdc"),
-        "device" to listOf("notifica", "print da tela", "captura de tela", "screenshot", "balao", "overlay", "celular", "aparelho", "bluetooth", "dispositivo pareado", "dispositivos pareados", "dispositivos proximos", "calendario", "ligaçao", "ligacao", "chamada", "contato", "contacts", "contact list", "address book", "agenda telefonica", "agenda de contatos", "telefone", "numero do contato", "localizaçao", "localizacao", "microfone", "navegar no aplicativo", "navegar nos apps", "abrir aplicativo", "abrir app", "acessar app", "acessar aplicativo", "outro aplicativo", "instagram", "whatsapp", "spotify"),
+        "device" to listOf("notifica", "whatsapp", "zap", "telegram", "instagram", "messenger", "direct", "responda", "responder", "mensagem", "spotify", "youtube", "uber", "99", "ifood", "abra o app", "abrir o app", "print da tela", "captura de tela", "screenshot", "balao", "overlay", "celular", "aparelho", "bluetooth", "dispositivo pareado", "dispositivos pareados", "dispositivos proximos", "calendario", "ligaçao", "ligacao", "chamada", "contato", "contacts", "contact list", "address book", "agenda telefonica", "agenda de contatos", "telefone", "numero do contato", "localizaçao", "localizacao", "microfone", "navegar no aplicativo", "navegar nos apps", "abrir aplicativo", "abrir app", "acessar app", "acessar aplicativo", "outro aplicativo", "instagram", "whatsapp", "spotify"),
         "connector_builder" to listOf("conector", "connector"),
     )
 

@@ -206,11 +206,28 @@ object DeviceCaps {
 
 /** Notificações capturadas somente em memória (sem persistir o conteúdo sensível). */
 @Serializable
-data class CapturedNotif(val time: Long, val pkg: String, val app: String, val title: String, val text: String)
+data class CapturedNotif(
+    val time: Long, val pkg: String, val app: String, val title: String, val text: String,
+    /** Id curto para device_notification_reply (n1, n2…). */
+    val id: String = "",
+    /** A notificação traz o botão "Responder" do próprio app (RemoteInput). */
+    val replyable: Boolean = false,
+    /** Últimas mensagens da conversa (MessagingStyle/InboxStyle), já no formato "Remetente: texto". */
+    val conversation: List<String> = emptyList(),
+)
 
 object NotifStore {
     val items = mutableStateListOf<CapturedNotif>()
-    fun add(n: CapturedNotif) { items.add(0, n); while (items.size > 500) items.removeAt(items.size - 1) }
+    fun add(n: CapturedNotif) {
+        // A mesma conversa atualiza a notificação a cada mensagem: mantém só a versão mais recente dela.
+        if (n.id.isNotBlank()) items.removeAll { it.id == n.id }
+        items.add(0, n); while (items.size > 500) items.removeAt(items.size - 1)
+    }
+    /** Registra a resposta enviada pelo agente na conversa capturada (para a próxima leitura já mostrá-la). */
+    fun addOutgoing(id: String, text: String) {
+        val idx = items.indexOfFirst { it.id == id }
+        if (idx >= 0) items[idx] = items[idx].let { it.copy(conversation = (it.conversation + "Você (enviado pelo agente): $text").takeLast(12)) }
+    }
     fun recent(filter: String, limit: Int): List<CapturedNotif> =
         items.filter { filter.isBlank() || it.app.contains(filter, true) || it.pkg.contains(filter, true) || it.text.contains(filter, true) }.take(limit)
 }
