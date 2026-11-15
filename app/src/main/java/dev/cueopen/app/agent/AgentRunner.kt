@@ -120,7 +120,13 @@ class AgentRunner(
      * (/stop explícito ou parar um chat ocioso). Antes, qualquer parada — tocar ■ no meio de um
      * passo, o botão da notificação do terminal — desligava a autonomia sem o usuário perceber.
      */
+    /** Agentes de seção pausados à mão pelo usuário no meio de uma tarefa delegada (a tarefa continua aberta). */
+    private val pausedDelegations = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+
     fun stop(sessionId: String, pauseAutonomy: Boolean = false) {
+        // Parar um agente que está numa tarefa do coordenador é uma PAUSA: a tarefa não conta como concluída.
+        // (Pausa da seção, team_stop e reatribuição removem a delegação antes de chamar stop.)
+        if (delegations[sessionId] != null) pausedDelegations.add(sessionId)
         autoResumeJobs.remove(sessionId)?.cancel(); autoResumeRound.remove(sessionId)
         executions.cancelSession(sessionId)
         // Primeiro envia Ctrl+C ao PTY ativo; cancelar só a coroutine deixava o processo vivo.
@@ -228,6 +234,14 @@ class AgentRunner(
         val quote = quotedReply?.trim()?.take(800)?.takeIf { it.isNotBlank() }
         if (showUserMessage) store.addItem(sessionId, ChatItem.User(text = text, attachments = attachments, replyTo = quote))
         if (showUserMessage) store.session(sessionId)?.sectionId?.let { autoNudges.remove(it); autoDone.remove(it) }
+        // Usuário retomou um agente pausado no meio de uma tarefa: a mesma tarefa continua e será relatada ao terminar.
+        if (pausedDelegations.remove(sessionId)) delegations[sessionId]?.let { d ->
+            store.section(d.sectionId)?.let { sec ->
+                (store.session(sec.sessionId)?.items?.firstOrNull { it.id == d.pillId } as? ChatItem.Step)?.let { pill ->
+                    store.replaceItem(sec.sessionId, pill.copy(status = StepStatus.RUNNING, result = ""))
+                }
+            }
+        }
         // Mensagem do usuário numa seção arquivada a traz de volta.
         if (showUserMessage) store.state.value.sections.firstOrNull { it.sessionId == sessionId && it.archived }?.let { store.upsertSection(it.copy(archived = false)) }
         // Mensagem do usuário retoma a seção pausada, inclusive o ciclo agendado.
@@ -326,8 +340,21 @@ class AgentRunner(
                     return@launch
                 }
                 kotlinx.coroutines.delay(2_000)  // rede recém-voltou: dá um instante para estabilizar
-            } else
-            kotlinx.coroutines.delay(wait)
+            } else {
+                // Falha do modelo (ex.: limite 429): se o usuário trocar o modelo ou o provedor, tenta de novo na hora.
+                // O app nunca troca de modelo sozinho.
+                val modelAtFailure = modelKey(sessionId)
+                val until = System.currentTimeMillis() + wait
+                while (System.currentTimeMillis() < until) {
+                    kotlinx.coroutines.delay(minOf(3_000L, until - System.currentTimeMillis()).coerceAtLeast(200))
+                    val cur = store.session(sessionId)
+                    if (cur == null || cur.status != SessionStatus.SLEEPING || cur.wakeAt != wakeAt) { autoResumeJobs.remove(sessionId); return@launch }
+                    if (modelKey(sessionId) != modelAtFailure) {
+                        store.addItem(sessionId, ChatItem.Step(tool = "model_switch", title = "Modelo trocado: tentando de novo agora", args = stepModel(store.agent(cur.agentId)), result = "", status = StepStatus.OK))
+                        break
+                    }
+                }
+            }
             autoResumeJobs.remove(sessionId)
             val s = store.session(sessionId) ?: return@launch
             if (s.status != SessionStatus.SLEEPING || s.wakeAt != wakeAt || isRunning(sessionId)) return@launch  // usuário já agiu
@@ -336,6 +363,10 @@ class AgentRunner(
         }
         return wakeAt
     }
+
+    /** Modelo e provedor que este chat usaria agora (mudam quando o usuário troca nas configurações). */
+    private fun modelKey(sessionId: String): String =
+        stepModel(store.agent(store.session(sessionId)?.agentId)) + "@" + store.settings.baseUrl
 
     /** Aparelho com rede validada e DNS respondendo para o provedor do modelo (ou, na dúvida, para um host público). */
     private fun internetReady(): Boolean {
@@ -574,6 +605,7 @@ class AgentRunner(
     private suspend fun wipeRuntime(sessionId: String) {
         val running = jobs[sessionId]
         stop(sessionId)
+        pausedDelegations.remove(sessionId)
         // Espera o loop cancelado terminar: senão ele grava passos/mensagens DEPOIS da limpeza.
         kotlinx.coroutines.withTimeoutOrNull(4_000) { running?.join() }
         runCatching { terminals.close(sessionId) }
@@ -1185,6 +1217,11 @@ class AgentRunner(
         val member = store.agent(d.memberId) ?: run { delegations.remove(sessionId); return }
         val waitingUser = child.status == SessionStatus.WAITING_USER
         val pill = store.session(sec.sessionId)?.items?.firstOrNull { it.id == d.pillId } as? ChatItem.Step
+        // Pausado pelo usuário: a tarefa segue aberta; nada é relatado até ele retomar e o agente terminar.
+        if (sessionId in pausedDelegations) {
+            if (pill != null) store.replaceItem(sec.sessionId, pill.copy(status = StepStatus.RUNNING, result = "pausado"))
+            return
+        }
         // Falha temporária do modelo com retomada agendada: o agente continua sozinho; nada a relatar ainda.
         if (child.status == SessionStatus.SLEEPING) {
             if (pill != null) store.replaceItem(sec.sessionId, pill.copy(status = StepStatus.RUNNING, result = "retomando sozinho"))
@@ -1356,6 +1393,7 @@ class AgentRunner(
     }
 
     private fun teamStop(sessionId: String, agentName: String, reason: String): String {
+        store.section(store.session(sessionId)?.sectionId)?.let { sec -> resolveMember(sec, agentName)?.let { pausedDelegations.remove(memberSession(sec, it)) } }
         val sec = store.section(store.session(sessionId)?.sectionId) ?: return "ERRO: esta conversa não é uma seção."
         val member = resolveMember(sec, agentName) ?: return "ERRO: não há agente \"$agentName\" no time."
         val childId = memberSession(sec, member)
