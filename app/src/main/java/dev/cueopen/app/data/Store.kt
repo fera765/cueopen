@@ -13,6 +13,8 @@ import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.decodeFromStream
+import kotlinx.serialization.json.encodeToStream
 import java.io.File
 import java.io.IOException
 
@@ -36,8 +38,9 @@ class Store(context: Context) {
         snapshots.drop(1).debounce(400).onEach { save(it) }.launchIn(scope)
     }
 
+    @OptIn(kotlinx.serialization.ExperimentalSerializationApi::class)
     private fun load(): AppState = runCatching {
-        val s = AppJson.decodeFromString(AppState.serializer(), file.readText())
+        val s = file.inputStream().buffered().use { AppJson.decodeFromStream(AppState.serializer(), it) }
         // Garante que skills nativas novas apareçam após updates
         val missing = BuiltInSkills.all.filter { b -> s.skills.none { it.id == b.id } }
         // Tarefas que estavam rodando quando o app morreu viram "interrompidas"
@@ -60,17 +63,20 @@ class Store(context: Context) {
                     fastModel = if (st.fastModel == "google/gemini-2.5-flash") "deepseek/deepseek-v4-flash" else st.fastModel,
                 )
             },
-            sessions = s.sessions.map {
+            sessions = s.sessions.map { SessionRetention.trim(it) }.map {
                 if (it.status == SessionStatus.RUNNING) { if (it.continuous) it.copy(status = SessionStatus.SLEEPING, wakeAt = now()) else it.copy(status = SessionStatus.STOPPED) } else it
             },
         )
     }.getOrElse { AppState() }
 
+    @OptIn(kotlinx.serialization.ExperimentalSerializationApi::class)
     @Synchronized
     private fun save(snapshot: VersionedState) {
         if (snapshot.revision <= persistedRevision) return
         val tmp = File(file.parentFile, file.name + ".tmp")
-        tmp.writeText(AppJson.encodeToString(AppState.serializer(), snapshot.state))
+        // Grava em fluxo direto no arquivo: montar o JSON inteiro numa String duplicava a memória e derrubava o app
+        // (OutOfMemoryError) quando o estado passava de ~30 MB.
+        tmp.outputStream().buffered(64 * 1024).use { AppJson.encodeToStream(AppState.serializer(), snapshot.state, it) }
         if (!tmp.renameTo(file)) throw IOException("Não foi possível concluir a gravação do estado local.")
         persistedRevision = snapshot.revision
     }
@@ -110,7 +116,7 @@ class Store(context: Context) {
     }
 
     fun editSession(id: String, fn: (Session) -> Session) = update { st ->
-        st.copy(sessions = st.sessions.map { if (it.id == id) fn(it).copy(updatedAt = now()) else it })
+        st.copy(sessions = st.sessions.map { if (it.id == id) SessionRetention.trim(fn(it).copy(updatedAt = now())) else it })
     }
 
     fun addItem(sessionId: String, item: ChatItem) = editSession(sessionId) { it.copy(items = it.items + item) }
