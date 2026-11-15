@@ -67,26 +67,8 @@ fun SettingsScreen(nav: NavController) {
             SectionLabel("Você")
             CueField(s.userName, { v -> app.store.updateSettings { it.copy(userName = v) } }, "Seu nome")
             SectionLabel("Provedor de modelos")
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                val isOR = s.baseUrl.contains("openrouter", ignoreCase = true)
-// Trocar de provedor guarda a configuração atual e restaura a do outro; um provedor personalizado
-                // NOVO começa com todos os campos vazios (sem "https://", sem chave nem modelo herdados).
-                fun switch(toOpenRouter: Boolean) = app.store.updateSettings {
-                    val fromKey = if (it.baseUrl.contains("openrouter", true)) "openrouter" else "custom"
-                    val toKey = if (toOpenRouter) "openrouter" else "custom"
-                    if (fromKey == toKey) it else {
-                        val saved = it.savedProviders + (fromKey to listOf(it.apiKey, it.baseUrl, it.model, it.fastModel))
-                        val r = saved[toKey]
-                        if (toOpenRouter) it.copy(savedProviders = saved, apiKey = r?.getOrNull(0).orEmpty(), baseUrl = "https://openrouter.ai/api/v1",
-                            model = r?.getOrNull(2)?.ifBlank { null } ?: "deepseek/deepseek-v4-flash", fastModel = r?.getOrNull(3)?.ifBlank { null } ?: "deepseek/deepseek-v4-flash")
-                        else it.copy(savedProviders = saved, apiKey = r?.getOrNull(0).orEmpty(), baseUrl = r?.getOrNull(1).orEmpty(),
-                            model = r?.getOrNull(2).orEmpty(), fastModel = r?.getOrNull(3).orEmpty())
-                    }
-                }
-                Chip("OpenRouter", isOR) { switch(true) }
-                Chip("Personalizado", !isOR) { switch(false) }
-            }
-            Text("OpenRouter é o exemplo recomendado. Personalizado aceita endpoints OpenAI-compatible; por exemplo, OpenCode Go usa https://opencode.ai/inference/go/openai/v1. O catálogo é carregado do provedor; famílias OpenCode que exigem outra API são ocultadas, e function calling depende do modelo escolhido.", fontSize = 12.sp, color = Cue.c.ink2)
+            SettingsLink(Icons.Rounded.Hub, "Provedores", "Ativo: " + (dev.cueopen.app.llm.ProviderCatalog.byBaseUrl(s.baseUrl)?.name ?: "Personalizado") +
+                " · " + (s.savedProviders.count { it.value.getOrNull(0).orEmpty().isNotBlank() } + if (s.apiKey.isNotBlank()) 1 else 0) + " com chave") { nav.navigate("providers") }
             SectionLabel("Credenciais")
             CueField(s.apiKey, { v -> app.store.updateSettings { it.copy(apiKey = v.trim()) } }, "Chave da API", password = true)
             CueField(s.baseUrl, { v -> app.store.updateSettings { it.copy(baseUrl = v.trim()) } }, if (s.baseUrl.contains("openrouter", true)) "Base URL (compatível OpenAI)" else "Base URL — ex.: https://api.exemplo.com/v1")
@@ -122,13 +104,7 @@ fun SettingsScreen(nav: NavController) {
                 }
             }
             SectionLabel("Canais de envio de arquivos")
-            Text("Com um canal configurado, os agentes enviam arquivos e imagens sozinhos (cada envio passa pela confirmação do agente, salvo no modo 100% autônomo). As credenciais ficam só no aparelho.", fontSize = 12.sp, color = Cue.c.ink3)
-            CueField(s.telegramBotToken, { v -> app.store.updateSettings { it.copy(telegramBotToken = v.trim()) } }, "Telegram · token do bot (@BotFather)", password = true)
-            CueField(s.telegramChatId, { v -> app.store.updateSettings { it.copy(telegramChatId = v.trim()) } }, "Telegram · chat_id de destino")
-            CueField(s.discordWebhookUrl, { v -> app.store.updateSettings { it.copy(discordWebhookUrl = v.trim()) } }, "Discord · URL do webhook do canal", password = true)
-            CueField(s.slackBotToken, { v -> app.store.updateSettings { it.copy(slackBotToken = v.trim()) } }, "Slack · token do bot (xoxb-…, escopo files:write)", password = true)
-            CueField(s.slackChannelId, { v -> app.store.updateSettings { it.copy(slackChannelId = v.trim()) } }, "Slack · ID do canal (ex.: C0123…)")
-            Text("WhatsApp não tem envio automático oficial para contas pessoais: o agente abre o WhatsApp com o arquivo pronto e toca em Enviar (precisa da acessibilidade ligada no agente).", fontSize = 12.sp, color = Cue.c.ink3)
+            SettingsLink(Icons.Rounded.Send, "Canais de envio", "Telegram, Discord, Slack e WhatsApp") { nav.navigate("channels") }
             SectionLabel("Notificações")
             ToggleRow("Avisar ao concluir tarefas agendadas", "", s.notifyOnDone) { v -> app.store.updateSettings { it.copy(notifyOnDone = v) } }
             SectionLabel("Rede")

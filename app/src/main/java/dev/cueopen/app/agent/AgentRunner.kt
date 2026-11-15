@@ -63,30 +63,6 @@ import java.util.HashMap
 import java.util.Locale
 
 private val iqOptionTradeWakeTag = Regex("""\[\[IQOPTION_TRADES:([0-9,]+)]]$""")
-private val accessibilitySnapshotBoundTools = setOf(
-    "device_accessibility_click", "device_accessibility_type",
-    "device_accessibility_scroll", "device_accessibility_inspect_image",
-)
-
-private fun isStaleAccessibilitySnapshotFailure(toolName: String, detail: String): Boolean =
-    toolName in accessibilitySnapshotBoundTools && listOf(
-    "Snapshot ausente ou invalidado", "snapshot_id expirado", "snapshot_id ausente",
-    "A janela mudou desde a leitura", "A árvore de controles mudou",
-    "O controle mudou desde a leitura", "element_id desconhecido neste snapshot",
-    ).any { phrase -> detail.contains(phrase) }
-
-/** O que o "computador" do agente está fazendo agora (mostrado no card ao vivo do chat). */
-/** Passos de uma tarefa delegada: aviso para entregar e corte (com entrega parcial ao coordenador). */
-const val MEMBER_SOFT_STEPS = 40
-const val MEMBER_HARD_STEPS = 60
-
-/** Tipo do Step que representa a pílula de um agente da seção no chat do coordenador (args = "chatId|agentId"). */
-const val TEAM_MEMBER_STEP = "team_member"
-
-data class Activity(val kind: Kind = Kind.IDLE, val detail: String = "") {
-    enum class Kind { IDLE, THINKING, TERMINAL, BROWSER, EDITOR, SEARCH }
-}
-
 /**
  * Loop do agente estilo Manus/Cue: LLM com function calling + ferramentas que agem no sandbox
  * Linux local (shell/arquivos) e no WebView (browser). Roda até o modelo responder sem tool calls,
@@ -4074,54 +4050,7 @@ class AgentRunner(
             }
         }
 
-        val (title, kind) = when (call.name) {
-            "shell" -> "Executando comando" to Activity.Kind.TERMINAL
-            "file_write", "file_edit" -> "Editando arquivo" to Activity.Kind.EDITOR
-            "file_read" -> "Lendo arquivo" to Activity.Kind.EDITOR
-            "file_list" -> "Listando arquivos" to Activity.Kind.EDITOR
-            "multi_agents" -> "Delegando subtarefas em paralelo" to Activity.Kind.THINKING
-            "browser_navigate" -> "Navegando" to Activity.Kind.BROWSER
-            "browser_new_tab" -> "Abrindo nova aba" to Activity.Kind.BROWSER
-            "browser_select_tab" -> "Trocando de aba" to Activity.Kind.BROWSER
-            "browser_close_tab" -> "Fechando aba" to Activity.Kind.BROWSER
-            "browser_read", "browser_snapshot" -> "Lendo snapshot da página" to Activity.Kind.BROWSER
-            "browser_click" -> "Clicando" to Activity.Kind.BROWSER
-            "browser_type" -> "Digitando" to Activity.Kind.BROWSER
-            "browser_scroll" -> "Rolando página" to Activity.Kind.BROWSER
-            "browser_back" -> "Voltando" to Activity.Kind.BROWSER
-            "browser_js" -> "Executando script na página" to Activity.Kind.BROWSER
-            "remember", "memory_save" -> "Salvando na memória" to Activity.Kind.THINKING
-            "memory_search" -> "Buscando na memória" to Activity.Kind.THINKING
-            "notes_write" -> "Anotando" to Activity.Kind.EDITOR
-            "browser_network" -> "Inspecionando rede" to Activity.Kind.BROWSER
-            "complete_step" -> "Concluindo fase" to Activity.Kind.THINKING
-            "set_schedule" -> "Agendando autonomia" to Activity.Kind.THINKING
-            "device_notifications" -> "Lendo notificações" to Activity.Kind.THINKING
-            "device_calendar_read" -> "Lendo calendário" to Activity.Kind.THINKING
-            "device_call_log" -> "Lendo histórico de ligações" to Activity.Kind.THINKING
-            "device_contacts" -> "Pesquisando contatos" to Activity.Kind.THINKING
-            "device_location" -> "Consultando última localização" to Activity.Kind.THINKING
-            "device_bluetooth", "device_bluetooth_pair" -> "Acessando Bluetooth" to Activity.Kind.THINKING
-            "device_dial" -> "Abrindo discador" to Activity.Kind.THINKING
-            "device_microphone" -> "Abrindo reconhecimento de voz" to Activity.Kind.THINKING
-            "device_screenshot" -> "Capturando tela" to Activity.Kind.THINKING
-            "device_accessibility_open_app" -> "Abrindo aplicativo" to Activity.Kind.THINKING
-            "device_accessibility_read_screen" -> "Lendo controles visíveis" to Activity.Kind.THINKING
-            "device_accessibility_inspect_image" -> "Analisando recorte visual" to Activity.Kind.THINKING
-            "device_accessibility_click", "device_accessibility_tap" -> "Tocando no aplicativo" to Activity.Kind.THINKING
-            "device_notification_reply" -> "Respondendo pela notificação" to Activity.Kind.THINKING
-            "send_file" -> "Enviando arquivo" to Activity.Kind.THINKING
-            "device_share_file" -> "Abrindo app para enviar arquivo" to Activity.Kind.THINKING
-            "device_open_link" -> "Abrindo link no app" to Activity.Kind.THINKING
-            "device_accessibility_type" -> "Preenchendo campo" to Activity.Kind.THINKING
-            "device_accessibility_scroll" -> "Rolando aplicativo" to Activity.Kind.THINKING
-            "device_accessibility_back" -> "Voltando no aplicativo" to Activity.Kind.THINKING
-            "device_notify", "device_overlay" -> "Avisando no aparelho" to Activity.Kind.THINKING
-            "browser_console" -> "Lendo console" to Activity.Kind.BROWSER
-            "browser_wait_for" -> "Aguardando a página" to Activity.Kind.BROWSER
-            "create_skill" -> "Criando skill" to Activity.Kind.THINKING
-            else -> (if (call.name.startsWith("mcp_")) "Conector · " + call.name.substringAfter("__") else call.name) to Activity.Kind.THINKING
-        }
+        val (title, kind) = ToolActivityLabels.of(call.name)
         val argPreview = when (call.name) {
             "shell" -> s("command")
             "file_write", "file_edit", "file_read", "file_list" -> s("path").ifBlank { cwd }
