@@ -1593,6 +1593,7 @@ class AgentRunner(
                         val usedModel = stepModel(agent)
                         val response = llm.chat(listOf(sys) + history, tools = stepTools, model = usedModel, maxTokens = currentReplyTokenLimit, conversationId = sessionId)
                         breaker.onSuccess()
+                        dev.cueopen.app.llm.KeyPool.onSuccess(dev.cueopen.app.llm.ProviderRoute.route(store.settings, usedModel).first.apiKey)
                         if (usedModel == primaryModel(agent) && dev.cueopen.app.llm.ModelFallback.onSuccess(usedModel))
                             store.addItem(sessionId, ChatItem.Step(tool = "model_switch", title = "Modelo principal voltou a responder", args = usedModel, result = "", status = StepStatus.OK))
                         if (response.truncated && (response.toolCalls.isNotEmpty() || response.content.isNullOrBlank())) throw dev.cueopen.app.llm.LlmRequestFailure(
@@ -1619,11 +1620,21 @@ class AgentRunner(
                         }
                         // Limite de requisições no modelo principal: passa na hora para o modelo alternativo (se configurado).
                         val primaryNow = primaryModel(agent)
-                        if (category == dev.cueopen.app.llm.LlmRecovery.Category.RATE_LIMIT && stepModel(agent) == primaryNow &&
-                            dev.cueopen.app.llm.ModelFallback.onRateLimit(primaryNow, store.settings.fallbackModel)) {
+                        val failingModel = stepModel(agent)
+                        val failingKeys = dev.cueopen.app.llm.ProviderRoute.route(store.settings, failingModel).first.apiKey
+                        if (category == dev.cueopen.app.llm.LlmRecovery.Category.RATE_LIMIT && dev.cueopen.app.llm.KeyPool.rotate(failingKeys)) {
+                            store.addItem(sessionId, ChatItem.Step(tool = "model_switch", title = "Limite nesta conta: usando a próxima chave do provedor",
+                                args = dev.cueopen.app.llm.ProviderRoute.label(failingModel), result = "Mesmo modelo, outra conta.", status = StepStatus.OK))
+                            attempt = 0
+                            continue
+                        }
+                        if (category == dev.cueopen.app.llm.LlmRecovery.Category.RATE_LIMIT &&
+                            dev.cueopen.app.llm.ModelFallback.onRateLimit(failingModel, store.settings.fallbackModel, primary = primaryNow)) {
+                            val next = stepModel(agent)
                             val back = dev.cueopen.app.llm.ModelFallback.activeUntil(primaryNow)?.let { SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(it)) }.orEmpty()
-                            store.addItem(sessionId, ChatItem.Step(tool = "model_switch", title = "Limite no modelo principal: usando o alternativo",
-                                args = store.settings.fallbackModel, result = "Testo o principal ($primaryNow) de novo às $back.", status = StepStatus.OK))
+                            store.addItem(sessionId, ChatItem.Step(tool = "model_switch",
+                                title = if (failingModel == primaryNow) "Limite no modelo principal: usando o alternativo" else "Limite no alternativo: usando o próximo da cadeia",
+                                args = dev.cueopen.app.llm.ProviderRoute.label(next), result = "Testo o principal ($primaryNow) de novo às $back.", status = StepStatus.OK))
                             attempt = 0
                             continue
                         }

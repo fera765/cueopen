@@ -42,6 +42,10 @@ object ProviderModels {
         val apiFamily: String? = null,
     )
 
+    /** Modelo sem custo: preço zero informado pelo provedor ou marcado como gratuito no ID (":free", "-free"). */
+    fun isFree(m: Model): Boolean =
+        (m.promptPrice == 0.0 && m.completionPrice == 0.0) || m.id.endsWith(":free", true) || m.id.endsWith("-free", true) || m.id.contains("-free-", true)
+
     private data class Entry(val loadedAt: Long, val models: List<Model>)
     private val cache = ConcurrentHashMap<String, Entry>()
     private val fetchLocks = ConcurrentHashMap<String, Mutex>()

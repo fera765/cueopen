@@ -107,7 +107,7 @@ class OpenRouter(private val settings: () -> Settings) {
         if (priceCache.isEmpty() || System.currentTimeMillis() - priceCacheAt > 6 * 60 * 60 * 1000L) {
             runCatchingCancellable {
                 val request = Request.Builder().url(endpoint(s.baseUrl, "models")).apply {
-                    if (s.apiKey.isNotBlank()) header("Authorization", "Bearer ${s.apiKey}")
+                    if (s.apiKey.isNotBlank()) header("Authorization", "Bearer ${KeyPool.current(s.apiKey)}")
                 }.get().build()
                 http().newCall(request).await().use { response ->
                     if (!response.isSuccessful) return@use
@@ -147,9 +147,8 @@ class OpenRouter(private val settings: () -> Settings) {
         jsonResponse: Boolean = false,
         conversationId: String? = null,
     ): LlmReply = withContext(Dispatchers.IO) {
-        val s = settings()
-        val mdl = model ?: s.model
-        require(mdl.isNotBlank()) { "Escolha um modelo nas Configurações." }
+        val (s, mdl) = settings().let { base -> ProviderRoute.route(base, model ?: base.model) }
+        require(mdl.isNotBlank()) { "Escolha um modelo em Configurações › Provedores." }
         val openRouter = isOpenRouter(s.baseUrl)
         val openCodeSession = OpenCodeProtocol.sessionHeader(s.baseUrl, conversationId)
         val openCodeUserAgent = OpenCodeProtocol.userAgent(s.baseUrl)
@@ -173,7 +172,7 @@ class OpenRouter(private val settings: () -> Settings) {
             val req = Request.Builder()
                 .url(endpoint(s.baseUrl, "chat/completions"))
                 .apply {
-                    if (s.apiKey.isNotBlank()) header("Authorization", "Bearer ${s.apiKey}")
+                    if (s.apiKey.isNotBlank()) header("Authorization", "Bearer ${KeyPool.current(s.apiKey)}")
                     if (openRouter) header("HTTP-Referer", "https://github.com/cueopen").header("X-Title", "CueOpen")
                     openCodeSession?.let { header("x-opencode-session", it) }
                     openCodeUserAgent?.let { header("User-Agent", it) }
@@ -272,9 +271,8 @@ class OpenRouter(private val settings: () -> Settings) {
                 throw IOException("O recorte visual está vazio ou excede o limite de envio.")
             }
             require(prompt.isNotBlank()) { "Informe o que deve ser observado no recorte visual." }
-            val s = settings()
-            val mdl = model ?: s.model
-            require(mdl.isNotBlank()) { "Escolha um modelo nas Configurações." }
+            val (s, mdl) = settings().let { base -> ProviderRoute.route(base, model ?: base.model) }
+            require(mdl.isNotBlank()) { "Escolha um modelo em Configurações › Provedores." }
             val openRouter = isOpenRouter(s.baseUrl)
             val sessionHeader = OpenCodeProtocol.sessionHeader(s.baseUrl, conversationId)
             val userContent = buildJsonArray {
@@ -300,7 +298,7 @@ class OpenRouter(private val settings: () -> Settings) {
             val request = Request.Builder()
                 .url(endpoint(s.baseUrl, "chat/completions"))
                 .apply {
-                    if (s.apiKey.isNotBlank()) header("Authorization", "Bearer ${s.apiKey}")
+                    if (s.apiKey.isNotBlank()) header("Authorization", "Bearer ${KeyPool.current(s.apiKey)}")
                     if (openRouter) header("HTTP-Referer", "https://github.com/cueopen").header("X-Title", "CueOpen")
                     sessionHeader?.let { header("x-opencode-session", it) }
                     OpenCodeProtocol.userAgent(s.baseUrl)?.let { header("User-Agent", it) }
@@ -345,8 +343,12 @@ class OpenRouter(private val settings: () -> Settings) {
         } catch (t: LlmRequestFailure) {
             // Limite no modelo rápido: uma nova tentativa no modelo alternativo, se configurado.
             val rateLimited = LlmRecovery.classify(t.message, t.retryable, t.responseTruncated) == LlmRecovery.Category.RATE_LIMIT
-            if (model != primary || !rateLimited || !ModelFallback.onRateLimit(primary, fallback)) throw t
-            chat(listOf(LlmMessage("user", prompt)), maxTokens = maxTokens, model = fallback, conversationId = conversationId).content.orEmpty().trim()
+            if (!rateLimited) throw t
+            val raw = ProviderRoute.route(settings(), model).first.apiKey
+            val next = if (KeyPool.rotate(raw)) model
+                else if (ModelFallback.onRateLimit(model, fallback, primary = primary)) ModelFallback.resolve(primary, fallback)
+                else throw t
+            chat(listOf(LlmMessage("user", prompt)), maxTokens = maxTokens, model = next, conversationId = conversationId).content.orEmpty().trim()
         }
     }
 

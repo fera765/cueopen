@@ -22,5 +22,7 @@ class OpenRouterOAuthTest {
         assertNull(OpenRouterOAuth.codeFromRequestLine("GET /favicon.ico HTTP/1.1"))
         assertNull(OpenRouterOAuth.codeFromRequestLine("GET /callback?error=denied HTTP/1.1"))
         assertNull(OpenRouterOAuth.codeFromRequestLine(""))
+        assertEquals("s1", OpenRouterOAuth.param("GET /callback?code=a&state=s1 HTTP/1.1", "state"))
+        assertNull(OpenRouterOAuth.param("GET /callback?code=a HTTP/1.1", "state"))
     }
 }

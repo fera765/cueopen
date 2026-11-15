@@ -64,8 +64,10 @@ fun ModelPicker(
             }
         }
     }
-    val results = remember(query, models) {
-        if (query.isBlank() || query == value) models.take(40) else ProviderModels.search(models, query)
+    var onlyFree by remember { mutableStateOf(false) }
+    val results = remember(query, models, onlyFree) {
+        val pool = if (onlyFree) models.filter { ProviderModels.isFree(it) } else models
+        if (query.isBlank() || query == value) pool.take(60) else ProviderModels.search(pool, query)
     }
     Column(Modifier.fillMaxWidth()) {
         OutlinedTextField(
@@ -84,6 +86,7 @@ fun ModelPicker(
             Column(Modifier.fillMaxWidth().padding(top = 4.dp).clip(RoundedCornerShape(16.dp)).background(c.surface).border(1.dp, c.line, RoundedCornerShape(16.dp))) {
                 Row(Modifier.fillMaxWidth().padding(start = 12.dp, end = 4.dp), verticalAlignment = Alignment.CenterVertically) {
                     Text("Modelos deste provedor", Modifier.weight(1f), fontSize = 12.sp, color = c.ink2)
+                    FilterChip(onlyFree, { onlyFree = !onlyFree }, label = { Text("Só gratuitos", fontSize = 12.sp) })
                     IconButton(onClick = { refresh++; error = null }, enabled = !loading) {
                         Icon(Icons.Rounded.Refresh, "Atualizar modelos", tint = c.ink2)
                     }

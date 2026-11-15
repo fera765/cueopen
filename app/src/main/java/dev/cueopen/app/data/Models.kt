@@ -489,6 +489,8 @@ data class Settings(
     val slackChannelId: String = "",
     /** Configuração do OpenRouter guardada ao trocar para "Personalizado" (e vice-versa), para nada se perder. */
     val savedProviders: Map<String, List<String>> = emptyMap(),
+    /** Provedor ativo (id do ProviderCatalog ou "custom"); vazio = deduzido da Base URL (instalações antigas). */
+    val activeProvider: String = "",
     val disableThinking: Boolean = true,
     val maxSteps: Int = 1000,
     val theme: ThemeMode = ThemeMode.SYSTEM,

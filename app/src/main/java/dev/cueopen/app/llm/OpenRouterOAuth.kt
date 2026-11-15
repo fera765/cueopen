@@ -30,8 +30,15 @@ object OpenRouterOAuth {
     fun challenge(verifier: String): String =
         Base64.getUrlEncoder().withoutPadding().encodeToString(MessageDigest.getInstance("SHA-256").digest(verifier.toByteArray(Charsets.US_ASCII)))
 
-    fun authUrl(callback: String, challenge: String): String =
-        "https://openrouter.ai/auth?callback_url=" + Uri.encode(callback) + "&code_challenge=" + challenge + "&code_challenge_method=S256"
+    fun authUrl(callback: String, challenge: String, state: String): String =
+        "https://openrouter.ai/auth?callback_url=" + Uri.encode(callback) + "&code_challenge=" + challenge + "&code_challenge_method=S256&state=" + state
+
+    /** Valor de um parâmetro da primeira linha da requisição ("GET /callback?code=abc&state=x HTTP/1.1"). */
+    fun param(line: String, name: String): String? {
+        val target = line.split(' ').getOrNull(1) ?: return null
+        return target.substringAfter('?', "").split('&').firstOrNull { it.startsWith("$name=") }
+            ?.removePrefix("$name=")?.let { java.net.URLDecoder.decode(it, "UTF-8") }?.takeIf { it.isNotBlank() }
+    }
 
     /** Extrai o `code` da primeira linha da requisição HTTP ("GET /callback?code=abc HTTP/1.1"). */
     fun codeFromRequestLine(line: String): String? {
@@ -44,11 +51,12 @@ object OpenRouterOAuth {
     /** Faz o login completo e devolve a chave da API. Lança erro com mensagem legível se algo falhar ou passar de 5 min. */
     suspend fun login(context: Context): String = withContext(Dispatchers.IO) {
         val verifier = newVerifier()
+        val state = newVerifier().take(24)
         ServerSocket(0, 1, InetAddress.getByName("127.0.0.1")).use { server ->
             server.soTimeout = 5 * 60_000
             val callback = "http://localhost:${server.localPort}/callback"
             withContext(Dispatchers.Main) {
-                context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(authUrl(callback, challenge(verifier)))).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+                context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(authUrl(callback, challenge(verifier), state))).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
             }
             var code: String? = null
             // O navegador pode pedir /favicon.ico antes; aceita algumas conexões até chegar o /callback.
@@ -57,7 +65,8 @@ object OpenRouterOAuth {
                 val socket = runCatching { server.accept() }.getOrElse { error("O login não voltou em 5 minutos. Tente de novo.") }
                 socket.use { s ->
                     val first = s.getInputStream().bufferedReader().readLine().orEmpty()
-                    code = codeFromRequestLine(first)
+                    // O state só volta se o OpenRouter repassar; quando volta, tem de ser o nosso (protege contra retorno forjado).
+                    code = codeFromRequestLine(first)?.takeIf { param(first, "state").let { st -> st == null || st == state } }
                     val page = if (code != null) "<h2>Pronto! Pode voltar ao Fluwy Bot.</h2>" else "<h2>Aguardando o login…</h2>"
                     val body = "<html><head><meta charset=utf-8><meta name=viewport content='width=device-width'></head><body style='font-family:sans-serif;padding:24px'>$page</body></html>"
                     s.getOutputStream().write(("HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: ${body.toByteArray().size}\r\nConnection: close\r\n\r\n$body").toByteArray())

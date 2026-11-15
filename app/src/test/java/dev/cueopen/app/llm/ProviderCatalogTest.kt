@@ -16,6 +16,13 @@ class ProviderCatalogTest {
         }
     }
 
+    @Test fun `explicit active provider wins and oauth providers come first`() {
+        val s = dev.cueopen.app.data.Settings(baseUrl = "http://192.168.0.10:11434/v1", activeProvider = "ollama")
+        assertEquals("ollama", ProviderCatalog.activeId(s))
+        assertEquals("custom", ProviderCatalog.activeId(s.copy(activeProvider = "")))
+        assertTrue(ProviderCatalog.ordered.first().oauth)
+    }
+
     @Test fun `base urls are matched ignoring case and trailing slash`() {
         assertEquals("groq", ProviderCatalog.byBaseUrl("https://API.groq.com/openai/v1/")?.id)
         assertNull(ProviderCatalog.byBaseUrl("https://meu-servidor.com/v1"))

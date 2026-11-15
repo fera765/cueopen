@@ -41,4 +41,14 @@ class ModelFallbackTest {
         assertFalse(ModelFallback.onSuccess("main", 10))
         assertEquals("alt", ModelFallback.resolve("main", "alt", 10))
     }
+
+    @Test fun `chain walks to the next model and back`() {
+        val t0 = 1_000L
+        assertEquals("a", ModelFallback.resolve("a", "groq::b, c", t0))
+        assertTrue(ModelFallback.onRateLimit("a", "groq::b, c", t0))
+        assertEquals("groq::b", ModelFallback.resolve("a", "groq::b, c", t0 + 1))
+        assertTrue(ModelFallback.onRateLimit("groq::b", "groq::b, c", t0 + 2, primary = "a"))
+        assertEquals("c", ModelFallback.resolve("a", "groq::b, c", t0 + 3))
+        assertEquals("a", ModelFallback.resolve("a", "groq::b, c", t0 + ModelFallback.FIRST_COOLDOWN_MS + 1))
+    }
 }

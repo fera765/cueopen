@@ -1,5 +1,7 @@
 package dev.cueopen.app.llm
 
+import dev.cueopen.app.data.Settings
+
 /**
  * Provedores OpenAI-compatible prontos para ligar com uma chave (e OpenRouter também por login OAuth).
  * "free" descreve o plano gratuito do provedor no momento em que foi catalogado; limites mudam — confira no site dele.
@@ -41,6 +43,12 @@ object ProviderCatalog {
     fun byBaseUrl(url: String): Preset? = all.firstOrNull { norm(it.baseUrl) == norm(url) }
 
     fun byId(id: String): Preset? = all.firstOrNull { it.id == id }
+
+    /** Provedor ativo: o escolhido na página de Provedores ou, em instalações antigas, o deduzido da Base URL. */
+    fun activeId(s: Settings): String = s.activeProvider.takeIf { it == "custom" || byId(it) != null } ?: storageKey(s.baseUrl)
+
+    /** Ordem da página: login (OAuth) primeiro — é a forma preferida de conectar —, depois os demais. */
+    val ordered: List<Preset> get() = all.sortedBy { if (it.oauth) 0 else 1 }
 
     /** Chave sob a qual a configuração de um provedor fica guardada em Settings.savedProviders. */
     fun storageKey(baseUrl: String): String = byBaseUrl(baseUrl)?.id ?: if (baseUrl.contains("openrouter", true)) "openrouter" else "custom"

@@ -11,20 +11,31 @@ object ModelFallback {
     private data class State(val until: Long, val cooldown: Long)
     private val states = java.util.concurrent.ConcurrentHashMap<String, State>()
 
-    /** Modelo a usar agora para o principal [primary]. */
+    /**
+     * Cadeia de modelos (como os "combos" de gateways): o principal e depois os alternativos, separados por vírgula.
+     * Cada item pode apontar para outro provedor conectado ("groq::llama-3.3-70b", ver ProviderRoute).
+     */
+    fun chain(primary: String, fallback: String): List<String> =
+        (listOf(primary) + fallback.split(',').map { it.trim() }.filter { it.isNotBlank() }).distinct()
+
+    /** Modelo a usar agora: o primeiro da cadeia que não está em espera (se todos estão, o que sai antes da espera). */
     fun resolve(primary: String, fallback: String, now: Long = System.currentTimeMillis()): String {
-        if (fallback.isBlank() || fallback == primary) return primary
-        val st = states[primary] ?: return primary
-        return if (now < st.until) fallback else primary
+        val c = chain(primary, fallback)
+        if (c.size == 1) return primary
+        return c.firstOrNull { (states[it]?.until ?: 0L) <= now } ?: c.minByOrNull { states[it]?.until ?: 0L } ?: primary
     }
 
-    /** O principal bateu o limite: liga o alternativo. Retorna false se não há alternativo configurado (ou já é ele). */
-    fun onRateLimit(primary: String, fallback: String, now: Long = System.currentTimeMillis()): Boolean {
-        if (fallback.isBlank() || fallback == primary) return false
-        val prev = states[primary]
+    /**
+     * [model] bateu o limite: entra em espera e a cadeia passa ao próximo. Retorna false se não há outro modelo
+     * para usar (sem alternativo configurado), e nesse caso nada muda.
+     */
+    fun onRateLimit(model: String, fallback: String, now: Long = System.currentTimeMillis(), primary: String = model): Boolean {
+        val c = chain(primary, fallback)
+        if (c.size == 1 || model !in c) return false
+        val prev = states[model]
         val cooldown = if (prev == null) FIRST_COOLDOWN_MS else (prev.cooldown * 2).coerceAtMost(MAX_COOLDOWN_MS)
-        states[primary] = State(now + cooldown, cooldown)
-        return true
+        states[model] = State(now + cooldown, cooldown)
+        return resolve(primary, fallback, now) != model
     }
 
     /** O principal respondeu de novo: volta a ser usado e a escada de espera zera. Retorna true se estava em alternativo. */
