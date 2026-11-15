@@ -92,6 +92,8 @@ fun SettingsScreen(nav: NavController) {
             CueField(s.baseUrl, { v -> app.store.updateSettings { it.copy(baseUrl = v.trim()) } }, if (s.baseUrl.contains("openrouter", true)) "Base URL (compatível OpenAI)" else "Base URL — ex.: https://api.exemplo.com/v1")
             ModelPicker(s.model, { v -> app.store.updateSettings { it.copy(model = v) } }, "Modelo do agente", baseUrl = s.baseUrl, apiKey = s.apiKey)
             ModelPicker(s.fastModel, { v -> app.store.updateSettings { it.copy(fastModel = v) } }, "Modelo rápido (títulos e resumos de contexto)", baseUrl = s.baseUrl, apiKey = s.apiKey)
+            ModelPicker(s.fallbackModel, { v -> app.store.updateSettings { it.copy(fallbackModel = v) } }, "Modelo alternativo (entra no limite de requisições)", baseUrl = s.baseUrl, apiKey = s.apiKey)
+            Text("Quando o modelo do agente ou o rápido batem limite (429), as chamadas passam para este modelo e o principal é testado de novo depois de alguns minutos. Deixe vazio para desligar.", fontSize = 12.sp, color = Cue.c.ink3)
             ToggleRow("Desativar thinking", "Zero raciocínio estendido — respostas mais rápidas", s.disableThinking) { v -> app.store.updateSettings { it.copy(disableThinking = v) } }
             Text("Passos máximos por execução: ${s.maxSteps}", fontSize = 14.sp)
             Slider(s.maxSteps.toFloat(), { v -> app.store.updateSettings { it.copy(maxSteps = v.toInt()) } }, valueRange = 10f..1000f,

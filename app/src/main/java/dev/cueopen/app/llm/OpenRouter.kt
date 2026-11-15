@@ -335,11 +335,20 @@ class OpenRouter(private val settings: () -> Settings) {
     }
 
     /** Pedido simples sem ferramentas (títulos, resumos), no modelo rápido. */
-    suspend fun quick(prompt: String, maxTokens: Int = 200, conversationId: String? = null): String =
-        chat(listOf(LlmMessage("user", prompt)), maxTokens = maxTokens,
-            model = settings().fastModel,
-            conversationId = conversationId,
-        ).content.orEmpty().trim()
+    suspend fun quick(prompt: String, maxTokens: Int = 200, conversationId: String? = null): String {
+        val primary = settings().fastModel
+        val fallback = settings().fallbackModel
+        val model = ModelFallback.resolve(primary, fallback)
+        return try {
+            chat(listOf(LlmMessage("user", prompt)), maxTokens = maxTokens, model = model, conversationId = conversationId).content.orEmpty().trim()
+                .also { if (model == primary) ModelFallback.onSuccess(primary) }
+        } catch (t: LlmRequestFailure) {
+            // Limite no modelo rápido: uma nova tentativa no modelo alternativo, se configurado.
+            val rateLimited = LlmRecovery.classify(t.message, t.retryable, t.responseTruncated) == LlmRecovery.Category.RATE_LIMIT
+            if (model != primary || !rateLimited || !ModelFallback.onRateLimit(primary, fallback)) throw t
+            chat(listOf(LlmMessage("user", prompt)), maxTokens = maxTokens, model = fallback, conversationId = conversationId).content.orEmpty().trim()
+        }
+    }
 
     private fun LlmMessage.toJson(): JsonElement = buildJsonObject {
         put("role", role)

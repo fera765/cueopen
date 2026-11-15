@@ -122,6 +122,8 @@ class AgentRunner(
      */
     /** Agentes de seção pausados à mão pelo usuário no meio de uma tarefa delegada (a tarefa continua aberta). */
     private val pausedDelegations = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+    /** Ferramentas indisponíveis já explicadas ao modelo nesta execução (avisa uma vez antes de interromper). */
+    private val unknownToolWarned = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
 
     fun stop(sessionId: String, pauseAutonomy: Boolean = false) {
         // Parar um agente que está numa tarefa do coordenador é uma PAUSA: a tarefa não conta como concluída.
@@ -229,6 +231,7 @@ class AgentRunner(
     /** Envia uma mensagem do usuário e (re)inicia o loop. */
     fun send(sessionId: String, text: String, attachments: List<String> = emptyList(), onDone: (() -> Unit)? = null, quotedReply: String? = null, showUserMessage: Boolean = true): Job {
         autoResumeJobs.remove(sessionId)?.cancel()  // o usuário (ou a retomada) agiu: cancela a retomada agendada
+        unknownToolWarned.removeIf { it.startsWith("$sessionId|") }
         jobs[sessionId]?.cancel()
         synchronized(childJobsByParent) { childJobsByParent.remove(sessionId)?.forEach { it.cancel() } }
         val quote = quotedReply?.trim()?.take(800)?.takeIf { it.isNotBlank() }
@@ -1608,8 +1611,11 @@ class AgentRunner(
                         kotlinx.coroutines.delay(wait.coerceAtMost(15_000))
                     }
                     try {
-                        val response = llm.chat(listOf(sys) + history, tools = stepTools, model = stepModel(agent), maxTokens = currentReplyTokenLimit, conversationId = sessionId)
+                        val usedModel = stepModel(agent)
+                        val response = llm.chat(listOf(sys) + history, tools = stepTools, model = usedModel, maxTokens = currentReplyTokenLimit, conversationId = sessionId)
                         breaker.onSuccess()
+                        if (usedModel == primaryModel(agent) && dev.cueopen.app.llm.ModelFallback.onSuccess(usedModel))
+                            store.addItem(sessionId, ChatItem.Step(tool = "model_switch", title = "Modelo principal voltou a responder", args = usedModel, result = "", status = StepStatus.OK))
                         if (response.truncated && (response.toolCalls.isNotEmpty() || response.content.isNullOrBlank())) throw dev.cueopen.app.llm.LlmRequestFailure(
                             "A resposta foi cortada sem texto recuperável ou com chamadas de ferramenta incompletas; nenhuma ferramenta foi executada.",
                             retryable = true,
@@ -1631,6 +1637,16 @@ class AgentRunner(
                             store.session(sessionId)?.let { cur -> runCatching { ctxMgr.compactIfNeeded(cur, force = true) }.getOrElse { ctxMgr.safeTrim(cur) } }
                             scope.launch { send(sessionId, continuationDirective(sessionId, automatic = true), showUserMessage = false) }
                             return
+                        }
+                        // Limite de requisições no modelo principal: passa na hora para o modelo alternativo (se configurado).
+                        val primaryNow = primaryModel(agent)
+                        if (category == dev.cueopen.app.llm.LlmRecovery.Category.RATE_LIMIT && stepModel(agent) == primaryNow &&
+                            dev.cueopen.app.llm.ModelFallback.onRateLimit(primaryNow, store.settings.fallbackModel)) {
+                            val back = dev.cueopen.app.llm.ModelFallback.activeUntil(primaryNow)?.let { SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(it)) }.orEmpty()
+                            store.addItem(sessionId, ChatItem.Step(tool = "model_switch", title = "Limite no modelo principal: usando o alternativo",
+                                args = store.settings.fallbackModel, result = "Testo o principal ($primaryNow) de novo às $back.", status = StepStatus.OK))
+                            attempt = 0
+                            continue
                         }
                         if (llmFailure == null || !dev.cueopen.app.llm.LlmRecovery.shouldRetry(category, attempt, retryable)) {
                             runCatching { dev.cueopen.app.diag.ErrorLog.log("agent", "LLM falhou após $attempt tentativa(s) [${category.name}]: ${t.javaClass.simpleName}: ${t.message.orEmpty()}", sessionId, "llm") }
@@ -1920,6 +1936,14 @@ class AgentRunner(
                 // Ferramenta inexistente/não liberada chamada de novo e de novo: não há o que insistir.
                 reply.toolCalls.filter { !ToolCallExecutionPolicy.isExposed(it.name, exposedToolNames) }
                     .firstNotNullOfOrNull { toolLoops.unknownTool(it.name) }?.let { t ->
+                        if (unknownToolWarned.add(sessionId + "|" + t.tool)) {
+                            toolLoops.clearUnknown(t.tool)
+                            val coord = coordinatedSection(sessionId) != null
+                            store.editSession(sessionId) { it.copy(llm = it.llm + LlmMessage("user", "[Sistema] A ferramenta \"${t.tool}\" não existe para você nesta conversa, então chamá-la de novo vai falhar do mesmo jeito. " +
+                                (if (coord) "Você é o coordenador: terminal, browser e edição de arquivos ficam com os agentes. Para isso, use team_delegate(agent, task) dizendo exatamente o que executar; para ler arquivos do time, use file_read/file_list."
+                                 else "Use somente as ferramentas da lista que você recebeu; se precisar de uma capacidade que não está lá, carregue-a com tools_load ou explique ao usuário o que falta."))) }
+                            return@let
+                        }
                         runCatching { dev.cueopen.app.diag.ErrorLog.log("agent", "Ferramenta indisponível repetida: ${t.tool} (interrompido).", sessionId, t.tool) }
                         store.addItemUnique(sessionId, ChatItem.Error(text = "O agente insistiu na ferramenta \"${t.tool}\", que não está disponível aqui. Interrompi para não gastar tokens."))
                         store.editSession(sessionId) { it.copy(status = SessionStatus.WAITING_USER) }
@@ -1936,6 +1960,8 @@ class AgentRunner(
                         callThreshold = repeatToolThreshold(call.name),
                         contentThreshold = if (call.name in CONTENT_REPEAT_TOOLS) 3 else null,
                     ) ?: continue
+                    // Depois de compactar, o conteúdo dos arquivos saiu do contexto: relê-los é necessário, não loop.
+                    if (trip.kind == ToolLoopDetector.Kind.POST_COMPACTION && call.name in POST_COMPACTION_READS) continue
                     tripped = call.name
                     trippedKind = trip.kind
                     trippedRepeatable = trippedRepeatable && repeatable && trip.kind == ToolLoopDetector.Kind.SAME_CALL
@@ -1948,7 +1974,7 @@ class AgentRunner(
                 } else {
                     cleanRounds = 0
                     val limit = when {
-                        trippedKind == ToolLoopDetector.Kind.POST_COMPACTION -> 1  // compactar não quebrou o loop
+                        trippedKind == ToolLoopDetector.Kind.POST_COMPACTION -> 2  // compactar não quebrou o loop: avisa antes de parar
                         trippedKind == ToolLoopDetector.Kind.NO_PROGRESS || trippedKind == ToolLoopDetector.Kind.PING_PONG -> 2
                         trippedStrict -> 1
                         trippedRepeatable -> 4
@@ -2294,6 +2320,8 @@ class AgentRunner(
         const val MEMBER_SLOW_MINUTES = 30L
         private val STRICT_REPEAT_TOOLS = setOf("connector_validate", "connector_test", "connector_propose", "connector_edit_propose")
         /** Leituras de conteúdo: o mesmo texto longo voltando por caminhos diferentes é falta de progresso. */
+        /** Leituras que, logo depois de uma compactação, são refeitas por necessidade (o conteúdo saiu do contexto). */
+        private val POST_COMPACTION_READS = setOf("file_read", "file_list", "notes_read", "memory_search", "skill_load", "team_status", "browser_read", "browser_snapshot", "app_read")
         private val CONTENT_REPEAT_TOOLS = setOf("file_read", "file_list", "memory_search", "notes_read", "connector_spec", "skill_load")
         private val PURE_REPEAT_TOOLS = setOf(
             "file_read", "file_list", "memory_search", "notes_read", "connector_spec", "skill_load",
@@ -2595,8 +2623,10 @@ class AgentRunner(
 
     // ------------------------------------------------------------------ planejamento de contexto
     /** Usa o modelo do agente quando definido; caso contrário, o modelo padrão. */
+    private fun primaryModel(agent: AgentProfile?): String = agent?.model?.takeIf { it.isNotBlank() } ?: store.settings.model
+    /** Modelo desta chamada: o principal, ou o alternativo enquanto o principal está em limite de requisições. */
     private fun stepModel(agent: AgentProfile?): String =
-        agent?.model?.takeIf { it.isNotBlank() } ?: store.settings.model
+        dev.cueopen.app.llm.ModelFallback.resolve(primaryModel(agent), store.settings.fallbackModel)
 
     private fun toolName(o: kotlinx.serialization.json.JsonElement): String =
         runCatching { o.jsonObject["function"]!!.jsonObject["name"]!!.jsonPrimitive.content }.getOrDefault("")
@@ -2847,6 +2877,10 @@ class AgentRunner(
                     if (agent?.confirmMode == "auto") appendLine("- Seção 100% autônoma: o usuário não acompanha o chat e não vai responder. Por isso, não faça perguntas, não peça escolha nem confirmação e não termine com \"me diga\" ou \"quer que eu\". Em cada decisão, escolha a melhor opção com base nos dados, registre a escolha em uma frase e siga para a próxima etapa. Um feedback não encerra o trabalho: depois de cada entrega, passe para a fase seguinte com um novo team_plan. O trabalho só termina quando o objetivo inteiro estiver entregue e você chamar section_done(summary).")
                     if (sec.scheduleMinutes > 0) appendLine("- Esta seção roda sozinha ${scheduleLabel(sec.scheduleMinutes)}: o app acorda você com uma mensagem [Heartbeat] e você executa o ciclo completo de novo. O agendamento já está feito; não chame set_schedule.")
                     else appendLine("- Se o usuário pedir repetição (ex.: \"uma vez por dia\"), chame set_schedule(minutes, mission) — 1440 = diário. A partir daí o Android acorda você sozinho.")
+                    appendLine("- Tamanho certo do plano: pedido curto (uma ação, uma resposta) → um único team_delegate, sem plano; pedido com etapas dependentes → team_plan com etapas pequenas e verificáveis (cada uma com entregável e critério de pronto).")
+                    appendLine("- Só afirme o que veio de um relatório: cada número, nome, link ou conclusão que você passar ao usuário precisa estar num [Relatório automático] ou num arquivo que você leu. Ao citar, diga de qual agente ou arquivo veio. Se uma informação não chegou, diga que falta — não complete com suposição.")
+                    appendLine("- Antes de aprovar uma entrega, confira a linha [Verificado pelo app]: arquivo prometido que não aparece ali não existe. Entrega vaga, sem dados concretos ou fora do pedido volta com team_review redo dizendo exatamente o que falta.")
+                    appendLine("- Mantenha um registro de trabalho em notes_write (atualize a cada etapa aprovada): objetivo, etapa atual, decisões tomadas, entregáveis com caminho e o que já foi descartado. Ele sobrevive à compactação do contexto: depois de uma compactação, leia o resumo e as anotações antes de reler arquivos ou refazer qualquer etapa.")
                     appendLine("- Não use sleep para esperar um agente: o [Relatório automático] chega sozinho assim que ele termina e, se você estiver em espera, o app acorda você na hora. Depois de delegar, basta encerrar a sua resposta.")
                     appendLine("- Entre uma ação e outra, mande feedbacks curtos (5 a 30 palavras) e continue trabalhando. Terminal e browser ficam com os agentes: o seu papel é coordenar.")
                     appendLine("- Ao receber um [Relatório automático], avalie a entrega e então aprove, peça um ajuste específico ou passe a próxima etapa. Apresente o progresso ao usuário em lista numerada.")

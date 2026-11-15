@@ -479,6 +479,8 @@ data class Settings(
     val baseUrl: String = "https://openrouter.ai/api/v1",
     val model: String = "deepseek/deepseek-v4-flash",
     val fastModel: String = "deepseek/deepseek-v4-flash",
+    /** Modelo usado automaticamente quando o modelo do agente ou o rápido batem limite de requisições (429). Vazio = desligado. */
+    val fallbackModel: String = "",
     /** Configuração do OpenRouter guardada ao trocar para "Personalizado" (e vice-versa), para nada se perder. */
     val savedProviders: Map<String, List<String>> = emptyMap(),
     val disableThinking: Boolean = true,

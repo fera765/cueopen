@@ -42,6 +42,9 @@ class ToolLoopDetector(private val window: Int = 24) {
         return if (n >= UNKNOWN_TOOL_THRESHOLD) Trip(name, Kind.UNKNOWN_TOOL) else null
     }
 
+    /** Zera a contagem de uma ferramenta indisponível (depois de explicar ao modelo que ela não existe). */
+    fun clearUnknown(name: String) { unknown.remove(name) }
+
     /**
      * @param callThreshold quantas vezes a mesma chamada (nome+args+resultado) pode aparecer sem progresso.
      * @param contentThreshold se não nulo, quantas vezes o mesmo conteúdo longo pode voltar por argumentos
