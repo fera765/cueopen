@@ -4683,7 +4683,7 @@ class AgentRunner(
                     val p = s("path").trim()
                     val start = if (p.isBlank()) root else AgentFilePathPolicy.readableWorkspace(root, sandbox.connectorsDir, p, allowRoot = true)
                     if (start == null || !start.exists()) "ERRO: caminho não existe: $p. Omita path para buscar no workspace inteiro."
-                    else withContext(kotlinx.coroutines.Dispatchers.IO) { FileSearch.search(root, start, s("pattern"), b("regex"), (i("max") ?: 50).coerceIn(5, 200)) }
+                    else kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) { FileSearch.search(root, start, s("pattern"), b("regex"), (i("max") ?: 50).coerceIn(5, 200)) }
                 }
                 "web_search" -> dev.cueopen.app.web.WebTools.search(s("query"), i("max") ?: 8)
                 "web_fetch" -> dev.cueopen.app.web.WebTools.fetch(SecretVault.resolve(sessionId, s("url")).trim(), (i("max_chars") ?: 12_000).coerceIn(2_000, 40_000))
