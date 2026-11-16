@@ -534,6 +534,8 @@ data class AppState(
     val browserLogins: List<BrowserLogin> = emptyList(),
     /** Seção Browser: scripts do usuário injetados nos browsers dos agentes, por domínio. */
     val userScripts: List<UserScript> = emptyList(),
+    /** Fluwy Pages: páginas que os agentes criam e atualizam (documento, kanban, checklist, tabela, HTML). */
+    val pages: List<dev.cueopen.app.pages.FluwyPage> = emptyList(),
 )
 
 /**

@@ -202,7 +202,27 @@ class Store(context: Context) {
     // ---------- Seções
     fun section(id: String?) = id?.let { i -> _state.value.sections.firstOrNull { it.id == i } }
     fun upsertSection(sec: Section) = update { st ->
-        st.copy(sections = if (st.sections.any { it.id == sec.id }) st.sections.map { if (it.id == sec.id) sec else it } else st.sections + sec)
+        st.copy(sections = if (st.sections.any { it.id == sec.id }) st.sections.map { if (it.id == sec.id) sec else it } else st.sections + sec,
+            // Quadro do time: o kanban da seção acompanha o plano sozinho.
+            pages = runCatching { dev.cueopen.app.pages.PageOps.syncBoard(st.pages, sec) }.getOrDefault(st.pages))
+    }
+
+    // ---------- Fluwy Pages
+    fun page(id: String) = _state.value.pages.firstOrNull { it.id == id }
+    fun pagesIn(spaceId: String) = _state.value.pages.filter { it.spaceId == spaceId }
+    fun upsertPage(p: dev.cueopen.app.pages.FluwyPage) = update { st ->
+        st.copy(pages = if (st.pages.any { it.id == p.id }) st.pages.map { if (it.id == p.id) p else it } else st.pages + p)
+    }
+    fun deletePage(id: String) = update { st -> st.copy(pages = st.pages.filterNot { it.id == id }) }
+    /** Aplica um lote de operações de forma atômica (dentro do lock do estado): vários agentes não se sobrescrevem. */
+    fun applyPageOps(id: String, ops: List<kotlinx.serialization.json.JsonObject>, by: String): Result<dev.cueopen.app.pages.FluwyPage> {
+        var out: Result<dev.cueopen.app.pages.FluwyPage> = Result.failure(IllegalArgumentException("página $id não existe (use page_list)"))
+        update { st ->
+            val p = st.pages.firstOrNull { it.id == id } ?: return@update st
+            out = dev.cueopen.app.pages.PageOps.apply(p, ops, by)
+            out.getOrNull()?.let { np -> st.copy(pages = st.pages.map { if (it.id == id) np else it }) } ?: st
+        }
+        return out
     }
     /** Remove a seção, todos os chats dela e os Agents que foram criados para ela. */
     fun deleteSection(id: String): List<String> {

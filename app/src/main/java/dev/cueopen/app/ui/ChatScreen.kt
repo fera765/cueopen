@@ -147,6 +147,7 @@ fun ChatScreen(nav: NavController, sessionId: String, onMenu: () -> Unit = {}) {
                 DropdownMenu(menu, { menu = false }) {
                     DropdownMenuItem({ Text("Compartilhar") }, { menu = false; shareSession(ctx, session) }, leadingIcon = { Icon(Icons.Rounded.IosShare, null) })
                     DropdownMenuItem({ Text("Replay") }, { menu = false; nav.navigate("replay/$sessionId") }, leadingIcon = { Icon(Icons.Rounded.PlayCircle, null) })
+                    DropdownMenuItem({ Text("Pages desta conversa") }, { menu = false; nav.navigate("pages?space=" + (app.store.section(app.store.session(sessionId)?.sectionId)?.sessionId ?: sessionId)) }, leadingIcon = { Icon(Icons.Rounded.Article, null) })
                     DropdownMenuItem({ Text("Arquivos da tarefa") }, { menu = false; nav.navigate("computer/$sessionId?tab=files") }, leadingIcon = { Icon(Icons.Rounded.FolderOpen, null) })
                     DropdownMenuItem({ Text("Fazer igual (nova tarefa)") }, {
                         menu = false
@@ -445,6 +446,7 @@ fun TimelineItem(item: ChatItem, onOpenComputer: (String) -> Unit, onOpenMedia: 
         is ChatItem.Step -> when (item.tool) {
             dev.cueopen.app.agent.TEAM_MEMBER_STEP -> TeamMemberPill(item, nav)
             "team_delegate", "team_status" -> {}  // a pílula do agente já representa a delegação
+            "page" -> PageStepCard(item, nav)
             else -> StepRow(item, onOpenComputer)
         }
         is ChatItem.Plan -> {}  // o plano fica no card do computador, acima do composer
@@ -1300,5 +1302,20 @@ private fun TeamLiveStrip(sec: dev.cueopen.app.data.Section, nav: androidx.navig
                 if (running) PulsingDot(c.ok, 6.dp)
             }
         }
+    }
+}
+
+/** Cartão no chat para página criada/atualizada (Fluwy Pages): toque abre a página. */
+@Composable
+private fun PageStepCard(s: ChatItem.Step, nav: androidx.navigation.NavController?) {
+    val c = Cue.c
+    Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(c.surface).clickable { nav?.navigate("page/${s.args}") }.padding(12.dp),
+        verticalAlignment = Alignment.CenterVertically) {
+        Icon(Icons.Rounded.Article, null, tint = c.accent); Spacer(Modifier.width(10.dp))
+        Column(Modifier.weight(1f)) {
+            Text(s.title, fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
+            Text("Fluwy Pages · " + s.result + " · toque para abrir", fontSize = 12.sp, color = c.ink3)
+        }
+        Icon(Icons.Rounded.ChevronRight, null, tint = c.ink3)
     }
 }

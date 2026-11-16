@@ -1599,7 +1599,9 @@ class AgentRunner(
             }
             // Planejamento contextual: decide quais ferramentas/conectores e quanto conhecimento/memória entram neste passo
             val allTools = tools(agent, allowMultiAgent = tokenBudgetOverride == null, builder = s.connectorBuilder, connectorEditId = s.connectorEditId, sectionId = s.sectionId, scriptBuilder = s.scriptBuilder)
-            if (s.scriptBuilder) ToolContextPlanner.load(sessionId, listOf("web_dev"))  // browser_js/network/console sempre à mão
+            if (s.scriptBuilder) ToolContextPlanner.load(sessionId, listOf("web_dev"))
+            // Pages ficam à mão numa seção (quadro do time) e onde já existe alguma página.
+            if (s.sectionId != null || store.pagesIn(pageSpace(sessionId)).isNotEmpty()) ToolContextPlanner.load(sessionId, listOf("pages"))  // browser_js/network/console sempre à mão
         val (contextPlan, stepToolsPlanned) = toolContextPlan(sessionId, s, allTools)
             // Entrega final após "pare": só ler/escrever/enviar/encerrar.
             val stepTools = if (sessionId in finalDelivery) kotlinx.serialization.json.JsonArray(allTools.filter { toolName(it) in FINAL_DELIVERY_TOOLS }) else stepToolsPlanned
@@ -2684,6 +2686,25 @@ class AgentRunner(
     /** Alternativos do momento: os provedores da cadeia (cada um com seu modelo) + alternativos por modelo. */
     private fun fallbackChain(): String = dev.cueopen.app.llm.ProviderChain.fallback(store.settings)
 
+    /**
+     * Plano B da leitura/busca direta: abre no browser do agente e lê a página. Se o agente não usa browser ou o browser
+     * não está disponível, devolve o erro original com a explicação.
+     */
+    private suspend fun browserFallback(sessionId: String, target: String, directResult: String, maxChars: Int): String {
+        val agent = store.agent(store.session(sessionId)?.agentId)
+        if (agent?.useBrowser == false) return directResult
+        setActivity(sessionId, Activity(Activity.Kind.BROWSER, "Leitura direta falhou: abrindo no browser"))
+        val br = browserFor(sessionId)
+        val nav = runCatching { br.navigate(target) }.getOrElse { "ERROR: ${it.javaClass.simpleName}" }
+        if (nav.startsWith("ERROR") || nav.contains("browser indisponível")) return directResult + "\n\n[O browser também não abriu: ${nav.take(200)}]"
+        BrowserVisitLog.record(sessionId, target, nav)
+        val page = runCatching { br.read(maxChars, trackRepeat = false) }.getOrDefault("")
+        return "[A leitura direta não funcionou (${directResult.lineSequence().first().take(140)}); abri automaticamente no browser:]\n" + nav.take(300) + "\n\n" + page
+    }
+
+    /** Espaço das páginas: a seção inteira compartilha (chat do coordenador); fora de seção, o próprio chat. */
+    private fun pageSpace(sessionId: String): String = store.section(store.session(sessionId)?.sectionId)?.sessionId ?: sessionId
+
     /** Mesma leitura (arquivo, offset, limite) sem o arquivo ter mudado e sem compactação no meio: devolve um aviso curto em vez do trecho de novo. */
     private val fileReadSeen = java.util.concurrent.ConcurrentHashMap<String, String>()
     private fun readCache(sessionId: String, f: java.io.File, offset: Int, limit: Int): String? {
@@ -2926,6 +2947,7 @@ class AgentRunner(
                 store.section(session.sectionId)?.takeIf { it.coordinatorAgentId != agent?.id && it.sessionId != session.id }?.let { sec ->
                     appendLine(); appendLine("## Você é agente da seção ${sec.name} (o coordenador define o seu trabalho)")
                     appendLine("- Execute exatamente a tarefa recebida do coordenador, sem criar etapas novas nem ampliar o escopo: ele divide o trabalho entre o time, e sair do escopo gera retrabalho e conflito com outros agentes.")
+                    appendLine("- Páginas do time (Pages): se a tarefa mencionar uma página ou quadro, leia com page_list/page_read e atualize só os seus cartões/trechos com page_update (mova seu cartão para Fazendo ao começar e Feito ao terminar).")
                     appendLine("- A cada etapa, escreva 1–2 frases de feedback (o que fez, o que vai fazer, o que falta). É por elas que o coordenador e o usuário acompanham você; não encadeie ferramentas em silêncio.")
                     appendLine("- Os arquivos do time ficam em /root/workspace, compartilhado entre os agentes. Liste com file_list; varrer o sistema inteiro (find /) é lento e não traz nada útil.")
                     appendLine("- Se faltar um insumo (arquivo, ID, acesso), diga exatamente o que falta e encerre com a resposta final: o coordenador resolve e devolve a tarefa. Insistir por conta própria só gasta tempo e tokens.")
@@ -2946,6 +2968,11 @@ class AgentRunner(
                     appendLine("- Para um pedido com mais de uma etapa, comece por team_plan (etapas, agente responsável e dependências). O app inicia as etapas sozinho; a cada [Relatório automático] você valida a entrega com team_review (approve, redo ou block), e ao aprovar as etapas seguintes começam sozinhas. O fluxo não depende de o usuário mandar \"continue\".")
                     appendLine("- team_delegate serve para tarefas avulsas fora do plano; ele não bloqueia, então acione vários agentes em paralelo quando fizer sentido. O usuário vê cada agente trabalhando numa pílula ao vivo.")
                     if (sec.plan.isNotEmpty()) appendLine("- Plano atual (persistido):\n" + SectionPlanEngine.describe(sec.plan))
+                    appendLine("- Esforço proporcional (prática da Anthropic para times de agentes): pergunta simples → você mesmo ou 1 agente; comparação → 2–4 agentes; pesquisa ampla → mais agentes com partes bem separadas. Times custam muitos tokens: não delegue o que um passo resolve.")
+                    appendLine("- Cada delegação precisa de objetivo, formato da entrega (output_format), fontes/ferramentas (tools_hint) e limites (boundaries) — tarefas vagas geram trabalho duplicado e lacunas. Dispare as partes independentes juntas, em paralelo.")
+                    appendLine("- Os agentes salvam o material completo em arquivo e devolvem só um resumo com o caminho: leia o arquivo quando precisar do detalhe, sem pedir para colarem tudo no relatório.")
+                    appendLine("- Antes de entregar ao usuário, confira o resultado final contra o pedido: precisão, fontes citadas, completude e se faltou alguma parte. O que falhar volta com team_review.")
+                    appendLine("- Quadro do time: o plano aparece sozinho como kanban em Pages (\"Quadro do time\"), atualizado a cada mudança de estado. Para relatórios, painéis e acompanhamentos que o usuário vai consultar, crie páginas com page_create e mantenha-as atualizadas com page_update (só a parte que mudou).")
                     if (agent?.confirmMode == "auto") appendLine("- Seção 100% autônoma: o usuário não acompanha o chat e não vai responder. Por isso, não faça perguntas, não peça escolha nem confirmação e não termine com \"me diga\" ou \"quer que eu\". Em cada decisão, escolha a melhor opção com base nos dados, registre a escolha em uma frase e siga para a próxima etapa. Um feedback não encerra o trabalho: depois de cada entrega, passe para a fase seguinte com um novo team_plan. O trabalho só termina quando o objetivo inteiro estiver entregue e você chamar section_done(summary).")
                     if (sec.scheduleMinutes > 0) appendLine("- Esta seção roda sozinha ${scheduleLabel(sec.scheduleMinutes)}: o app acorda você com uma mensagem [Heartbeat] e você executa o ciclo completo de novo. O agendamento já está feito; não chame set_schedule.")
                     else appendLine("- Se o usuário pedir repetição (ex.: \"uma vez por dia\"), chame set_schedule(minutes, mission) — 1440 = diário. A partir daí o Android acorda você sozinho.")
@@ -3165,7 +3192,10 @@ class AgentRunner(
                     "Escreva a tarefa de forma específica: objetivo, entregável, prazo e critério de pronto. Use wait=true apenas se precisar do resultado antes de seguir.",
                 buildJsonObject {
                     put("agent", str("Nome exato do Agent do time"))
-                    put("task", str("Tarefa completa e autossuficiente: o agente não vê a sua conversa, só este texto"))
+                    put("task", str("Tarefa completa e autossuficiente (objetivo e critério de pronto): o agente não vê a sua conversa, só este texto"))
+                    put("output_format", str("Formato da entrega (ex.: tabela em resultados.md com colunas X/Y; lista de 10 links com nota)"))
+                    put("tools_hint", str("Ferramentas/fontes a usar (ex.: web_search + web_fetch em sites oficiais)"))
+                    put("boundaries", str("O que NÃO fazer / fronteira com a tarefa dos outros agentes"))
                     put("wait", bool("true = espera o resultado (até timeout_minutes). Padrão: false"))
                     put("timeout_minutes", int("Com wait=true, a espera máxima em minutos (1-30; padrão 15)"))
                 }, listOf("agent", "task")))
@@ -3228,6 +3258,8 @@ class AgentRunner(
         }, listOf("tasks_json")))
         val term = agent?.useTerminal != false
         val web = agent?.useBrowser != false && allowMultiAgent
+        // Pages: sempre numa seção (time compartilha quadro/relatórios) e quando o planner carrega o grupo "pages".
+        val pagesEnabled = allowMultiAgent
         add(tool("update_plan", "Cria ou atualiza o plano da tarefa, dividido em fases. O usuário acompanha o progresso por ele.", buildJsonObject {
             put("goal", str("Objetivo em uma frase"))
             put("phases", strArray("Fases em ordem"))
@@ -3256,6 +3288,18 @@ class AgentRunner(
         add(tool("file_read", "Lê um arquivo de texto por partes. Aceita arquivos do workspace da tarefa (relativos ou /root/workspace/...) e, somente para leitura, de /root/connectors/<id>/workspace/.... Se o arquivo não existir, liste o diretório pai em vez de repetir o mesmo caminho.", buildJsonObject {
             put("path", str("Caminho do arquivo")); put("offset", int("Linha inicial (1 = início; padrão 1)")); put("limit", int("Quantidade de linhas (padrão 250, máx. 1000)")); put("stale_ok", bool("true apenas quando o usuário ou o coordenador pediu para reler um snapshot antigo do browser arquivado em .cue/out; por padrão snapshots antigos são recusados"))
         }, listOf("path")))
+        if (pagesEnabled) {
+            add(tool("page_create", "Cria uma página Fluwy Pages (aparece em Pages, mobile-first, e o usuário abre pelo chat). kind: doc (relatório em markdown), kanban (quadro com colunas e cartões), checklist, table (tabela) ou html (página livre com HTML/CSS/JS). Numa seção, todo o time vê e atualiza a mesma página.",
+                buildJsonObject { put("title", str("Título")); put("kind", str("doc | kanban | checklist | table | html")); put("markdown", str("Conteúdo inicial (doc)")); put("html", str("HTML completo, mobile-first (html)"))
+                    put("columns", strArray("Colunas do kanban (padrão: A fazer, Fazendo, Revisão, Feito)")); put("headers", strArray("Cabeçalhos da tabela")) }, listOf("title", "kind")))
+            add(tool("page_update", "Atualiza uma página com um lote de operações (tudo ou nada). Mude só o necessário em vez de reescrever. ops: " +
+                "rename{title} · set_markdown{markdown} · append_markdown{markdown} · replace_text{find,replace} · set_html{html} · add_column{name} · " +
+                "add_card{title,column?,assignee?,note?} · move_card{card_id|title,column} · update_card{card_id,new_title?,note?,assignee?,column?} · remove_card{card_id} · " +
+                "add_item{title} · check{card_id|title} · uncheck{card_id|title} · set_headers{headers[]} · add_row{cells[]} · update_row{index,cells[]} · remove_row{index}.",
+                buildJsonObject { put("page_id", str("ID da página (page_list)")); put("ops", buildJsonObject { put("type", "array"); put("description", "Lista de operações, cada uma um objeto com \"op\" e os campos dela"); put("items", buildJsonObject { put("type", "object") }) }) }, listOf("page_id", "ops")))
+            add(tool("page_read", "Lê uma página em formato compacto (cartões com card_id, linhas numeradas).", buildJsonObject { put("page_id", str("ID da página")) }, listOf("page_id")))
+            add(tool("page_list", "Lista as páginas desta conversa/seção.", buildJsonObject {}))
+        }
         add(tool("file_search", "Procura um texto (ou regex) dentro dos arquivos do workspace e devolve caminho:linha: trecho. Use ANTES de ler arquivos grandes: ache a linha e leia só o trecho com file_read(offset).",
             buildJsonObject { put("pattern", str("Texto ou regex a procurar (sem diferenciar maiúsculas)")); put("path", str("Arquivo ou pasta (padrão: todo o workspace)")); put("regex", bool("true se pattern é regex")); put("max", int("Máximo de linhas (padrão 50)")) }, listOf("pattern")))
         add(tool("file_list", "Lista um diretório do workspace da tarefa ou, somente para leitura, de /root/connectors/<id>/workspace/.", buildJsonObject { put("path", str("Diretório relativo ao workspace, ou /root/workspace/, ou /root/connectors/<id>/workspace/")) }))
@@ -3842,7 +3886,19 @@ class AgentRunner(
         when (call.name) {
             "create_section" -> return createSection(sessionId, s("name"), s("description"), s("coordinator_instructions"), s("agents_json"),
                 s("first_task"), s("suggested_android_caps"), b("suggest_wallet"), b("autonomous"), i("schedule_minutes") ?: 0)
-            "team_delegate" -> return ToolResult(teamDelegate(sessionId, s("agent"), s("task"), b("wait"), (i("timeout_minutes") ?: 15).coerceIn(1, 30)))
+            "team_delegate" -> {
+                val sec = store.section(store.session(sessionId)?.sectionId)
+                val goal = sec?.planGoal?.ifBlank { null } ?: store.session(sessionId)?.llm?.lastOrNull { it.role == "user" && it.content?.startsWith("[") != true }?.content?.take(600)
+                val brief = buildString {
+                    append(s("task"))
+                    if (s("output_format").isNotBlank()) append("\n\nFormato da entrega: ").append(s("output_format"))
+                    if (s("tools_hint").isNotBlank()) append("\nFerramentas/fontes indicadas: ").append(s("tools_hint"))
+                    if (s("boundaries").isNotBlank()) append("\nLimites (não faça): ").append(s("boundaries"))
+                    if (!goal.isNullOrBlank()) append("\n\n[Objetivo geral do time, para contexto — sua parte é só a tarefa acima]: ").append(goal)
+                    append("\n\nEntregue: material completo em arquivo no workspace + resumo curto (até ~250 palavras) com os achados principais e o caminho do arquivo.")
+                }
+                return ToolResult(teamDelegate(sessionId, s("agent"), brief, b("wait"), (i("timeout_minutes") ?: 15).coerceIn(1, 30)))
+            }
             "team_status" -> return ToolResult(teamStatus(sessionId))
             "team_plan" -> return ToolResult(teamPlan(sessionId, s("goal"), s("tasks_json")))
             "team_reassign" -> return ToolResult(teamReassign(sessionId, s("task_id"), s("agent"), s("note")))
@@ -4699,8 +4755,49 @@ class AgentRunner(
                     if (start == null || !start.exists()) "ERRO: caminho não existe: $p. Omita path para buscar no workspace inteiro."
                     else kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) { FileSearch.search(root, start, s("pattern"), b("regex"), (i("max") ?: 50).coerceIn(5, 200)) }
                 }
-                "web_search" -> dev.cueopen.app.web.WebTools.search(s("query"), i("max") ?: 8)
-                "web_fetch" -> dev.cueopen.app.web.WebTools.fetch(SecretVault.resolve(sessionId, s("url")).trim(), (i("max_chars") ?: 12_000).coerceIn(2_000, 40_000))
+                "page_create" -> {
+                    val by = store.agent(store.session(sessionId)?.agentId)?.name ?: "Agente"
+                    fun arr(k: String) = (a[k] as? kotlinx.serialization.json.JsonArray)?.mapNotNull { (it as? kotlinx.serialization.json.JsonPrimitive)?.contentOrNull }.orEmpty()
+                    dev.cueopen.app.pages.PageOps.create(pageSpace(sessionId), s("title"), s("kind"), by, s("markdown"), s("html"), arr("columns"), arr("headers")).fold({ p ->
+                        if (store.pagesIn(p.spaceId).size >= 60) "RECUSADO: esta conversa já tem 60 páginas; atualize uma existente." else {
+                            store.upsertPage(p)
+                            store.addItem(sessionId, ChatItem.Step(tool = "page", title = "Página criada: ${p.title}", args = p.id, result = p.kind, status = StepStatus.OK))
+                            "Criada: ${p.id} (${p.kind}). O usuário já pode abrir em Pages. Atualize com page_update(page_id=\"${p.id}\", ops=[...])."
+                        }
+                    }, { "ERRO: ${it.message}" })
+                }
+                "page_update" -> {
+                    val by = store.agent(store.session(sessionId)?.agentId)?.name ?: "Agente"
+                    val ops = (a["ops"] as? kotlinx.serialization.json.JsonArray)?.mapNotNull { it as? kotlinx.serialization.json.JsonObject }
+                        ?: runCatching { kotlinx.serialization.json.Json.parseToJsonElement(s("ops")).jsonArray.map { it.jsonObject } }.getOrNull()
+                    val id = s("page_id")
+                    if (ops.isNullOrEmpty()) "ERRO: envie ops como lista de objetos, ex.: [{\"op\":\"move_card\",\"card_id\":\"c_1\",\"column\":\"Feito\"}]."
+                    else if (store.page(id)?.let { it.spaceId != pageSpace(sessionId) } == true) "RECUSADO: essa página é de outra conversa."
+                    else store.applyPageOps(id, ops, by).fold({ p ->
+                        val last = store.session(sessionId)?.items?.lastOrNull() as? ChatItem.Step
+                        if (last?.tool == "page" && last.args == p.id) store.replaceItem(sessionId, last.copy(title = "Página atualizada: ${p.title}", result = "versão ${p.version}"))
+                        else store.addItem(sessionId, ChatItem.Step(tool = "page", title = "Página atualizada: ${p.title}", args = p.id, result = "versão ${p.version}", status = StepStatus.OK))
+                        "OK: ${p.title} agora na versão ${p.version} (${ops.size} operação(ões))."
+                    }, { "ERRO: ${it.message}" })
+                }
+                "page_read" -> store.page(s("page_id"))?.takeIf { it.spaceId == pageSpace(sessionId) }?.let { dev.cueopen.app.pages.PageOps.render(it) }
+                    ?: "ERRO: página não encontrada nesta conversa. Use page_list."
+                "page_list" -> store.pagesIn(pageSpace(sessionId)).sortedByDescending { it.updatedAt }.joinToString("\n") { p ->
+                    "${p.id} · ${p.kind} · \"${p.title}\" · v${p.version} · ${p.cards.size} cartões"
+                }.ifBlank { "Nenhuma página ainda. Crie com page_create." }
+                "web_search" -> dev.cueopen.app.web.WebTools.search(s("query"), i("max") ?: 8).let { r ->
+                    // Busca direta bloqueada/vazia: abre a busca no browser na hora, sem o agente precisar tentar de novo.
+                    if (r.startsWith("ERRO") || r.startsWith("Nenhum resultado pela busca direta")) browserFallback(sessionId, s("query"), r, 9_000) else r
+                }
+                "web_fetch" -> {
+                    val url = SecretVault.resolve(sessionId, s("url")).trim()
+                    val max = (i("max_chars") ?: 12_000).coerceIn(2_000, 40_000)
+                    dev.cueopen.app.web.WebTools.fetch(url, max).let { r ->
+                        // Erro ou página que depende de JS/login: segue automaticamente pelo browser.
+                        val failed = (r.startsWith("ERRO") && !r.startsWith("ERRO: informe")) || r.contains("[Pouco texto extraído")
+                        if (failed) browserFallback(sessionId, url, r, max.coerceAtMost(20_000)) else r
+                    }
+                }
                 "file_list" -> {
                     val path = s("path").trim()
                     val root = sandbox.workspaceFor(sessionId)

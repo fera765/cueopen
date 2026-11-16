@@ -231,6 +231,8 @@ fun CueNav(nav: NavHostController, startOnboarding: Boolean) {
         composable("providers") { ProvidersScreen(nav) }
         composable("channels") { ChannelsScreen(nav) }
         composable("usage") { UsageScreen(nav) }
+        composable("pages?space={space}", arguments = listOf(androidx.navigation.navArgument("space") { nullable = true; defaultValue = null })) { e -> PagesScreen(nav, e.arguments?.getString("space")) }
+        composable("page/{id}") { e -> PageScreen(nav, e.arguments!!.getString("id")!!) }
         composable("wallet") { WalletScreen(nav) }
         composable("wallet/send") { WalletSendScreen(nav) }
         composable("wallet/receive") { WalletReceiveScreen(nav) }

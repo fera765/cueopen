@@ -49,6 +49,9 @@ object ToolActivityLabels {
         "browser_wait_for" -> "Aguardando a página" to Activity.Kind.BROWSER
         "create_skill" -> "Criando skill" to Activity.Kind.THINKING
         "file_search" -> "Procurando nos arquivos" to Activity.Kind.EDITOR
+        "page_create" -> "Criando página" to Activity.Kind.EDITOR
+        "page_update" -> "Atualizando página" to Activity.Kind.EDITOR
+        "page_read", "page_list" -> "Lendo páginas" to Activity.Kind.EDITOR
         "web_search" -> "Buscando na web" to Activity.Kind.SEARCH
         "web_fetch" -> "Lendo página" to Activity.Kind.SEARCH
         else -> (if (tool.startsWith("mcp_")) "Conector · " + tool.substringAfter("__") else tool) to Activity.Kind.THINKING
@@ -72,6 +75,8 @@ object ToolActivityLabels {
         "device_accessibility_inspect_image" -> "element ${i("element_id")?.toString() ?: "?"} · recorte efêmero"
         "create_skill" -> s("name")
         "file_search" -> s("pattern").take(60)
+        "page_create" -> s("title").take(60)
+        "page_update", "page_read" -> s("page_id")
         "web_search" -> s("query").take(80)
         "web_fetch" -> s("url").take(80)
         "send_file" -> s("channel") + " · " + s("path").substringAfterLast('/')

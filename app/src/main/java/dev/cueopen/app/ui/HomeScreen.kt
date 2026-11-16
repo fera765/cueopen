@@ -643,6 +643,7 @@ private fun SessionDrawer(nav: NavController, sessions: List<Session>, agents: L
                 DrawerItem(Icons.Rounded.Schedule, "Tarefas agendadas") { go("scheduled") }
                 DrawerItem(Icons.Rounded.LibraryBooks, "Knowledge") { go("knowledge") }
                 DrawerItem(Icons.Rounded.Psychology, "Memória") { go("memory") }
+                DrawerItem(Icons.Rounded.Article, "Fluwy Pages") { go("pages") }
                 DrawerItem(Icons.Rounded.FolderOpen, "Arquivos") { go("files") }
                 DrawerItem(Icons.Rounded.AccountBalanceWallet, "Carteira Solana") { go("wallet") }
                 DrawerItem(Icons.Rounded.Language, "Browser") { go("browserhub") }
