@@ -77,9 +77,24 @@ fun CueMarkdown(text: String, modifier: Modifier = Modifier, onSend: ((String) -
             when (kind) {
                 "mermaid" -> MermaidCard(content)
                 "cueui" -> CueWidgetView(CueUi.parse(content, complete = true), onSend)
+                "files" -> CueWidgetView(CueWidget.Files("Arquivos", content.lines().mapNotNull { FileLinks.parseAttachmentLine(it) }), onSend)
                 "cueui-open" -> CueWidgetView(CueUi.parse(content, complete = false), onSend)
                 "code" -> CodeFenceCard(language, content)
-                else -> if (hasTable(content)) renderWithTables(content) else MdBlock(content)
+                else -> {
+                    // Linhas "📎 arquivo" (entrega do agente) viram cartões clicáveis que abrem o arquivo.
+                    val lines = content.lines()
+                    if (lines.none { FileLinks.parseAttachmentLine(it) != null }) { if (hasTable(content)) renderWithTables(content) else MdBlock(content) }
+                    else {
+                        val chunks = mutableListOf<Pair<Boolean, MutableList<String>>>()
+                        lines.forEach { l -> val isFile = FileLinks.parseAttachmentLine(l) != null
+                            if (chunks.lastOrNull()?.first == isFile) chunks.last().second.add(l) else chunks.add(isFile to mutableListOf(l)) }
+                        chunks.forEach { (isFile, ls) ->
+                            val txt = ls.joinToString("\n")
+                            if (isFile) CueWidgetView(CueWidget.Files("Arquivos", ls.mapNotNull { FileLinks.parseAttachmentLine(it) }), onSend)
+                            else if (txt.isNotBlank()) { if (hasTable(txt)) renderWithTables(txt) else MdBlock(txt) }
+                        }
+                    }
+                }
             }
         }
     }

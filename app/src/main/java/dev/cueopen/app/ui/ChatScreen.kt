@@ -175,7 +175,12 @@ fun ChatScreen(nav: NavController, sessionId: String, onMenu: () -> Unit = {}) {
         Column(Modifier.fillMaxSize().padding(pad).imePadding()) {
           run {
           Box(Modifier.weight(1f).fillMaxWidth()) {
-            androidx.compose.runtime.CompositionLocalProvider(LocalChatPersona provides ChatPersona.of(agent)) {
+            val openFile: (String) -> Unit = { p ->
+                val f = app.sandbox.hostFile(p.trim().removePrefix("file://"), sessionId)
+                if (f.isFile) mediaOpen = f.absolutePath
+                else android.widget.Toast.makeText(ctx, "Arquivo não encontrado: ${p.substringAfterLast('/')}", android.widget.Toast.LENGTH_SHORT).show()
+            }
+            androidx.compose.runtime.CompositionLocalProvider(LocalChatPersona provides ChatPersona.of(agent), LocalOpenFile provides openFile) {
             LazyColumn(Modifier.fillMaxSize(), state = list, contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 items(visibleItems, key = { it.id }) { item ->
                     TimelineItem(item, onOpenComputer = { tab -> nav.navigate("computer/$sessionId?tab=$tab") }, onOpenMedia = { mediaOpen = it }, sessionId = sessionId, nav = nav,

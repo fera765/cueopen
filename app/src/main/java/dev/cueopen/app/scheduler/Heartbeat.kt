@@ -63,6 +63,7 @@ object Heartbeat {
 
 class HeartbeatReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
+        if (dev.cueopen.app.AppExit.exited(context)) return  // o usuário saiu do app
         val agentId = intent.getStringExtra(Heartbeat.EXTRA_AGENT) ?: return
         val app = context.applicationContext as? CueApp ?: return
         val agent = app.store.agent(agentId) ?: return

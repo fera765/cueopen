@@ -101,6 +101,12 @@ class AgentRunner(
     /** Ferramentas indisponíveis já explicadas ao modelo nesta execução (avisa uma vez antes de interromper). */
     private val unknownToolWarned = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
 
+    /** "Sair do app": interrompe toda execução em andamento (a autonomia fica como estava e volta ao reabrir). */
+    fun stopEverything() {
+        jobs.keys.toList().forEach { runCatching { stop(it) } }
+        autoResumeJobs.values.forEach { it.cancel() }; autoResumeJobs.clear()
+    }
+
     fun stop(sessionId: String, pauseAutonomy: Boolean = false) {
         // Parar um agente que está numa tarefa do coordenador é uma PAUSA: a tarefa não conta como concluída.
         // (Pausa da seção, team_stop e reatribuição removem a delegação antes de chamar stop.)
@@ -2986,6 +2992,14 @@ class AgentRunner(
             if (memoryFacts.isNotEmpty()) {
                 appendLine(); appendLine("## Memória recuperada (referência que pode estar desatualizada; confirme antes de agir)")
                 appendLine(PromptContextPolicy.untrustedBlock("memory_facts", memoryFacts.joinToString("\n- "), contextPlan?.memoryChars ?: 2_400))
+            }
+            // Conversas anteriores parecidas: só no início da conversa (ainda sem resumo), para não pagar tokens a cada passo.
+            if (session.summary.isBlank() && session.llm.count { it.role == "user" } <= 1 && session.sectionId == null) {
+                val past = MemoryHygiene.pastChats(store.state.value.sessions, session.id, query)
+                if (past.isNotEmpty()) {
+                    appendLine(); appendLine("## Conversas anteriores relacionadas (referência; podem estar desatualizadas)")
+                    appendLine(PromptContextPolicy.untrustedBlock("past_chats", past.joinToString("\n- "), 1_400))
+                }
             }
             if (knowledge.isNotEmpty()) {
                 val knowledgeText = knowledge.joinToString("\n\n") { "Documento: ${it.title}\n${it.content.take(1500)}" }

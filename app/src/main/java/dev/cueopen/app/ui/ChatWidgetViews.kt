@@ -249,17 +249,18 @@ fun CueWidgetView(w: CueWidget, onSend: ((String) -> Unit)?) {
         }
         is CueWidget.Files -> {
             val clip = LocalClipboardManager.current
+            val open = LocalOpenFile.current
             Column(card) {
                 title(w.title.ifBlank { "Arquivos" })
                 w.items.forEach { (path, note) ->
                     Row(Modifier.fillMaxWidth().padding(vertical = 3.dp).clip(RoundedCornerShape(10.dp)).background(c.surface2)
-                        .clickable { clip.setText(AnnotatedString(path)) }.padding(10.dp), verticalAlignment = Alignment.CenterVertically) {
+                        .clickable { if (open != null) open(path) else clip.setText(AnnotatedString(path)) }.padding(10.dp), verticalAlignment = Alignment.CenterVertically) {
                         Text("📄", fontSize = 16.sp); Spacer(Modifier.width(8.dp))
                         Column(Modifier.weight(1f)) {
                             Text(path.substringAfterLast('/'), fontSize = 14.sp, color = c.ink, fontWeight = FontWeight.Medium)
                             Text(note.ifBlank { path }, fontSize = 11.sp, color = c.ink3, maxLines = 2)
                         }
-                        Icon(Icons.Rounded.ContentCopy, "Copiar caminho", Modifier.size(16.dp), tint = c.ink3)
+                        Icon(Icons.Rounded.ContentCopy, "Copiar caminho", Modifier.size(28.dp).clip(RoundedCornerShape(8.dp)).clickable { clip.setText(AnnotatedString(path)) }.padding(6.dp), tint = c.ink3)
                     }
                 }
             }

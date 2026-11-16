@@ -180,6 +180,11 @@ fun SettingsScreen(nav: NavController) {
             SectionLabel("Dados")
             SettingsLink(Icons.Rounded.DeleteSweep, "Apagar todas as tarefas", "Agents, skills e knowledge são mantidos", tint = c.err) { confirmClear = true }
             Spacer(Modifier.height(12.dp))
+            val exitCtx = androidx.compose.ui.platform.LocalContext.current
+            Button(onClick = { (exitCtx as? android.app.Activity)?.let { dev.cueopen.app.AppExit.exit(it) } }, modifier = Modifier.fillMaxWidth(),
+                colors = ButtonDefaults.buttonColors(containerColor = c.err, contentColor = Color.White)) { Text("Sair do app") }
+            Text("Fecha o app de vez: para agentes, ciclos, agendas e terminal até você abrir o app de novo.", fontSize = 12.sp, color = c.ink3)
+            Spacer(Modifier.height(12.dp))
             Text("Fluwy Bot · sem login, tudo local no seu aparelho.",
                 fontSize = 12.sp, color = c.ink3)
             Spacer(Modifier.height(24.dp))

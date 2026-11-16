@@ -71,6 +71,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        AppExit.reopen(application as CueApp)
         enableEdgeToEdge()
         handleIntent(intent)
         // Voltar não destrói a Activity: ela fica viva em segundo plano e o browser dos agentes segue com janela.

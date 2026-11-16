@@ -118,12 +118,8 @@ class CueApp : Application() {
         llm = OpenRouter { store.settings }
         terminals = dev.cueopen.app.sandbox.TerminalManager(this, sandbox)
         agent = AgentRunner(store, sandbox, ::browserFor, llm, terminals, this)
-        agent.resumeSleeping()
-        agent.recoverSections()  // planos de seção interrompidos continuam sozinhos
-        agent.startAutonomy()
-        dev.cueopen.app.scheduler.AutonomyWorker.ensure(this)
-        // terminal já ativo em segundo plano assim que o app abre (se o sandbox estiver instalado)
-        if (sandbox.isInstalled()) dev.cueopen.app.sandbox.SandboxService.start(this, "Terminal ativo")
+        // Depois de "Sair", nada volta a rodar sozinho até o usuário abrir o app (MainActivity chama AppExit.reopen).
+        if (!AppExit.exited(this)) startBackground()
         getSystemService(NotificationManager::class.java).createNotificationChannel(
             NotificationChannel(CH_TASKS, "Tarefas", NotificationManager.IMPORTANCE_DEFAULT)
         )
@@ -260,4 +256,16 @@ class CueApp : Application() {
         const val CH_TASKS = "tasks"
         lateinit var instance: CueApp; private set
     }
+
+    /** Agentes dormindo, seções, autonomia e terminal em segundo plano. */
+    fun startBackground() {
+        agent.resumeSleeping()
+        agent.recoverSections()  // planos de seção interrompidos continuam sozinhos
+        agent.startAutonomy()
+        dev.cueopen.app.scheduler.AutonomyWorker.ensure(this)
+        dev.cueopen.app.scheduler.Heartbeat.rescheduleAll(this)
+        // terminal já ativo em segundo plano assim que o app abre (se o sandbox estiver instalado)
+        if (sandbox.isInstalled()) dev.cueopen.app.sandbox.SandboxService.start(this, "Terminal ativo")
+    }
+
 }

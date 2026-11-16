@@ -57,6 +57,7 @@ object Scheduler {
 class ScheduledWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, params) {
     override suspend fun doWork(): Result {
         val app = applicationContext as CueApp
+        if (dev.cueopen.app.AppExit.exited(app)) return Result.success()  // o usuário saiu do app: pula esta execução
         val id = inputData.getString("id") ?: return Result.failure()
         val task = app.store.state.value.scheduled.firstOrNull { it.id == id } ?: return Result.failure()
         val session = Session(title = "⏰ ${task.title}", agentId = task.agentId, scheduledTaskId = task.id)
@@ -112,6 +113,7 @@ class ScheduledWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(
  */
 class AutonomyWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, params) {
     override suspend fun doWork(): Result {
+        if (dev.cueopen.app.AppExit.exited(applicationContext)) return Result.success()
         dev.cueopen.app.scheduler.Heartbeat.rescheduleAll(applicationContext)
         return Result.success()
     }
@@ -127,6 +129,7 @@ class AutonomyWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(c
 class BootReceiver : android.content.BroadcastReceiver() {
     override fun onReceive(context: Context, intent: android.content.Intent) {
         // criar a Application já chama startAutonomy(); aqui só garantimos o worker
+        if (dev.cueopen.app.AppExit.exited(context)) return
         AutonomyWorker.ensure(context)
         dev.cueopen.app.scheduler.Heartbeat.rescheduleAll(context)
     }
