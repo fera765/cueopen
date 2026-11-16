@@ -44,10 +44,68 @@ object SkillInstaller {
     }
     private fun getText(url: String, max: Long, github: Boolean = false) = String(getBytes(url, max, github), Charsets.UTF_8)
 
-    /** Baixa e valida. Pode devolver mais de uma skill quando o link é um repositório com várias. */
-    suspend fun fetch(source: String, wantedName: String? = null): List<Fetched> = withContext(Dispatchers.IO) {
-        val ref = GithubSkills.parse(source)
-        if (ref != null) fetchGithub(ref, wantedName) else fetchUrl(source.trim(), wantedName)
+    /**
+     * Baixa e valida qualquer origem suportada (pode devolver várias skills):
+     * - GitHub: owner/repo, …/tree/<ref>/<pasta>, …/blob/<ref>/…/SKILL.md (commit fixado, pasta inteira);
+     * - arquivo .zip (URL ou arquivo do workspace) com uma ou mais pastas de skill;
+     * - URL direta de um .md com a skill (baixa também os arquivos relativos citados);
+     * - página web que tem um link para SKILL.md (ou /SKILL.md no mesmo endereço);
+     * - pasta ou arquivo local do workspace ([localRoot]).
+     */
+    suspend fun fetch(source: String, wantedName: String? = null, localRoot: File? = null): List<Fetched> = withContext(Dispatchers.IO) {
+        val src = source.trim().trim('<', '>', '"', '\'', '`')
+        val ref = GithubSkills.parse(src)
+        when {
+            ref != null -> fetchGithub(ref, wantedName)
+            localRoot != null && !src.startsWith("http") -> fetchLocal(localRoot, src, wantedName)
+            src.substringBefore('?').endsWith(".zip", true) -> fromZip(getBytes(src, SkillPackage.MAX_BYTES), src, wantedName)
+            else -> fetchUrl(src, wantedName)
+        }
+    }
+
+    /** Pasta, SKILL.md ou .zip que já está no workspace (ex.: anexado pelo usuário). */
+    private fun fetchLocal(root: File, path: String, wanted: String?): List<Fetched> {
+        val f = File(root, path.removePrefix("/root/workspace/").removePrefix("./")).canonicalFile
+        if (!f.path.startsWith(root.canonicalPath)) error("o caminho precisa estar no workspace")
+        if (!f.exists()) error("não encontrei $path no workspace")
+        if (f.isFile && f.name.endsWith(".zip", true)) return fromZip(f.readBytes(), path, wanted)
+        val dir = if (f.isDirectory) f else f.parentFile
+        val md = (if (f.isFile) f else File(dir, "SKILL.md")).takeIf { it.isFile }?.readText() ?: error("não há SKILL.md em $path")
+        val files = dir.walkTopDown().filter { it.isFile && it.name != "SKILL.md" }.map { it.relativeTo(dir).path to it }
+            .filter { (p, file) -> !SkillPackage.unsafePath(p) && file.length() <= SkillPackage.MAX_FILE_BYTES }.take(SkillPackage.MAX_FILES)
+            .associate { (p, file) -> p to file.readBytes() }
+        return listOf(Fetched(SkillPackage.inspect(md, dir.name, wanted), md, files, "workspace:$path", SkillPackage.warnings(md)))
+    }
+
+    /** Pacote .zip: acha as pastas com SKILL.md e aplica os mesmos filtros e limites do GitHub. */
+    fun fromZip(bytes: ByteArray, source: String, wanted: String?): List<Fetched> {
+        val entries = LinkedHashMap<String, ByteArray>()
+        var total = 0L
+        java.util.zip.ZipInputStream(bytes.inputStream()).use { zin ->
+            var e = zin.nextEntry
+            while (e != null) {
+                val name = e.name.replace('\\', '/').trimStart('/')
+                if (!e.isDirectory && !name.startsWith("__MACOSX/") && !name.endsWith(".DS_Store")) {
+                    if (SkillPackage.unsafePath(name)) { e = zin.nextEntry; continue }
+                    val data = zin.readBytes()
+                    total += data.size
+                    if (total > SkillPackage.MAX_BYTES || entries.size >= SkillPackage.MAX_FILES * 5) error("pacote .zip grande demais")
+                    entries[name] = data
+                }
+                e = zin.nextEntry
+            }
+        }
+        val folders = SkillPackage.skillFolders(entries.keys.toList(), "")
+        if (folders.isEmpty()) error("o .zip não tem nenhum SKILL.md")
+        return folders.take(20).map { folder ->
+            val prefix = if (folder.isEmpty()) "" else "$folder/"
+            val own = entries.filterKeys { it.startsWith(prefix) }.mapKeys { it.key.removePrefix(prefix) }
+            if (own.size > SkillPackage.MAX_FILES) error("a skill tem mais de ${SkillPackage.MAX_FILES} arquivos")
+            val md = String(own["SKILL.md"]!!, Charsets.UTF_8)
+            val meta = SkillPackage.inspect(md, folder.substringAfterLast('/').ifBlank { source.substringAfterLast('/').removeSuffix(".zip") }, if (folders.size == 1) wanted else null)
+            Fetched(meta, md, own.filterKeys { it != "SKILL.md" && own[it]!!.size <= SkillPackage.MAX_FILE_BYTES }, "$source${if (folder.isEmpty()) "" else "#$folder"}",
+                SkillPackage.warnings(md))
+        }
     }
 
     private fun fetchGithub(ref: GithubSkills.Ref, wanted: String?): List<Fetched> {
@@ -82,10 +140,22 @@ object SkillInstaller {
         }
     }
 
-    private fun fetchUrl(url: String, wanted: String?): List<Fetched> {
-        if (!url.startsWith("https://") && !url.startsWith("http://")) error("informe um link do GitHub (owner/repo) ou uma URL https de um SKILL.md")
-        val md = getText(url, SkillPackage.MAX_SKILL_MD.toLong())
-        if (md.trimStart().startsWith("<!doctype", true) || md.trimStart().startsWith("<html", true)) error("o endereço devolveu uma página HTML, não um SKILL.md")
+    private fun looksHtml(s: String) = s.trimStart().let { it.startsWith("<!doctype", true) || it.startsWith("<html", true) || it.startsWith("<head", true) }
+
+    private fun fetchUrl(urlIn: String, wanted: String?): List<Fetched> {
+        val url0 = urlIn
+        if (!url0.startsWith("https://") && !url0.startsWith("http://")) error("informe um link do GitHub (owner/repo), uma URL de SKILL.md/.zip ou um caminho do workspace")
+        var url = url0
+        var md = getText(url, SkillPackage.MAX_SKILL_MD.toLong())
+        if (looksHtml(md)) {
+            // Página web: segue um link para SKILL.md (ou tenta <endereço>/SKILL.md).
+            val link = Regex("href=[\"']([^\"']*SKILL\\.md[^\"']*)[\"']", RegexOption.IGNORE_CASE).find(md)?.groupValues?.get(1)
+                ?.let { java.net.URI(url).resolve(it).toString() } ?: (url.trimEnd('/') + "/SKILL.md")
+            if (GithubSkills.parse(link) != null) return fetchGithub(GithubSkills.parse(link)!!, wanted)
+            md = runCatching { getText(link, SkillPackage.MAX_SKILL_MD.toLong()) }.getOrNull()?.takeIf { !looksHtml(it) }
+                ?: error("o endereço é uma página web e não achei um SKILL.md nela (tente o link direto do SKILL.md, do repositório ou de um .zip)")
+            url = link
+        }
         val base = url.substringBeforeLast('/') + "/"
         val host = java.net.URI(url).host
         val fallback = url.substringBeforeLast('/').substringAfterLast('/').takeIf { it.isNotBlank() && it != host } ?: host.substringBefore('.')

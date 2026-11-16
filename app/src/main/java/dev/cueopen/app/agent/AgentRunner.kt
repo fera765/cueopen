@@ -296,20 +296,20 @@ class AgentRunner(
         }
         // "continuar / prossiga / retome": seguir de onde parou, nunca recomeçar o pedido original.
         if (showUserMessage && directiveSuffix.isBlank() && ContinuationPolicy.isContinueIntent(text)) content += "\n\n" + continuationDirective(sessionId, automatic = false)
-        // Pedido de instalar skill por link: a ferramenta fica disponível e o caminho fica explícito (sem o agente improvisar com curl).
-        if (showUserMessage) dev.cueopen.app.skills.SkillInstallIntent.detect(text)?.let { si ->
-            ToolContextPlanner.load(sessionId, listOf("skills_admin"))
-            content += "\n\n[Pedido de instalação de skill: chame skill_install(source=\"${si.source}\"" + (si.name?.let { n -> ", name=\"$n\"" } ?: "") +
-                ") primeiro. Depois siga o SKILL.md devolvido para o resto do pedido (configurar, preparar, rodar) e confira o resultado. " +
-                "\"Minha máquina\" = este aparelho: os comandos rodam no terminal Linux do app (shell), e um servidor em localhost/127.0.0.1 abre no browser do app (browser_navigate). " +
-                "Rode cada passo, verifique a resposta (ex.: /api/ping) e só diga que está pronto depois de abrir e conferir.]"
-        }
+        // Pedido de instalar skill: o APP instala (sem o modelo improvisar com curl/find) antes do loop; ver runSkillInstall.
+        val installIntent = if (showUserMessage) dev.cueopen.app.skills.SkillInstallIntent.detect(text) else null
+        if (installIntent != null) ToolContextPlanner.load(sessionId, listOf("skills_admin"))
         content += directiveSuffix
         store.editSession(sessionId) { it.copy(llm = it.llm + LlmMessage("user", content), status = SessionStatus.RUNNING) }
         dev.cueopen.app.sandbox.SandboxService.start(ctx, "Executando tarefa…")
         val job = scope.launch {
             try {
                 maybeTitle(sessionId, text)
+                if (installIntent != null) {
+                    val out = runSkillInstall(sessionId, installIntent)
+                    if (out == null) return@launch  // só instalar (ou falhou): o feedback já está no chat, sem chamar o modelo
+                    store.editSession(sessionId) { it.copy(llm = it.llm + LlmMessage("user", out)) }
+                }
                 loop(sessionId)
             } catch (c: kotlinx.coroutines.CancellationException) {
                 throw c
@@ -2714,6 +2714,60 @@ class AgentRunner(
     /** Espaço das páginas: a seção inteira compartilha (chat do coordenador); fora de seção, o próprio chat. */
     private fun pageSpace(sessionId: String): String = store.section(store.session(sessionId)?.sectionId)?.sessionId ?: sessionId
 
+    /**
+     * Instalação feita pelo app (determinística, como o OpenBot faz antes de entregar a skill ao agente): mostra
+     * "Instalando skill", baixa/valida/salva e dá o feedback no chat. Devolve a instrução para o agente continuar
+     * (setup e o resto do pedido) ou null quando o pedido era só instalar — ou quando falhou.
+     */
+    private suspend fun runSkillInstall(sessionId: String, intent: dev.cueopen.app.skills.SkillInstallIntent.Intent): String? {
+        setActivity(sessionId, Activity(Activity.Kind.THINKING, "Instalando skill"))
+        val step = ChatItem.Step(tool = "skill_install", title = "Instalando skill", args = intent.source, result = "", status = StepStatus.RUNNING)
+        store.addItem(sessionId, step)
+        val fetched = runCatching { dev.cueopen.app.skills.SkillInstaller.fetch(intent.source, intent.name, sandbox.workspaceFor(sessionId)) }
+        val list = fetched.getOrElse { e ->
+            store.replaceItem(sessionId, step.copy(status = StepStatus.ERROR, result = e.message.orEmpty().take(300)))
+            val msg = "Não consegui instalar a skill de ${intent.source}: ${e.message}.\n\nFormatos aceitos: link do GitHub (owner/repo ou a pasta da skill), URL de um SKILL.md, arquivo .zip (link ou anexo) ou página que tenha um link para SKILL.md."
+            store.addItem(sessionId, ChatItem.Assistant(text = msg, final = true))
+            store.editSession(sessionId) { it.copy(llm = it.llm + LlmMessage("assistant", msg), status = SessionStatus.DONE) }
+            return null
+        }
+        val installed = list.map { f -> f to installSkill(sessionId, f) }
+        store.replaceItem(sessionId, step.copy(status = StepStatus.OK, result = installed.joinToString { it.second.first.name } + " instalada" + if (installed.size > 1) "s" else ""))
+        val report = installed.joinToString("\n\n") { (f, pair) ->
+            val (sk, written) = pair
+            "✅ Skill **${sk.name}** instalada e ativa\n" +
+                "- ${sk.description.take(220)}\n" +
+                "- Origem: ${f.source}\n" +
+                "- Arquivos (${written.size}): ${written.take(8).joinToString()}${if (written.size > 8) "…" else ""} → /root/workspace/skills/${sk.name}/\n" +
+                (if (f.meta.problems.isNotEmpty()) "- Validação: " + f.meta.problems.joinToString("; ") + "\n" else "") +
+                (if (f.warnings.isNotEmpty()) "- ⚠ Atenção: " + f.warnings.joinToString("; ") + " (vou pedir confirmação antes de rodar isso)\n" else "") +
+                "- Para usar: mencione @${sk.name} ou peça a tarefa normalmente."
+        }
+        store.addItem(sessionId, ChatItem.Assistant(text = report, final = !intent.followUp))
+        store.editSession(sessionId) { it.copy(llm = it.llm + LlmMessage("assistant", report)) }
+        if (!intent.followUp) {
+            store.editSession(sessionId) { it.copy(status = SessionStatus.DONE) }
+            return null
+        }
+        val main = installed.first()
+        return "[Sistema] O app já instalou a skill \"${main.second.first.name}\" em /root/workspace/skills/${main.second.first.name}/ (SKILL.md + arquivos). " +
+            "Não reinstale, não baixe o SKILL.md de novo e não procure a skill em outro lugar. Agora conclua o resto do pedido do usuário seguindo o SKILL.md abaixo " +
+            "(seção de setup/instalação/uso), passo a passo, conferindo cada resultado. \"Minha máquina\"/\"no meu computador\" = este aparelho: comandos no terminal Linux do app (shell; ~ é /root) " +
+            "e servidores em localhost abrem no browser do app. Se faltar algo que só o usuário tem (conta, chave, programa), diga exatamente o que falta." +
+            (if (main.first.warnings.isNotEmpty()) " ⚠ Antes de rodar comandos marcados como arriscado (${main.first.warnings.joinToString()}), peça confirmação." else "") +
+            "\n\n--- SKILL.md ---\n" + main.first.meta.body.take(10_000)
+    }
+
+    /** Caminho em ~/… ou /root/… dentro do sandbox desta conversa (somente leitura). Null se sair dele. */
+    private fun sandboxHomeFile(sessionId: String, raw: String): java.io.File? {
+        val p = raw.trim().let { if (it.startsWith("~/")) "/root/" + it.removePrefix("~/") else if (it == "~") "/root" else it }
+        if (!p.startsWith("/root") || p.startsWith("/root/connectors")) return null
+        return runCatching {
+            val home = sandbox.hostFile("/root", sessionId).canonicalFile
+            sandbox.hostFile(p, sessionId).canonicalFile.takeIf { it.path == home.path || it.path.startsWith(home.path + java.io.File.separator) }
+        }.getOrNull()
+    }
+
     /** Pasta do app onde ficam os arquivos das skills instaladas. */
     private fun skillStore(name: String) = java.io.File(ctx.filesDir, "skills/" + dev.cueopen.app.skills.SkillPackage.slugify(name))
 
@@ -2731,7 +2785,7 @@ class AgentRunner(
 
     /** Copia os arquivos da skill para /root/workspace/skills/<nome>/ (para scripts/templates funcionarem nesta conversa). */
     private fun ensureSkillFiles(sessionId: String, sk: Skill) {
-        if (sk.files.size <= 1) return
+        if (sk.source.isBlank() && sk.files.isEmpty()) return  // skill criada no app: só instruções
         runCatching {
             val src = skillStore(sk.name).takeIf { it.isDirectory } ?: return
             val dst = java.io.File(sandbox.workspaceFor(sessionId), "skills/" + dev.cueopen.app.skills.SkillPackage.slugify(sk.name))
@@ -4784,9 +4838,10 @@ class AgentRunner(
                 }
                 "file_read" -> {
                     val path = s("path").trim()
+                    // Além do workspace: leitura em ~/ e /root/ do sandbox desta conversa (skills instalam apps em ~/pasta).
                     val target = AgentFilePathPolicy.readableWorkspace(
                         sandbox.workspaceFor(sessionId), sandbox.connectorsDir, path,
-                    )
+                    ) ?: sandboxHomeFile(sessionId, path)
                     if (target == null) "ERRO: caminho inválido (recebido: \"${path.take(160)}\"). Use caminho relativo ao workspace ou /root/workspace/...; para conector, informe o ID completo em /root/connectors/<id>/workspace/.... Não tente caminhos absolutos Android ou caminhos alternativos fora dessas raízes."
                     else {
                         noteFileSeen(sessionId, target)  // leitura feita: libera novas edições e marca a versão vista
@@ -4826,7 +4881,8 @@ class AgentRunner(
                         ?: runCatching { kotlinx.serialization.json.Json.parseToJsonElement(s("ops")).jsonArray.map { it.jsonObject } }.getOrNull()
                     val id = s("page_id")
                     if (ops.isNullOrEmpty()) "ERRO: envie ops como lista de objetos, ex.: [{\"op\":\"move_card\",\"card_id\":\"c_1\",\"column\":\"Feito\"}]."
-                    else if (store.page(id)?.let { it.spaceId != pageSpace(sessionId) } == true) "RECUSADO: essa página é de outra conversa."
+                    else if (store.page(id) == null) "ERRO: página \"$id\" não existe. Páginas desta conversa: " +
+                        store.pagesIn(pageSpace(sessionId)).joinToString { "${it.id} (\"${it.title}\")" }.ifBlank { "nenhuma" }
                     else store.applyPageOps(id, ops, by).fold({ p ->
                         val last = store.session(sessionId)?.items?.lastOrNull() as? ChatItem.Step
                         if (last?.tool == "page" && last.args == p.id) store.replaceItem(sessionId, last.copy(title = "Página atualizada: ${p.title}", result = "versão ${p.version}"))
@@ -4834,8 +4890,10 @@ class AgentRunner(
                         "OK: ${p.title} agora na versão ${p.version} (${ops.size} operação(ões))."
                     }, { "ERRO: ${it.message}" })
                 }
-                "page_read" -> store.page(s("page_id"))?.takeIf { it.spaceId == pageSpace(sessionId) }?.let { dev.cueopen.app.pages.PageOps.render(it) }
-                    ?: "ERRO: página não encontrada nesta conversa. Use page_list."
+                "page_read" -> (store.page(s("page_id")) ?: dev.cueopen.app.pages.PageOps.sameTitle(store.state.value.pages, pageSpace(sessionId), s("page_id")))
+                    ?.let { dev.cueopen.app.pages.PageOps.render(it) }
+                    ?: ("ERRO: página \"${s("page_id")}\" não existe. Páginas desta conversa: " +
+                        store.pagesIn(pageSpace(sessionId)).joinToString { "${it.id} (\"${it.title}\")" }.ifBlank { "nenhuma — crie com page_create" })
                 "page_list" -> store.pagesIn(pageSpace(sessionId)).sortedByDescending { it.updatedAt }.joinToString("\n") { p ->
                     "${p.id} · ${p.kind} · \"${p.title}\" · v${p.version} · ${p.cards.size} cartões"
                 }.ifBlank { "Nenhuma página ainda. Crie com page_create." }
@@ -4857,7 +4915,7 @@ class AgentRunner(
                     val root = sandbox.workspaceFor(sessionId)
                     val d = if (path.isBlank()) root else AgentFilePathPolicy.readableWorkspace(
                         root, sandbox.connectorsDir, path, allowRoot = true,
-                    )
+                    ) ?: sandboxHomeFile(sessionId, path)
                     fun listing(dir: java.io.File) = dir.walkTopDown().maxDepth(3).filter { it != dir && !it.path.contains("/.cue/") && it.name != ".cue" }.take(300)
                         .joinToString("\n") { (if (it.isDirectory) "📁 " else "📄 ") + it.relativeTo(dir).path + if (it.isFile) " (${it.length()}b)" else "" }
                         .ifBlank { "(vazio)" }
@@ -5077,7 +5135,7 @@ class AgentRunner(
                     else "Esta tarefa não usa um Agent; crie um Agent para ter memória."
                 }
                 "skill_install" -> {
-                    val fetched = runCatching { dev.cueopen.app.skills.SkillInstaller.fetch(s("source"), s("name").ifBlank { null }) }
+                    val fetched = runCatching { dev.cueopen.app.skills.SkillInstaller.fetch(s("source"), s("name").ifBlank { null }, sandbox.workspaceFor(sessionId)) }
                     fetched.fold({ list ->
                         list.joinToString("\n\n━━━━━━━━\n\n") { f ->
                             val (sk, written) = installSkill(sessionId, f)
