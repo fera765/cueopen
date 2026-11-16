@@ -29,7 +29,7 @@ object ToolContextPlanner {
         "schedule" to setOf("sleep", "set_schedule", "cron_add", "cron_list", "cron_remove"),
         "channels" to setOf("send_file"),
         "pages" to setOf("page_create", "page_update", "page_read", "page_list"),
-        "skills_admin" to setOf("create_skill", "skill_list", "skill_revise"),
+        "skills_admin" to setOf("skill_install", "create_skill", "skill_list", "skill_revise"),
         "wallet" to setOf("wallet_get_address", "wallet_get_balance", "wallet_list_tokens", "wallet_swap",
             "market_price", "market_candles", "market_liquidity", "market_discover", "market_token_info",
             "trade_set_rule", "trade_list", "trade_cancel", "trade_update_rule"),
@@ -56,7 +56,7 @@ object ToolContextPlanner {
         // Só pedidos explícitos de Fluwy Pages; "crie uma página html/site" continua sendo arquivo comum.
         "pages" to listOf("fluwy pages", "pages", "page_", "kanban", "quadro", "painel", "dashboard", "checklist", "tracker", "acompanhamento"),
         "channels" to listOf("telegram", "discord", "slack", "envie o arquivo", "enviar o arquivo", "mande o arquivo", "mandar o arquivo", "envie a imagem", "mande a imagem", "enviar imagem", "mandar imagem", "envie o pdf", "mande o pdf", "enviar o relatório", "mande o relatório"),
-        "skills_admin" to listOf("crie uma skill", "criar skill", "nova skill", "salve como skill"),
+        "skills_admin" to listOf("crie uma skill", "criar skill", "nova skill", "salve como skill", "skill.md", "instale a skill", "instalar skill", "instalar a skill", "install skill", "set up http", "setup http", "skill local"),
         "wallet" to listOf("carteira", "wallet", "solana", "sol ", "token", "swap", "saldo", "comprar", "vender", "day trade", "daytrade", "trade", "cripto", "crypto", "memecoin", "stop loss", "take profit", "liquidez", "pump", "jupiter", "usdc"),
         "device" to listOf("notifica", "whatsapp", "zap", "telegram", "instagram", "messenger", "direct", "responda", "responder", "mensagem", "spotify", "youtube", "uber", "99", "ifood", "abra o app", "abrir o app", "print da tela", "captura de tela", "screenshot", "balao", "overlay", "celular", "aparelho", "bluetooth", "dispositivo pareado", "dispositivos pareados", "dispositivos proximos", "calendario", "ligaçao", "ligacao", "chamada", "contato", "contacts", "contact list", "address book", "agenda telefonica", "agenda de contatos", "telefone", "numero do contato", "localizaçao", "localizacao", "microfone", "navegar no aplicativo", "navegar nos apps", "abrir aplicativo", "abrir app", "acessar app", "acessar aplicativo", "outro aplicativo", "instagram", "whatsapp", "spotify"),
         "connector_builder" to listOf("conector", "connector"),

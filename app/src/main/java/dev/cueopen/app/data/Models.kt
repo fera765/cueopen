@@ -430,6 +430,10 @@ data class Skill(
     val builtIn: Boolean = false,
     /** Versões anteriores das instruções (mais recente primeiro), guardadas a cada revisão. */
     val revisions: List<String> = emptyList(),
+    /** Origem da instalação (github.com/owner/repo/pasta@commit ou URL do SKILL.md). Vazio = criada no app. */
+    val source: String = "",
+    /** Arquivos que vieram com a skill (scripts, templates), guardados no app e copiados para o workspace ao usar. */
+    val files: List<String> = emptyList(),
 )
 
 @Serializable

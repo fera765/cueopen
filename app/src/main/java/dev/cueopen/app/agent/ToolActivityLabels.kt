@@ -48,6 +48,7 @@ object ToolActivityLabels {
         "browser_console" -> "Lendo console" to Activity.Kind.BROWSER
         "browser_wait_for" -> "Aguardando a página" to Activity.Kind.BROWSER
         "create_skill" -> "Criando skill" to Activity.Kind.THINKING
+        "skill_install" -> "Instalando skill" to Activity.Kind.THINKING
         "file_search" -> "Procurando nos arquivos" to Activity.Kind.EDITOR
         "page_create" -> "Criando página" to Activity.Kind.EDITOR
         "page_update" -> "Atualizando página" to Activity.Kind.EDITOR
@@ -74,6 +75,7 @@ object ToolActivityLabels {
         "device_accessibility_type" -> "element ${i("element_id")?.toString() ?: "?"} · texto oculto"
         "device_accessibility_inspect_image" -> "element ${i("element_id")?.toString() ?: "?"} · recorte efêmero"
         "create_skill" -> s("name")
+        "skill_install" -> s("source").take(80)
         "file_search" -> s("pattern").take(60)
         "page_create" -> s("title").take(60)
         "page_update", "page_read" -> s("page_id")

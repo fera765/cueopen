@@ -287,6 +287,7 @@ class AgentRunner(
         val activated = if (showUserMessage) skillsFor(text) else emptyList()
         activated.forEach { sk ->
             content += skillBlock(sk)
+            ensureSkillFiles(sessionId, sk)
             store.addItem(sessionId, ChatItem.Step(tool = "skill_load", title = "Skill ativa: ${sk.name}", args = sk.description.take(90), result = "", status = StepStatus.OK))
         }
         // "@Nome" que é uma skill acionada não troca o agente do chat, mesmo que exista um agente com o mesmo nome.
@@ -295,6 +296,14 @@ class AgentRunner(
         }
         // "continuar / prossiga / retome": seguir de onde parou, nunca recomeçar o pedido original.
         if (showUserMessage && directiveSuffix.isBlank() && ContinuationPolicy.isContinueIntent(text)) content += "\n\n" + continuationDirective(sessionId, automatic = false)
+        // Pedido de instalar skill por link: a ferramenta fica disponível e o caminho fica explícito (sem o agente improvisar com curl).
+        if (showUserMessage) dev.cueopen.app.skills.SkillInstallIntent.detect(text)?.let { si ->
+            ToolContextPlanner.load(sessionId, listOf("skills_admin"))
+            content += "\n\n[Pedido de instalação de skill: chame skill_install(source=\"${si.source}\"" + (si.name?.let { n -> ", name=\"$n\"" } ?: "") +
+                ") primeiro. Depois siga o SKILL.md devolvido para o resto do pedido (configurar, preparar, rodar) e confira o resultado. " +
+                "\"Minha máquina\" = este aparelho: os comandos rodam no terminal Linux do app (shell), e um servidor em localhost/127.0.0.1 abre no browser do app (browser_navigate). " +
+                "Rode cada passo, verifique a resposta (ex.: /api/ping) e só diga que está pronto depois de abrir e conferir.]"
+        }
         content += directiveSuffix
         store.editSession(sessionId) { it.copy(llm = it.llm + LlmMessage("user", content), status = SessionStatus.RUNNING) }
         dev.cueopen.app.sandbox.SandboxService.start(ctx, "Executando tarefa…")
@@ -2705,6 +2714,32 @@ class AgentRunner(
     /** Espaço das páginas: a seção inteira compartilha (chat do coordenador); fora de seção, o próprio chat. */
     private fun pageSpace(sessionId: String): String = store.section(store.session(sessionId)?.sectionId)?.sessionId ?: sessionId
 
+    /** Pasta do app onde ficam os arquivos das skills instaladas. */
+    private fun skillStore(name: String) = java.io.File(ctx.filesDir, "skills/" + dev.cueopen.app.skills.SkillPackage.slugify(name))
+
+    /** Salva/atualiza a skill (mantém o histórico) e copia os arquivos para o workspace da conversa. */
+    private fun installSkill(sessionId: String, f: dev.cueopen.app.skills.SkillInstaller.Fetched): Pair<Skill, List<String>> {
+        val existing = store.state.value.skills.firstOrNull { !it.builtIn && it.name.equals(f.meta.name, true) }
+        val written = dev.cueopen.app.skills.SkillInstaller.writeFolder(skillStore(f.meta.name), f)
+        val sk = Skill(id = existing?.id ?: dev.cueopen.app.data.newId(), name = f.meta.name, description = f.meta.description,
+            instructions = f.meta.body, enabled = true, source = f.source, files = written,
+            revisions = existing?.let { (listOf(it.instructions) + it.revisions).take(10) }.orEmpty())
+        store.upsertSkill(sk)
+        ensureSkillFiles(sessionId, sk)
+        return sk to written
+    }
+
+    /** Copia os arquivos da skill para /root/workspace/skills/<nome>/ (para scripts/templates funcionarem nesta conversa). */
+    private fun ensureSkillFiles(sessionId: String, sk: Skill) {
+        if (sk.files.size <= 1) return
+        runCatching {
+            val src = skillStore(sk.name).takeIf { it.isDirectory } ?: return
+            val dst = java.io.File(sandbox.workspaceFor(sessionId), "skills/" + dev.cueopen.app.skills.SkillPackage.slugify(sk.name))
+            src.copyRecursively(dst, overwrite = true)
+            dst.walkTopDown().filter { it.isFile && (it.name.endsWith(".sh") || it.name.endsWith(".py")) }.forEach { it.setExecutable(true) }
+        }
+    }
+
     /** Mesma leitura (arquivo, offset, limite) sem o arquivo ter mudado e sem compactação no meio: devolve um aviso curto em vez do trecho de novo. */
     private val fileReadSeen = java.util.concurrent.ConcurrentHashMap<String, String>()
     private fun readCache(sessionId: String, f: java.io.File, offset: Int, limit: Int): String? {
@@ -3370,6 +3405,12 @@ class AgentRunner(
         if (allowMultiAgent) add(tool("skill_revise",
             "Revisa uma skill existente da biblioteca: substitui as instruções (e, se informada, a descrição) e guarda a versão anterior no histórico. Use quando uma skill se mostrou incompleta ou errada na prática. Skills embutidas do app não podem ser revisadas; crie uma nova com create_skill.",
             buildJsonObject { put("name", str("Nome exato da skill")); put("instructions", str("Novas instruções completas, passo a passo")); put("description", str("Opcional: nova descrição curta (quando usar)")) }, listOf("name", "instructions")))
+        if (allowMultiAgent) add(tool("skill_install",
+            "Instala uma skill a partir de um link (como o OpenBot): repositório/pasta/arquivo do GitHub (fixa o commit e baixa a pasta inteira: SKILL.md + scripts/templates) " +
+                "ou URL direta de um SKILL.md (baixa também os arquivos que ele cita). Valida o frontmatter, salva na biblioteca e copia os arquivos para /root/workspace/skills/<nome>/. " +
+                "Devolve o SKILL.md: depois, siga as instruções dele para o que o usuário pediu (configurar, rodar, montar o dashboard…).",
+            buildJsonObject { put("source", str("Link do GitHub (owner/repo, …/tree/<branch>/<pasta>, …/blob/…/SKILL.md) ou URL https do SKILL.md")); put("name", str("Nome local pedido pelo usuário (opcional)")) },
+            listOf("source")))
         if (allowMultiAgent) add(tool("create_skill", "Cria uma skill nova na biblioteca do usuário, reutilizável em outras tarefas.", buildJsonObject {
             put("name", str("Nome da skill")); put("description", str("Descrição curta: quando usar")); put("instructions", str("Instruções detalhadas, passo a passo"))
         }, listOf("name", "description", "instructions")))
@@ -4141,7 +4182,9 @@ class AgentRunner(
                 val sk = library.firstOrNull { SkillMatcher.norm(it.name) == wanted }
                     ?: library.firstOrNull { wanted.isNotBlank() && (SkillMatcher.norm(it.name).contains(wanted) || SkillMatcher.norm(it.name).replace(" ", "") == wanted.replace(" ", "").replace("-", "").replace("_", "")) }
                     ?: library.maxByOrNull { SkillMatcher.nameHits(s("name"), it.name) }?.takeIf { SkillMatcher.nameHits(s("name"), it.name) >= 2 }
-                return ToolResult(sk?.let { "# ${it.name}\n${it.instructions}" } ?: "Skill não encontrada. Disponíveis: " + store.state.value.skills.joinToString { it.name })
+                sk?.let { ensureSkillFiles(sessionId, it) }
+                return ToolResult(sk?.let { "# ${it.name}\n${it.instructions}" + (if (it.files.size > 1) "\n\n[Arquivos da skill em /root/workspace/skills/${dev.cueopen.app.skills.SkillPackage.slugify(it.name)}/: ${it.files.joinToString()}]" else "") }
+                    ?: "Skill não encontrada. Disponíveis: " + store.state.value.skills.joinToString { it.name })
             }
             "ask_user" -> {
                 if (autoSectionSession(sessionId)) return ToolResult("MODO AUTÔNOMO: o usuário não vai responder. Decida você mesmo a melhor opção com os dados que tem, registre a escolha em 1 frase e continue o trabalho agora.")
@@ -5032,6 +5075,19 @@ class AgentRunner(
                     val ag = store.agent(sess?.agentId)
                     if (ag != null) { store.upsertAgent(ag.copy(memory = ag.memory + s("fact"))); "Memória salva." }
                     else "Esta tarefa não usa um Agent; crie um Agent para ter memória."
+                }
+                "skill_install" -> {
+                    val fetched = runCatching { dev.cueopen.app.skills.SkillInstaller.fetch(s("source"), s("name").ifBlank { null }) }
+                    fetched.fold({ list ->
+                        list.joinToString("\n\n━━━━━━━━\n\n") { f ->
+                            val (sk, written) = installSkill(sessionId, f)
+                            "OK: skill \"${sk.name}\" instalada e ativa (${f.source}).\n" +
+                                "Arquivos em /root/workspace/skills/${sk.name}/: ${written.joinToString()}" +
+                                (if (f.meta.problems.isNotEmpty()) "\nAjustes na validação: " + f.meta.problems.joinToString("; ") else "") +
+                                (if (f.warnings.isNotEmpty()) "\n⚠ Atenção antes de executar: " + f.warnings.joinToString("; ") + ". Confirme com o usuário antes de rodar esses comandos." else "") +
+                                "\n\n--- SKILL.md (siga para concluir o pedido do usuário) ---\n" + f.meta.body.take(8_000)
+                        }
+                    }, { "ERRO ao instalar a skill: ${it.message}. Confira o link (público? tem SKILL.md?)." })
                 }
                 "create_skill" -> {
                     store.upsertSkill(Skill(name = s("name"), description = s("description"), instructions = s("instructions")))

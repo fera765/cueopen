@@ -633,7 +633,13 @@ private fun SkillMarketplace() {
             if (repo.isBlank() || repoLoading) return
             repoLoading = true; error = null
             scope.launch {
-                runCatching { dev.cueopen.app.data.GithubSkills.fetch(repo) }
+                runCatching {
+                    // Link do GitHub: busca as skills do repositório. URL direta de SKILL.md: usa o instalador (mesma validação do agente).
+                    if (dev.cueopen.app.data.GithubSkills.parse(repo) != null) dev.cueopen.app.data.GithubSkills.fetch(repo)
+                    else dev.cueopen.app.skills.SkillInstaller.fetch(repo).map { f ->
+                        dev.cueopen.app.data.SkillHub.Remote(id = "url:" + f.source, title = f.meta.name, description = f.meta.description, source = f.source, installs = 0, content = f.markdown)
+                    }
+                }
                     .onSuccess { results = it; if (it.isEmpty()) error = "Não consegui baixar nenhuma skill desse repositório." }
                     .onFailure { error = it.message ?: "Falha ao consultar o GitHub." }
                 repoLoading = false
@@ -642,7 +648,7 @@ private fun SkillMarketplace() {
         OutlinedTextField(
             value = repo, onValueChange = { repo = it }, modifier = Modifier.fillMaxWidth(),
             singleLine = true, shape = RoundedCornerShape(20.dp),
-            placeholder = { Text("Do GitHub: owner/repo ou link do repositório", maxLines = 1, overflow = TextOverflow.Ellipsis) },
+            placeholder = { Text("GitHub (owner/repo) ou URL de um SKILL.md", maxLines = 1, overflow = TextOverflow.Ellipsis) },
             leadingIcon = { Icon(Icons.Rounded.Code, null, tint = c.ink2) },
             trailingIcon = {
                 if (repoLoading) CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp, color = c.accent)
