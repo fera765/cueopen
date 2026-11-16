@@ -23,11 +23,13 @@ internal object AndroidAssistantSetupPolicy {
         assistantRoleAvailable: Boolean,
         assistantRoleHeld: Boolean = false,
     ): List<AssistantSetupRoute> = buildList {
+        // O papel de assistente NÃO é pedível por apps (o seletor devolve "cancelado" na hora no Android puro):
+        // o caminho que funciona é a tela do sistema "Assistente digital padrão". O seletor fica só como último recurso.
+        add(AssistantSetupRoute.VOICE_INPUT_SETTINGS)
+        add(AssistantSetupRoute.DEFAULT_APPS_SETTINGS)
         if (sdkInt >= Build.VERSION_CODES.Q && assistantRoleAvailable && !assistantRoleHeld) {
             add(AssistantSetupRoute.ROLE_CHOOSER)
         }
-        add(AssistantSetupRoute.VOICE_INPUT_SETTINGS)
-        add(AssistantSetupRoute.DEFAULT_APPS_SETTINGS)
     }
 }
 

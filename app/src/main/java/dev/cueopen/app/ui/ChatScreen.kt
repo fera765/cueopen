@@ -447,6 +447,7 @@ fun TimelineItem(item: ChatItem, onOpenComputer: (String) -> Unit, onOpenMedia: 
             dev.cueopen.app.agent.TEAM_MEMBER_STEP -> TeamMemberPill(item, nav)
             "team_delegate", "team_status" -> {}  // a pílula do agente já representa a delegação
             "page" -> PageStepCard(item, nav)
+            "login_needed" -> LoginNeededCard(item, sessionId, nav)
             else -> StepRow(item, onOpenComputer)
         }
         is ChatItem.Plan -> {}  // o plano fica no card do computador, acima do composer
@@ -1317,5 +1318,23 @@ private fun PageStepCard(s: ChatItem.Step, nav: androidx.navigation.NavControlle
             Text("Fluwy Pages · " + s.result + " · toque para abrir", fontSize = 12.sp, color = c.ink3)
         }
         Icon(Icons.Rounded.ChevronRight, null, tint = c.ink3)
+    }
+}
+
+/** Pedido de login (como o takeover do Manus): o usuário entra no site, salva a sessão e a tarefa continua. */
+@Composable
+private fun LoginNeededCard(s: ChatItem.Step, sessionId: String?, nav: androidx.navigation.NavController?) {
+    val c = Cue.c
+    val loginId = s.args.substringBefore('|')
+    val st by dev.cueopen.app.CueApp.instance.store.state.collectAsStateWithLifecycle()
+    val done = st.browserLogins.firstOrNull { it.id == loginId }?.status == "active"
+    Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(c.surface).padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Icon(if (done) Icons.Rounded.LockOpen else Icons.Rounded.Lock, null, tint = if (done) c.ok else c.accent); Spacer(Modifier.width(8.dp))
+            Text(if (done) "Sessão salva" else s.title, fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
+        }
+        Text(if (done) "O agente já pode entrar neste site." else "Entre com a sua conta no site. A senha fica só no site: o app e a IA não veem.", fontSize = 12.sp, color = c.ink2)
+        if (!done) Button({ nav?.navigate("browserlogin/$loginId" + (sessionId?.let { "?session=$it" } ?: "")) },
+            colors = ButtonDefaults.buttonColors(containerColor = c.ink, contentColor = c.bg)) { Text("Entrar e salvar") }
     }
 }

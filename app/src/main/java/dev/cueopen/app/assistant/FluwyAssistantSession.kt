@@ -27,6 +27,9 @@ import java.io.File
 import java.util.UUID
 
 /** Overlay enxuto do assistente Android, executado no processo isolado :assistant. */
+/** Comando falado com o celular bloqueado: o app só o executa depois do desbloqueio. */
+const val ACTION_RUN_AFTER_UNLOCK = "dev.cueopen.app.assistant.RUN_AFTER_UNLOCK"
+
 class FluwyAssistantSession(baseContext: Context) : VoiceInteractionSession(baseContext) {
     private val appContext = baseContext.applicationContext
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -360,6 +363,19 @@ class FluwyAssistantSession(baseContext: Context) : VoiceInteractionSession(base
             putExtra(AssistantRoutingPolicy.EXTRA_TRANSCRIPT, text.take(MAX_TRANSCRIPT_LENGTH))
         }
 
+        // Celular bloqueado: como o Google Assistente, nada é executado sem desbloquear. O comando abre o app,
+        // o Android pede o desbloqueio e só então ele segue para o agente.
+        val keyguard = appContext.getSystemService(android.app.KeyguardManager::class.java)
+        if (keyguard?.isKeyguardLocked == true) {
+            val unlock = Intent(appContext, dev.cueopen.app.MainActivity::class.java).apply {
+                action = ACTION_RUN_AFTER_UNLOCK
+                putExtra(AssistantRoutingPolicy.EXTRA_TRANSCRIPT, text.take(MAX_TRANSCRIPT_LENGTH))
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+            }
+            runCatching { startAssistantActivity(unlock) }.onFailure { runCatching { appContext.startActivity(unlock) } }
+            finish()
+            return
+        }
         if (AssistantRoutingPolicy.explicitlyRequestsScreenshot(text)) {
             // A captura explícita segue pelo fluxo de consentimento MediaProjection já existente.
             finish()

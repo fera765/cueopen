@@ -1967,6 +1967,9 @@ class AgentRunner(
                 // OpenBot: conteúdo externo vai como dado não confiável + falhas ganham motivo e próximo passo.
                 val durableToolOutput = ToolOutcomeAdvisor.decorate(
                     call.name, AccessibilityToolHistory.durableResult(call.name, ctxOut), result.output)
+                // Como o Manus: página pede login → o app pede ao usuário (o agente nunca digita senha), e a tarefa continua depois.
+                if (call.name.startsWith("browser_") && ToolOutcomeAdvisor.classify(call.name, result.output) == ToolOutcomeAdvisor.Reason.LOGIN_WALL)
+                    runCatching { requestUserLogin(sessionId) }
                 store.editSession(sessionId) {
                     it.copy(llm = it.llm + LlmMessage("tool", durableToolOutput, toolCallId = call.id, name = call.name))
                 }
@@ -2768,6 +2771,41 @@ class AgentRunner(
         }.getOrNull()
     }
 
+    /**
+     * Pedido de login ao usuário (takeover do Manus): um cartão no chat por domínio, com "Entrar e salvar". Se já havia
+     * uma sessão salva para o site, ela é marcada como expirada. Depois de salvar, a tarefa é retomada sozinha.
+     */
+    private fun requestUserLogin(sessionId: String) {
+        val url = runCatching { browserFor(sessionId).ui.value.url }.getOrNull().orEmpty()
+        val domain = dev.cueopen.app.browser.BrowserPolicies.hostOf(url).removePrefix("www.")
+        if (domain.isBlank()) return
+        val items = store.session(sessionId)?.items.orEmpty()
+        if (items.takeLast(40).any { it is ChatItem.Step && it.tool == "login_needed" && it.args.contains(domain) }) return
+        val existing = store.state.value.browserLogins.firstOrNull { dev.cueopen.app.browser.BrowserPolicies.domainMatches(domain, it.domain) }
+        if (existing != null && existing.status == "active") store.editBrowserLogin(existing.id) { it.copy(status = "expired") }
+        val login = existing ?: dev.cueopen.app.data.BrowserLogin(name = domain, url = "https://$domain", domain = domain, status = "expired").also { store.upsertBrowserLogin(it) }
+        store.addItem(sessionId, ChatItem.Step(tool = "login_needed", title = if (existing != null) "A sessão de $domain expirou" else "$domain pede login",
+            args = "${login.id}|$domain", result = "Toque para entrar com a sua conta; a senha fica só no site.", status = StepStatus.OK))
+        runCatching { notifyLoginNeeded(sessionId, domain) }
+    }
+
+    private fun notifyLoginNeeded(sessionId: String, domain: String) {
+        val intent = android.content.Intent(ctx, dev.cueopen.app.MainActivity::class.java)
+            .setAction(dev.cueopen.app.SessionNotificationRouting.ACTION_OPEN_SESSION)
+            .putExtra(dev.cueopen.app.SessionNotificationRouting.EXTRA_SESSION, sessionId)
+            .addFlags(android.content.Intent.FLAG_ACTIVITY_CLEAR_TOP or android.content.Intent.FLAG_ACTIVITY_SINGLE_TOP)
+        val pi = android.app.PendingIntent.getActivity(ctx, domain.hashCode(), intent, android.app.PendingIntent.FLAG_IMMUTABLE or android.app.PendingIntent.FLAG_UPDATE_CURRENT)
+        val n = androidx.core.app.NotificationCompat.Builder(ctx, dev.cueopen.app.CueApp.CH_TASKS).setSmallIcon(android.R.drawable.ic_lock_idle_lock)
+            .setContentTitle("Login necessário: $domain").setContentText("Entre com a sua conta para o agente continuar.").setContentIntent(pi).setAutoCancel(true).build()
+        androidx.core.app.NotificationManagerCompat.from(ctx).notify(domain.hashCode(), n)
+    }
+
+    /** O usuário entrou e salvou a sessão: libera o site e retoma a tarefa. */
+    fun onUserLoggedIn(sessionId: String, domain: String) {
+        store.addItem(sessionId, ChatItem.Step(tool = "login_done", title = "Sessão de $domain salva", args = domain, result = "o agente continua", status = StepStatus.OK))
+        sendOrQueue(sessionId, "[Sistema] O usuário entrou em $domain e salvou a sessão. Recarregue a página (browser_navigate) e continue a tarefa de onde parou.")
+    }
+
     /** Pasta do app onde ficam os arquivos das skills instaladas. */
     private fun skillStore(name: String) = java.io.File(ctx.filesDir, "skills/" + dev.cueopen.app.skills.SkillPackage.slugify(name))
 
@@ -2883,6 +2921,7 @@ class AgentRunner(
             appendLine(PromptContextPolicy.instructionHierarchy)
             appendLine("1. Planeje: em tarefas com várias etapas, chame `update_plan` no início e atualize o plano conforme as fases terminam.")
             appendLine("2. Aja em vez de descrever: use as ferramentas e confira o resultado de cada ação.")
+            appendLine("2g. Login em sites: nunca digite senha, código 2FA ou dados de cartão. Se a página pedir login, o app mostra ao usuário o pedido \"Entrar e salvar\" e a tarefa continua sozinha depois; enquanto isso, avance no que não depende do login ou encerre dizendo que aguarda o login.")
             appendLine("2f. Contexto é limitado e resultados antigos de ferramentas podem ser removidos: guarde caminhos, URLs e IDs (não cópias de conteúdo grande) e recarregue sob demanda. Em trabalho longo, mantenha no NOTES.md o progresso e o que falta, assumindo que a conversa pode ser compactada a qualquer momento.")
             appendLine("2e. Eficiência: faça o trabalho com o menor número de passos. Para pesquisar, `web_search` e depois `web_fetch` nas melhores fontes (o browser só para login, JavaScript ou interação). Em arquivos grandes, `file_search` acha a linha e `file_read` com offset lê só o trecho. Chame várias ferramentas independentes na mesma resposta. Não releia o que já está no contexto.")
             appendLine("2z. Anúncio e ação andam juntos: ao dizer que vai fazer algo (\"vou pesquisar/verificar/testar/abrir/rodar…\"), emita a chamada de ferramenta na mesma resposta. Um anúncio sem ferramenta não produz nada e leva a repetição. Se não for usar ferramenta, entregue a resposta final diretamente ou chame finish, e não repita a mesma frase de intenção.")

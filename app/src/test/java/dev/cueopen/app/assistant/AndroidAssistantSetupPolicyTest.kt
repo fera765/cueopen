@@ -4,12 +4,12 @@ import org.junit.Assert.assertEquals
 import org.junit.Test
 
 class AndroidAssistantSetupPolicyTest {
-    @Test fun `Android 10 ou mais novo pede papel quando disponivel antes dos fallbacks`() {
+    @Test fun `Android 10 ou mais novo abre a tela do sistema antes do seletor de papel`() {
         assertEquals(
             listOf(
-                AssistantSetupRoute.ROLE_CHOOSER,
                 AssistantSetupRoute.VOICE_INPUT_SETTINGS,
                 AssistantSetupRoute.DEFAULT_APPS_SETTINGS,
+                AssistantSetupRoute.ROLE_CHOOSER,
             ),
             AndroidAssistantSetupPolicy.routes(sdkInt = 29, assistantRoleAvailable = true),
         )

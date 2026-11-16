@@ -219,9 +219,8 @@ private fun AssistantDefaultRoleLink(context: android.content.Context) {
         setupFeedback = when {
             nowActive -> "O Android confirmou Fluwy como assistente ativo."
             nowRoleHeld -> "Fluwy foi selecionado, mas o serviço ainda não confirmou atividade. Se a invocação falhar, consulte Configurações > Logs de erros."
-            result.resultCode == android.app.Activity.RESULT_CANCELED -> "A seleção foi cancelada ou não confirmada pelo Android."
-            result.resultCode == android.app.Activity.RESULT_OK -> "O Android retornou sucesso, mas Fluwy ainda não aparece como serviço ativo. Confira o estado e os logs."
-            else -> "O seletor do Android foi fechado sem confirmar Fluwy como assistente ativo."
+            // A tela de Configurações sempre volta como "cancelada": o que vale é o estado real.
+            else -> "Fluwy ainda não é o assistente. Na tela do Android, toque em \"Assistente digital padrão\" (ou \"App assistente\") e escolha Fluwy. Toque de novo aqui se precisar."
         }
     }
     SettingsLink(
@@ -236,7 +235,7 @@ private fun AssistantDefaultRoleLink(context: android.content.Context) {
         else if (roleHeld)
             "O papel foi concedido, mas o VoiceInteractionService ainda não está ativo. Toque para reabrir as opções do sistema e conferir."
         else if (roleRequestAvailable)
-            "O Android abrirá a seleção do assistente. Após escolher Fluwy, use o gesto do sistema para abrir a interface original sobre apps compatíveis."
+            "Abre a tela do Android: toque em \"Assistente digital padrão\" e escolha Fluwy. Depois, segure o botão home (ou deslize do canto) para chamar o Fluwy."
         else
             "Toque para abrir as opções do sistema. Se necessário, escolha Apps padrão > Assistente digital; a disponibilidade depende do Android/fabricante.",
         tint = Cue.c.accent,

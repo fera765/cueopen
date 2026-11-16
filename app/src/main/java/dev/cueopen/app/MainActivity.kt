@@ -90,6 +90,7 @@ class MainActivity : ComponentActivity() {
                 Box(Modifier.fillMaxSize().background(Cue.c.bg)) {
                     val nav = rememberNavController()
                     CueNav(nav, startOnboarding = startOnboarding)
+                    BrowserPermissionHost()
                     if (splash) SplashScreen(onDone = { splash = false })
                     val ps = pendingSession.value
                     LaunchedEffect(ps) {
@@ -148,6 +149,15 @@ class MainActivity : ComponentActivity() {
                 pendingSession.value = assistantChat
             }
             dev.cueopen.app.assistant.AssistantRoutingPolicy.ACTION_REQUEST_MICROPHONE -> pendingMicrophonePermission.value = true
+            // Chegou depois do desbloqueio (a Activity não abre sobre a tela bloqueada): agora o comando segue.
+            dev.cueopen.app.assistant.ACTION_RUN_AFTER_UNLOCK -> i.getStringExtra(dev.cueopen.app.assistant.AssistantRoutingPolicy.EXTRA_TRANSCRIPT)?.let { text ->
+                sendBroadcast(Intent(this, dev.cueopen.app.assistant.AssistantCommandReceiver::class.java).apply {
+                    action = dev.cueopen.app.assistant.AssistantRoutingPolicy.ACTION_SUBMIT_COMMAND
+                    putExtra(dev.cueopen.app.assistant.AssistantRoutingPolicy.EXTRA_REQUEST_ID, java.util.UUID.randomUUID().toString())
+                    putExtra(dev.cueopen.app.assistant.AssistantRoutingPolicy.EXTRA_TRANSCRIPT, text)
+                })
+                i.removeExtra(dev.cueopen.app.assistant.AssistantRoutingPolicy.EXTRA_TRANSCRIPT)  // não repete ao recriar a tela
+            }
         }
         val extraId = i.getStringExtra(SessionNotificationRouting.EXTRA_SESSION_ID)
             ?: i.getStringExtra(SessionNotificationRouting.EXTRA_SESSION)
@@ -221,7 +231,8 @@ fun CueNav(nav: NavHostController, startOnboarding: Boolean) {
         composable("files") { FilesScreen(nav) }
         composable("memory") { MemoryScreen(nav) }
         composable("browserhub") { BrowserHubScreen(nav) }
-        composable("browserlogin/{id}") { e -> BrowserLoginScreen(nav, e.arguments!!.getString("id")!!) }
+        composable("browserlogin/{id}?session={session}", arguments = listOf(androidx.navigation.navArgument("session") { nullable = true; defaultValue = null })) { e ->
+            BrowserLoginScreen(nav, e.arguments!!.getString("id")!!, e.arguments?.getString("session")) }
         composable("connectors") { ConnectorsScreen(nav) }
         composable("mcpconnector/{id}") { e -> McpConnectorSettingsScreen(nav, e.arguments!!.getString("id")!!) }
         composable("uiconnector/edit/{id}") { e -> UiConnectorEditorScreen(nav, e.arguments!!.getString("id")!!) }

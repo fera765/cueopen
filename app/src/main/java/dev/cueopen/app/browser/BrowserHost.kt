@@ -480,6 +480,7 @@ class BrowserHost(private val appCtx: Context, private val sessionId: String = "
                 .replace(Regex("; Android [^;]+; [^;]+ Build/[^;)]+"), "; Android 12")
             cacheMode = WebSettings.LOAD_DEFAULT
             mediaPlaybackRequiresUserGesture = false
+            setGeolocationEnabled(true)  // o site só recebe a localização se o usuário permitir (BrowserPermissions)
             setSupportMultipleWindows(true)
             if (android.os.Build.VERSION.SDK_INT >= 26) safeBrowsingEnabled = false
         }
@@ -602,6 +603,12 @@ class BrowserHost(private val appCtx: Context, private val sessionId: String = "
                 if (tab.id == activeTabId) _ui.value = _ui.value.copy(progress = newProgress)
             }
             override fun onReceivedTitle(view: WebView, title: String?) { sync(view) }
+            // Recursos do aparelho pedidos pelo site: o usuário decide (e o Android concede, se preciso).
+            override fun onPermissionRequest(request: android.webkit.PermissionRequest) = BrowserPermissions.onWebPermission(appCtx, request)
+            override fun onGeolocationPermissionsShowPrompt(origin: String, callback: android.webkit.GeolocationPermissions.Callback) =
+                BrowserPermissions.onGeolocation(appCtx, origin, callback)
+            override fun onShowFileChooser(view: WebView, cb: android.webkit.ValueCallback<Array<android.net.Uri>>, params: FileChooserParams): Boolean =
+                BrowserPermissions.onFileChooser(cb, params)
             override fun onConsoleMessage(m: android.webkit.ConsoleMessage): Boolean {
                 demoPrefix?.let { p ->
                     val msg = m.message().orEmpty()

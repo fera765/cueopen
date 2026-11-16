@@ -325,49 +325,65 @@ fun Composer(
         if (granted) pendingVoiceStart = true else voiceError = "Permissão de microfone negada."
     }
 
-    fun beginVoiceRecording() {
+    // Ditado contínuo: o reconhecedor do Android para a cada pausa; aqui cada trecho é somado e a escuta reinicia
+    // sozinha. Termina quando o usuário toca em parar ou após ~2 rodadas seguidas sem fala (≈10 s de silêncio).
+    var dictated by remember { mutableStateOf("") }
+    var silentRounds by remember { mutableIntStateOf(0) }
+    var busyRetries by remember { mutableIntStateOf(0) }
+    val voiceScope = rememberCoroutineScope()
+    fun commitDictation() {
+        val spoken = (if (voiceText.length > dictated.length) voiceText else dictated).trim()
+        if (spoken.isNotEmpty()) onChange(listOf(value.trim(), spoken).filter { it.isNotEmpty() }.joinToString(" "))
+        dictated = ""; voiceText = ""; pauseRequested = false; recording = false
+    }
+
+    fun beginVoiceRecording(continuing: Boolean = false) {
         val speech = recognizer
         if (speech == null) {
             voiceError = "O reconhecimento de voz não está disponível neste aparelho."
             return
         }
         voiceError = null
-        voiceText = ""
-        pauseRequested = false
+        if (!continuing) { voiceText = ""; dictated = ""; silentRounds = 0; busyRetries = 0; pauseRequested = false }
+        fun restart(delayMs: Long) = voiceScope.launch {
+            kotlinx.coroutines.delay(delayMs)
+            if (!pauseRequested && recording) beginVoiceRecording(continuing = true)
+        }
         speech.setRecognitionListener(object : RecognitionListener {
             override fun onReadyForSpeech(params: Bundle?) { recording = true }
-            override fun onBeginningOfSpeech() { recording = true }
+            override fun onBeginningOfSpeech() { recording = true; silentRounds = 0 }
             override fun onRmsChanged(rmsdB: Float) {}
             override fun onBufferReceived(buffer: ByteArray?) {}
             override fun onEndOfSpeech() {}
             override fun onError(error: Int) {
-                recording = false
-                if (pauseRequested) {
-                    val spoken = voiceText.trim()
-                    if (spoken.isNotEmpty()) onChange(listOf(value.trim(), spoken).filter { it.isNotEmpty() }.joinToString(" "))
-                    voiceText = ""
-                    pauseRequested = false
-                } else if (error != SpeechRecognizer.ERROR_CLIENT && error != SpeechRecognizer.ERROR_RECOGNIZER_BUSY) {
-                    voiceError = when (error) {
-                        SpeechRecognizer.ERROR_NO_MATCH -> "Não consegui reconhecer a fala. Tente novamente."
-                        SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> "Não detectei fala. Toque no microfone para tentar novamente."
-                        SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> "Permita o acesso ao microfone nas configurações."
-                        else -> "Falha no reconhecimento de voz (código $error)."
+                if (pauseRequested) { commitDictation(); return }
+                when (error) {
+                    SpeechRecognizer.ERROR_NO_MATCH, SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> {
+                        silentRounds++
+                        if (silentRounds < 2) restart(150)
+                        else if (dictated.isNotBlank()) commitDictation()
+                        else { recording = false; voiceError = "Não detectei fala. Toque no microfone para tentar novamente." }
                     }
+                    SpeechRecognizer.ERROR_RECOGNIZER_BUSY, SpeechRecognizer.ERROR_CLIENT -> {
+                        if (++busyRetries <= 3) { runCatching { speech.cancel() }; restart(400) }
+                        else if (dictated.isNotBlank()) commitDictation() else recording = false
+                    }
+                    SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> { recording = false; voiceError = "Permita o acesso ao microfone nas configurações." }
+                    else -> { if (dictated.isNotBlank()) commitDictation() else { recording = false; voiceError = "Falha no reconhecimento de voz (código $error)." } }
                 }
             }
             override fun onResults(results: Bundle?) {
-                val spoken = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull().orEmpty().ifBlank { voiceText }.trim()
-                voiceText = spoken
-                recording = false
-                if (pauseRequested) {
-                    if (spoken.isNotEmpty()) onChange(listOf(value.trim(), spoken).filter { it.isNotEmpty() }.joinToString(" "))
-                    voiceText = ""
-                    pauseRequested = false
-                }
+                val segment = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull().orEmpty().trim()
+                if (segment.isNotEmpty()) { dictated = listOf(dictated, segment).filter { it.isNotBlank() }.joinToString(" "); silentRounds = 0; busyRetries = 0 }
+                else silentRounds++
+                voiceText = dictated
+                if (pauseRequested) { commitDictation(); return }
+                if (silentRounds >= 2) commitDictation() else restart(120)
             }
             override fun onPartialResults(partialResults: Bundle?) {
-                partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull()?.let { voiceText = it }
+                partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull()?.let { part ->
+                    voiceText = listOf(dictated, part).filter { it.isNotBlank() }.joinToString(" ")
+                }
             }
             override fun onEvent(eventType: Int, params: Bundle?) {}
         })
@@ -377,6 +393,10 @@ fun Composer(
             .putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, "pt-BR")
             .putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
             .putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
+            // Pausas longas antes de fechar o trecho (o reconhecedor pode ignorar; o reinício cobre).
+            .putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 4_000L)
+            .putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 3_000L)
+            .putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS, 15_000L)
         runCatching { speech.startListening(intent); recording = true }
             .onFailure { recording = false; voiceError = "Não foi possível iniciar o microfone: ${it.message ?: "erro desconhecido"}" }
     }
@@ -477,13 +497,10 @@ fun Composer(
                 if (recording) {
                     IconButton(onClick = {
                         pauseRequested = true
-                        runCatching { recognizer?.stopListening() }.onFailure {
-                            recording = false
-                            val spoken = voiceText.trim()
-                            if (spoken.isNotEmpty()) onChange(listOf(value.trim(), spoken).filter { it.isNotEmpty() }.joinToString(" "))
-                            voiceText = ""; pauseRequested = false
-                        }
-                    }) { Icon(Icons.Rounded.Pause, "Pausar e inserir texto") }
+                        runCatching { recognizer?.stopListening() }.onFailure { commitDictation() }
+                        // Entre dois trechos não há escuta ativa para responder: garante a inserção mesmo assim.
+                        voiceScope.launch { kotlinx.coroutines.delay(1_500); if (pauseRequested) { runCatching { recognizer?.cancel() }; commitDictation() } }
+                    }) { Icon(Icons.Rounded.Pause, "Parar e inserir texto") }
                 } else if (voiceText.isNotBlank()) {
                     IconButton(onClick = {
                         onChange(listOf(value.trim(), voiceText.trim()).filter { it.isNotEmpty() }.joinToString(" "))
@@ -492,7 +509,7 @@ fun Composer(
                 }
                 IconButton(onClick = {
                     runCatching { recognizer?.cancel() }
-                    recording = false; pauseRequested = false; voiceText = ""; voiceError = null
+                    recording = false; pauseRequested = false; voiceText = ""; dictated = ""; voiceError = null
                 }) { Icon(Icons.Rounded.Close, "Cancelar gravação") }
             }
             Spacer(Modifier.height(8.dp))
@@ -526,12 +543,8 @@ fun Composer(
             RoundIcon(if (recording) Icons.Rounded.MicOff else Icons.Rounded.Mic, if (recording) "Gravando voz" else "Gravar voz") {
                 if (recording) {
                     pauseRequested = true
-                    runCatching { recognizer?.stopListening() }.onFailure {
-                        recording = false
-                        val spoken = voiceText.trim()
-                        if (spoken.isNotEmpty()) onChange(listOf(value.trim(), spoken).filter { it.isNotEmpty() }.joinToString(" "))
-                        voiceText = ""; pauseRequested = false
-                    }
+                    runCatching { recognizer?.stopListening() }.onFailure { commitDictation() }
+                    voiceScope.launch { kotlinx.coroutines.delay(1_500); if (pauseRequested) { runCatching { recognizer?.cancel() }; commitDictation() } }
                 } else if (hasAudioPermission) beginVoiceRecording() else voicePermission.launch(Manifest.permission.RECORD_AUDIO)
             }
             Spacer(Modifier.weight(1f))

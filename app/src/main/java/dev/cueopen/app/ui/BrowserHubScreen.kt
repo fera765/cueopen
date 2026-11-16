@@ -111,7 +111,12 @@ private fun LoginsTab(nav: NavController) {
             Text("Faça login uma vez num site e salve a sessão: os agentes autorizados entram já logados, cada um no próprio browser. A senha nunca passa pela IA nem fica salva pelo app.",
                 fontSize = 13.sp, color = c.ink2, lineHeight = 18.sp)
             Spacer(Modifier.height(10.dp))
-            PillButton("Adicionar sessão", Icons.Rounded.Add) { adding = true }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                PillButton("Adicionar sessão", Icons.Rounded.Add) { adding = true }
+                if (st.browserLogins.isNotEmpty()) PillButton("Sair de todas", Icons.Rounded.Logout) {
+                    scope.launch { st.browserLogins.forEach { l -> BrowserFeatures.revoke(l.domain); app.store.editBrowserLogin(l.id) { it.copy(status = "revoked") } } }
+                }
+            }
         }
         if (st.browserLogins.isEmpty()) item { EmptyState(Icons.Rounded.Key, "Nenhuma sessão salva", "Toque em Adicionar sessão, informe o site e entre na sua conta.") }
         items(st.browserLogins, key = { it.id }) { l ->
@@ -189,7 +194,7 @@ private fun LoginEditDialog(existing: BrowserLogin?, agents: List<AgentProfile>,
 
 /** Browser de login: o usuário entra na conta manualmente; o app só confere os cookies e salva os metadados. */
 @Composable
-fun BrowserLoginScreen(nav: NavController, loginId: String) {
+fun BrowserLoginScreen(nav: NavController, loginId: String, returnSession: String? = null) {
     val app = CueApp.instance
     val st by app.store.state.collectAsStateWithLifecycle()
     val c = Cue.c
@@ -206,6 +211,8 @@ fun BrowserLoginScreen(nav: NavController, loginId: String) {
                     if (n == 0) msg = "Nenhum cookie de ${l.domain} encontrado. Termine o login e tente de novo."
                     else {
                         app.store.editBrowserLogin(l.id) { it.copy(status = "active", lastVerifiedAt = System.currentTimeMillis()) }
+                        // Veio de um pedido do agente: a tarefa continua sozinha (como o Manus depois do takeover).
+                        returnSession?.let { sid -> app.agent.onUserLoggedIn(sid, l.domain) }
                         nav.popBackStack()
                     }
                 }
