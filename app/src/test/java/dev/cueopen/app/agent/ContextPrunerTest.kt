@@ -15,4 +15,14 @@ class ContextPrunerTest {
         assertEquals(big, p[2].content); assertEquals(big, p[3].content)
         assertSame(p, ContextPruner.prune(p, cut = 3))
     }
+
+    @Test fun `clear old tool results keeps the latest ones and needs a minimum gain`() {
+        val big = "y".repeat(4_000)
+        val llm = (1..8).flatMap { listOf(LlmMessage("assistant", "chamada $it"), LlmMessage("tool", "$it:$big")) }
+        val c = ContextPruner.clearOld(llm, keepLast = 4, clearAtLeastChars = 8_000)
+        val tools = c.filter { it.role == "tool" }
+        assertTrue(tools.take(4).all { it.content!!.startsWith(ContextPruner.CLEARED) })
+        assertTrue(tools.takeLast(4).none { it.content!!.startsWith(ContextPruner.CLEARED) })
+        assertSame(llm, ContextPruner.clearOld(llm, keepLast = 4, clearAtLeastChars = 1_000_000))
+    }
 }

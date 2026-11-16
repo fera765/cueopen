@@ -95,6 +95,7 @@ fun PageScreen(nav: NavController, pageId: String) {
     var rename by remember { mutableStateOf(false) }
     var ask by remember { mutableStateOf("") }
     var cardOpen by remember { mutableStateOf<String?>(null) }
+    var showChat by remember { mutableStateOf(false) }
     fun op(vararg o: kotlinx.serialization.json.JsonObject) { app.store.applyPageOps(pageId, o.toList(), app.store.settings.userName.ifBlank { "Você" }) }
     if (p == null) {
         Scaffold(containerColor = c.bg, topBar = { CueTopBar("Página", { nav.popBackStack() }) }) { pad ->
@@ -123,12 +124,16 @@ fun PageScreen(nav: NavController, pageId: String) {
         }
     }, bottomBar = {
         // "Pedir mudança": a mensagem vai para o chat dono da página; o agente edita a mesma página.
-        Row(Modifier.fillMaxWidth().background(c.bg).padding(12.dp).navigationBarsPadding().imePadding(), verticalAlignment = Alignment.CenterVertically) {
+        Column(Modifier.fillMaxWidth().background(c.bg).navigationBarsPadding().imePadding()) {
+        if (showChat) PageConversation(p.spaceId)
+        Row(Modifier.fillMaxWidth().padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
+            IconButton({ showChat = !showChat }) { Icon(if (showChat) Icons.Rounded.ExpandMore else Icons.Rounded.Forum, "Conversa com o agente", tint = c.ink2) }
             Box(Modifier.weight(1f)) { CueField(ask, { ask = it }, "Pedir mudança ao agente") }
             IconButton(enabled = ask.isNotBlank(), onClick = {
-                app.agent.sendOrQueue(p.spaceId, "Sobre a página \"${p.title}\" (${p.id}): ${ask.trim()}\n[Atualize esta mesma página com page_update.]")
-                ask = ""; android.widget.Toast.makeText(ctx, "Enviado ao agente", android.widget.Toast.LENGTH_SHORT).show()
+                app.agent.sendOrQueue(p.spaceId, "Sobre a página \"${p.title}\" (${p.id}): ${ask.trim()}\n[Edite esta MESMA página: page_read(\"${p.id}\") e page_update(\"${p.id}\"). Não crie outra página.]")
+                ask = ""; showChat = true
             }) { Icon(Icons.Rounded.Send, "Enviar", tint = c.accent) }
+        }
         }
     }) { pad ->
         Column(Modifier.padding(pad).fillMaxSize()) {
@@ -168,7 +173,7 @@ fun PageScreen(nav: NavController, pageId: String) {
                     HorizontalDivider(color = c.line)
                     p.rows.forEach { r -> Row { r.forEach { cell -> Text(cell, Modifier.width(w).padding(6.dp), fontSize = 13.sp) } }; HorizontalDivider(color = c.line) }
                 }
-                FluwyPage.KIND_HTML -> HtmlPageView(p.html, p.version)
+                FluwyPage.KIND_HTML -> Box(Modifier.weight(1f)) { HtmlPageView(p) }
                 else -> Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp)) { CueMarkdown(p.markdown) }
             }
         }
@@ -195,10 +200,63 @@ fun PageScreen(nav: NavController, pageId: String) {
     }
 }
 
-/** Página HTML livre: WebView isolado (sem acesso a arquivos), com JavaScript, sempre com viewport de celular. */
-@SuppressLint("SetJavaScriptEnabled")
+/** Últimas mensagens do chat dono da página: o usuário conversa com o agente sem sair da página. */
 @Composable
-private fun HtmlPageView(html: String, version: Int) {
+private fun PageConversation(spaceId: String) {
+    val app = CueApp.instance
+    val st by app.store.state.collectAsStateWithLifecycle()
+    val c = Cue.c
+    val session = st.sessions.firstOrNull { it.id == spaceId } ?: return
+    val running = session.status == dev.cueopen.app.data.SessionStatus.RUNNING
+    val items = session.items.filter { it is dev.cueopen.app.data.ChatItem.User || it is dev.cueopen.app.data.ChatItem.Assistant || (it is dev.cueopen.app.data.ChatItem.Step && it.tool == "page") }.takeLast(6)
+    Column(Modifier.fillMaxWidth().heightIn(max = 260.dp).padding(horizontal = 12.dp).clip(RoundedCornerShape(14.dp)).background(c.surface).verticalScroll(rememberScrollState()).padding(10.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        items.forEach { i ->
+            when (i) {
+                is dev.cueopen.app.data.ChatItem.User -> Text("Você: " + i.text.take(300), fontSize = 13.sp, color = c.ink2)
+                is dev.cueopen.app.data.ChatItem.Assistant -> Text(i.text.take(600), fontSize = 13.sp)
+                is dev.cueopen.app.data.ChatItem.Step -> Text("• " + i.title + " (" + i.result + ")", fontSize = 12.sp, color = c.accent)
+                else -> {}
+            }
+        }
+        if (running) Text("Agente trabalhando…", fontSize = 12.sp, color = c.ink3)
+        if (items.isEmpty() && !running) Text("Sem mensagens ainda. Peça uma mudança abaixo.", fontSize = 12.sp, color = c.ink3)
+    }
+}
+
+/**
+ * Ponte da página HTML com o app (window.Fluwy): ler/salvar os dados da página e mandar mensagem ao agente.
+ * Só existe dentro do visualizador de páginas e só toca na própria página.
+ */
+private class FluwyBridge(private val pageId: String) {
+    private var lastAsk = 0L
+    @android.webkit.JavascriptInterface fun getData(): String = CueApp.instance.store.page(pageId)?.data.orEmpty()
+    @android.webkit.JavascriptInterface fun saveData(json: String): Boolean {
+        if (json.length > 60_000) return false
+        val r = CueApp.instance.store.applyPageOps(pageId, listOf(buildJsonObject { put("op", "set_data"); put("data", json) }), CueApp.instance.store.settings.userName.ifBlank { "Você" })
+        return r.isSuccess
+    }
+    @android.webkit.JavascriptInterface fun ask(text: String): Boolean {
+        val now = System.currentTimeMillis()
+        if (text.isBlank() || now - lastAsk < 3_000) return false
+        lastAsk = now
+        val p = CueApp.instance.store.page(pageId) ?: return false
+        android.os.Handler(android.os.Looper.getMainLooper()).post {
+            CueApp.instance.agent.sendOrQueue(p.spaceId, "[Mensagem enviada pela página \"${p.title}\" (${p.id})] ${text.take(2_000)}\n[Se for para mudar a página, use page_update(\"${p.id}\").]")
+        }
+        return true
+    }
+    @android.webkit.JavascriptInterface fun pageInfo(): String = CueApp.instance.store.page(pageId)?.let { "{\"id\":\"${it.id}\",\"version\":${it.version}}" } ?: "{}"
+}
+
+private const val FLUWY_SHIM = "<script>window.Fluwy={getData:function(){try{return JSON.parse(FluwyBridge.getData()||'null')}catch(e){return FluwyBridge.getData()}}," +
+    "saveData:function(d){return FluwyBridge.saveData(typeof d==='string'?d:JSON.stringify(d))},ask:function(t){return FluwyBridge.ask(String(t))}," +
+    "info:function(){return JSON.parse(FluwyBridge.pageInfo())}};</script>"
+
+/** Página HTML livre: WebView isolado (sem acesso a arquivos), com JavaScript e a ponte window.Fluwy, sempre com viewport de celular. */
+@SuppressLint("SetJavaScriptEnabled", "JavascriptInterface")
+@Composable
+private fun HtmlPageView(p: FluwyPage) {
     AndroidView(factory = { ctx ->
         WebView(ctx).apply {
             settings.javaScriptEnabled = true
@@ -206,8 +264,15 @@ private fun HtmlPageView(html: String, version: Int) {
             settings.allowFileAccess = false
             settings.allowContentAccess = false
             webViewClient = WebViewClient()
+            addJavascriptInterface(FluwyBridge(p.id), "FluwyBridge")
         }
     }, update = { wv ->
-        if (wv.tag != version) { wv.tag = version; wv.loadDataWithBaseURL("https://pages.fluwy.local/", PageHtml.ensureMobile(html), "text/html", "utf-8", null) }
+        // Recarrega só quando o HTML muda (salvar dados não reinicia a página do usuário).
+        val key = p.html.hashCode()
+        if (wv.tag != key) {
+            wv.tag = key
+            val html = PageHtml.ensureMobile(p.html).let { h -> if (h.contains("<head>", true)) h.replaceFirst(Regex("(?i)<head>"), "<head>$FLUWY_SHIM") else FLUWY_SHIM + h }
+            wv.loadDataWithBaseURL("https://pages.fluwy.local/", html, "text/html", "utf-8", null)
+        }
     }, modifier = Modifier.fillMaxSize())
 }

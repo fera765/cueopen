@@ -60,11 +60,21 @@ object PageOps {
                 "rename" -> o.s("title").takeIf { it.isNotBlank() }?.let { p.copy(title = it.take(120)) } ?: return fail("informe title")
                 "set_markdown" -> p.copy(markdown = o.s("markdown").takeIf { it.length <= MAX_MARKDOWN } ?: return fail("markdown grande demais"))
                 "append_markdown" -> (p.markdown.trimEnd() + "\n\n" + o.s("markdown")).trim().takeIf { it.length <= MAX_MARKDOWN }?.let { p.copy(markdown = it) } ?: return fail("página grande demais")
-                "replace_text" -> {
-                    val find = o.s("find"); if (find.isBlank()) return fail("informe find")
-                    val c = p.markdown.split(find).size - 1
-                    if (c != 1) return fail(if (c == 0) "trecho não encontrado" else "trecho aparece $c vezes; inclua mais contexto")
-                    p.copy(markdown = p.markdown.replace(find, o.s("replace")))
+                "replace_text", "replace_html" -> {
+                    // Vale para o conteúdo principal da página: HTML nas páginas html, markdown nas demais.
+                    val isHtml = p.kind == FluwyPage.KIND_HTML
+                    val src = if (isHtml) p.html else p.markdown
+                    val out = TextPatch.replace(src, o.s("find"), o.s("replace")).getOrElse { return fail(it.message ?: "trecho não encontrado") }
+                    if (isHtml) p.copy(html = out) else p.copy(markdown = out)
+                }
+                "replace_section" -> {
+                    if (p.kind == FluwyPage.KIND_HTML) return fail("em páginas html use replace_text ou set_html")
+                    p.copy(markdown = TextPatch.replaceSection(p.markdown, o.s("heading"), o.s("markdown")).getOrElse { return fail(it.message ?: "título não encontrado") })
+                }
+                "set_data" -> {
+                    val d = o["data"]?.let { if (it is JsonPrimitive) it.contentOrNull.orEmpty() else it.toString() }.orEmpty()
+                    if (d.length > 60_000) return fail("data acima de 60 mil caracteres")
+                    p.copy(data = d)
                 }
                 "set_html" -> {
                     if (p.kind != FluwyPage.KIND_HTML) return fail("set_html só vale para páginas kind=html")
@@ -144,10 +154,17 @@ object PageOps {
                 appendLine("| # | " + p.headers.joinToString(" | ") + " |")
                 p.rows.forEachIndexed { i, r -> appendLine("| ${i + 1} | " + r.joinToString(" | ") + " |") }
             }
-            FluwyPage.KIND_HTML -> appendLine("(HTML com ${p.html.length} caracteres; para mudar, envie a página inteira com set_html)\n" + p.html.take(maxChars / 2))
+            FluwyPage.KIND_HTML -> appendLine("(HTML com ${p.html.length} caracteres. Para mudar um pedaço use replace_text com um trecho copiado daqui; para refazer tudo, set_html.)\n" + p.html.take(maxChars * 3 / 4))
             else -> append(p.markdown)
         }
+        if (p.data.isNotBlank()) append("\n\n[Dados salvos pela página (data)]\n" + p.data.take(4_000))
     }.let { if (it.length > maxChars) it.take(maxChars) + "\n[… cortado]" else it }
+
+    private fun normTitle(t: String) = java.text.Normalizer.normalize(t.lowercase(), java.text.Normalizer.Form.NFD).replace(Regex("\\p{M}+"), "").replace(Regex("[^a-z0-9]+"), " ").trim()
+
+    /** Página já existente com o mesmo título (ignora acentos/pontuação) no mesmo espaço — evita duplicar ao "editar". */
+    fun sameTitle(pages: List<FluwyPage>, spaceId: String, title: String): FluwyPage? =
+        pages.firstOrNull { it.spaceId == spaceId && normTitle(it.title) == normTitle(title) }
 
     private fun columnFor(s: TaskStatus, cols: List<String>): String = when (s) {
         TaskStatus.PENDING -> cols[0]

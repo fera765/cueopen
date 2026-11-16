@@ -37,6 +37,10 @@ class PageOpsTest {
         assertEquals("Feito", c2.cards.single().column)
         assertTrue(PageOps.apply(d, ops("""[{"op":"set_html","html":"<p>x</p>"}]"""), "a").isFailure)
         assertTrue(PageOps.create("s", "x", "planilha", "a").isFailure)
+        val h = PageOps.create("s", "Site", "html", "a", html = "<h1>Clínica   Sorriso</h1>").getOrThrow()
+        assertEquals("<h1>Clínica Feliz</h1>", PageOps.apply(h, ops("""[{"op":"replace_text","find":"<h1>Clínica Sorriso</h1>","replace":"<h1>Clínica Feliz</h1>"}]"""), "a").getOrThrow().html)
+        assertEquals("{\"n\":1}", PageOps.apply(h, ops("""[{"op":"set_data","data":{"n":1}}]"""), "a").getOrThrow().data)
+        assertEquals(h, PageOps.sameTitle(listOf(h), "s", "site!"))
     }
 
     @Test fun `section plan becomes a synced team board`() {

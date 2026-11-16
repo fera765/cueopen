@@ -27,6 +27,8 @@ data class FluwyPage(
     val pinned: Boolean = false,
     /** Quadro gerado do plano da seção (team_plan): os cartões "task_*" seguem o estado das tarefas. */
     val sectionId: String? = null,
+    /** Dados da página (JSON) — páginas html gravam aqui pelo window.Fluwy.saveData; o agente lê no page_read. */
+    val data: String = "",
 ) {
     companion object {
         const val KIND_DOC = "doc"

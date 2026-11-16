@@ -21,4 +21,25 @@ object ContextPruner {
         }
         return if (changed) out else llm
     }
+
+    const val CLEARED = "[resultado antigo removido do contexto para economizar tokens; refaça a ferramenta se precisar dele]"
+
+    /**
+     * Limpeza de resultados de ferramentas (context editing da Anthropic, clear_tool_uses): mantém inteiros os
+     * [keepLast] resultados mais recentes e troca os mais antigos por um aviso curto. Só aplica se liberar pelo menos
+     * [clearAtLeastChars] (limpar pouco não compensa). Devolve a lista original se não valer a pena.
+     */
+    fun clearOld(llm: List<LlmMessage>, keepLast: Int = 4, clearAtLeastChars: Int = 8_000): List<LlmMessage> {
+        val toolIdx = llm.indices.filter { llm[it].role == "tool" }
+        val old = toolIdx.dropLast(keepLast).toSet()
+        var freed = 0
+        val out = llm.mapIndexed { i, m ->
+            val c = m.content
+            if (i in old && c != null && c.length > 400 && !c.startsWith(CLEARED)) {
+                freed += c.length - 260
+                m.copy(content = CLEARED + "\n" + c.take(200))
+            } else m
+        }
+        return if (freed >= clearAtLeastChars) out else llm
+    }
 }

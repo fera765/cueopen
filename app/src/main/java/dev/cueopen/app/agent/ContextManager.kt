@@ -187,6 +187,9 @@ class ContextManager(private val store: Store, private val sandbox: Sandbox, pri
 
     /** Tamanho logo após a última compactação, por sessão (histerese). */
     private val postCompactSize = java.util.concurrent.ConcurrentHashMap<String, Int>()
+    /** Quantas limpezas de resultados já houve na sessão (a releitura de um trecho limpo volta a valer). */
+    private val clearEpoch = java.util.concurrent.ConcurrentHashMap<String, Int>()
+    fun clearEpochOf(sessionId: String): Int = clearEpoch[sessionId] ?: 0
 
     suspend fun compactIfNeeded(s: Session, force: Boolean = false): Session {
         val normalized = ToolCallHistoryNormalizer.normalize(s.llm)
@@ -195,6 +198,17 @@ class ContextManager(private val store: Store, private val sandbox: Sandbox, pri
             s.copy(llm = normalized)
         } else s
         val budget = store.settings.contextBudget
+        // Antes de resumir (chamada ao modelo), limpa resultados antigos de ferramentas quando o contexto passa de 60%.
+        if (!force && current.autoCompact && estimateTokens(current.llm) + estimateTokens(current.summary) >= budget * 6 / 10) {
+            val cleared = ContextPruner.clearOld(current.llm, keepLast = 4, clearAtLeastChars = (budget * 3.2 * 0.1).toInt())
+            if (cleared !== current.llm) {
+                store.editSession(current.id) { if (it.llm.size == cleared.size) it.copy(llm = cleared) else it }
+                clearEpoch.merge(current.id, 1, Int::plus)
+                val after = current.copy(llm = cleared)
+                if (estimateTokens(after.llm) + estimateTokens(after.summary) < budget) return after
+                return compactIfNeeded(after, force)
+            }
+        }
         if (!force && (!current.autoCompact ||
                 !MemoryHygiene.shouldCompact(estimateTokens(current.llm) + estimateTokens(current.summary), budget, postCompactSize[current.id]))) return current
         if (current.llm.size < 4) return current

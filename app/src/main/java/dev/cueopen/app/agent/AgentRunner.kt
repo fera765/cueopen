@@ -2709,7 +2709,7 @@ class AgentRunner(
     private val fileReadSeen = java.util.concurrent.ConcurrentHashMap<String, String>()
     private fun readCache(sessionId: String, f: java.io.File, offset: Int, limit: Int): String? {
         val key = "$sessionId|${f.absolutePath}|$offset|$limit"
-        val stamp = "${f.lastModified()}:${f.length()}:${store.session(sessionId)?.compactions ?: 0}"
+        val stamp = "${f.lastModified()}:${f.length()}:${store.session(sessionId)?.compactions ?: 0}:${ctxMgr.clearEpochOf(sessionId)}"
         return if (fileReadSeen.put(key, stamp) == stamp)
             "[Você já leu exatamente este trecho nesta tarefa e o arquivo não mudou. Use o conteúdo que já está no contexto; para outra parte, mude offset, ou ache a linha com file_search.]"
         else null
@@ -2794,6 +2794,7 @@ class AgentRunner(
             appendLine(PromptContextPolicy.instructionHierarchy)
             appendLine("1. Planeje: em tarefas com várias etapas, chame `update_plan` no início e atualize o plano conforme as fases terminam.")
             appendLine("2. Aja em vez de descrever: use as ferramentas e confira o resultado de cada ação.")
+            appendLine("2f. Contexto é limitado e resultados antigos de ferramentas podem ser removidos: guarde caminhos, URLs e IDs (não cópias de conteúdo grande) e recarregue sob demanda. Em trabalho longo, mantenha no NOTES.md o progresso e o que falta, assumindo que a conversa pode ser compactada a qualquer momento.")
             appendLine("2e. Eficiência: faça o trabalho com o menor número de passos. Para pesquisar, `web_search` e depois `web_fetch` nas melhores fontes (o browser só para login, JavaScript ou interação). Em arquivos grandes, `file_search` acha a linha e `file_read` com offset lê só o trecho. Chame várias ferramentas independentes na mesma resposta. Não releia o que já está no contexto.")
             appendLine("2z. Anúncio e ação andam juntos: ao dizer que vai fazer algo (\"vou pesquisar/verificar/testar/abrir/rodar…\"), emita a chamada de ferramenta na mesma resposta. Um anúncio sem ferramenta não produz nada e leva a repetição. Se não for usar ferramenta, entregue a resposta final diretamente ou chame finish, e não repita a mesma frase de intenção.")
             appendLine("2a. Entrega com evidência: só afirme que algo foi feito ou funciona quando uma ferramenta mostrou isso (saída, arquivo, status). Antes de `finish`, confira o resultado com ls, file_read ou executando. Se não conseguiu validar, diga isso claramente — o usuário decide melhor com a verdade do que com um sucesso presumido.")
@@ -3019,6 +3020,11 @@ class AgentRunner(
             if (memoryFacts.isNotEmpty()) {
                 appendLine(); appendLine("## Memória recuperada (referência que pode estar desatualizada; confirme antes de agir)")
                 appendLine(PromptContextPolicy.untrustedBlock("memory_facts", memoryFacts.joinToString("\n- "), contextPlan?.memoryChars ?: 2_400))
+            }
+            store.pagesIn(pageSpace(sessionId)).takeIf { it.isNotEmpty() }?.let { ps ->
+                appendLine(); appendLine("## Páginas desta conversa (Fluwy Pages)")
+                ps.sortedByDescending { it.updatedAt }.take(15).forEach { p -> appendLine("- ${p.id} · ${p.kind} · \"${p.title}\" · v${p.version}") }
+                appendLine("Pedido para mudar/editar/atualizar uma destas páginas = page_read e depois page_update na MESMA página (mude só o necessário). Nunca crie outra página para isso.")
             }
             // Conversas anteriores parecidas: só no início da conversa (ainda sem resumo), para não pagar tokens a cada passo.
             if (session.summary.isBlank() && session.llm.count { it.role == "user" } <= 1 && session.sectionId == null) {
@@ -3289,13 +3295,16 @@ class AgentRunner(
             put("path", str("Caminho do arquivo")); put("offset", int("Linha inicial (1 = início; padrão 1)")); put("limit", int("Quantidade de linhas (padrão 250, máx. 1000)")); put("stale_ok", bool("true apenas quando o usuário ou o coordenador pediu para reler um snapshot antigo do browser arquivado em .cue/out; por padrão snapshots antigos são recusados"))
         }, listOf("path")))
         if (pagesEnabled) {
-            add(tool("page_create", "Cria uma página Fluwy Pages (aparece em Pages, mobile-first, e o usuário abre pelo chat). kind: doc (relatório em markdown), kanban (quadro com colunas e cartões), checklist, table (tabela) ou html (página livre com HTML/CSS/JS). Numa seção, todo o time vê e atualiza a mesma página.",
+            add(tool("page_create", "Cria uma página Fluwy Pages NOVA (aparece em Pages, mobile-first). Para mudar uma página que já existe use page_update, nunca page_create. kind: doc (relatório em markdown), kanban, checklist, table ou html (app/página livre com HTML/CSS/JS). " +
+                "Páginas html podem conversar com o app pelo objeto window.Fluwy: Fluwy.getData() devolve o JSON salvo, Fluwy.saveData(jsonString) salva (o agente lê no page_read), Fluwy.ask(texto) manda uma mensagem a você. Use isso para formulários, listas e controles que o usuário preenche. Numa seção, todo o time vê e atualiza a mesma página.",
                 buildJsonObject { put("title", str("Título")); put("kind", str("doc | kanban | checklist | table | html")); put("markdown", str("Conteúdo inicial (doc)")); put("html", str("HTML completo, mobile-first (html)"))
                     put("columns", strArray("Colunas do kanban (padrão: A fazer, Fazendo, Revisão, Feito)")); put("headers", strArray("Cabeçalhos da tabela")) }, listOf("title", "kind")))
             add(tool("page_update", "Atualiza uma página com um lote de operações (tudo ou nada). Mude só o necessário em vez de reescrever. ops: " +
-                "rename{title} · set_markdown{markdown} · append_markdown{markdown} · replace_text{find,replace} · set_html{html} · add_column{name} · " +
+                "rename{title} · set_markdown{markdown} · append_markdown{markdown} · replace_section{heading,markdown} · replace_text{find,replace} (vale para markdown e para HTML; copie o trecho do page_read) · set_html{html} · set_data{data} · add_column{name} · " +
                 "add_card{title,column?,assignee?,note?} · move_card{card_id|title,column} · update_card{card_id,new_title?,note?,assignee?,column?} · remove_card{card_id} · " +
-                "add_item{title} · check{card_id|title} · uncheck{card_id|title} · set_headers{headers[]} · add_row{cells[]} · update_row{index,cells[]} · remove_row{index}.",
+                "add_item{title} · check{card_id|title} · uncheck{card_id|title} · set_headers{headers[]} · add_row{cells[]} · update_row{index,cells[]} · remove_row{index}. " +
+                "Exemplos: [{\"op\":\"move_card\",\"card_id\":\"c_ab12\",\"column\":\"Feito\"}] · [{\"op\":\"replace_section\",\"heading\":\"Preços\",\"markdown\":\"novo texto\"}] · " +
+                "[{\"op\":\"replace_text\",\"find\":\"<h1>Título antigo</h1>\",\"replace\":\"<h1>Título novo</h1>\"}]. Antes de replace_text, copie o trecho do page_read.",
                 buildJsonObject { put("page_id", str("ID da página (page_list)")); put("ops", buildJsonObject { put("type", "array"); put("description", "Lista de operações, cada uma um objeto com \"op\" e os campos dela"); put("items", buildJsonObject { put("type", "object") }) }) }, listOf("page_id", "ops")))
             add(tool("page_read", "Lê uma página em formato compacto (cartões com card_id, linhas numeradas).", buildJsonObject { put("page_id", str("ID da página")) }, listOf("page_id")))
             add(tool("page_list", "Lista as páginas desta conversa/seção.", buildJsonObject {}))
@@ -4758,7 +4767,9 @@ class AgentRunner(
                 "page_create" -> {
                     val by = store.agent(store.session(sessionId)?.agentId)?.name ?: "Agente"
                     fun arr(k: String) = (a[k] as? kotlinx.serialization.json.JsonArray)?.mapNotNull { (it as? kotlinx.serialization.json.JsonPrimitive)?.contentOrNull }.orEmpty()
-                    dev.cueopen.app.pages.PageOps.create(pageSpace(sessionId), s("title"), s("kind"), by, s("markdown"), s("html"), arr("columns"), arr("headers")).fold({ p ->
+                    val dup = dev.cueopen.app.pages.PageOps.sameTitle(store.state.value.pages, pageSpace(sessionId), s("title"))
+                    if (dup != null) "RECUSADO: já existe a página \"${dup.title}\" (${dup.id}, ${dup.kind}). Para editar, leia com page_read e altere com page_update(page_id=\"${dup.id}\"). Só crie outra se o usuário pediu uma página NOVA — e com outro título."
+                    else dev.cueopen.app.pages.PageOps.create(pageSpace(sessionId), s("title"), s("kind"), by, s("markdown"), s("html"), arr("columns"), arr("headers")).fold({ p ->
                         if (store.pagesIn(p.spaceId).size >= 60) "RECUSADO: esta conversa já tem 60 páginas; atualize uma existente." else {
                             store.upsertPage(p)
                             store.addItem(sessionId, ChatItem.Step(tool = "page", title = "Página criada: ${p.title}", args = p.id, result = p.kind, status = StepStatus.OK))
