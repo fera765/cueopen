@@ -1522,16 +1522,8 @@ class AgentRunner(
     private fun maybeTitle(sessionId: String, text: String) {
         val s = store.session(sessionId) ?: return
         if (s.title != "Nova tarefa") return
-        val fallback = text.lineSequence().first().take(48)
-        store.editSession(sessionId) { it.copy(title = fallback) }
-        // O título não segura a primeira chamada do agente; atualiza em paralelo quando terminar.
-        scope.launch {
-            runCatching {
-                val t = llm.quick("Crie um título curto para a tarefa abaixo: no máximo 6 palavras, sem aspas, no mesmo idioma do pedido. Responda somente com o título.\n$text", conversationId = sessionId)
-                val clean = t.replace(Regex("^(t[ií]tulo[^:]*:)\\s*", RegexOption.IGNORE_CASE), "").trim().removeSurrounding("\"").removeSurrounding("*").take(60)
-                if (clean.isNotBlank() && store.session(sessionId)?.title == fallback) store.editSession(sessionId) { it.copy(title = clean) }
-            }
-        }
+        // Título montado do próprio pedido: sem chamada extra ao modelo.
+        store.editSession(sessionId) { it.copy(title = TaskTitle.make(text)) }
     }
 
     private val ctxMgr = ContextManager(store, sandbox, llm)
@@ -1626,7 +1618,7 @@ class AgentRunner(
                 safeOutput.coerceAtMost(2048L).toInt()
             } ?: 8192
             var currentReplyTokenLimit = replyTokenLimit
-            val reply = run {
+            val replyRaw = run {
                 var attempt = 0
                 while (true) {
                     // Circuit breaker por provedor+modelo: se está aberto (ou em cooldown de rate limit), espera em vez de chamar.
@@ -1657,6 +1649,7 @@ class AgentRunner(
                         val llmFailure = t as? dev.cueopen.app.llm.LlmRequestFailure
                         val retryable = llmFailure?.retryable == true
                         val category = dev.cueopen.app.llm.LlmRecovery.classify(t.message, retryable, llmFailure?.responseTruncated == true)
+                        dev.cueopen.app.llm.PlanUsage.orgIdFrom(t.message)?.let { org -> if (store.settings.opencodeOrgId.isBlank()) store.updateSettings { it.copy(opencodeOrgId = org) } }
                         if (llmFailure?.responseTruncated != true) breaker.onFailure(System.currentTimeMillis(), llmFailure?.retryAfterMillis)
                         // Contexto estourado: compacta e continua (uma vez a cada 10 min, para nunca virar ciclo).
                         if (category == dev.cueopen.app.llm.LlmRecovery.Category.CONTEXT && tokenBudgetOverride == null &&
@@ -1724,7 +1717,11 @@ class AgentRunner(
                 }
                 @Suppress("UNREACHABLE_CODE") return
             }
+            // Nomes de ferramenta "de hábito" (grep, read_file, fetch…) viram a ferramenta real exposta.
+            val reply = replyRaw.copy(toolCalls = replyRaw.toolCalls.map { tc -> tc.copy(name = ToolAliases.resolve(tc.name, exposedToolNames)) })
             val modelId = stepModel(agent)
+            dev.cueopen.app.llm.UsageLedger.record(ctx, store.agent(store.session(sessionId)?.agentId)?.name ?: "Sem agent", modelId,
+                dev.cueopen.app.llm.ProviderCatalog.activeId(store.settings), reply.usage.prompt.toLong(), reply.usage.completion.toLong())
             autoResumeRound.remove(sessionId)  // o modelo voltou a responder: zera a escada de retomadas
             if (pendingRecovery.remove(sessionId)) store.session(sessionId)?.items?.filterIsInstance<ChatItem.LlmRecovery>()
                 ?.filter { it.state == "waiting" }?.forEach { store.replaceItem(sessionId, it.copy(state = "resolved")) }
@@ -2681,6 +2678,16 @@ class AgentRunner(
     /** Alternativos do momento: os provedores da cadeia (cada um com seu modelo) + alternativos por modelo. */
     private fun fallbackChain(): String = dev.cueopen.app.llm.ProviderChain.fallback(store.settings)
 
+    /** Mesma leitura (arquivo, offset, limite) sem o arquivo ter mudado e sem compactação no meio: devolve um aviso curto em vez do trecho de novo. */
+    private val fileReadSeen = java.util.concurrent.ConcurrentHashMap<String, String>()
+    private fun readCache(sessionId: String, f: java.io.File, offset: Int, limit: Int): String? {
+        val key = "$sessionId|${f.absolutePath}|$offset|$limit"
+        val stamp = "${f.lastModified()}:${f.length()}:${store.session(sessionId)?.compactions ?: 0}"
+        return if (fileReadSeen.put(key, stamp) == stamp)
+            "[Você já leu exatamente este trecho nesta tarefa e o arquivo não mudou. Use o conteúdo que já está no contexto; para outra parte, mude offset, ou ache a linha com file_search.]"
+        else null
+    }
+
     private fun primaryModel(agent: AgentProfile?): String = agent?.model?.takeIf { it.isNotBlank() } ?: store.settings.model
     /** Modelo desta chamada: o principal, ou o alternativo enquanto o principal está em limite de requisições. */
     private fun stepModel(agent: AgentProfile?): String =
@@ -2760,6 +2767,7 @@ class AgentRunner(
             appendLine(PromptContextPolicy.instructionHierarchy)
             appendLine("1. Planeje: em tarefas com várias etapas, chame `update_plan` no início e atualize o plano conforme as fases terminam.")
             appendLine("2. Aja em vez de descrever: use as ferramentas e confira o resultado de cada ação.")
+            appendLine("2e. Eficiência: faça o trabalho com o menor número de passos. Para pesquisar, `web_search` e depois `web_fetch` nas melhores fontes (o browser só para login, JavaScript ou interação). Em arquivos grandes, `file_search` acha a linha e `file_read` com offset lê só o trecho. Chame várias ferramentas independentes na mesma resposta. Não releia o que já está no contexto.")
             appendLine("2z. Anúncio e ação andam juntos: ao dizer que vai fazer algo (\"vou pesquisar/verificar/testar/abrir/rodar…\"), emita a chamada de ferramenta na mesma resposta. Um anúncio sem ferramenta não produz nada e leva a repetição. Se não for usar ferramenta, entregue a resposta final diretamente ou chame finish, e não repita a mesma frase de intenção.")
             appendLine("2a. Entrega com evidência: só afirme que algo foi feito ou funciona quando uma ferramenta mostrou isso (saída, arquivo, status). Antes de `finish`, confira o resultado com ls, file_read ou executando. Se não conseguiu validar, diga isso claramente — o usuário decide melhor com a verdade do que com um sucesso presumido.")
             appendLine("2b. Quando uma ferramenta falhar: leia a mensagem, identifique a causa e mude a abordagem (outro caminho, comando ou argumento). Repetir a mesma chamada produz o mesmo erro. Se ficar bloqueado de verdade, finalize explicando o motivo em vez de insistir.")
@@ -3234,6 +3242,8 @@ class AgentRunner(
         add(tool("file_read", "Lê um arquivo de texto por partes. Aceita arquivos do workspace da tarefa (relativos ou /root/workspace/...) e, somente para leitura, de /root/connectors/<id>/workspace/.... Se o arquivo não existir, liste o diretório pai em vez de repetir o mesmo caminho.", buildJsonObject {
             put("path", str("Caminho do arquivo")); put("offset", int("Linha inicial (1 = início; padrão 1)")); put("limit", int("Quantidade de linhas (padrão 250, máx. 1000)")); put("stale_ok", bool("true apenas quando o usuário ou o coordenador pediu para reler um snapshot antigo do browser arquivado em .cue/out; por padrão snapshots antigos são recusados"))
         }, listOf("path")))
+        add(tool("file_search", "Procura um texto (ou regex) dentro dos arquivos do workspace e devolve caminho:linha: trecho. Use ANTES de ler arquivos grandes: ache a linha e leia só o trecho com file_read(offset).",
+            buildJsonObject { put("pattern", str("Texto ou regex a procurar (sem diferenciar maiúsculas)")); put("path", str("Arquivo ou pasta (padrão: todo o workspace)")); put("regex", bool("true se pattern é regex")); put("max", int("Máximo de linhas (padrão 50)")) }, listOf("pattern")))
         add(tool("file_list", "Lista um diretório do workspace da tarefa ou, somente para leitura, de /root/connectors/<id>/workspace/.", buildJsonObject { put("path", str("Diretório relativo ao workspace, ou /root/workspace/, ou /root/connectors/<id>/workspace/")) }))
         if (web) {
             add(tool("browser_navigate", "Abre uma URL (ou termos de busca) no browser. Erros HTTP 4xx/5xx e falhas de rede na página principal são erros, não conteúdo válido. Para localhost, valide antes o processo, a porta e a saúde HTTP no mesmo ambiente de rede do WebView; CONNECTION_REFUSED pede correção do listener ou do endereço, não uma nova tentativa. PARTIAL significa que há texto mas o carregamento não foi confirmado — a aplicação pode não estar pronta, então verifique DOM, console e um sinal funcional.", buildJsonObject { put("url", str("URL ou termos de busca")) }, listOf("url")))
@@ -3252,6 +3262,10 @@ class AgentRunner(
             add(tool("browser_js", "Executa JavaScript na página atual e devolve o resultado da expressão.", buildJsonObject { put("code", str("Código JS (uma expressão)")) }, listOf("code")))
         }
         if (web) {
+            add(tool("web_search", "Busca na web sem abrir o browser (rápido e barato): devolve título, URL e trecho. Depois leia os relevantes com web_fetch. Use o browser só para sites com login, JavaScript pesado ou interação.",
+                buildJsonObject { put("query", str("Termos da busca")); put("max", int("Quantidade de resultados (padrão 8)")) }, listOf("query")))
+            add(tool("web_fetch", "Lê uma página por HTTP e devolve só o texto principal (sem menus/rodapés), bem menor que um snapshot do browser. Se vier pouco texto (site com JS/login), use browser_navigate.",
+                buildJsonObject { put("url", str("URL http(s) completa")); put("max_chars", int("Limite de caracteres (padrão 12000, máx. 40000)")) }, listOf("url")))
             add(tool("browser_network", "Mostra as requisições da página: método, URL, status, tempo, headers e os payloads fetch/XHR capturados (com limite de tamanho). Útil para descobrir de qual API um dado vem.", buildJsonObject { put("filter", str("Filtro opcional: texto contido na URL")) }))
             add(tool("browser_console", "Mostra as mensagens recentes do console JavaScript da página (erros, avisos e logs).", buildJsonObject {}))
         }
@@ -4660,10 +4674,19 @@ class AgentRunner(
                             "RECUSADO: este arquivo é um snapshot ANTIGO do browser (capturado há $staleMin min) e a página pode ter mudado. " +
                                 "Para o estado atual, use browser_read (ou browser_navigate, se precisar reabrir). " +
                                 "Só releia este snapshot se o usuário ou o coordenador pediu exatamente esse conteúdo antigo — nesse caso repita com stale_ok=true."
-                        else (if (staleMin != null && staleMin >= STALE_SNAPSHOT_MINUTES) "[Snapshot antigo do browser, capturado há $staleMin min — pode não refletir a página atual]\n" else "") +
+                        else readCache(sessionId, target, i("offset") ?: 1, i("limit") ?: 250) ?: (if (staleMin != null && staleMin >= STALE_SNAPSHOT_MINUTES) "[Snapshot antigo do browser, capturado há $staleMin min — pode não refletir a página atual]\n" else "") +
                             readFileChunk(target, path, i("offset") ?: 1, i("limit") ?: 250)
                     }
                 }
+                "file_search" -> {
+                    val root = sandbox.workspaceFor(sessionId)
+                    val p = s("path").trim()
+                    val start = if (p.isBlank()) root else AgentFilePathPolicy.readableWorkspace(root, sandbox.connectorsDir, p, allowRoot = true)
+                    if (start == null || !start.exists()) "ERRO: caminho não existe: $p. Omita path para buscar no workspace inteiro."
+                    else withContext(kotlinx.coroutines.Dispatchers.IO) { FileSearch.search(root, start, s("pattern"), b("regex"), (i("max") ?: 50).coerceIn(5, 200)) }
+                }
+                "web_search" -> dev.cueopen.app.web.WebTools.search(s("query"), i("max") ?: 8)
+                "web_fetch" -> dev.cueopen.app.web.WebTools.fetch(SecretVault.resolve(sessionId, s("url")).trim(), (i("max_chars") ?: 12_000).coerceIn(2_000, 40_000))
                 "file_list" -> {
                     val path = s("path").trim()
                     val root = sandbox.workspaceFor(sessionId)

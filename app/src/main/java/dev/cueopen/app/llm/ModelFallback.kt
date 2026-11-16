@@ -49,5 +49,8 @@ object ModelFallback {
     /** Até quando o alternativo fica no lugar do principal (null = não está). */
     fun activeUntil(primary: String, now: Long = System.currentTimeMillis()): Long? = states[primary]?.until?.takeIf { it > now }
 
+    /** Modelos em espera agora (bateram limite) e até quando. */
+    fun limited(now: Long = System.currentTimeMillis()): Map<String, Long> = states.filterValues { it.until > now }.mapValues { it.value.until }
+
     fun reset() = states.clear()
 }

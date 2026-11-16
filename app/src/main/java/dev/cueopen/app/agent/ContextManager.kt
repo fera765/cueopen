@@ -199,6 +199,14 @@ class ContextManager(private val store: Store, private val sandbox: Sandbox, pri
         var cut = (current.llm.size - keep).coerceAtLeast(1)
         while (cut > 0 && current.llm[cut].role == "tool") cut--
         if (cut <= 0) return current
+        // Primeiro sem LLM: encurta resultados antigos de ferramentas. Se couber com folga, não precisa resumir.
+        if (!force) {
+            val pruned = ContextPruner.prune(current.llm, cut)
+            if (pruned !== current.llm && estimateTokens(pruned) + estimateTokens(current.summary) < budget * 3 / 4) {
+                store.editSession(current.id) { if (it.llm.size == pruned.size) it.copy(llm = pruned) else it }
+                return current.copy(llm = pruned)
+            }
+        }
         val head = current.llm.subList(0, cut)
         val tail = current.llm.subList(cut, current.llm.size)
         val transcript = buildString {
@@ -327,6 +335,8 @@ class ContextManager(private val store: Store, private val sandbox: Sandbox, pri
         val convo = s.llm.filter { it.role == "user" || (it.role == "assistant" && !it.content.isNullOrBlank()) }
             .takeLast(16).joinToString("\n") { "${it.role}: ${(it.content ?: "").take(800)}" }
         if (convo.length < 200) return
+        // Sem nada duradouro dito pelo usuário, não gasta uma chamada ao modelo.
+        if (!MemoryGate.worthExtracting(s.llm.filter { it.role == "user" }.map { it.content.orEmpty() })) return
         val existing = store.state.value.memories.takeLast(40).joinToString("\n") { "- ${it.text}" }
         val out = runCatching {
             llm.quick("""

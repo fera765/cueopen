@@ -100,7 +100,8 @@ fun ProvidersScreen(nav: NavController) {
             }
             val activeKey = KeyPool.current(s.apiKey)
             ModelPicker(s.model, { v -> app.store.updateSettings { it.copy(model = v) } }, "Modelo do agente · ${providerName(activeId)}", baseUrl = s.baseUrl, apiKey = activeKey)
-            ModelPicker(s.fastModel, { v -> app.store.updateSettings { it.copy(fastModel = v) } }, "Modelo rápido (títulos e resumos de contexto)", baseUrl = s.baseUrl, apiKey = activeKey)
+            ModelPicker(s.fastModel, { v -> app.store.updateSettings { it.copy(fastModel = v) } }, "Modelo rápido (resumos de contexto e memórias)", baseUrl = s.baseUrl, apiKey = activeKey)
+            PlanLimitsCard(activeId, s.apiKey, s.opencodeOrgId)
             ProviderChainEditor(s, connected.filter { it != activeId })
             HorizontalDivider(color = c.line)
 
@@ -232,6 +233,11 @@ private fun ProviderCard(s: Settings, p: ProviderCatalog.Preset?, active: Boolea
         if (p == null || !p.needsKey) CueField(base, { base = it }, if (p == null) "Base URL — ex.: https://api.exemplo.com/v1" else "Base URL (troque 127.0.0.1 pelo IP do computador)")
         if ((p == null || p.needsKey) && showKeyField)
             CueField(keys, { keys = it }, "Chave da API (várias contas: uma por linha)", password = KeyPool.keys(keys).size <= 1, minLines = if (KeyPool.keys(keys).size > 1) 2 else 1)
+        if (id == "opencode-go" || id == "opencode-zen") {
+            var org by remember(s.opencodeOrgId) { mutableStateOf(s.opencodeOrgId) }
+            CueField(org, { org = it.trim(); app.store.updateSettings { cur -> cur.copy(opencodeOrgId = org) } }, "ID do workspace (org_…) — para mostrar o uso do plano Go")
+            Text("Fica no endereço do console do OpenCode (opencode.ai/console/org_…). O app também o pega sozinho de mensagens de erro do OpenCode.", fontSize = 11.sp, color = c.ink3)
+        }
         // ---- Modelo deste provedor (o do ativo fica no topo)
         if (connected && !active) {
             val (k, b) = providerCreds(s, id)

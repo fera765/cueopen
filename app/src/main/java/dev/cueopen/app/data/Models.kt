@@ -497,6 +497,8 @@ data class Settings(
     val oauthClients: Map<String, String> = emptyMap(),
     /** Renovação do login por código, por provedor: [refresh_token, expira_em_ms]. */
     val oauthTokens: Map<String, List<String>> = emptyMap(),
+    /** Workspace do OpenCode (org_…), usado para ler o uso do plano Go; capturado sozinho de mensagens de erro do OpenCode. */
+    val opencodeOrgId: String = "",
     val disableThinking: Boolean = true,
     val maxSteps: Int = 1000,
     val theme: ThemeMode = ThemeMode.SYSTEM,

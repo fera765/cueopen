@@ -229,6 +229,7 @@ fun CueNav(nav: NavHostController, startOnboarding: Boolean) {
         composable("proxy") { ProxyScreen(nav) }
         composable("providers") { ProvidersScreen(nav) }
         composable("channels") { ChannelsScreen(nav) }
+        composable("usage") { UsageScreen(nav) }
         composable("wallet") { WalletScreen(nav) }
         composable("wallet/send") { WalletSendScreen(nav) }
         composable("wallet/receive") { WalletReceiveScreen(nav) }

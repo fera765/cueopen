@@ -67,6 +67,23 @@ fun AgentsScreen(nav: NavController) {
                     }
                 }
             }
+            item {
+                Text("Modelos prontos", fontWeight = FontWeight.SemiBold)
+                Row(Modifier.horizontalScroll(rememberScrollState()).padding(top = 6.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    dev.cueopen.app.agent.AgentTemplates.all.forEach { t ->
+                        CueCard(onClick = {
+                            val a = dev.cueopen.app.agent.AgentTemplates.toAgent(t)
+                            CueApp.instance.store.upsertAgent(a); nav.navigate("agent/${a.id}")
+                        }) {
+                            Column(Modifier.width(150.dp)) {
+                                AgentFace(Color(t.color), t.face, 36.dp)
+                                Text(t.name, fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
+                                Text(t.summary, fontSize = 12.sp, color = c.ink2, maxLines = 2)
+                            }
+                        }
+                    }
+                }
+            }
             if (st.agents.isEmpty()) item { EmptyState(Icons.Rounded.Groups, "Nenhum Agent ainda", "Crie um Agent para tarefas recorrentes — ex.: pesquisador, dev, social media.") }
             items(st.agents, key = { it.id }) { a ->
                 CueCard(onClick = { nav.navigate("agent/${a.id}") }) {

@@ -96,6 +96,7 @@ fun SettingsScreen(nav: NavController) {
                     Chip(l, s.theme == m) { app.store.updateSettings { it.copy(theme = m) } }
                 }
             }
+            SettingsLink(Icons.Rounded.Insights, "Uso e limites", "Chamadas e tokens por modelo e agent; limites do plano") { nav.navigate("usage") }
             SectionLabel("Canais de envio de arquivos")
             SettingsLink(Icons.Rounded.Send, "Canais de envio", "Telegram, Discord, Slack e WhatsApp") { nav.navigate("channels") }
             SectionLabel("Notificações")
