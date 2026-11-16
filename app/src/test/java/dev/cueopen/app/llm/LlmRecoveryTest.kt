@@ -19,6 +19,7 @@ class LlmRecoveryTest {
         assertEquals(Category.NETWORK, LlmRecovery.classify("Falha de comunicação com o provedor: Unable to resolve host", true))
         assertEquals(Category.AUTH, LlmRecovery.classify("HTTP 401 — Invalid API key", false))
         assertEquals(Category.CREDITS, LlmRecovery.classify("HTTP 402 — Insufficient credits", false))
+        assertEquals(Category.AUTH, LlmRecovery.classify("HTTP 400 — This OpenCode Go model trains on request data. Turn on \"Allow paid endpoints that train on request data\"", false))
         assertEquals(Category.MODEL_NOT_FOUND, LlmRecovery.classify("HTTP 404 — model xyz not found", false))
         assertEquals(Category.ENDPOINT, LlmRecovery.classify("Base URL inválida.", false))
         assertEquals(Category.CONTEXT, LlmRecovery.classify("HTTP 400 — maximum context length is 128000 tokens", false))

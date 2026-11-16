@@ -134,6 +134,8 @@ class AgentRunner(
      * Agente parado ou em espera: envia na hora, como antes.
      */
     fun sendOrQueue(sessionId: String, text: String, quotedReply: String? = null): Job {
+        // Ordem de parar: interrompe tudo na hora (não entra na fila) e, se pedida, faz só a entrega final.
+        StopIntent.parse(text).takeIf { it.stop }?.let { return stopAndDeliver(sessionId, text, it.deliver, quotedReply) }
         val session = store.session(sessionId)
         val busy = isRunning(sessionId) && session?.status == SessionStatus.RUNNING
         val hasQueue = messageQueue.value[sessionId].orEmpty().isNotEmpty()
@@ -146,6 +148,43 @@ class AgentRunner(
         val running = jobs[sessionId]
         // Se o trabalho terminar antes de a fila ser lida, o que sobrou é enviado em seguida (nada se perde).
         return scope.launch { running?.join(); kotlinx.coroutines.delay(300); flushQueueIfIdle(sessionId) }
+    }
+
+    /** Chats numa entrega final após "pare": ferramentas restritas, sem delegar/navegar/agendar e sem retomar a autonomia. */
+    private val finalDelivery = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+
+    /** Ferramentas permitidas na entrega final (ler o que já existe, escrever o arquivo pedido, enviar e encerrar). */
+    private val FINAL_DELIVERY_TOOLS = setOf("file_read", "file_list", "file_write", "file_edit", "notes_read", "notes_write", "memory_search",
+        "team_status", "send_file", "finish", "complete_step")
+
+    /**
+     * "Pare (e me entregue X)": para coordenador, agentes, ciclo agendado, agendas desta conversa e fila; depois, se o
+     * usuário pediu algo, roda UMA execução curta só para entregar e termina. Nada volta a rodar sozinho.
+     */
+    fun stopAndDeliver(sessionId: String, text: String, deliver: Boolean, quotedReply: String? = null): Job {
+        val sec = store.state.value.sections.firstOrNull { it.sessionId == sessionId } ?: store.section(store.session(sessionId)?.sectionId)
+        synchronized(queueLock) { messageQueue.value = messageQueue.value - sessionId }
+        if (sec != null) pauseSection(sec.id) else stop(sessionId, pauseAutonomy = true)
+        // Agendas criadas nesta conversa também param (o usuário pediu para parar o processo).
+        val chatIds = setOfNotNull(sessionId, sec?.sessionId) + store.state.value.sessions.filter { sec != null && it.sectionId == sec.id }.map { it.id }
+        val paused = store.state.value.scheduled.filter { it.enabled && it.sourceSessionId in chatIds }
+        paused.forEach { t -> store.upsertScheduled(t.copy(enabled = false)); runCatching { dev.cueopen.app.scheduler.Scheduler.cancel(ctx, t.id) } }
+        val target = sec?.sessionId ?: sessionId
+        // Modo contínuo desligado: sem dormir-e-acordar nem retomada ao reabrir o app.
+        chatIds.forEach { id -> store.editSession(id) { it.copy(continuous = false, wakeAt = null) } }
+        val stoppedNote = "Parado a seu pedido: " + (if (sec != null) "coordenador, agentes e próximo ciclo" else "execução e autonomia") +
+            (if (paused.isNotEmpty()) " e ${paused.size} agenda(s) desta conversa" else "") + " foram interrompidos."
+        if (!deliver) {
+            store.addItem(target, ChatItem.User(text = text, replyTo = quotedReply))
+            store.addItem(target, ChatItem.Assistant(text = "$stoppedNote Nada volta a rodar até você pedir.", final = true))
+            return scope.launch { }
+        }
+        finalDelivery.add(target)
+        store.addItem(target, ChatItem.Step(tool = "stop", title = "Parado a seu pedido — entregando o que você pediu", args = "", result = stoppedNote, status = StepStatus.OK))
+        val directive = "\n\n[ORDEM DO USUÁRIO: PARAR E ENTREGAR. $stoppedNote Agora faça SOMENTE a entrega pedida nesta mensagem, usando o que já foi feito " +
+            "(leia arquivos/notas do workspace se precisar; crie o arquivo pedido com file_write). Não delegue, não navegue, não pesquise de novo, não agende " +
+            "e não retome o trabalho anterior. Ao terminar a entrega, chame finish com o resultado (e o caminho do arquivo, se criou um).]"
+        return send(target, text, quotedReply = quotedReply, directiveSuffix = directive)
     }
 
     private fun takeQueue(sessionId: String): List<QueuedMessage> = synchronized(queueLock) {
@@ -205,7 +244,10 @@ class AgentRunner(
     private fun skillBlock(sk: Skill) = "\n\n[Skill ativada para este pedido: ${sk.name}. Siga as instruções abaixo para cumprir o pedido; os valores que o usuário informou entram como parâmetros.]\n${sk.instructions}"
 
     /** Envia uma mensagem do usuário e (re)inicia o loop. */
-    fun send(sessionId: String, text: String, attachments: List<String> = emptyList(), onDone: (() -> Unit)? = null, quotedReply: String? = null, showUserMessage: Boolean = true): Job {
+    fun send(sessionId: String, text: String, attachments: List<String> = emptyList(), onDone: (() -> Unit)? = null, quotedReply: String? = null, showUserMessage: Boolean = true,
+             directiveSuffix: String = ""): Job {
+        // Mensagem comum depois de uma entrega final: volta ao normal (a parada valeu só para aquela ordem).
+        if (directiveSuffix.isBlank()) finalDelivery.remove(sessionId)
         autoResumeJobs.remove(sessionId)?.cancel()  // o usuário (ou a retomada) agiu: cancela a retomada agendada
         unknownToolWarned.removeIf { it.startsWith("$sessionId|") }
         jobs[sessionId]?.cancel()
@@ -223,8 +265,8 @@ class AgentRunner(
         }
         // Mensagem do usuário numa seção arquivada a traz de volta.
         if (showUserMessage) store.state.value.sections.firstOrNull { it.sessionId == sessionId && it.archived }?.let { store.upsertSection(it.copy(archived = false)) }
-        // Mensagem do usuário retoma a seção pausada, inclusive o ciclo agendado.
-        if (showUserMessage) store.state.value.sections.firstOrNull { it.sessionId == sessionId && it.configured && it.scheduleMinutes > 0 }?.let { sec ->
+        // Mensagem do usuário retoma a seção pausada, inclusive o ciclo agendado (exceto a ordem de parar e entregar).
+        if (showUserMessage && sessionId !in finalDelivery) store.state.value.sections.firstOrNull { it.sessionId == sessionId && it.configured && it.scheduleMinutes > 0 }?.let { sec ->
             store.agent(sec.coordinatorAgentId)?.takeIf { !it.autonomous }?.let { c ->
                 store.upsertAgent(c.copy(autonomous = true, heartbeatMinutes = sec.scheduleMinutes, homeSessionId = sec.sessionId, lastBeatAt = System.currentTimeMillis()))
                 runCatching { dev.cueopen.app.scheduler.Heartbeat.schedule(ctx, c.id, sec.scheduleMinutes) }
@@ -246,7 +288,8 @@ class AgentRunner(
             store.editSession(sessionId) { it.copy(agentId = a.id) }
         }
         // "continuar / prossiga / retome": seguir de onde parou, nunca recomeçar o pedido original.
-        if (showUserMessage && ContinuationPolicy.isContinueIntent(text)) content += "\n\n" + continuationDirective(sessionId, automatic = false)
+        if (showUserMessage && directiveSuffix.isBlank() && ContinuationPolicy.isContinueIntent(text)) content += "\n\n" + continuationDirective(sessionId, automatic = false)
+        content += directiveSuffix
         store.editSession(sessionId) { it.copy(llm = it.llm + LlmMessage("user", content), status = SessionStatus.RUNNING) }
         dev.cueopen.app.sandbox.SandboxService.start(ctx, "Executando tarefa…")
         val job = scope.launch {
@@ -1192,6 +1235,8 @@ class AgentRunner(
      * atualiza a pílula e entrega o relatório ao coordenador (um por vez, sem interromper a resposta dele).
      */
     private fun onRunEnded(sessionId: String) {
+        // Entrega final após "pare": nada de vigia do plano, lembretes ou relatório que faria o trabalho recomeçar.
+        if (sessionId in finalDelivery) return
         store.session(sessionId)?.sectionId?.let { sid -> store.section(sid)?.takeIf { it.sessionId == sessionId }?.let { planWatchdog(it.id); return } }
         val d = delegations[sessionId] ?: return
         val child = store.session(sessionId) ?: run { delegations.remove(sessionId); return }
@@ -1496,7 +1541,8 @@ class AgentRunner(
             if (AccessibilityToolHistory.sanitizePersistedSession(existing) != existing)
                 store.editSession(sessionId) { AccessibilityToolHistory.sanitizePersistedSession(it) }
         }
-        val maxSteps = (maxStepsOverride ?: store.settings.maxSteps).coerceIn(1, store.settings.maxSteps.coerceAtLeast(1))
+        val maxSteps0 = (maxStepsOverride ?: store.settings.maxSteps).coerceIn(1, store.settings.maxSteps.coerceAtLeast(1))
+        val maxSteps = if (sessionId in finalDelivery) maxSteps0.coerceAtMost(15) else maxSteps0
         val sectionMember = store.session(sessionId)?.let { s -> s.sectionId != null && store.section(s.sectionId)?.sessionId != sessionId } == true
         val startingTokens = store.session(sessionId)?.let { it.tokensIn + it.tokensOut } ?: 0L
         var steps = 0
@@ -1556,7 +1602,9 @@ class AgentRunner(
             // Planejamento contextual: decide quais ferramentas/conectores e quanto conhecimento/memória entram neste passo
             val allTools = tools(agent, allowMultiAgent = tokenBudgetOverride == null, builder = s.connectorBuilder, connectorEditId = s.connectorEditId, sectionId = s.sectionId, scriptBuilder = s.scriptBuilder)
             if (s.scriptBuilder) ToolContextPlanner.load(sessionId, listOf("web_dev"))  // browser_js/network/console sempre à mão
-        val (contextPlan, stepTools) = toolContextPlan(sessionId, s, allTools)
+        val (contextPlan, stepToolsPlanned) = toolContextPlan(sessionId, s, allTools)
+            // Entrega final após "pare": só ler/escrever/enviar/encerrar.
+            val stepTools = if (sessionId in finalDelivery) allTools.filter { toolName(it) in FINAL_DELIVERY_TOOLS } else stepToolsPlanned
             // O schema enviado ao provider também é uma allowlist de execução para esta volta.
             val exposedToolNames = stepTools.mapNotNull(::toolName).toSet()
             val sys = LlmMessage("system", systemPrompt(sessionId, agent, s, contextPlan, allowDeviceTools = tokenBudgetOverride == null))

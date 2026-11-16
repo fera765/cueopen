@@ -49,6 +49,7 @@ object LlmRecovery {
             code == 408 || code == 504 || Regex("timed? ?out|timeout").containsMatchIn(low) -> Category.TIMEOUT
             code != null && code in 500..599 -> Category.SERVER
             Regex("falha de comunicação|unknownhost|unable to resolve|connection (reset|refused|closed)|network|socket|ssl|eof").containsMatchIn(low) -> Category.NETWORK
+            Regex("trains on request data|data (training|retention) polic|privacy settings?|allow paid endpoints").containsMatchIn(low) -> Category.AUTH
             code == 400 || code == 422 -> if (transient.containsMatchIn(m)) Category.SERVER else Category.FORMAT
             retryable -> Category.SERVER
             else -> Category.UNKNOWN
