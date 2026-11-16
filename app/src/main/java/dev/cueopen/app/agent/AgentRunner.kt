@@ -1604,7 +1604,7 @@ class AgentRunner(
             if (s.scriptBuilder) ToolContextPlanner.load(sessionId, listOf("web_dev"))  // browser_js/network/console sempre à mão
         val (contextPlan, stepToolsPlanned) = toolContextPlan(sessionId, s, allTools)
             // Entrega final após "pare": só ler/escrever/enviar/encerrar.
-            val stepTools = if (sessionId in finalDelivery) allTools.filter { toolName(it) in FINAL_DELIVERY_TOOLS } else stepToolsPlanned
+            val stepTools = if (sessionId in finalDelivery) kotlinx.serialization.json.JsonArray(allTools.filter { toolName(it) in FINAL_DELIVERY_TOOLS }) else stepToolsPlanned
             // O schema enviado ao provider também é uma allowlist de execução para esta volta.
             val exposedToolNames = stepTools.mapNotNull(::toolName).toSet()
             val sys = LlmMessage("system", systemPrompt(sessionId, agent, s, contextPlan, allowDeviceTools = tokenBudgetOverride == null))
