@@ -29,6 +29,8 @@ data class FluwyPage(
     val sectionId: String? = null,
     /** Dados da página (JSON) — páginas html gravam aqui pelo window.Fluwy.saveData; o agente lê no page_read. */
     val data: String = "",
+    /** Agent que criou a página: ao excluir o agent, a página sai junto. */
+    val creatorAgentId: String? = null,
 ) {
     companion object {
         const val KIND_DOC = "doc"

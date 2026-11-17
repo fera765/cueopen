@@ -55,4 +55,12 @@ class PageOpsTest {
         assertTrue(b2.cards.filter { it.id.startsWith("task_") }.all { it.column == "Feito" }); assertTrue(b2.cards.any { it.title == "Ideia extra" })
         assertEquals(done, PageOps.syncBoard(done, sec.copy(plan = sec.plan.map { it.copy(status = TaskStatus.DONE) })))
     }
+
+    @Test fun `pages go away with their chat agent or section`() {
+        val a = FluwyPage(id = "1", spaceId = "chat1", title = "A")
+        val b = FluwyPage(id = "2", spaceId = "chat2", title = "B", creatorAgentId = "ag1")
+        val c = FluwyPage(id = "3", spaceId = "chat1", title = "Quadro", sectionId = "sec1")
+        assertEquals(listOf(a, c), PageOps.prune(listOf(a, b, c), setOf("chat1", "chat2"), emptySet(), setOf("sec1")))
+        assertEquals(listOf(b), PageOps.prune(listOf(a, b, c), setOf("chat2"), setOf("ag1"), emptySet()))
+    }
 }

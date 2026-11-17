@@ -4918,7 +4918,7 @@ class AgentRunner(
                     else if (dup != null) "RECUSADO: já existe a página \"${dup.title}\" (${dup.id}, ${dup.kind}). Para editar, leia com page_read e altere com page_update(page_id=\"${dup.id}\"). Só crie outra se o usuário pediu uma página NOVA — e com outro título."
                     else dev.cueopen.app.pages.PageOps.create(pageSpace(sessionId), s("title"), s("kind"), by, s("markdown"), s("html"), arr("columns"), arr("headers")).fold({ p ->
                         if (store.pagesIn(p.spaceId).size >= 60) "RECUSADO: esta conversa já tem 60 páginas; atualize uma existente." else {
-                            store.upsertPage(p)
+                            store.upsertPage(p.copy(creatorAgentId = store.session(sessionId)?.agentId))
                             store.addItem(sessionId, ChatItem.Step(tool = "page", title = "Página criada: ${p.title}", args = p.id, result = p.kind, status = StepStatus.OK))
                             "Criada: ${p.id} (${p.kind}). O usuário já pode abrir em Pages. Atualize com page_update(page_id=\"${p.id}\", ops=[...])."
                         }

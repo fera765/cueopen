@@ -47,8 +47,10 @@ fun PagesScreen(nav: NavController, spaceId: String?) {
     val app = CueApp.instance
     val st by app.store.state.collectAsStateWithLifecycle()
     val c = Cue.c
+    // Páginas só existem dentro de um chat/seção: sem conversa, não há lista geral.
+    if (spaceId.isNullOrBlank()) { LaunchedEffect(Unit) { nav.popBackStack() }; return }
     var query by remember { mutableStateOf("") }
-    val pages = st.pages.filter { spaceId.isNullOrBlank() || it.spaceId == spaceId }
+    val pages = st.pages.filter { it.spaceId == spaceId }
         .filter { query.isBlank() || it.title.contains(query, true) }
         .sortedWith(compareByDescending<FluwyPage> { it.pinned }.thenByDescending { it.updatedAt })
     val now = System.currentTimeMillis()
@@ -56,7 +58,7 @@ fun PagesScreen(nav: NavController, spaceId: String?) {
         "Hoje" to pages.filter { !it.pinned && now - it.updatedAt < 86_400_000L },
         "Esta semana" to pages.filter { !it.pinned && now - it.updatedAt in 86_400_000L until 7 * 86_400_000L },
         "Antigas" to pages.filter { !it.pinned && now - it.updatedAt >= 7 * 86_400_000L })
-    Scaffold(containerColor = c.bg, topBar = { CueTopBar("Fluwy Pages", { nav.popBackStack() }) }) { pad ->
+    Scaffold(containerColor = c.bg, topBar = { CueTopBar("Pages desta conversa", { nav.popBackStack() }) }) { pad ->
         LazyColumn(Modifier.padding(pad), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             item {
                 Text("Páginas que os agentes criam e mantêm atualizadas: relatórios, quadros kanban, checklists, tabelas e páginas livres. Peça no chat: \"crie uma página com…\".",

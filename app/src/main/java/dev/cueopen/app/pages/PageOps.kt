@@ -178,6 +178,15 @@ object PageOps {
     fun boardId(sectionId: String) = "board_$sectionId"
 
     /**
+     * Páginas sempre pertencem a um chat/seção (e, se criadas por um agent, a ele): quando o chat, a seção ou o agent
+     * deixam de existir, as páginas deles somem também. Não há páginas soltas.
+     */
+    fun prune(pages: List<FluwyPage>, sessionIds: Set<String>, agentIds: Set<String>, sectionIds: Set<String>): List<FluwyPage> =
+        pages.filter { p ->
+            p.spaceId in sessionIds && (p.creatorAgentId == null || p.creatorAgentId in agentIds) && (p.sectionId == null || p.sectionId in sectionIds)
+        }
+
+    /**
      * Quadro do time: espelha o plano da seção (team_plan) num kanban. Cartões "task_*" seguem o estado real das tarefas;
      * cartões que os agentes criaram à mão ficam como estão.
      */

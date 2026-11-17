@@ -46,6 +46,7 @@ class Store(context: Context) {
         // Tarefas que estavam rodando quando o app morreu viram "interrompidas"
         s.copy(
             skills = (s.skills + missing).filterNot { it.builtIn && it.id in BuiltInSkills.retiredIds },
+            pages = dev.cueopen.app.pages.PageOps.prune(s.pages, s.sessions.mapTo(HashSet()) { it.id }, s.agents.mapTo(HashSet()) { it.id }, s.sections.mapTo(HashSet()) { it.id }),
             // Migra uma única vez o consentimento de background dos agentes já autônomos;
             // depois disso, a remoção da capability pelo usuário nunca é revertida no próximo load.
             agents = s.agents.map { agent ->
@@ -99,7 +100,14 @@ class Store(context: Context) {
     fun update(fn: (AppState) -> AppState) {
         synchronized(stateLock) {
             val current = _state.value
-            val next = fn(current)
+            val next = fn(current).let { n ->
+                // Excluiu chat, seção ou agent (por qualquer caminho): as páginas deles saem junto.
+                if (n.pages.isNotEmpty() && (n.sessions !== current.sessions || n.agents !== current.agents || n.sections !== current.sections)) {
+                    val kept = dev.cueopen.app.pages.PageOps.prune(n.pages, n.sessions.mapTo(HashSet()) { it.id },
+                        n.agents.mapTo(HashSet()) { it.id }, n.sections.mapTo(HashSet()) { it.id })
+                    if (kept.size != n.pages.size) n.copy(pages = kept) else n
+                } else n
+            }
             if (next !== current) {
                 revision += 1
                 _state.value = next
