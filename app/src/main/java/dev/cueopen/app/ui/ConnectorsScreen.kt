@@ -33,6 +33,7 @@ import androidx.navigation.NavController
 import dev.cueopen.app.CueApp
 import dev.cueopen.app.connectors.Connectors
 import dev.cueopen.app.connectors.LocalMcpGateway
+import dev.cueopen.app.connectors.ActivepiecesHub
 import dev.cueopen.app.data.Connector
 import dev.cueopen.app.ui.theme.Cue
 import kotlinx.coroutines.launch
@@ -61,6 +62,10 @@ fun ConnectorsScreen(nav: NavController) {
     var engineReady by remember { mutableStateOf(LocalMcpGateway.engineInstalled()) }
     LaunchedEffect(gwBusy) { if (!gwBusy) engineReady = LocalMcpGateway.engineInstalled() }
     val localCatalog = remember { LocalMcpGateway.catalog(ctx) }
+    fun openUrl(url: String) {
+        runCatching { CustomTabsIntent.Builder().setShowTitle(true).build().launchUrl(ctx, Uri.parse(url)) }
+            .onFailure { ctx.startActivity(android.content.Intent(android.content.Intent.ACTION_VIEW, Uri.parse(url))) }
+    }
     fun cidOf(s: LocalMcpGateway.Server) = "mcp_" + LocalMcpGateway.safeName(s.id).replace('-', '_')
     fun installLocal(s: LocalMcpGateway.Server, values: Map<String, String>) {
         val id = cidOf(s); val name = LocalMcpGateway.safeName(s.id)
@@ -194,7 +199,7 @@ fun ConnectorsScreen(nav: NavController) {
                                 conn.lastError != null -> Text(conn.lastError, fontSize = 11.sp, color = c.err, maxLines = 2, overflow = TextOverflow.Ellipsis)
                                 connected -> Text("Conectado · $toolsCount ferramentas", fontSize = 11.sp, color = c.ok)
                             }
-                            if (!connected && conn.lastError != null && conn.gatewayRef == null) Text("Tenho um token →", fontSize = 11.sp, color = c.accent,
+                            if (!connected && conn.lastError != null && conn.gatewayRef?.startsWith("local:") != true) Text("Tenho um token →", fontSize = 11.sp, color = c.accent,
                                 modifier = Modifier.clickable { tokenFor = conn })
                         }
                         Spacer(Modifier.width(8.dp))
@@ -227,7 +232,65 @@ fun ConnectorsScreen(nav: NavController) {
                 }
             }
             item {
-                SectionLabel("Catálogo")
+                val hubState by ActivepiecesHub.state.collectAsStateWithLifecycle()
+                val hubLog by ActivepiecesHub.log.collectAsStateWithLifecycle()
+                var hubLogOpen by remember { mutableStateOf(false) }
+                LaunchedEffect(Unit) { ActivepiecesHub.refresh() }
+                val hubConn = st.connectors.firstOrNull { it.id == ActivepiecesHub.CONNECTOR_ID }
+                CueCard {
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Box(Modifier.size(42.dp).clip(RoundedCornerShape(12.dp)).background(c.accentSoft), contentAlignment = Alignment.Center) {
+                                Icon(Icons.Rounded.Hub, null, tint = c.accent)
+                            }
+                            Spacer(Modifier.width(12.dp))
+                            Column(Modifier.weight(1f)) {
+                                Text("Hub de apps · Activepieces", fontWeight = FontWeight.SemiBold)
+                                Text("700+ apps com login: Gmail, Planilhas, Instagram, Facebook, GitHub, Supabase, Slack, Notion, SEO e mais. Roda no Linux do app.",
+                                    fontSize = 12.sp, color = c.ink2)
+                            }
+                        }
+                        Text(when (hubState) {
+                            ActivepiecesHub.State.NOT_INSTALLED -> if (LocalMcpGateway.sandboxReady()) "Não instalado · download de ~1 GB (use Wi-Fi)" else "Instale o Linux (Alpine) em Configurações › Sandbox"
+                            ActivepiecesHub.State.INSTALLING -> "Baixando e montando o hub…"
+                            ActivepiecesHub.State.STOPPED -> "Instalado · parado"
+                            ActivepiecesHub.State.STARTING -> "Iniciando… (a 1ª vez leva alguns minutos)"
+                            ActivepiecesHub.State.RUNNING -> if (hubConn?.connectedAt != null) "No ar · conectado ao agente" else "No ar · falta conectar ao agente"
+                            ActivepiecesHub.State.ERROR -> "Erro · veja o registro"
+                        }, fontSize = 12.sp, color = if (hubState == ActivepiecesHub.State.ERROR) c.err else c.ink2)
+                        Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            @Composable fun pill(label: String, primary: Boolean = true, onClick: () -> Unit) =
+                                Box(Modifier.clip(CircleShape).background(if (primary) c.ink else c.surface2).clickable(onClick = onClick).padding(horizontal = 14.dp, vertical = 8.dp)) {
+                                    Text(label, color = if (primary) c.bg else c.ink, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                                }
+                            when (hubState) {
+                                ActivepiecesHub.State.NOT_INSTALLED, ActivepiecesHub.State.ERROR -> if (LocalMcpGateway.sandboxReady()) {
+                                    pill(if (ActivepiecesHub.installed()) "Iniciar" else "Instalar hub") {
+                                        scope.launch { if (ActivepiecesHub.installed() || ActivepiecesHub.install()) ActivepiecesHub.start() }
+                                    }
+                                }
+                                ActivepiecesHub.State.STOPPED -> pill("Iniciar") { scope.launch { ActivepiecesHub.start() } }
+                                ActivepiecesHub.State.RUNNING -> {
+                                    pill("Abrir painel") { openUrl(ActivepiecesHub.BASE) }
+                                    pill(if (hubConn?.connectedAt != null) "Reconectar" else "Conectar ao agente", primary = hubConn?.connectedAt == null) {
+                                        connect((hubConn ?: ActivepiecesHub.connector()).copy(enabled = true, accessToken = null, lastError = null))
+                                    }
+                                    pill("Parar", primary = false) { scope.launch { ActivepiecesHub.stop() } }
+                                }
+                                else -> CircularProgressIndicator(Modifier.size(22.dp), strokeWidth = 2.dp, color = c.accent)
+                            }
+                        }
+                        if (hubState == ActivepiecesHub.State.RUNNING && hubConn?.connectedAt == null) Text(
+                            "1) Abra o painel e crie sua conta local. 2) Em Conexões, conecte seus apps (login OAuth). " +
+                                "3) Em MCP Server, ative o servidor e escolha as ferramentas. 4) Toque em Conectar ao agente.",
+                            fontSize = 11.sp, color = c.ink3)
+                        if (hubLog.isNotBlank()) Text(if (hubLogOpen) "Ocultar registro" else "Ver registro", fontSize = 12.sp, color = c.accent, modifier = Modifier.clickable { hubLogOpen = !hubLogOpen })
+                        if (hubLogOpen) Text(hubLog.takeLast(2500), fontSize = 11.sp, color = c.ink2, fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace)
+                    }
+                }
+            }
+            item {
+                SectionLabel("Servidores MCP avulsos (chave de API)")
                 OutlinedTextField(
                     value = query, onValueChange = { query = it; shownCount = 40 },
                     modifier = Modifier.fillMaxWidth(),

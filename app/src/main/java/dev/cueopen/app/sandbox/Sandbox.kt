@@ -286,13 +286,13 @@ class Sandbox(private val ctx: Context) {
     }
 
     /** Inicia um processo de longa duração dentro do Alpine (ex.: gateway MCP local), com saída no [logFile]. */
-    fun spawn(command: String, logFile: File): Process {
+    fun spawn(command: String, logFile: File, extraEnv: Map<String, String> = emptyMap()): Process {
         check(isInstalled()) { "Sandbox não instalado." }
         writeScripts()
         logFile.parentFile?.mkdirs()
         val pb = ProcessBuilder("/system/bin/sh", File(prefix, "init-sandbox.sh").absolutePath, "/bin/sh", "-c", command)
             .directory(prefix).redirectErrorStream(true).redirectOutput(ProcessBuilder.Redirect.to(logFile))
-        pb.environment().putAll(env() + terminalProxyEnv())
+        pb.environment().putAll(env() + terminalProxyEnv() + extraEnv)
         return pb.start()
     }
 

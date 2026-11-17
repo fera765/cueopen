@@ -261,6 +261,7 @@ object Connectors {
 
     suspend fun refreshTools(store: Store, c: Connector): Connector = withContext(Dispatchers.IO) {
         if (c.gatewayRef?.startsWith(LocalMcpGateway.REF_PREFIX) == true) LocalMcpGateway.ensureRunning()
+        if (c.gatewayRef == ActivepiecesHub.REF) ActivepiecesHub.ensureRunning()
         try {
             val tools = JSONArray()
             withSession(store, c) { cc ->
@@ -335,6 +336,8 @@ object Connectors {
             ?: return@withContext "Conector não encontrado para $fnName"
         if (c.gatewayRef?.startsWith(LocalMcpGateway.REF_PREFIX) == true && !LocalMcpGateway.ensureRunning())
             return@withContext "ERRO: o gateway MCP local (Linux do app) não está ativo. Abra Conectores para reinstalar o servidor ${c.name}."
+        if (c.gatewayRef == ActivepiecesHub.REF && !ActivepiecesHub.ensureRunning())
+            return@withContext "ERRO: o hub de conectores (Activepieces) não iniciou. Abra Conectores › Hub para ver o registro."
         val arr = runCatching { JSONArray(c.toolsJson) }.getOrNull() ?: JSONArray()
         val toolName = (0 until arr.length()).map { arr.getJSONObject(it).getString("name") }
             .firstOrNull { ("mcp_${safe(c.id)}__${safe(it)}").take(64) == fnName } ?: fnName.substringAfter("__")
