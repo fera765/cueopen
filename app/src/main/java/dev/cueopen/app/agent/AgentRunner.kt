@@ -2912,8 +2912,37 @@ class AgentRunner(
         ))
         val connIdOf = { n: String -> conns.keys.firstOrNull { n.startsWith("uic_${it}_") } }
         val mcpOf = { n: String -> n.substringBefore("__").takeIf { n.contains("__") } }
-        val kept = buildJsonArray { all.forEach { t -> if (plan.keepTool(toolName(t), connIdOf, mcpOf)) add(t) } }
+        val hubPfx = "mcp_" + dev.cueopen.app.connectors.ActivepiecesHub.CONNECTOR_ID
+        val automation = HubGuard.automationIntent(ToolContextPlanner.norm(contextQuery(s)))
+        val kept = buildJsonArray { all.forEach { t -> val n = toolName(t); if (plan.keepTool(n, connIdOf, mcpOf) && !HubGuard.hideTool(n, hubPfx, automation)) add(t) } }
         return plan to kept
+    }
+
+    /** Falhas por (tarefa, ferramenta, argumentos) — a mesma chamada falhando de novo é recusada (HubGuard). */
+    private val hubCallFailures = java.util.concurrent.ConcurrentHashMap<String, Int>()
+
+    /** Chamada MCP com a disciplina do hub: tarefa única → ap_run_action; 1 fluxo por tarefa com nome "Fluwy · …"; sem repetir erro. */
+    private suspend fun hubGuardedCall(sessionId: String, fn: String, args: kotlinx.serialization.json.JsonObject): String {
+        val hubPrefix = "mcp_" + dev.cueopen.app.connectors.ActivepiecesHub.CONNECTOR_ID
+        if (!fn.startsWith(hubPrefix + "__")) return dev.cueopen.app.connectors.Connectors.callTool(store, fn, args)
+        val s = store.session(sessionId)
+        val items = s?.items.orEmpty()
+        val task = items.count { it is ChatItem.User }
+        val sinceUser = items.drop(items.indexOfLast { it is ChatItem.User }.coerceAtLeast(0)).filterIsInstance<ChatItem.Step>()
+        val created = sinceUser.count { st -> HubGuard.shortName(st.tool) in HubGuard.CREATE_FLOW && st.tool.startsWith(hubPrefix) &&
+            st.status != StepStatus.ERROR && (st.result.contains("created") || st.result.startsWith("✅") || st.result.startsWith("⚠")) }
+        val key = "$sessionId|$task|$fn|${args.toString().hashCode()}"
+        val state = HubGuard.TaskState(HubGuard.automationIntent(ToolContextPlanner.norm(s?.let { contextQuery(it) }.orEmpty())), created, hubCallFailures[key] ?: 0)
+        return when (val d = HubGuard.check(fn, args, hubPrefix, state)) {
+            is HubGuard.Decision.Refuse -> d.message
+            is HubGuard.Decision.Allow -> {
+                val out = dev.cueopen.app.connectors.Connectors.callTool(store, fn, d.args)
+                val failed = out.startsWith("ERRO") || out.startsWith("Falha") || out.trimStart().startsWith("❌")
+                if (failed) hubCallFailures.merge(key, 1, Int::plus) else hubCallFailures.remove(key)
+                if (hubCallFailures.size > 500) hubCallFailures.clear()
+                out
+            }
+        }
     }
 
     /** Recusa abrir no browser um app que o hub cobre antes de tentar o conector nesta tarefa (ver ConnectorRouting.browserGuard). */
@@ -3024,6 +3053,11 @@ class AgentRunner(
                     connected.map { Triple(it.name, "mcp_" + it.id.replace(Regex("[^A-Za-z0-9_]"), "_"), it.gatewayRef == hubRef) },
                     hub?.inventory, hub?.let { h -> dev.cueopen.app.connectors.Connectors.toolNames(h).map { it.first } }.orEmpty(), mentioned,
                 ).forEach { appendLine(it) }
+                if (hub != null) {
+                    val q = ToolContextPlanner.norm(lastUserText(session))
+                    val cat = HubRecipes.catalog { ctx.assets.open("hub/recipes.json").bufferedReader().use { it.readText() } }
+                    HubRecipes.promptLines(cat, q, HubGuard.automationIntent(q), "mcp_" + hub.id.replace(Regex("[^A-Za-z0-9_]"), "_")).forEach { appendLine(it) }
+                }
             }
             appendLine("6b. Trabalho recorrente: quando o usuário pedir para monitorar, acompanhar ou repetir algo ao longo do tempo (ex.: \"a cada 20 min verifique o mercado\", \"uma vez por dia\"), chame set_schedule com o intervalo em minutos (1440 = diário). Quando o pedido tiver hora marcada (\"todo dia às 8h\", \"amanhã às 15:30\"), use cron_add, que dispara no horário exato numa conversa isolada. Se ele não disser o intervalo e a tarefa for contínua, escolha um intervalo razoável e econômico. Para parar, set_schedule com minutes=0.")
             val requestedCaps = if (allowDeviceTools) agent?.deviceCaps.orEmpty() else emptyList()
@@ -5282,7 +5316,7 @@ class AgentRunner(
                     store.upsertSkill(Skill(name = s("name"), description = s("description"), instructions = s("instructions")))
                     "Skill \"${s("name")}\" criada e ativada."
                 }
-                else -> if (call.name.startsWith("mcp_")) dev.cueopen.app.connectors.Connectors.callTool(store, call.name, resolveArgs(sessionId, a))
+                else -> if (call.name.startsWith("mcp_")) hubGuardedCall(sessionId, call.name, resolveArgs(sessionId, a))
                         else if (call.name.startsWith("uic_")) {
                             val ag = store.agent(store.session(sessionId)?.agentId)
                             dev.cueopen.app.CueApp.instance.uiConnectors.callTool(

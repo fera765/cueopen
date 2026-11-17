@@ -312,6 +312,32 @@ object ActivepiecesHub {
 
     fun lastLog(): String = runCatching { File(hostDir(), "hub.log").readText().takeLast(20_000) }.getOrDefault("")
 
+    // ---------------- Limpeza de automações ----------------
+    private fun fn(tool: String) = "mcp_" + CONNECTOR_ID + "__" + tool
+
+    /** Automações sem uso (rascunhos de teste/temporários e duplicatas) — nunca inclui as publicadas/ligadas. */
+    suspend fun cleanupCandidates(): List<dev.cueopen.app.agent.HubGuard.FlowLine> {
+        val store = CueApp.instance.store
+        if (!ensureRunning()) error("O hub não está no ar.")
+        var out = Connectors.callTool(store, fn("ap_list_flows"), kotlinx.serialization.json.buildJsonObject { put("limit", kotlinx.serialization.json.JsonPrimitive(100)) })
+        if (out.startsWith("ERRO") || out.startsWith("Falha") || out.contains("❌")) out = Connectors.callTool(store, fn("ap_list_flows"), kotlinx.serialization.json.JsonObject(emptyMap()))
+        if (out.startsWith("ERRO") || out.startsWith("Falha")) error(out.take(300))
+        return dev.cueopen.app.agent.HubGuard.cleanupCandidates(dev.cueopen.app.agent.HubGuard.parseFlows(out))
+    }
+
+    /** Apaga as automações escolhidas pelo usuário. Devolve quantas saíram. */
+    suspend fun deleteFlows(ids: Collection<String>): Int {
+        val store = CueApp.instance.store
+        var n = 0
+        ids.forEach { id ->
+            val r = Connectors.callTool(store, fn("ap_delete_flow"), kotlinx.serialization.json.buildJsonObject { put("flowId", kotlinx.serialization.json.JsonPrimitive(id)) })
+            if (!r.startsWith("ERRO") && !r.startsWith("Falha") && !r.contains("❌")) n++
+            else dev.cueopen.app.diag.ErrorLog.log("hub", "Falha ao apagar automação $id: ${r.take(300)}")
+        }
+        logLine("🧹 $n automação(ões) sem uso apagada(s).\n")
+        return n
+    }
+
     fun connector() = dev.cueopen.app.data.Connector(
         CONNECTOR_ID, "Activepieces Hub", MCP_URL,
         "Hub local com 700+ apps (Gmail, Instagram, Facebook, GitHub, Supabase…)",

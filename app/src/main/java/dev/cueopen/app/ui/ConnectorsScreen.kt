@@ -52,6 +52,9 @@ fun ConnectorsScreen(nav: NavController) {
     var custom by remember { mutableStateOf(false) }
     var tokenFor by remember { mutableStateOf<Connector?>(null) }
     var policyFor by remember { mutableStateOf<Connector?>(null) }
+    var cleanup by remember { mutableStateOf<List<dev.cueopen.app.agent.HubGuard.FlowLine>>(emptyList()) }
+    var cleanupPick by remember { mutableStateOf(setOf<String>()) }
+    var cleaning by remember { mutableStateOf(false) }
     fun openUrl(url: String) {
         runCatching { CustomTabsIntent.Builder().setShowTitle(true).build().launchUrl(ctx, Uri.parse(url)) }
             .onFailure { ctx.startActivity(android.content.Intent(android.content.Intent.ACTION_VIEW, Uri.parse(url))) }
@@ -156,6 +159,16 @@ fun ConnectorsScreen(nav: NavController) {
                                         connect((hubConn ?: ActivepiecesHub.connector()).copy(enabled = true, accessToken = null, lastError = null))
                                     }
                                     pill("Parar", primary = false) { scope.launch { ActivepiecesHub.stop() } }
+                                    if (hubConn?.connectedAt != null) pill("Limpar automações", primary = false) {
+                                        cleaning = true
+                                        scope.launch {
+                                            runCatching { ActivepiecesHub.cleanupCandidates() }
+                                                .onSuccess { list -> cleanup = list; cleanupPick = list.map { it.id }.toSet()
+                                                    if (list.isEmpty()) android.widget.Toast.makeText(ctx, "Nenhuma automação sem uso ou duplicada.", android.widget.Toast.LENGTH_SHORT).show() }
+                                                .onFailure { android.widget.Toast.makeText(ctx, "Não consegui listar: ${it.message}", android.widget.Toast.LENGTH_LONG).show() }
+                                            cleaning = false
+                                        }
+                                    }
                                 }
                                 else -> CircularProgressIndicator(Modifier.size(22.dp), strokeWidth = 2.dp, color = c.accent)
                             }
@@ -255,6 +268,32 @@ fun ConnectorsScreen(nav: NavController) {
             }
         }
     }
+    if (cleanup.isNotEmpty()) AlertDialog(onDismissRequest = { cleanup = emptyList() },
+        title = { Text("Automações sem uso (${cleanup.size})") },
+        text = {
+            Column(Modifier.heightIn(max = 420.dp).verticalScroll(rememberScrollState())) {
+                Text("Rascunhos de teste/temporários e duplicatas. Automações publicadas ou ligadas nunca entram aqui.", fontSize = 12.sp, color = c.ink2)
+                Spacer(Modifier.height(6.dp))
+                cleanup.forEach { f ->
+                    val on = f.id in cleanupPick
+                    Row(Modifier.fillMaxWidth().clickable { cleanupPick = if (on) cleanupPick - f.id else cleanupPick + f.id }, verticalAlignment = Alignment.CenterVertically) {
+                        Checkbox(on, { v -> cleanupPick = if (v) cleanupPick + f.id else cleanupPick - f.id })
+                        Column(Modifier.weight(1f)) {
+                            Text(f.name, fontSize = 14.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            Text("${f.status.lowercase()} · ${if (f.published) "publicada" else "rascunho"}", fontSize = 11.sp, color = c.ink3)
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = { TextButton({
+            val ids = cleanupPick; cleanup = emptyList()
+            scope.launch {
+                val n = ActivepiecesHub.deleteFlows(ids)
+                android.widget.Toast.makeText(ctx, "$n automação(ões) apagada(s).", android.widget.Toast.LENGTH_SHORT).show()
+            }
+        }, enabled = cleanupPick.isNotEmpty()) { Text("Apagar (${cleanupPick.size})", color = c.err) } },
+        dismissButton = { TextButton({ cleanup = emptyList() }) { Text("Cancelar") } })
     tokenFor?.let { conn ->
         var tk by remember { mutableStateOf("") }
         AlertDialog(onDismissRequest = { tokenFor = null }, title = { Text("Conectar ${conn.name} com token") }, text = {
