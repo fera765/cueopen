@@ -97,22 +97,23 @@ fun queryName(ctx: android.content.Context, u: Uri): String {
     return safeAttachmentName(u.lastPathSegment.orEmpty())
 }
 
-data class Starter(val title: String, val icon: ImageVector, val tint: Long, val prompt: String)
+data class Starter(val title: String, val icon: ImageVector, val tint: Long, val prompt: String, val hint: String = "")
 
 val starters = listOf(
-    Starter("Slides", Icons.Rounded.Slideshow, 0xFFFFE6DC, "Crie uma apresentação de 8 slides sobre "),
-    Starter("Website", Icons.Rounded.Language, 0xFFDDE9FF, "Construa um site de uma página para "),
-    Starter("Wide Research", Icons.Rounded.TravelExplore, 0xFFDDF5E7, "Pesquise e compare as principais opções de "),
-    Starter("Criar imagem", Icons.Rounded.Image, 0xFFFFF3CF, "Crie uma ilustração de "),
-    Starter("Playbook", Icons.Rounded.MenuBook, 0xFFEDE3FF, "Monte um playbook passo a passo para "),
-    Starter("Mobile app", Icons.Rounded.PhoneAndroid, 0xFFFFE0EA, "Prototipe um app mobile (PWA) que "),
-    Starter("Analisar dados", Icons.Rounded.QueryStats, 0xFFDDF4F4, "Analise os dados do arquivo anexado e gere gráficos sobre "),
+    Starter("Slides", Icons.Rounded.Slideshow, 0xFFFFE6DC, "Crie uma apresentação de 8 slides sobre ", "Apresentação pronta"),
+    Starter("Website", Icons.Rounded.Language, 0xFFDDE9FF, "Construa um site de uma página para ", "Página publicada"),
+    Starter("Wide Research", Icons.Rounded.TravelExplore, 0xFFDDF5E7, "Pesquise e compare as principais opções de ", "Pesquisa ampla"),
+    Starter("Criar imagem", Icons.Rounded.Image, 0xFFFFF3CF, "Crie uma ilustração de ", "Arte e ilustração"),
+    Starter("Playbook", Icons.Rounded.MenuBook, 0xFFEDE3FF, "Monte um playbook passo a passo para ", "Guia passo a passo"),
+    Starter("Mobile app", Icons.Rounded.PhoneAndroid, 0xFFFFE0EA, "Prototipe um app mobile (PWA) que ", "Protótipo PWA"),
+    Starter("Analisar dados", Icons.Rounded.QueryStats, 0xFFDDF4F4, "Analise os dados do arquivo anexado e gere gráficos sobre ", "Gráficos e insights"),
 )
 
 private data class HomeHeaderState(
     val agents: List<AgentProfile>,
     val userName: String,
     val apiKey: String,
+    val connectedConnectors: Int = 0,
 )
 
 private data class DrawerSnapshot(
@@ -125,11 +126,11 @@ fun HomeScreen(nav: NavController, initialDraft: String? = null, initialAgent: S
     val app = CueApp.instance
     val headerFlow = remember(app) {
         app.store.state.map { state ->
-            HomeHeaderState(state.agents, state.settings.userName, state.settings.apiKey)
+            HomeHeaderState(state.agents, state.settings.userName, state.settings.apiKey, state.connectors.count { it.connectedAt != null && it.enabled })
         }.distinctUntilChanged()
     }
     val currentState = remember(app) {
-        app.store.state.value.let { HomeHeaderState(it.agents, it.settings.userName, it.settings.apiKey) }
+        app.store.state.value.let { s -> HomeHeaderState(s.agents, s.settings.userName, s.settings.apiKey, s.connectors.count { it.connectedAt != null && it.enabled }) }
     }
     val st by headerFlow.collectAsStateWithLifecycle(currentState)
     val drawer = rememberDrawerState(DrawerValue.Closed)
@@ -169,37 +170,36 @@ fun HomeScreen(nav: NavController, initialDraft: String? = null, initialAgent: S
                     drawerSnapshot = DrawerSnapshot(state.sessions, state.connectors.count { it.connectedAt != null })
                     scope.launch { drawer.open() }
                 }) { Icon(Icons.Rounded.Menu, "Menu") }
-                AgentSelector(agent, st.agents, onSelect = { agentId = it }, onManage = { nav.navigate("agents") })
-                Spacer(Modifier.weight(1f))
-                IconButton({ nav.navigate("terminal") }) { Icon(Icons.Rounded.Terminal, "Terminal") }
-                IconButton({ nav.navigate("settings") { launchSingleTop = true } }) { Icon(Icons.Rounded.Tune, "Configurações") }
+                Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
+                    AgentSelector(agent, st.agents, onSelect = { agentId = it }, onManage = { nav.navigate("agents") })
+                }
+                IconButton({ nav.navigate("terminal") }) { Icon(Icons.Rounded.Terminal, "Terminal", tint = c.ink2) }
+                IconButton({ nav.navigate("settings") { launchSingleTop = true } }) { Icon(Icons.Rounded.Tune, "Configurações", tint = c.ink2) }
             }
         }) { pad ->
             Column(Modifier.fillMaxSize().padding(pad).imePadding()) {
-                Column(Modifier.weight(1f).padding(horizontal = 20.dp), verticalArrangement = Arrangement.Center) {
-                    if (agent == null) RotatingAgentFace(56.dp, intervalMillis = 4_800L)
-                    else AnimatedAgentFace(Color(agent.color), agent.face, 56.dp)
-                    Spacer(Modifier.height(16.dp))
-                    val hello = st.userName.ifBlank { null }?.let { "Olá, $it" } ?: "Olá"
-                    Text(hello, style = MaterialTheme.typography.headlineLarge, color = c.ink3)
-                    Text(if (agent != null) "O que ${agent.name} deve fazer?" else "O que posso fazer por você?", style = MaterialTheme.typography.headlineLarge)
-                    if (st.apiKey.isBlank()) {
-                        Spacer(Modifier.height(16.dp))
-                        Row(Modifier.clip(RoundedCornerShape(14.dp)).background(c.accentSoft).clickable { nav.navigate("settings") { launchSingleTop = true } }.padding(12.dp),
-                            verticalAlignment = Alignment.CenterVertically) {
-                            Icon(Icons.Rounded.Key, null, tint = c.accent); Spacer(Modifier.width(8.dp))
-                            Text("Adicione sua chave OpenRouter para começar", style = MaterialTheme.typography.bodyMedium)
-                        }
+                val sandboxState by app.sandbox.state.collectAsStateWithLifecycle()
+                Column(Modifier.weight(1f).fillMaxWidth().padding(horizontal = 24.dp), verticalArrangement = Arrangement.Center, horizontalAlignment = Alignment.CenterHorizontally) {
+                    Box(Modifier.size(88.dp).clip(CircleShape).background(c.accentSoft.copy(alpha = if (c.dark) 0.25f else 0.7f)), contentAlignment = Alignment.Center) {
+                        if (agent == null) RotatingAgentFace(60.dp, intervalMillis = 4_800L)
+                        else AnimatedAgentFace(Color(agent.color), agent.face, 60.dp)
                     }
-                    if (app.sandbox.state.collectAsStateWithLifecycle().value != dev.cueopen.app.sandbox.Sandbox.State.READY) {
-                        Spacer(Modifier.height(8.dp))
-                        Row(Modifier.clip(RoundedCornerShape(14.dp)).background(c.surface2).clickable { nav.navigate("sandbox") }.padding(12.dp),
-                            verticalAlignment = Alignment.CenterVertically) {
-                            Icon(Icons.Rounded.Computer, null); Spacer(Modifier.width(8.dp))
-                            Text("Instale o computador do agente (Linux local)", style = MaterialTheme.typography.bodyMedium)
-                        }
+                    Spacer(Modifier.height(18.dp))
+                    val hello = st.userName.ifBlank { null }?.let { "Olá, $it" } ?: "Olá"
+                    Text(hello, style = MaterialTheme.typography.titleMedium, color = c.ink2)
+                    Spacer(Modifier.height(4.dp))
+                    Text(if (agent != null) "O que ${agent.name} deve fazer?" else "O que posso fazer por você?",
+                        style = MaterialTheme.typography.headlineLarge, textAlign = androidx.compose.ui.text.style.TextAlign.Center)
+                    Spacer(Modifier.height(16.dp))
+                    // Status do ambiente em chips compactos: um toque leva à configuração certa.
+                    Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        if (st.apiKey.isBlank()) HomeStatusChip(Icons.Rounded.Key, "Adicionar chave do modelo", warn = true) { nav.navigate("settings") { launchSingleTop = true } }
+                        HomeStatusChip(Icons.Rounded.Computer, if (sandboxState == dev.cueopen.app.sandbox.Sandbox.State.READY) "Linux pronto" else "Instalar Linux",
+                            warn = sandboxState != dev.cueopen.app.sandbox.Sandbox.State.READY) { nav.navigate("sandbox") }
+                        HomeStatusChip(Icons.Rounded.Cable, if (st.connectedConnectors > 0) "${st.connectedConnectors} conectores" else "Conectar apps") { nav.navigate("connectors") }
                     }
                 }
+                Text("Comece por aqui", style = MaterialTheme.typography.labelMedium, color = c.ink3, modifier = Modifier.padding(start = 20.dp, bottom = 2.dp))
                 Row(Modifier.horizontalScroll(rememberScrollState()).padding(horizontal = 16.dp, vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                     starters.forEach { s -> StarterCard(s) { draft = s.prompt } }
                 }
@@ -226,13 +226,27 @@ fun HomeScreen(nav: NavController, initialDraft: String? = null, initialAgent: S
 @Composable
 private fun StarterCard(s: Starter, onClick: () -> Unit) {
     val c = Cue.c
-    Column(Modifier.width(112.dp).clip(RoundedCornerShape(18.dp)).background(c.surface).border(1.dp, c.line, RoundedCornerShape(18.dp))
-        .clickable(onClick = onClick).padding(12.dp)) {
+    Row(Modifier.width(176.dp).clip(RoundedCornerShape(18.dp)).background(c.surface).border(1.dp, c.line, RoundedCornerShape(18.dp))
+        .clickable(onClick = onClick).padding(horizontal = 12.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
         Box(Modifier.size(40.dp).clip(RoundedCornerShape(12.dp)).background(if (c.dark) c.surface2 else Color(s.tint)), contentAlignment = Alignment.Center) {
             Icon(s.icon, null, tint = c.ink, modifier = Modifier.size(22.dp))
         }
-        Spacer(Modifier.height(10.dp))
-        Text(s.title, fontWeight = FontWeight.SemiBold, fontSize = 14.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        Spacer(Modifier.width(10.dp))
+        Column(Modifier.weight(1f)) {
+            Text(s.title, fontWeight = FontWeight.SemiBold, fontSize = 14.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            if (s.hint.isNotBlank()) Text(s.hint, fontSize = 12.sp, color = c.ink3, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        }
+    }
+}
+
+@Composable
+private fun HomeStatusChip(icon: ImageVector, text: String, warn: Boolean = false, onClick: () -> Unit) {
+    val c = Cue.c
+    Row(Modifier.clip(CircleShape).background(if (warn) c.accentSoft else c.surface2).clickable(onClick = onClick)
+        .padding(horizontal = 12.dp, vertical = 7.dp), verticalAlignment = Alignment.CenterVertically) {
+        Icon(icon, null, Modifier.size(16.dp), tint = if (warn) c.accent else c.ink2)
+        Spacer(Modifier.width(6.dp))
+        Text(text, fontSize = 12.sp, fontWeight = FontWeight.Medium, color = if (warn) c.accent else c.ink)
     }
 }
 
@@ -630,39 +644,65 @@ private fun SessionDrawer(nav: NavController, sessions: List<Session>, agents: L
     }
     val groups = remember(filtered) { filtered.groupBy { dayGroup(it.updatedAt) } }
     fun go(r: String) { onClose(); nav.navigate(r) }
-    Column(Modifier.fillMaxSize().statusBarsPadding().padding(12.dp)) {
+    Column(Modifier.fillMaxSize().statusBarsPadding().padding(horizontal = 14.dp, vertical = 10.dp)) {
+        // Cabeçalho: identidade + atalho de configurações sempre à mão.
         Row(verticalAlignment = Alignment.CenterVertically) {
-            RotatingAgentFace(32.dp, intervalMillis = 5_200L, enabled = drawerOpen); Spacer(Modifier.width(10.dp))
-            Text("Fluwy Bot", style = MaterialTheme.typography.titleLarge)
+            Box(Modifier.size(40.dp).clip(CircleShape).background(c.accentSoft.copy(alpha = if (c.dark) 0.25f else 0.7f)), contentAlignment = Alignment.Center) {
+                RotatingAgentFace(30.dp, intervalMillis = 5_200L, enabled = drawerOpen)
+            }
+            Spacer(Modifier.width(10.dp))
+            Column(Modifier.weight(1f)) {
+                Text("Fluwy Bot", style = MaterialTheme.typography.titleLarge)
+                Text("${agents.size} agents · $connectedConnectorCount conectores", fontSize = 12.sp, color = c.ink3)
+            }
+            IconButton({ go("settings") }) { Icon(Icons.Rounded.Settings, "Configurações", tint = c.ink2) }
         }
         Spacer(Modifier.height(12.dp))
-        PillButton("Nova tarefa", Icons.Rounded.Edit, modifier = Modifier.fillMaxWidth()) { onNew() }
-        Spacer(Modifier.height(8.dp))
-        CueField(query, { query = it }, "Buscar tarefas")
-        Spacer(Modifier.height(4.dp))
-        // Menu agrupado e recolhido por padrão: a sidebar fica para tarefas e seções.
-        var menuOpen by androidx.compose.runtime.saveable.rememberSaveable { mutableStateOf(false) }
-        Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).clickable { menuOpen = !menuOpen }.padding(horizontal = 10.dp, vertical = 11.dp),
+        // Ação principal em destaque.
+        Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).background(c.accent).clickable { onNew() }.padding(horizontal = 16.dp, vertical = 13.dp),
             verticalAlignment = Alignment.CenterVertically) {
-            Icon(Icons.Rounded.Apps, null, Modifier.size(20.dp), tint = c.ink2); Spacer(Modifier.width(12.dp))
-            Text("Menu", style = MaterialTheme.typography.bodyLarge, modifier = Modifier.weight(1f))
-            Icon(if (menuOpen) Icons.Rounded.ExpandLess else Icons.Rounded.ExpandMore, if (menuOpen) "Recolher menu" else "Abrir menu", tint = c.ink3)
+            Icon(Icons.Rounded.Edit, null, tint = Color.White, modifier = Modifier.size(20.dp))
+            Spacer(Modifier.width(10.dp))
+            Text("Nova tarefa", color = Color.White, fontWeight = FontWeight.SemiBold, fontSize = 15.sp, modifier = Modifier.weight(1f))
+            Icon(Icons.Rounded.ArrowForward, null, tint = Color.White.copy(alpha = 0.85f), modifier = Modifier.size(18.dp))
         }
-        androidx.compose.animation.AnimatedVisibility(menuOpen) {
-            Column(Modifier.padding(start = 8.dp)) {
-                DrawerItem(Icons.Rounded.Groups, "Agents", "${agents.size}") { go("agents") }
-                DrawerItem(Icons.Rounded.AutoAwesome, "Skills") { go("skills") }
-                DrawerItem(Icons.Rounded.Cable, "Conectores", "$connectedConnectorCount".takeIf { it != "0" }) { go("connectors") }
-                DrawerItem(Icons.Rounded.Schedule, "Tarefas agendadas") { go("scheduled") }
-                DrawerItem(Icons.Rounded.LibraryBooks, "Knowledge") { go("knowledge") }
-                DrawerItem(Icons.Rounded.Psychology, "Memória") { go("memory") }
-                DrawerItem(Icons.Rounded.FolderOpen, "Arquivos") { go("files") }
-                DrawerItem(Icons.Rounded.AccountBalanceWallet, "Carteira Solana") { go("wallet") }
-                DrawerItem(Icons.Rounded.Language, "Browser") { go("browserhub") }
-                    DrawerItem(Icons.Rounded.Computer, "Computador (sandbox)") { go("sandbox") }
+        Spacer(Modifier.height(10.dp))
+        // Busca compacta em pílula.
+        Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(c.surface2).padding(horizontal = 12.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically) {
+            Icon(Icons.Rounded.Search, null, Modifier.size(18.dp), tint = c.ink3)
+            Spacer(Modifier.width(8.dp))
+            Box(Modifier.weight(1f)) {
+                if (query.isEmpty()) Text("Buscar tarefas", fontSize = 14.sp, color = c.ink3)
+                androidx.compose.foundation.text.BasicTextField(query, { query = it }, singleLine = true,
+                    textStyle = MaterialTheme.typography.bodyMedium.copy(color = c.ink),
+                    cursorBrush = androidx.compose.ui.graphics.SolidColor(c.accent), modifier = Modifier.fillMaxWidth())
             }
+            if (query.isNotEmpty()) Icon(Icons.Rounded.Close, "Limpar", Modifier.size(18.dp).clickable { query = "" }, tint = c.ink3)
+        }
+        Spacer(Modifier.height(12.dp))
+        // Atalhos sempre visíveis em grade (antes ficavam escondidos num menu recolhido).
+        val shortcuts = listOf(
+            DrawerShortcut(Icons.Rounded.Groups, "Agents", agents.size.takeIf { it > 0 }?.toString()) { go("agents") },
+            DrawerShortcut(Icons.Rounded.Cable, "Conectores", connectedConnectorCount.takeIf { it > 0 }?.toString()) { go("connectors") },
+            DrawerShortcut(Icons.Rounded.AutoAwesome, "Skills") { go("skills") },
+            DrawerShortcut(Icons.Rounded.Schedule, "Agenda") { go("scheduled") },
+            DrawerShortcut(Icons.Rounded.FolderOpen, "Arquivos") { go("files") },
+            DrawerShortcut(Icons.Rounded.Psychology, "Memória") { go("memory") },
+            DrawerShortcut(Icons.Rounded.LibraryBooks, "Knowledge") { go("knowledge") },
+            DrawerShortcut(Icons.Rounded.Language, "Browser") { go("browserhub") },
+            DrawerShortcut(Icons.Rounded.Computer, "Linux") { go("sandbox") },
+            DrawerShortcut(Icons.Rounded.AccountBalanceWallet, "Carteira") { go("wallet") },
+        )
+        shortcuts.chunked(5).forEach { row ->
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                row.forEach { sc -> ShortcutTile(sc, Modifier.weight(1f)) }
+                repeat(5 - row.size) { Spacer(Modifier.weight(1f)) }
+            }
+            Spacer(Modifier.height(6.dp))
         }
         Divider()
+        val live by        Divider()
         val live by CueApp.instance.store.state.collectAsStateWithLifecycle()
         val sections = live.sections.filterNot { it.archived }
         val archivedSections = live.sections.filter { it.archived }
@@ -693,9 +733,33 @@ private fun SessionDrawer(nav: NavController, sessions: List<Session>, agents: L
                 item { SectionLabel(g) }
                 items(list, key = { it.id }) { s -> SessionRow(s, agents.firstOrNull { it.id == s.agentId }) { go("chat/${s.id}") } }
             }
-            if (filtered.isEmpty()) item { Text("Nenhuma tarefa ainda", color = c.ink3, modifier = Modifier.padding(16.dp)) }
+            if (filtered.isEmpty()) item {
+                Column(Modifier.fillMaxWidth().padding(vertical = 28.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                    Icon(Icons.Rounded.ChatBubbleOutline, null, tint = c.ink3, modifier = Modifier.size(28.dp))
+                    Spacer(Modifier.height(8.dp))
+                    Text(if (query.isBlank()) "Nenhuma tarefa ainda" else "Nada encontrado para \"$query\"", color = c.ink3, fontSize = 13.sp)
+                }
+            }
         }
-        DrawerItem(Icons.Rounded.Settings, "Configurações") { go("settings") }
+    }
+}
+
+private class DrawerShortcut(val icon: ImageVector, val label: String, val badge: String? = null, val onClick: () -> Unit)
+
+@Composable
+private fun ShortcutTile(sc: DrawerShortcut, modifier: Modifier) {
+    val c = Cue.c
+    Column(modifier.clip(RoundedCornerShape(12.dp)).clickable(onClick = sc.onClick).padding(vertical = 6.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+        Box {
+            Box(Modifier.size(40.dp).clip(RoundedCornerShape(12.dp)).background(c.surface2), contentAlignment = Alignment.Center) {
+                Icon(sc.icon, null, Modifier.size(20.dp), tint = c.ink)
+            }
+            if (sc.badge != null) Box(Modifier.align(Alignment.TopEnd).offset(x = 4.dp, y = (-4).dp).clip(CircleShape).background(c.accent).padding(horizontal = 5.dp, vertical = 1.dp)) {
+                Text(sc.badge, color = Color.White, fontSize = 9.sp, fontWeight = FontWeight.Bold)
+            }
+        }
+        Spacer(Modifier.height(4.dp))
+        Text(sc.label, fontSize = 10.sp, color = c.ink2, maxLines = 1, overflow = TextOverflow.Ellipsis)
     }
 }
 
