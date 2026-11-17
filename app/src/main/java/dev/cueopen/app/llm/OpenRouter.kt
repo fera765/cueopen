@@ -40,7 +40,9 @@ class LlmRequestFailure(
     cause: Throwable? = null,
     val retryAfterMillis: Long? = null,
     val responseTruncated: Boolean = false,
-) : IOException(message, cause)
+) : IOException(message, cause) {
+    init { runCatching { dev.cueopen.app.diag.ErrorLog.log("llm", message + (cause?.let { "\ncausa: ${it::class.java.simpleName}: ${it.message}" } ?: "")) } }
+}
 
 /** Transporte OpenAI-compatible (OpenRouter por padrão). */
 class OpenRouter(private val settings: () -> Settings) {
@@ -225,7 +227,10 @@ class OpenRouter(private val settings: () -> Settings) {
             )
         }
         val root = json.parseToJsonElement(text).jsonObject
-        root["error"]?.let { throw IOException("LLM: $it") }
+        root["error"]?.let {
+            runCatching { dev.cueopen.app.diag.ErrorLog.log("llm", "Provedor retornou erro: $it") }
+            throw IOException("LLM: $it")
+        }
         val choice0 = root["choices"]!!.jsonArray[0].jsonObject
         val finish = choice0["finish_reason"]?.let { runCatching { it.jsonPrimitive.contentOrNull }.getOrNull() }
         val msg = choice0["message"]!!.jsonObject

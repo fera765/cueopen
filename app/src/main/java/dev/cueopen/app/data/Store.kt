@@ -47,7 +47,7 @@ class Store(context: Context) {
         s.copy(
             skills = (s.skills + missing).filterNot { it.builtIn && it.id in BuiltInSkills.retiredIds },
             // Conectores MCP antigos (catálogo fixo / registro aberto) saem: ficam só os do gateway e os personalizados.
-            connectors = s.connectors.filter { it.gatewayRef?.startsWith("local:") == true || it.gatewayRef?.startsWith("hub:") == true || it.description == "Personalizado" },
+            connectors = s.connectors.filter { it.gatewayRef?.startsWith("hub:") == true || it.description == "Personalizado" },
             pages = dev.cueopen.app.pages.PageOps.prune(s.pages, s.sessions.mapTo(HashSet()) { it.id }, s.agents.mapTo(HashSet()) { it.id }, s.sections.mapTo(HashSet()) { it.id }),
             // Migra uma única vez o consentimento de background dos agentes já autônomos;
             // depois disso, a remoção da capability pelo usuário nunca é revertida no próximo load.
@@ -262,6 +262,9 @@ class Store(context: Context) {
     fun deleteKnowledge(id: String) = update { it.copy(knowledge = it.knowledge.filterNot { k -> k.id == id }) }
 
     fun upsertConnector(c: Connector) = update { st ->
+        val prev = st.connectors.firstOrNull { it.id == c.id }
+        if (c.lastError != null && c.lastError != prev?.lastError)
+            runCatching { dev.cueopen.app.diag.ErrorLog.log("connector", "${c.name} (${c.url}): ${c.lastError}") }
         st.copy(connectors = if (st.connectors.any { it.id == c.id }) st.connectors.map { if (it.id == c.id) c else it } else st.connectors + c)
     }
     fun connector(id: String) = _state.value.connectors.firstOrNull { it.id == id }

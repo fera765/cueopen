@@ -169,7 +169,7 @@ fun HomeScreen(nav: NavController, initialDraft: String? = null, initialAgent: S
                     val state = app.store.state.value
                     drawerSnapshot = DrawerSnapshot(state.sessions, state.connectors.count { it.connectedAt != null })
                     scope.launch { drawer.open() }
-                }) { Icon(Icons.Rounded.Menu, "Menu") }
+                }) { SidebarIcon() }
                 Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
                     AgentSelector(agent, st.agents, onSelect = { agentId = it }, onManage = { nav.navigate("agents") })
                 }
@@ -178,7 +178,6 @@ fun HomeScreen(nav: NavController, initialDraft: String? = null, initialAgent: S
             }
         }) { pad ->
             Column(Modifier.fillMaxSize().padding(pad).imePadding()) {
-                val sandboxState by app.sandbox.state.collectAsStateWithLifecycle()
                 Column(Modifier.weight(1f).fillMaxWidth().padding(horizontal = 24.dp), verticalArrangement = Arrangement.Center, horizontalAlignment = Alignment.CenterHorizontally) {
                     Box(Modifier.size(88.dp).clip(CircleShape).background(c.accentSoft.copy(alpha = if (c.dark) 0.25f else 0.7f)), contentAlignment = Alignment.Center) {
                         if (agent == null) RotatingAgentFace(60.dp, intervalMillis = 4_800L)
@@ -186,22 +185,27 @@ fun HomeScreen(nav: NavController, initialDraft: String? = null, initialAgent: S
                     }
                     Spacer(Modifier.height(18.dp))
                     val hello = st.userName.ifBlank { null }?.let { "Olá, $it" } ?: "Olá"
-                    Text(hello, style = MaterialTheme.typography.titleMedium, color = c.ink2)
+                    Text(hello, style = MaterialTheme.typography.titleMedium, color = c.ink2, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     Spacer(Modifier.height(4.dp))
-                    Text(if (agent != null) "O que ${agent.name} deve fazer?" else "O que posso fazer por você?",
-                        style = MaterialTheme.typography.headlineLarge, textAlign = androidx.compose.ui.text.style.TextAlign.Center)
-                    Spacer(Modifier.height(16.dp))
-                    // Status do ambiente em chips compactos: um toque leva à configuração certa.
-                    Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        if (st.apiKey.isBlank()) HomeStatusChip(Icons.Rounded.Key, "Adicionar chave do modelo", warn = true) { nav.navigate("settings") { launchSingleTop = true } }
-                        HomeStatusChip(Icons.Rounded.Computer, if (sandboxState == dev.cueopen.app.sandbox.Sandbox.State.READY) "Linux pronto" else "Instalar Linux",
-                            warn = sandboxState != dev.cueopen.app.sandbox.Sandbox.State.READY) { nav.navigate("sandbox") }
-                        HomeStatusChip(Icons.Rounded.Cable, if (st.connectedConnectors > 0) "${st.connectedConnectors} conectores" else "Conectar apps") { nav.navigate("connectors") }
+                    Text("O que posso fazer por você?", style = MaterialTheme.typography.headlineLarge, textAlign = androidx.compose.ui.text.style.TextAlign.Center)
+                    if (agent != null) {
+                        Spacer(Modifier.height(10.dp))
+                        Row(Modifier.widthIn(max = 280.dp).clip(CircleShape).background(c.surface2).padding(horizontal = 10.dp, vertical = 5.dp), verticalAlignment = Alignment.CenterVertically) {
+                            AgentFace(Color(agent.color), agent.face, 18.dp); Spacer(Modifier.width(6.dp))
+                            Text("com ${agent.name}", fontSize = 12.sp, color = c.ink2, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        }
                     }
-                }
-                Text("Comece por aqui", style = MaterialTheme.typography.labelMedium, color = c.ink3, modifier = Modifier.padding(start = 20.dp, bottom = 2.dp))
-                Row(Modifier.horizontalScroll(rememberScrollState()).padding(horizontal = 16.dp, vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    starters.forEach { s -> StarterCard(s) { draft = s.prompt } }
+                    if (st.apiKey.isBlank()) {
+                        Spacer(Modifier.height(14.dp))
+                        HomeStatusChip(Icons.Rounded.Key, "Adicionar chave do modelo", warn = true) { nav.navigate("settings") { launchSingleTop = true } }
+                    }
+                    Spacer(Modifier.height(22.dp))
+                    // Sugestões como pílulas centralizadas: um toque preenche o pedido.
+                    @OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
+                    FlowRow(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        starters.forEach { s -> SuggestionPill(s) { draft = s.prompt } }
+                    }
                 }
                 Composer(
                     value = draft, onChange = { draft = it },
@@ -224,18 +228,34 @@ fun HomeScreen(nav: NavController, initialDraft: String? = null, initialAgent: S
 }
 
 @Composable
-private fun StarterCard(s: Starter, onClick: () -> Unit) {
+private fun SuggestionPill(s: Starter, onClick: () -> Unit) {
     val c = Cue.c
-    Row(Modifier.width(176.dp).clip(RoundedCornerShape(18.dp)).background(c.surface).border(1.dp, c.line, RoundedCornerShape(18.dp))
-        .clickable(onClick = onClick).padding(horizontal = 12.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
-        Box(Modifier.size(40.dp).clip(RoundedCornerShape(12.dp)).background(if (c.dark) c.surface2 else Color(s.tint)), contentAlignment = Alignment.Center) {
-            Icon(s.icon, null, tint = c.ink, modifier = Modifier.size(22.dp))
+    val tint = Color(s.tint)
+    Row(Modifier.clip(CircleShape).background(c.surface).border(1.dp, c.line, CircleShape).clickable(onClick = onClick)
+        .padding(start = 6.dp, end = 14.dp, top = 6.dp, bottom = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+        Box(Modifier.size(28.dp).clip(CircleShape).background(if (c.dark) c.surface2 else tint), contentAlignment = Alignment.Center) {
+            Icon(s.icon, null, tint = c.ink, modifier = Modifier.size(16.dp))
         }
-        Spacer(Modifier.width(10.dp))
-        Column(Modifier.weight(1f)) {
-            Text(s.title, fontWeight = FontWeight.SemiBold, fontSize = 14.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            if (s.hint.isNotBlank()) Text(s.hint, fontSize = 12.sp, color = c.ink3, maxLines = 1, overflow = TextOverflow.Ellipsis)
-        }
+        Spacer(Modifier.width(8.dp))
+        Text(s.title, fontSize = 13.sp, fontWeight = FontWeight.Medium, maxLines = 1)
+    }
+}
+
+/** Ícone da sidebar: painel lateral desenhado (mais leve que o "hambúrguer"). */
+@Composable
+private fun SidebarIcon() {
+    val color = Cue.c.ink
+    androidx.compose.foundation.Canvas(Modifier.size(22.dp)) {
+        val s = size.minDimension
+        val stroke = s * 0.085f
+        val r = androidx.compose.ui.geometry.CornerRadius(s * 0.22f)
+        drawRoundRect(color, topLeft = androidx.compose.ui.geometry.Offset(stroke / 2, s * 0.14f),
+            size = androidx.compose.ui.geometry.Size(s - stroke, s * 0.72f), cornerRadius = r,
+            style = androidx.compose.ui.graphics.drawscope.Stroke(width = stroke))
+        val x = s * 0.38f
+        drawLine(color, androidx.compose.ui.geometry.Offset(x, s * 0.14f), androidx.compose.ui.geometry.Offset(x, s * 0.86f), strokeWidth = stroke)
+        drawLine(color, androidx.compose.ui.geometry.Offset(s * 0.16f, s * 0.36f), androidx.compose.ui.geometry.Offset(s * 0.27f, s * 0.36f), strokeWidth = stroke, cap = androidx.compose.ui.graphics.StrokeCap.Round)
+        drawLine(color, androidx.compose.ui.geometry.Offset(s * 0.16f, s * 0.5f), androidx.compose.ui.geometry.Offset(s * 0.27f, s * 0.5f), strokeWidth = stroke, cap = androidx.compose.ui.graphics.StrokeCap.Round)
     }
 }
 
@@ -254,14 +274,18 @@ private fun HomeStatusChip(icon: ImageVector, text: String, warn: Boolean = fals
 private fun AgentSelector(agent: AgentProfile?, agents: List<AgentProfile>, onSelect: (String?) -> Unit, onManage: () -> Unit) {
     var open by remember { mutableStateOf(false) }
     Box {
-        Row(Modifier.clip(CircleShape).clickable { open = true }.padding(horizontal = 10.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
-            Text(agent?.name ?: "Fluwy Bot", style = MaterialTheme.typography.titleLarge)
-            Icon(Icons.Rounded.KeyboardArrowDown, null)
+        Row(Modifier.widthIn(max = 230.dp).clip(CircleShape).background(Cue.c.surface2).clickable { open = true }.padding(start = 6.dp, end = 8.dp, top = 5.dp, bottom = 5.dp),
+            verticalAlignment = Alignment.CenterVertically) {
+            if (agent != null) AgentFace(Color(agent.color), agent.face, 24.dp) else AgentFace(Color(0xFFFF6B3D), "wink", 24.dp)
+            Spacer(Modifier.width(6.dp))
+            Text(agent?.name ?: "Fluwy Bot", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold,
+                maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
+            Icon(Icons.Rounded.KeyboardArrowDown, null, Modifier.size(18.dp), tint = Cue.c.ink2)
         }
         DropdownMenu(open, { open = false }) {
             DropdownMenuItem(text = { Text("Fluwy Bot (padrão)") }, leadingIcon = { AgentFace(Color(0xFFFF6B3D), "wink", 24.dp) }, onClick = { onSelect(null); open = false })
             agents.forEach { a ->
-                DropdownMenuItem(text = { Text(a.name) }, leadingIcon = { AgentFace(Color(a.color), a.face, 24.dp) }, onClick = { onSelect(a.id); open = false })
+                DropdownMenuItem(text = { Text(a.name, maxLines = 1, overflow = TextOverflow.Ellipsis) }, leadingIcon = { AgentFace(Color(a.color), a.face, 24.dp) }, onClick = { onSelect(a.id); open = false })
             }
             HorizontalDivider()
             DropdownMenuItem(text = { Text("Gerenciar Agents") }, leadingIcon = { Icon(Icons.Rounded.Groups, null) }, onClick = { open = false; onManage() })
@@ -645,17 +669,32 @@ private fun SessionDrawer(nav: NavController, sessions: List<Session>, agents: L
     val groups = remember(filtered) { filtered.groupBy { dayGroup(it.updatedAt) } }
     fun go(r: String) { onClose(); nav.navigate(r) }
     Column(Modifier.fillMaxSize().statusBarsPadding().padding(horizontal = 14.dp, vertical = 10.dp)) {
-        // Cabeçalho: identidade + atalho de configurações sempre à mão.
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Box(Modifier.size(40.dp).clip(CircleShape).background(c.accentSoft.copy(alpha = if (c.dark) 0.25f else 0.7f)), contentAlignment = Alignment.Center) {
-                RotatingAgentFace(30.dp, intervalMillis = 5_200L, enabled = drawerOpen)
+        // Cabeçalho: identidade, saudação e números do workspace num cartão suave.
+        val userName = remember { CueApp.instance.store.state.value.settings.userName }
+        Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(22.dp))
+            .background(androidx.compose.ui.graphics.Brush.verticalGradient(listOf(c.accentSoft.copy(alpha = if (c.dark) 0.22f else 0.85f), c.surface)))
+            .border(1.dp, c.line, RoundedCornerShape(22.dp)).padding(14.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Box(Modifier.size(46.dp).clip(CircleShape).background(c.bg.copy(alpha = 0.7f)), contentAlignment = Alignment.Center) {
+                    RotatingAgentFace(32.dp, intervalMillis = 5_200L, enabled = drawerOpen)
+                }
+                Spacer(Modifier.width(12.dp))
+                Column(Modifier.weight(1f)) {
+                    Text("Fluwy Bot", style = MaterialTheme.typography.titleLarge, maxLines = 1)
+                    Text(userName.ifBlank { null }?.let { "Olá, $it" } ?: "Seu agente pessoal", fontSize = 12.sp, color = c.ink2, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
+                Box(Modifier.size(36.dp).clip(CircleShape).background(c.bg.copy(alpha = 0.7f)).clickable { go("settings") }, contentAlignment = Alignment.Center) {
+                    Icon(Icons.Rounded.Settings, "Configurações", Modifier.size(19.dp), tint = c.ink2)
+                }
             }
-            Spacer(Modifier.width(10.dp))
-            Column(Modifier.weight(1f)) {
-                Text("Fluwy Bot", style = MaterialTheme.typography.titleLarge)
-                Text("${agents.size} agents · $connectedConnectorCount conectores", fontSize = 12.sp, color = c.ink3)
+            Spacer(Modifier.height(12.dp))
+            Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(c.bg.copy(alpha = 0.6f)).padding(vertical = 8.dp)) {
+                DrawerStat("${agents.size}", "Agents", Modifier.weight(1f)) { go("agents") }
+                Box(Modifier.width(1.dp).height(28.dp).background(c.line).align(Alignment.CenterVertically))
+                DrawerStat("$connectedConnectorCount", "Conectores", Modifier.weight(1f)) { go("connectors") }
+                Box(Modifier.width(1.dp).height(28.dp).background(c.line).align(Alignment.CenterVertically))
+                DrawerStat("${filtered.size}", "Tarefas", Modifier.weight(1f)) { }
             }
-            IconButton({ go("settings") }) { Icon(Icons.Rounded.Settings, "Configurações", tint = c.ink2) }
         }
         Spacer(Modifier.height(12.dp))
         // Ação principal em destaque.
@@ -683,16 +722,16 @@ private fun SessionDrawer(nav: NavController, sessions: List<Session>, agents: L
         Spacer(Modifier.height(12.dp))
         // Atalhos sempre visíveis em grade (antes ficavam escondidos num menu recolhido).
         val shortcuts = listOf(
-            DrawerShortcut(Icons.Rounded.Groups, "Agents", agents.size.takeIf { it > 0 }?.toString()) { go("agents") },
-            DrawerShortcut(Icons.Rounded.Cable, "Conectores", connectedConnectorCount.takeIf { it > 0 }?.toString()) { go("connectors") },
-            DrawerShortcut(Icons.Rounded.AutoAwesome, "Skills") { go("skills") },
-            DrawerShortcut(Icons.Rounded.Schedule, "Agenda") { go("scheduled") },
-            DrawerShortcut(Icons.Rounded.FolderOpen, "Arquivos") { go("files") },
-            DrawerShortcut(Icons.Rounded.Psychology, "Memória") { go("memory") },
-            DrawerShortcut(Icons.Rounded.LibraryBooks, "Knowledge") { go("knowledge") },
-            DrawerShortcut(Icons.Rounded.Language, "Browser") { go("browserhub") },
-            DrawerShortcut(Icons.Rounded.Computer, "Linux") { go("sandbox") },
-            DrawerShortcut(Icons.Rounded.AccountBalanceWallet, "Carteira") { go("wallet") },
+            DrawerShortcut(Icons.Rounded.Groups, "Agents", agents.size.takeIf { it > 0 }?.toString(), 0xFF7C5CFF) { go("agents") },
+            DrawerShortcut(Icons.Rounded.Cable, "Conectores", connectedConnectorCount.takeIf { it > 0 }?.toString(), 0xFF2F9E6E) { go("connectors") },
+            DrawerShortcut(Icons.Rounded.AutoAwesome, "Skills", tint = 0xFFE0A100) { go("skills") },
+            DrawerShortcut(Icons.Rounded.Schedule, "Agenda", tint = 0xFF2D7FF9) { go("scheduled") },
+            DrawerShortcut(Icons.Rounded.FolderOpen, "Arquivos", tint = 0xFFFF6B3D) { go("files") },
+            DrawerShortcut(Icons.Rounded.Psychology, "Memória", tint = 0xFFD94E8F) { go("memory") },
+            DrawerShortcut(Icons.Rounded.LibraryBooks, "Knowledge", tint = 0xFF0FA3B1) { go("knowledge") },
+            DrawerShortcut(Icons.Rounded.Language, "Browser", tint = 0xFF3B82F6) { go("browserhub") },
+            DrawerShortcut(Icons.Rounded.Computer, "Linux", tint = 0xFF64748B) { go("sandbox") },
+            DrawerShortcut(Icons.Rounded.AccountBalanceWallet, "Carteira", tint = 0xFF9945FF) { go("wallet") },
         )
         shortcuts.chunked(5).forEach { row ->
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -743,15 +782,24 @@ private fun SessionDrawer(nav: NavController, sessions: List<Session>, agents: L
     }
 }
 
-private class DrawerShortcut(val icon: ImageVector, val label: String, val badge: String? = null, val onClick: () -> Unit)
+private class DrawerShortcut(val icon: ImageVector, val label: String, val badge: String? = null, val tint: Long = 0xFFFF6B3D, val onClick: () -> Unit)
+
+@Composable
+private fun DrawerStat(value: String, label: String, modifier: Modifier, onClick: () -> Unit) {
+    Column(modifier.clip(RoundedCornerShape(10.dp)).clickable(onClick = onClick).padding(vertical = 2.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+        Text(value, fontWeight = FontWeight.Bold, fontSize = 16.sp)
+        Text(label, fontSize = 11.sp, color = Cue.c.ink3)
+    }
+}
 
 @Composable
 private fun ShortcutTile(sc: DrawerShortcut, modifier: Modifier) {
     val c = Cue.c
     Column(modifier.clip(RoundedCornerShape(12.dp)).clickable(onClick = sc.onClick).padding(vertical = 6.dp), horizontalAlignment = Alignment.CenterHorizontally) {
         Box {
-            Box(Modifier.size(40.dp).clip(RoundedCornerShape(12.dp)).background(c.surface2), contentAlignment = Alignment.Center) {
-                Icon(sc.icon, null, Modifier.size(20.dp), tint = c.ink)
+            val tint = Color(sc.tint)
+            Box(Modifier.size(42.dp).clip(RoundedCornerShape(14.dp)).background(tint.copy(alpha = if (c.dark) 0.18f else 0.14f)), contentAlignment = Alignment.Center) {
+                Icon(sc.icon, null, Modifier.size(20.dp), tint = tint)
             }
             if (sc.badge != null) Box(Modifier.align(Alignment.TopEnd).offset(x = 4.dp, y = (-4).dp).clip(CircleShape).background(c.accent).padding(horizontal = 5.dp, vertical = 1.dp)) {
                 Text(sc.badge, color = Color.White, fontSize = 9.sp, fontWeight = FontWeight.Bold)

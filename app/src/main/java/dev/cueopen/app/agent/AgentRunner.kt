@@ -2738,6 +2738,7 @@ class AgentRunner(
         store.addItem(sessionId, step)
         val fetched = runCatching { dev.cueopen.app.skills.SkillInstaller.fetch(intent.source, intent.name, sandbox.workspaceFor(sessionId)) }
         val list = fetched.getOrElse { e ->
+            runCatching { dev.cueopen.app.diag.ErrorLog.log("skill", "Instalação de ${intent.source} falhou: ${e::class.java.simpleName}: ${e.message}\n${e.stackTraceToString().take(1500)}", sessionId, "skill_install") }
             store.replaceItem(sessionId, step.copy(status = StepStatus.ERROR, result = e.message.orEmpty().take(300)))
             val msg = "Não consegui instalar a skill de ${intent.source}: ${e.message}.\n\nFormatos aceitos: link do GitHub (owner/repo ou a pasta da skill), URL de um SKILL.md, arquivo .zip (link ou anexo) ou página que tenha um link para SKILL.md."
             store.addItem(sessionId, ChatItem.Assistant(text = msg, final = true))

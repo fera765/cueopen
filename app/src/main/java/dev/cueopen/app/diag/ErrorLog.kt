@@ -60,6 +60,43 @@ object ErrorLog {
 
     fun clear(context: Context) = clearFiles(context.applicationContext.filesDir)
 
+    /**
+     * Diagnóstico completo num só arquivo para enviar: erros (IA/LLM, agentes, ferramentas, conectores, skills,
+     * hub, Linux, browser, crashes), logs de depuração dos conectores e os registros de instalação/execução do hub
+     * e do Linux. Segredos já são mascarados na origem; o conteúdo das conversas não entra.
+     */
+    fun exportAll(context: Context): File {
+        val ctx = context.applicationContext
+        val sb = StringBuilder()
+        val version = runCatching { ctx.packageManager.getPackageInfo(ctx.packageName, 0).versionName }.getOrNull()
+        sb.append("Fluwy Bot — diagnóstico completo\n")
+            .append("Gerado: ").append(stamp.format(Date())).append(" · app ").append(version ?: "?")
+            .append(" · ").append(android.os.Build.MANUFACTURER).append(' ').append(android.os.Build.MODEL)
+            .append(" · Android ").append(android.os.Build.VERSION.RELEASE)
+            .append(" · ").append(android.os.Build.SUPPORTED_ABIS.firstOrNull()).append("\n\n")
+        fun section(title: String, body: String?) {
+            if (body.isNullOrBlank()) return
+            sb.append("===== ").append(title).append(" =====\n").append(body.trim()).append("\n\n")
+        }
+        section("ERROS (todas as origens)", readAll(ctx))
+        section("ÚLTIMO CRASH", runCatching { lastCrashFile(ctx).takeIf { it.exists() }?.readText() }.getOrNull())
+        runCatching {
+            File(ctx.filesDir, "connector-debug").listFiles()?.sortedBy { it.name }?.forEach { f ->
+                section("CONECTOR · ${f.name.removePrefix("connector-").removeSuffix(".debug.log")}", f.readText().takeLast(20_000))
+            }
+        }
+        runCatching {
+            val sandbox = dev.cueopen.app.CueApp.instance.sandbox
+            section("LINUX (instalação/estado: ${sandbox.state.value})", sandbox.log.value.takeLast(15_000))
+            val hub = File(sandbox.alpineDir, "opt/fluwy-hub")
+            section("HUB · instalação", File(hub, "install.log").takeIf { it.exists() }?.readText()?.takeLast(60_000))
+            section("HUB · execução", File(hub, "hub.log").takeIf { it.exists() }?.readText()?.takeLast(30_000))
+        }
+        val out = File(ctx.filesDir, "diagnostico-completo.txt")
+        out.writeText(sb.toString())
+        return out
+    }
+
     /** File-only helper keeps the clear scope testable and never touches app state or connector logs. */
     internal fun clearFiles(directory: File) {
         synchronized(lock) {

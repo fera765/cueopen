@@ -32,7 +32,11 @@ import kotlinx.coroutines.flow.asStateFlow
 
 /** Container simples de dependências (sem login, tudo local). */
 class CueApp : Application() {
-    val applicationScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    val applicationScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate +
+        kotlinx.coroutines.CoroutineExceptionHandler { _, e ->
+            // Falha em tarefa de fundo: registra em vez de derrubar o app.
+            runCatching { dev.cueopen.app.diag.ErrorLog.log("background", "${e::class.java.simpleName}: ${e.message}\n${e.stackTraceToString().take(2500)}") }
+        })
     lateinit var store: Store; private set
     lateinit var sandbox: Sandbox; private set
     lateinit var proxyStore: ProxyStore; private set

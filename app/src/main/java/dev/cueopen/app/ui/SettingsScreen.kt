@@ -131,28 +131,29 @@ fun SettingsScreen(nav: NavController) {
             }
             SectionLabel("Logs de erros")
             Text(
-                "Guarda as FALHAS reais do app (ferramentas do agente, browser, terminal, swaps, mercado, crashes) — nunca o conteúdo das conversas. Baixe e envie aqui no Claude para eu corrigir.",
+                "Guarda as FALHAS reais do app — IA/provedores, agentes e ferramentas, conectores, skills, hub de apps, Linux, browser e crashes — nunca o conteúdo das conversas. Baixe o diagnóstico completo e envie aqui no Claude para eu corrigir.",
                 fontSize = 12.sp, color = c.ink2
             )
             if (logBytes < 0L) {
                 CueCard { Text("Carregando logs…", color = c.ink2, fontSize = 13.sp) }
-            } else if (logBytes == 0L) {
-                CueCard { Text("Nenhum erro registrado até agora. 🎉", color = c.ink2, fontSize = 13.sp) }
             } else {
-                Text("${logBytes / 1024 + 1} KB registrados", fontSize = 12.sp, color = c.ink3)
-                if (logTail.isNotBlank()) Text(
-                    logTail, Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(Color(0xFF0F1115)).padding(12.dp),
-                    color = Color(0xFFFFB38A), fontFamily = FontFamily.Monospace, fontSize = 10.sp
-                )
+                if (logBytes == 0L) CueCard { Text("Nenhum erro registrado até agora. O diagnóstico completo ainda inclui conectores, hub e Linux.", color = c.ink2, fontSize = 13.sp) }
+                else {
+                    Text("${logBytes / 1024 + 1} KB registrados", fontSize = 12.sp, color = c.ink3)
+                    if (logTail.isNotBlank()) Text(
+                        logTail, Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(Color(0xFF0F1115)).padding(12.dp),
+                        color = Color(0xFFFFB38A), fontFamily = FontFamily.Monospace, fontSize = 10.sp
+                    )
+                }
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     OutlinedButton(modifier = Modifier.weight(1f), onClick = {
                         runCatching {
-                            val f = dev.cueopen.app.diag.ErrorLog.file(nav.context)
+                            val f = dev.cueopen.app.diag.ErrorLog.exportAll(nav.context)
                             val uri = androidx.core.content.FileProvider.getUriForFile(nav.context, nav.context.packageName + ".files", f)
                             val send = android.content.Intent(android.content.Intent.ACTION_SEND).apply {
                                 type = "text/plain"
                                 putExtra(android.content.Intent.EXTRA_STREAM, uri)
-                                putExtra(android.content.Intent.EXTRA_SUBJECT, "Fluwy Bot — log de erros")
+                                putExtra(android.content.Intent.EXTRA_SUBJECT, "Fluwy Bot — diagnóstico completo")
                                 addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
                             }
                             nav.context.startActivity(android.content.Intent.createChooser(send, "Baixar / enviar log de erros").addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK))
@@ -161,7 +162,7 @@ fun SettingsScreen(nav: NavController) {
                     OutlinedButton(modifier = Modifier.weight(1f), onClick = {
                         val context = nav.context.applicationContext
                         scope.launch {
-                            val text = withContext(Dispatchers.IO) { dev.cueopen.app.diag.ErrorLog.readAll(context) }
+                            val text = withContext(Dispatchers.IO) { dev.cueopen.app.diag.ErrorLog.exportAll(context).readText() }
                             val clip = context.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
                             clip.setPrimaryClip(android.content.ClipData.newPlainText("Fluwy Bot log de erros", text))
                         }

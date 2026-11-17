@@ -41,7 +41,7 @@ import java.util.concurrent.TimeUnit
  */
 object Connectors {
 
-    // Catálogo e servidores MCP vêm do gateway local no Alpine (LocalMcpGateway).
+    // Catálogo de apps vem do hub local (ActivepiecesHub); conectores avulsos entram pelo "+" (URL MCP).
 
     private val baseHttp = OkHttpClient.Builder().connectTimeout(12, TimeUnit.SECONDS).readTimeout(30, TimeUnit.SECONDS).callTimeout(45, TimeUnit.SECONDS).retryOnConnectionFailure(true).build()
     private fun httpClient() = dev.cueopen.app.CueApp.instance.proxyHttpClient(dev.cueopen.app.proxy.ProxyScope.AGENT_API, baseHttp)
@@ -260,7 +260,6 @@ object Connectors {
     }
 
     suspend fun refreshTools(store: Store, c: Connector): Connector = withContext(Dispatchers.IO) {
-        if (c.gatewayRef?.startsWith(LocalMcpGateway.REF_PREFIX) == true) LocalMcpGateway.ensureRunning()
         if (c.gatewayRef == ActivepiecesHub.REF) ActivepiecesHub.ensureRunning()
         try {
             val tools = JSONArray()
@@ -334,8 +333,6 @@ object Connectors {
         if (policyFor(store, fnName) == POLICY_BLOCK) return@withContext "RECUSADO: esta ferramenta está bloqueada pelo usuário em Conectores › Permissões das ferramentas."
         val c = store.state.value.connectors.firstOrNull { fnName.startsWith("mcp_${safe(it.id)}__") }
             ?: return@withContext "Conector não encontrado para $fnName"
-        if (c.gatewayRef?.startsWith(LocalMcpGateway.REF_PREFIX) == true && !LocalMcpGateway.ensureRunning())
-            return@withContext "ERRO: o gateway MCP local (Linux do app) não está ativo. Abra Conectores para reinstalar o servidor ${c.name}."
         if (c.gatewayRef == ActivepiecesHub.REF && !ActivepiecesHub.ensureRunning())
             return@withContext "ERRO: o hub de conectores (Activepieces) não iniciou. Abra Conectores › Hub para ver o registro."
         val arr = runCatching { JSONArray(c.toolsJson) }.getOrNull() ?: JSONArray()

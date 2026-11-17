@@ -224,13 +224,14 @@ class Sandbox(private val ctx: Context) {
             if (!isInstalled()) error("Sistema de arquivos incompleto (busybox ausente)")
             appendLog("✅  Sandbox pronto")
             _state.value = State.READY
-            // O gateway MCP local vem junto com o Linux (instala em segundo plano, sem travar a tela).
+            // O hub de conectores vem junto com o Linux: instala sozinho em Wi-Fi (são ~1 GB); no 4G o usuário inicia em Conectores.
             CueApp.instance.applicationScope.launch(Dispatchers.IO) {
-                runCatching { dev.cueopen.app.connectors.LocalMcpGateway.installEngine() }
+                runCatching { if (dev.cueopen.app.connectors.ActivepiecesHub.onUnmeteredNetwork()) dev.cueopen.app.connectors.ActivepiecesHub.install() }
             }
             true
         } catch (t: Throwable) {
             appendLog("❌  ${t.message}")
+            dev.cueopen.app.diag.ErrorLog.log("sandbox", "Instalação do Linux falhou: ${t.message}\n${_log.value.takeLast(1500)}")
             _state.value = State.ERROR
             false
         }
@@ -255,6 +256,7 @@ class Sandbox(private val ctx: Context) {
         cwd: String = "/root/workspace",
         timeoutSec: Long = 180,
         onOutput: (String) -> Unit = {},
+        idleTimeoutSec: Long = 0,
     ): ExecResult = withContext(Dispatchers.IO) {
         if (!isInstalled()) return@withContext ExecResult(127, "Sandbox não instalado. Abra Configurações > Sandbox.", false)
         writeScripts()
@@ -265,6 +267,7 @@ class Sandbox(private val ctx: Context) {
         pb.environment().putAll(env() + terminalProxyEnv())
         val proc = pb.start()
         val out = StringBuilder()
+        val lastOutputAt = java.util.concurrent.atomic.AtomicLong(System.currentTimeMillis())
         val reader = Thread {
             runCatching {
                 proc.inputStream.bufferedReader().use { r ->
@@ -273,12 +276,25 @@ class Sandbox(private val ctx: Context) {
                         val n = r.read(buf); if (n < 0) break
                         val chunk = String(buf, 0, n)
                         synchronized(out) { out.append(chunk) }
+                        lastOutputAt.set(System.currentTimeMillis())
                         onOutput(chunk)
                     }
                 }
             }
         }.apply { start() }
-        val finished = proc.waitFor(timeoutSec, TimeUnit.SECONDS)
+        // Watchdog: além do tempo total, mata o processo se ficar [idleTimeoutSec] sem nenhuma saída (travado).
+        val deadline = System.currentTimeMillis() + timeoutSec * 1000
+        var finished = false
+        while (true) {
+            if (proc.waitFor(1, TimeUnit.SECONDS)) { finished = true; break }
+            val now = System.currentTimeMillis()
+            if (now > deadline) break
+            if (idleTimeoutSec > 0 && now - lastOutputAt.get() > idleTimeoutSec * 1000) {
+                val msg = "\n[watchdog] sem saída há ${idleTimeoutSec}s — processo encerrado como travado.\n"
+                synchronized(out) { out.append(msg) }; onOutput(msg)
+                break
+            }
+        }
         if (!finished) proc.destroyForcibly()
         reader.join(2000)
         val text = synchronized(out) { out.toString() }

@@ -42,14 +42,33 @@ object ActivepiecesHub {
     val state: StateFlow<State> = _state
     private val _log = MutableStateFlow("")
     val log: StateFlow<String> = _log
-    private fun logLine(s: String) { _log.value = (_log.value + s).takeLast(8000) }
+    /** Registro em tempo real: vai para a tela e para um arquivo (sobrevive a reinícios e entra no diagnóstico). */
+    private fun logLine(s: String) {
+        _log.value = (_log.value + s).takeLast(30_000)
+        runCatching { File(hostDir(), "install.log").appendText(s) }
+    }
+    fun installLogFile(): File = File(hostDir(), "install.log")
+    fun fullLog(): String = runCatching { installLogFile().readText().takeLast(200_000) }.getOrDefault(_log.value) +
+        "\n\n===== hub.log (execução) =====\n" + lastLog()
+
+    /** Wi-Fi/rede sem limite de dados: só então o hub (~1 GB) instala sozinho. */
+    fun onUnmeteredNetwork(): Boolean = runCatching {
+        val cm = CueApp.instance.getSystemService(android.net.ConnectivityManager::class.java)
+        val caps = cm.getNetworkCapabilities(cm.activeNetwork) ?: return false
+        caps.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_NOT_METERED)
+    }.getOrDefault(false)
 
     private val mutex = Mutex()
+    private val installMutex = Mutex()
     @Volatile private var proc: Process? = null
     private val http = OkHttpClient.Builder().connectTimeout(2, TimeUnit.SECONDS).readTimeout(5, TimeUnit.SECONDS).build()
     private val sandbox get() = CueApp.instance.sandbox
     private fun hostDir() = File(sandbox.alpineDir, HOST_DIR.trimStart('/')).apply { mkdirs() }
     private fun rootfs() = File(hostDir(), "rootfs")
+
+    private object LocalSandbox { fun ready() = runCatching { CueApp.instance.sandbox.isInstalled() }.getOrDefault(false) }
+
+    fun sandboxReady(): Boolean = LocalSandbox.ready()
 
     fun installed(): Boolean = runCatching { File(rootfs(), "usr/src/app/docker-entrypoint.sh").exists() }.getOrDefault(false)
 
@@ -78,20 +97,41 @@ object ActivepiecesHub {
         return v
     }
 
-    /** Baixa a imagem oficial e monta o rootfs do hub (~1 GB). Precisa do Linux do app instalado. */
-    suspend fun install(): Boolean = withContext(Dispatchers.IO) {
-        if (!LocalMcpGateway.sandboxReady()) { logLine("Instale o Linux (Alpine) primeiro.\n"); return@withContext false }
+    /**
+     * Baixa a imagem oficial e monta o rootfs do hub (~1 GB). Roda em primeiro plano (serviço + wake lock) para o
+     * Android não congelar o processo, com watchdog de inatividade e retomada: camadas ficam em cache verificado.
+     */
+    suspend fun install(): Boolean = installMutex.withLock { withContext(Dispatchers.IO) {
+        if (installed()) { if (_state.value == State.NOT_INSTALLED) _state.value = State.STOPPED; return@withContext true }
+        if (!LocalSandbox.ready()) { logLine("Instale o Linux (Alpine) primeiro.\n"); return@withContext false }
         _state.value = State.INSTALLING
+        _log.value = ""
+        runCatching { installLogFile().writeText("") }
+        val ctx = CueApp.instance
+        runCatching { SandboxService.start(ctx, "Instalando o hub de conectores…") }
+        val wake = runCatching {
+            (ctx.getSystemService(android.content.Context.POWER_SERVICE) as android.os.PowerManager)
+                .newWakeLock(android.os.PowerManager.PARTIAL_WAKE_LOCK, "cueopen:hub-install").apply { acquire(3 * 60 * 60 * 1000L) }
+        }.getOrNull()
         try {
+            val stamp = java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss", java.util.Locale.US).format(java.util.Date())
+            logLine("== Instalação do hub · $stamp · ${android.os.Build.MODEL} · Android ${android.os.Build.VERSION.RELEASE} · ${android.os.Build.SUPPORTED_ABIS.firstOrNull()} ==\n")
+            logLine("Rede: ${if (onUnmeteredNetwork()) "Wi-Fi/sem limite" else "dados móveis"}\n")
             val script = File(hostDir(), "pull_image.py")
             CueApp.instance.assets.open("hub/pull_image.py").use { i -> script.outputStream().use { i.copyTo(it) } }
-            logLine("⬇️ Baixando o Activepieces (imagem oficial, ~1 GB). Use Wi-Fi.\n")
+            logLine("Preparando ferramentas (python3, GNU tar)…\n")
+            val prep = sandbox.exec("apk add --no-cache python3 tar gzip 2>&1 | tail -n 3", cwd = "/tmp", timeoutSec = 600, onOutput = { logLine(it) }, idleTimeoutSec = 300)
+            if (prep.exitCode != 0) error("não consegui instalar python3/tar no Linux (código ${prep.exitCode})")
+            logLine("Baixando o Activepieces (imagem oficial, ~1 GB). Se cair, toque em Instalar de novo: o download continua de onde parou.\n")
             val r = sandbox.exec(
-                "set -e; command -v python3 >/dev/null || apk add --no-cache python3 >/dev/null; " +
-                    "python3 $HOST_DIR/pull_image.py $IMAGE $TAG $HOST_DIR/rootfs",
-                cwd = "/tmp", timeoutSec = 3 * 3600,
-            ) { logLine(it) }
-            if (r.exitCode != 0 || !installed()) error(if (r.timedOut) "tempo esgotado" else "código ${r.exitCode}")
+                "python3 -u $HOST_DIR/pull_image.py $IMAGE $TAG $HOST_DIR/rootfs $HOST_DIR/cache",
+                cwd = "/tmp", timeoutSec = 4 * 3600, onOutput = { logLine(it) }, idleTimeoutSec = 900,
+            )
+            if (r.exitCode != 0 || !installed()) error(when {
+                r.timedOut -> "tempo total esgotado"
+                r.output.contains("[watchdog]") -> "instalação travou (15 min sem progresso)"
+                else -> r.output.lineSequence().lastOrNull { it.startsWith("ERRO:") }?.removePrefix("ERRO:")?.trim() ?: "código ${r.exitCode}"
+            })
             File(rootfs(), "etc/resolv.conf").apply { parentFile?.mkdirs(); delete() }.writeText("nameserver 8.8.8.8\nnameserver 1.1.1.1\n")
             secret("jwt", 32); secret("enc", 16)
             logLine("✅ Hub instalado.\n")
@@ -99,10 +139,13 @@ object ActivepiecesHub {
             true
         } catch (t: Throwable) {
             logLine("❌ Falha ao instalar o hub: ${t.message}\n")
+            dev.cueopen.app.diag.ErrorLog.log("hub", "Instalação do hub falhou: ${t.message}\n--- últimas linhas ---\n${_log.value.takeLast(3000)}")
             _state.value = State.ERROR
             false
+        } finally {
+            runCatching { if (wake?.isHeld == true) wake.release() }
         }
-    }
+    } }
 
     /** Sobe o hub (app + worker) e espera o /api/v1/health responder. A primeira partida demora alguns minutos. */
     suspend fun start(): Boolean = mutex.withLock {
@@ -127,7 +170,8 @@ object ActivepiecesHub {
                 if (proc?.isAlive != true) break
                 delay(2000)
             }
-            logLine("❌ O hub não iniciou.\n${lastLog()}\n")
+            logLine("❌ O hub não iniciou.\n${lastLog().takeLast(3000)}\n")
+            dev.cueopen.app.diag.ErrorLog.log("hub", "O hub não iniciou.\n${lastLog().takeLast(3000)}")
             _state.value = State.ERROR
             false
         }
@@ -144,7 +188,7 @@ object ActivepiecesHub {
     /** Usado pelo agente: garante o hub no ar antes de chamar ferramentas. */
     suspend fun ensureRunning(): Boolean = healthy() || start()
 
-    fun lastLog(): String = runCatching { File(hostDir(), "hub.log").readText().takeLast(1500) }.getOrDefault("")
+    fun lastLog(): String = runCatching { File(hostDir(), "hub.log").readText().takeLast(20_000) }.getOrDefault("")
 
     fun connector() = dev.cueopen.app.data.Connector(
         CONNECTOR_ID, "Activepieces Hub", MCP_URL,
