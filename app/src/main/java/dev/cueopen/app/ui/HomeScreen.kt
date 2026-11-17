@@ -702,7 +702,6 @@ private fun SessionDrawer(nav: NavController, sessions: List<Session>, agents: L
             Spacer(Modifier.height(6.dp))
         }
         Divider()
-        val live by        Divider()
         val live by CueApp.instance.store.state.collectAsStateWithLifecycle()
         val sections = live.sections.filterNot { it.archived }
         val archivedSections = live.sections.filter { it.archived }
