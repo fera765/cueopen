@@ -419,7 +419,7 @@ data class Connector(
     val lastError: String? = null,
     /** Política por ferramenta, como no Executor: "allow" (sempre liberada), "ask" (pede aprovação), "block" (bloqueada). Sem entrada = padrão do app. */
     val toolPolicy: Map<String, String> = emptyMap(),
-    /** Conexão hospedada no gateway: "smithery:{namespace}/{connectionId}". Null = conector MCP personalizado. */
+    /** Servidor do gateway MCP local (Alpine): "local:{nome}". Null = conector MCP personalizado. */
     val gatewayRef: String? = null,
 )
 
@@ -483,9 +483,6 @@ object SandboxPackageDefaults {
 
 @Serializable
 data class Settings(
-    /** API key gratuita do Smithery (gateway MCP) e namespace do Connect. */
-    val smitheryKey: String = "",
-    val smitheryNamespace: String = "",
     val apiKey: String = "",
     val baseUrl: String = "https://openrouter.ai/api/v1",
     val model: String = "deepseek/deepseek-v4-flash",

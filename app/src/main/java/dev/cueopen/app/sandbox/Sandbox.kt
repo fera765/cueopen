@@ -4,6 +4,7 @@ import android.content.Context
 import android.os.Build
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.withContext
@@ -223,6 +224,10 @@ class Sandbox(private val ctx: Context) {
             if (!isInstalled()) error("Sistema de arquivos incompleto (busybox ausente)")
             appendLog("✅  Sandbox pronto")
             _state.value = State.READY
+            // O gateway MCP local vem junto com o Linux (instala em segundo plano, sem travar a tela).
+            CueApp.instance.applicationScope.launch(Dispatchers.IO) {
+                runCatching { dev.cueopen.app.connectors.LocalMcpGateway.installEngine() }
+            }
             true
         } catch (t: Throwable) {
             appendLog("❌  ${t.message}")
@@ -278,6 +283,17 @@ class Sandbox(private val ctx: Context) {
         reader.join(2000)
         val text = synchronized(out) { out.toString() }
         ExecResult(if (finished) proc.exitValue() else -1, text, !finished)
+    }
+
+    /** Inicia um processo de longa duração dentro do Alpine (ex.: gateway MCP local), com saída no [logFile]. */
+    fun spawn(command: String, logFile: File): Process {
+        check(isInstalled()) { "Sandbox não instalado." }
+        writeScripts()
+        logFile.parentFile?.mkdirs()
+        val pb = ProcessBuilder("/system/bin/sh", File(prefix, "init-sandbox.sh").absolutePath, "/bin/sh", "-c", command)
+            .directory(prefix).redirectErrorStream(true).redirectOutput(ProcessBuilder.Redirect.to(logFile))
+        pb.environment().putAll(env() + terminalProxyEnv())
+        return pb.start()
     }
 
     // ---------------- Servidor AXS (terminal interativo) ----------------
