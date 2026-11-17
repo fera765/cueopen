@@ -91,6 +91,7 @@ object ErrorLog {
             val hub = File(sandbox.alpineDir, "opt/fluwy-hub")
             section("HUB · instalação", File(hub, "install.log").takeIf { it.exists() }?.readText()?.takeLast(60_000))
             section("HUB · execução", File(hub, "hub.log").takeIf { it.exists() }?.readText()?.takeLast(30_000))
+            section("HUB · redis", File(hub, "redis.log").takeIf { it.exists() }?.readText()?.takeLast(5_000))
         }
         val out = File(ctx.filesDir, "diagnostico-completo.txt")
         out.writeText(sb.toString())

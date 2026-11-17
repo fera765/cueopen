@@ -49,7 +49,8 @@ object ActivepiecesHub {
     }
     fun installLogFile(): File = File(hostDir(), "install.log")
     fun fullLog(): String = runCatching { installLogFile().readText().takeLast(200_000) }.getOrDefault(_log.value) +
-        "\n\n===== hub.log (execução) =====\n" + lastLog()
+        "\n\n===== hub.log (execução) =====\n" + lastLog() +
+        "\n\n===== redis.log =====\n" + runCatching { File(hostDir(), "redis.log").readText().takeLast(5000) }.getOrDefault("")
 
     /** Wi-Fi/rede sem limite de dados: só então o hub (~1 GB) instala sozinho. */
     fun onUnmeteredNetwork(): Boolean = runCatching {
@@ -61,6 +62,38 @@ object ActivepiecesHub {
     private val mutex = Mutex()
     private val installMutex = Mutex()
     @Volatile private var proc: Process? = null
+    @Volatile private var redisProc: Process? = null
+    private const val REDIS_PORT = 6380
+
+    private fun portOpen(port: Int): Boolean = runCatching {
+        java.net.Socket().use { it.connect(java.net.InetSocketAddress("127.0.0.1", port), 500); true }
+    }.getOrDefault(false)
+
+    /**
+     * Redis próprio no Alpine (o redis-memory-server embutido do Activepieces morre com código 1 no Android:
+     * o Redis 7 recusa iniciar em kernels arm64 com o aviso ARM64-COW-BUG). Sem persistência, só no loopback.
+     */
+    private suspend fun ensureRedis(): Boolean {
+        if (portOpen(REDIS_PORT)) return true
+        val has = sandbox.exec("command -v redis-server >/dev/null || apk add --no-cache redis 2>&1 | tail -n 2; command -v redis-server",
+            cwd = "/tmp", timeoutSec = 600, onOutput = { logLine(it) }, idleTimeoutSec = 300)
+        if (has.exitCode != 0) { logLine("❌ Não consegui instalar o Redis no Linux do app.\n"); return false }
+        redisProc?.destroy()
+        redisProc = sandbox.spawn(
+            "exec redis-server --bind 127.0.0.1 --port $REDIS_PORT --protected-mode yes --save '' --appendonly no " +
+                "--daemonize no --io-threads 1 --ignore-warnings ARM64-COW-BUG",
+            File(hostDir(), "redis.log"),
+        )
+        repeat(40) {
+            if (portOpen(REDIS_PORT)) { logLine("Redis no ar (porta $REDIS_PORT).\n"); return true }
+            if (redisProc?.isAlive != true) return@repeat
+            delay(500)
+        }
+        val tail = runCatching { File(hostDir(), "redis.log").readText().takeLast(1500) }.getOrDefault("")
+        logLine("❌ Redis não iniciou.\n$tail\n")
+        dev.cueopen.app.diag.ErrorLog.log("hub", "Redis não iniciou.\n$tail")
+        return false
+    }
     private val http = OkHttpClient.Builder().connectTimeout(2, TimeUnit.SECONDS).readTimeout(5, TimeUnit.SECONDS).build()
     private val sandbox get() = CueApp.instance.sandbox
     private fun hostDir() = File(sandbox.alpineDir, HOST_DIR.trimStart('/')).apply { mkdirs() }
@@ -120,7 +153,7 @@ object ActivepiecesHub {
             val script = File(hostDir(), "pull_image.py")
             CueApp.instance.assets.open("hub/pull_image.py").use { i -> script.outputStream().use { i.copyTo(it) } }
             logLine("Preparando ferramentas (python3, GNU tar)…\n")
-            val prep = sandbox.exec("apk add --no-cache python3 tar gzip 2>&1 | tail -n 3", cwd = "/tmp", timeoutSec = 600, onOutput = { logLine(it) }, idleTimeoutSec = 300)
+            val prep = sandbox.exec("apk add --no-cache python3 tar gzip redis 2>&1 | tail -n 3", cwd = "/tmp", timeoutSec = 600, onOutput = { logLine(it) }, idleTimeoutSec = 300)
             if (prep.exitCode != 0) error("não consegui instalar python3/tar no Linux (código ${prep.exitCode})")
             logLine("Baixando o Activepieces (imagem oficial, ~1 GB). Se cair, toque em Instalar de novo: o download continua de onde parou.\n")
             val r = sandbox.exec(
@@ -157,11 +190,12 @@ object ActivepiecesHub {
             secret("jwt", 32); secret("enc", 16)
             val cmd = "export PATH=/usr/local/bin:/usr/local/sbin:/usr/bin:/usr/sbin:/bin:/sbin HOME=/opt/ap-home; " +
                 "mkdir -p /opt/ap-home /opt/ap-data; cd /usr/src/app; " +
-                "export AP_DB_TYPE=PGLITE AP_REDIS_TYPE=MEMORY AP_PORT=$PORT AP_FRONTEND_URL=$BASE AP_CONFIG_PATH=/opt/ap-data " +
+                "export AP_DB_TYPE=PGLITE AP_REDIS_TYPE=STANDALONE AP_REDIS_HOST=127.0.0.1 AP_REDIS_PORT=$REDIS_PORT AP_PORT=$PORT AP_FRONTEND_URL=$BASE AP_CONFIG_PATH=/opt/ap-data " +
                 "AP_EXECUTION_MODE=UNSANDBOXED AP_TELEMETRY_ENABLED=false AP_WORKER_CONCURRENCY=2 NODE_ENV=production; " +
                 "export AP_JWT_SECRET=\"\$(cat /opt/ap-secrets/jwt)\" AP_ENCRYPTION_KEY=\"\$(cat /opt/ap-secrets/enc)\"; " +
                 "exec sh ./docker-entrypoint.sh"
             logLine("🚀 Iniciando o hub (a primeira vez pode levar alguns minutos)…\n")
+            if (!ensureRedis()) { _state.value = State.ERROR; return@withContext false }
             proc = sandbox.spawn(cmd, File(hostDir(), "hub.log"), mapOf("ALPINE_ROOT" to rootfs().absolutePath))
             runCatching { SandboxService.start(CueApp.instance, "Hub de conectores ativo") }
             val deadline = System.currentTimeMillis() + 10 * 60_000
@@ -181,6 +215,8 @@ object ActivepiecesHub {
         withContext(Dispatchers.IO) {
             proc?.let { p -> runCatching { p.destroy(); if (!p.waitFor(5, TimeUnit.SECONDS)) p.destroyForcibly() } }
             proc = null
+            redisProc?.let { p -> runCatching { p.destroy(); if (!p.waitFor(3, TimeUnit.SECONDS)) p.destroyForcibly() } }
+            redisProc = null
             _state.value = if (installed()) State.STOPPED else State.NOT_INSTALLED
         }
     }
