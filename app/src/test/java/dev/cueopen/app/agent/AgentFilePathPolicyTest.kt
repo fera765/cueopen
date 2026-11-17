@@ -81,4 +81,10 @@ class AgentFilePathPolicyTest {
         val dir = Files.createTempDirectory("agent-file-path-policy-").toFile()
         try { block(dir) } finally { dir.deleteRecursively() }
     }
+
+    @Test fun `dot dot inside the workspace is resolved and escaping stays refused`() {
+        org.junit.Assert.assertEquals("gcheck.txt", AgentFilePathPolicy.normalize(".cue/out/../../gcheck.txt"))
+        org.junit.Assert.assertEquals(".cue/gcheck.txt", AgentFilePathPolicy.normalize(".cue/out/../gcheck.txt"))
+        org.junit.Assert.assertEquals("../x", AgentFilePathPolicy.normalize("a/../../x"))
+    }
 }

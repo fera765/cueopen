@@ -27,6 +27,17 @@ internal object AgentFilePathPolicy {
      * Formas comuns que o modelo usa para "a raiz do workspace" ou caminhos relativos a ela:
      * ".", "./x", "~", "~/workspace/x", "/root", "workspace/x" (o cwd do shell é /root/workspace).
      */
+    fun collapseDots(path: String): String {
+        val abs = path.startsWith("/")
+        val out = ArrayList<String>()
+        for (seg in path.split('/')) when {
+            seg.isEmpty() || seg == "." -> {}
+            seg == ".." -> if (out.isNotEmpty() && out.last() != "..") out.removeAt(out.lastIndex) else out.add("..")
+            else -> out.add(seg)
+        }
+        return (if (abs) "/" else "") + out.joinToString("/")
+    }
+
     fun normalize(rawPath: String): String {
         // URIs (file://, content://…) seguem intactas e são recusadas mais adiante. Um ":" comum (ex.: "nota 10:30.md") é só nome de arquivo.
         if ("://" in rawPath) return rawPath.trim()
@@ -37,6 +48,8 @@ internal object AgentFilePathPolicy {
         if (p.startsWith("workspace/")) p = p.removePrefix("workspace/")
         while (p.startsWith("./")) p = p.removePrefix("./")
         if (p.length > 1) p = p.trimEnd('/')
+        // "a/../b" e ".cue/out/../x": resolve os ".." aqui; o que ainda sair da raiz continua com ".." e é recusado depois.
+        if (p.split('/').any { it == ".." || it == "." }) p = collapseDots(p)
         return p
     }
 

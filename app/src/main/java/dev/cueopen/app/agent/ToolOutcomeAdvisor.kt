@@ -15,7 +15,7 @@ object ToolOutcomeAdvisor {
         CHALLENGE("verificação anti-robô (captcha/Cloudflare)",
             "não tente resolver nem contornar. Peça ao usuário com ask_user para concluir a verificação no Browser e continue depois."),
         LOGIN_WALL("a página exige login",
-            "não invente credenciais. Use ask_secure para pedir o dado ao usuário ou ask_user para ele entrar manualmente."),
+            "nunca peça nem digite senha/código. O app já mostrou ao usuário o pedido \"Entrar e salvar\" e retoma a tarefa quando ele salvar a sessão: avance no que não depende do login ou encerre dizendo que aguarda o login."),
         PERMISSION("permissão negada",
             "repetir não muda nada. Explique ao usuário qual permissão falta (Acesso ao Android do Agent ou do sistema) e siga sem ela."),
         NOT_FOUND("recurso não encontrado",
@@ -29,7 +29,7 @@ object ToolOutcomeAdvisor {
         BAD_REGEX("expressão regular inválida",
             "não repita o padrão. No grep do sandbox (busybox) a repetição vai só até 255 — use {0,255} ou menos, ou grep -o com contexto menor; no Python, escape os caracteres especiais (re.escape) ou procure com str.find. Para achar um trecho num arquivo grande, prefira python com índice e fatia."),
         MISSING_DEPENDENCY("biblioteca/comando não instalado no sandbox",
-            "tente instalar UMA vez (pip install <pacote> --break-system-packages, apk add <pacote> ou npm i <pacote>). Se a instalação falhar, use uma alternativa já instalada ou entregue no formato possível (ex.: o SVG em vez do PNG) — não repita o mesmo import/comando."),
+            "tente instalar UMA vez (pip install <pacote> --break-system-packages, apk add <pacote> ou npm i <pacote>). Muita coisa já vem no python3 (sqlite3, json, csv, http.server, urllib): para \"sqlite3: command not found\" use python3 -c \"import sqlite3; …\". Se a instalação falhar, use uma alternativa já instalada ou entregue no formato possível (ex.: o SVG em vez do PNG) — não repita o mesmo import/comando."),
         BLOCKED("bloqueado por política de segurança",
             "esta ação não é permitida neste contexto. Não tente variações para contornar; explique ao usuário."),
     }

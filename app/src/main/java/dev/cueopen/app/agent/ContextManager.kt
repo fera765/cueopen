@@ -78,7 +78,7 @@ class ContextManager(private val store: Store, private val sandbox: Sandbox, pri
         val head = output.take(limit / 2)
         val tail = output.takeLast(limit / 2)
         val headLines = head.count { it == '\n' } + 1
-        return "$head\n…[${output.length - limit} caracteres omitidos — saída completa em .cue/out/${f.name}. Para ver o trecho omitido use file_read path=.cue/out/${f.name} offset=$headLines (lê por partes; não releia do início)]…\n$tail"
+        return "$head\n…[${output.length - limit} caracteres omitidos — saída completa em /root/workspace/.cue/out/${f.name} (no shell use esse caminho absoluto). Para ver o trecho omitido use file_read path=.cue/out/${f.name} offset=$headLines (lê por partes; não releia do início)]…\n$tail"
     }
 
     /**

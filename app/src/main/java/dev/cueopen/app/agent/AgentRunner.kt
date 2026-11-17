@@ -2714,6 +2714,12 @@ class AgentRunner(
         return "[A leitura direta não funcionou (${directResult.lineSequence().first().take(140)}); abri automaticamente no browser:]\n" + nav.take(300) + "\n\n" + page
     }
 
+    /** A página da seção (a primeira criada, fora o quadro automático do plano). Null fora de seção. */
+    private fun sectionPage(sessionId: String): dev.cueopen.app.pages.FluwyPage? {
+        if (store.session(sessionId)?.sectionId == null) return null
+        return store.pagesIn(pageSpace(sessionId)).filter { it.sectionId == null }.minByOrNull { it.createdAt }
+    }
+
     /** Espaço das páginas: a seção inteira compartilha (chat do coordenador); fora de seção, o próprio chat. */
     private fun pageSpace(sessionId: String): String = store.section(store.session(sessionId)?.sectionId)?.sessionId ?: sessionId
 
@@ -3076,7 +3082,7 @@ class AgentRunner(
                 store.section(session.sectionId)?.takeIf { it.coordinatorAgentId != agent?.id && it.sessionId != session.id }?.let { sec ->
                     appendLine(); appendLine("## Você é agente da seção ${sec.name} (o coordenador define o seu trabalho)")
                     appendLine("- Execute exatamente a tarefa recebida do coordenador, sem criar etapas novas nem ampliar o escopo: ele divide o trabalho entre o time, e sair do escopo gera retrabalho e conflito com outros agentes.")
-                    appendLine("- Páginas do time (Pages): se a tarefa mencionar uma página ou quadro, leia com page_list/page_read e atualize só os seus cartões/trechos com page_update (mova seu cartão para Fazendo ao começar e Feito ao terminar).")
+                    appendLine("- Página da seção (Pages): a seção tem UMA página compartilhada por todos os agentes. Nunca crie outra: leia com page_read e atualize só a sua parte com page_update (a seção com o seu nome, os seus cartões). Se ainda não existir página e a tarefa pedir uma, crie-a — ela vira a página da seção.")
                     appendLine("- A cada etapa, escreva 1–2 frases de feedback (o que fez, o que vai fazer, o que falta). É por elas que o coordenador e o usuário acompanham você; não encadeie ferramentas em silêncio.")
                     appendLine("- Os arquivos do time ficam em /root/workspace, compartilhado entre os agentes. Liste com file_list; varrer o sistema inteiro (find /) é lento e não traz nada útil.")
                     appendLine("- Se faltar um insumo (arquivo, ID, acesso), diga exatamente o que falta e encerre com a resposta final: o coordenador resolve e devolve a tarefa. Insistir por conta própria só gasta tempo e tokens.")
@@ -3101,7 +3107,7 @@ class AgentRunner(
                     appendLine("- Cada delegação precisa de objetivo, formato da entrega (output_format), fontes/ferramentas (tools_hint) e limites (boundaries) — tarefas vagas geram trabalho duplicado e lacunas. Dispare as partes independentes juntas, em paralelo.")
                     appendLine("- Os agentes salvam o material completo em arquivo e devolvem só um resumo com o caminho: leia o arquivo quando precisar do detalhe, sem pedir para colarem tudo no relatório.")
                     appendLine("- Antes de entregar ao usuário, confira o resultado final contra o pedido: precisão, fontes citadas, completude e se faltou alguma parte. O que falhar volta com team_review.")
-                    appendLine("- Quadro do time: o plano aparece sozinho como kanban em Pages (\"Quadro do time\"), atualizado a cada mudança de estado. Para relatórios, painéis e acompanhamentos que o usuário vai consultar, crie páginas com page_create e mantenha-as atualizadas com page_update (só a parte que mudou).")
+                    appendLine("- Quadro do time: o plano aparece sozinho como kanban em Pages (\"Quadro do time\"), atualizado a cada mudança de estado. A seção tem UMA página compartilhada (além do quadro automático): crie-a uma vez com page_create e, daí em diante, você e os agentes só a atualizam com page_update (cada agente na sua parte). Ao delegar trabalho que vai para a página, diga ao agente o page_id e qual parte ele atualiza.")
                     if (agent?.confirmMode == "auto") appendLine("- Seção 100% autônoma: o usuário não acompanha o chat e não vai responder. Por isso, não faça perguntas, não peça escolha nem confirmação e não termine com \"me diga\" ou \"quer que eu\". Em cada decisão, escolha a melhor opção com base nos dados, registre a escolha em uma frase e siga para a próxima etapa. Um feedback não encerra o trabalho: depois de cada entrega, passe para a fase seguinte com um novo team_plan. O trabalho só termina quando o objetivo inteiro estiver entregue e você chamar section_done(summary).")
                     if (sec.scheduleMinutes > 0) appendLine("- Esta seção roda sozinha ${scheduleLabel(sec.scheduleMinutes)}: o app acorda você com uma mensagem [Heartbeat] e você executa o ciclo completo de novo. O agendamento já está feito; não chame set_schedule.")
                     else appendLine("- Se o usuário pedir repetição (ex.: \"uma vez por dia\"), chame set_schedule(minutes, mission) — 1440 = diário. A partir daí o Android acorda você sozinho.")
@@ -4905,7 +4911,11 @@ class AgentRunner(
                     val by = store.agent(store.session(sessionId)?.agentId)?.name ?: "Agente"
                     fun arr(k: String) = (a[k] as? kotlinx.serialization.json.JsonArray)?.mapNotNull { (it as? kotlinx.serialization.json.JsonPrimitive)?.contentOrNull }.orEmpty()
                     val dup = dev.cueopen.app.pages.PageOps.sameTitle(store.state.value.pages, pageSpace(sessionId), s("title"))
-                    if (dup != null) "RECUSADO: já existe a página \"${dup.title}\" (${dup.id}, ${dup.kind}). Para editar, leia com page_read e altere com page_update(page_id=\"${dup.id}\"). Só crie outra se o usuário pediu uma página NOVA — e com outro título."
+                        ?: sectionPage(sessionId)
+                    if (dup != null && store.session(sessionId)?.sectionId != null && dup.sectionId == null)
+                        "RECUSADO: esta seção trabalha numa única página compartilhada: \"${dup.title}\" (${dup.id}, ${dup.kind}). Todos os agentes atualizam essa mesma página: " +
+                            "leia com page_read(\"${dup.id}\") e mude só a sua parte com page_update(\"${dup.id}\", ops=[...]) — por exemplo uma seção com o seu nome (replace_section/append_markdown) ou os seus cartões."
+                    else if (dup != null) "RECUSADO: já existe a página \"${dup.title}\" (${dup.id}, ${dup.kind}). Para editar, leia com page_read e altere com page_update(page_id=\"${dup.id}\"). Só crie outra se o usuário pediu uma página NOVA — e com outro título."
                     else dev.cueopen.app.pages.PageOps.create(pageSpace(sessionId), s("title"), s("kind"), by, s("markdown"), s("html"), arr("columns"), arr("headers")).fold({ p ->
                         if (store.pagesIn(p.spaceId).size >= 60) "RECUSADO: esta conversa já tem 60 páginas; atualize uma existente." else {
                             store.upsertPage(p)
@@ -4945,7 +4955,8 @@ class AgentRunner(
                     val max = (i("max_chars") ?: 12_000).coerceIn(2_000, 40_000)
                     dev.cueopen.app.web.WebTools.fetch(url, max).let { r ->
                         // Erro ou página que depende de JS/login: segue automaticamente pelo browser.
-                        val failed = (r.startsWith("ERRO") && !r.startsWith("ERRO: informe")) || r.contains("[Pouco texto extraído")
+                        val missing = Regex("^ERRO: HTTP (404|410)\\b").containsMatchIn(r)
+                        val failed = (r.startsWith("ERRO") && !r.startsWith("ERRO: informe") && !missing) || r.contains("[Pouco texto extraído")
                         if (failed) browserFallback(sessionId, url, r, max.coerceAtMost(20_000)) else r
                     }
                 }
@@ -5239,7 +5250,11 @@ class AgentRunner(
             "Resultado Android transitório omitido dos diagnósticos; nenhum conteúdo de tela foi salvo."
         else out
         if (isError) executions.fail(executionId, safeExecutionOutput) else executions.finish(executionId, safeExecutionOutput)
-        if (isError || markerError) {
+        // Saídas esperadas de testes do terminal (grep sem achado, `test` falso, curl checando se um servidor já está de pé)
+        // não são falhas do app: não entram no log de erros.
+        val benignProbe = call.name == "shell" && Regex("""\[exit (1|7|22)\]""").containsMatchIn(out) &&
+            out.length < 260 && !Regex("(?i)error|erro|traceback|fatal|exception|denied|not found").containsMatchIn(out)
+        if ((isError || markerError) && !benignProbe) {
             val safeLog = if (accessibilityTool) "Falha de ferramenta Android; conteúdo de tela omitido por privacidade."
                 else if (call.name.startsWith("browser_") && isError && !out.contains("não vale mais"))  // índice velho já se recupera sozinho
                     // Falha de browser: grava o diagnóstico completo para a próxima correção ser certeira.
