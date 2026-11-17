@@ -108,25 +108,25 @@ object ActivepiecesHub {
      * O motor do Activepieces chama `spawn("esbuild")`. Um esbuild instalado via npm -g pode não executar dentro do
      * proot (link de binário nativo) ou não estar no PATH do processo filho. Aqui: testa candidatos (binário nativo
      * do pacote @esbuild/linux-*, depois o do pacote esbuild), copia o primeiro que roda para /usr/bin e
-     * /usr/local/bin; se nenhum roda, baixa o binário nativo com npm pack. Por fim simula o spawn do Node e loga.
+     * /usr/local/bin; se o binário nativo (Go) não executa neste aparelho, usa o esbuild-wasm (mesma CLI, roda no
+     * próprio Node) com um atalho em /usr/bin que funciona mesmo sem PATH. Por fim simula o spawn do motor e loga.
      */
     private val ESBUILD_FIX = """
-        |ok_esbuild() { /usr/bin/esbuild --version >/dev/null 2>&1; }
-        |if ok_esbuild; then echo "[fluwy] esbuild ok: $(/usr/bin/esbuild --version)"; else
-        |  for c in $(find /usr/local/lib/node_modules /usr/src/app/node_modules /usr/lib/node_modules -maxdepth 6 -type f -path '*@esbuild/linux-*/bin/esbuild' 2>/dev/null) /usr/local/bin/esbuild $(find /usr/local/lib/node_modules -maxdepth 4 -type f -path '*esbuild/bin/esbuild' 2>/dev/null); do
-        |    [ -f "${'$'}c" ] || continue
-        |    if "${'$'}c" --version >/dev/null 2>&1 && head -c 4 "${'$'}c" | grep -q ELF; then
-        |      cp -fL "${'$'}c" /usr/bin/esbuild.new && chmod 755 /usr/bin/esbuild.new && mv -f /usr/bin/esbuild.new /usr/bin/esbuild && break
-        |    else echo "[fluwy] esbuild candidato não roda: ${'$'}c"; fi
+        |ok() { env -i /usr/bin/esbuild --version >/dev/null 2>&1; }
+        |if ok; then echo "[fluwy] esbuild ok: $(env -i /usr/bin/esbuild --version)"; else
+        |  for c in $(find /usr/local/lib/node_modules /usr/src/app/node_modules -maxdepth 6 -type f -path '*@esbuild/linux-*/bin/esbuild' 2>/dev/null); do
+        |    if "${'$'}c" --version >/dev/null 2>&1; then cp -fL "${'$'}c" /usr/bin/esbuild && chmod 755 /usr/bin/esbuild; ok && break
+        |    else echo "[fluwy] binário nativo não roda (${'$'}c): $("${'$'}c" --version 2>&1 | head -c 160)"; fi
         |  done
-        |  if ! ok_esbuild; then
-        |    A=$(uname -m); case "${'$'}A" in aarch64|arm64) A=arm64;; x86_64) A=x64;; armv7l|armv8l) A=arm;; esac
-        |    echo "[fluwy] baixando esbuild nativo (linux-${'$'}A)…"
-        |    mkdir -p /tmp/esb && cd /tmp/esb && rm -f ./*.tgz && npm pack "@esbuild/linux-${'$'}A@0.25.0" >/dev/null 2>&1         |      && tar -xzf ./*.tgz package/bin/esbuild && cp -f package/bin/esbuild /usr/bin/esbuild && chmod 755 /usr/bin/esbuild
-        |    cd /usr/src/app
+        |  if ! ok; then
+        |    # O binário nativo (Go) não executa neste aparelho: usa o esbuild-wasm (mesma CLI, roda no Node).
+        |    W="$(npm root -g)/esbuild-wasm/bin/esbuild"
+        |    if [ ! -f "${'$'}W" ]; then echo "[fluwy] instalando esbuild-wasm…"; npm install -g --no-fund --no-audit esbuild-wasm@0.25.0 >/tmp/esbw.log 2>&1 || tail -n 5 /tmp/esbw.log; fi
+        |    NODE="$(command -v node)"
+        |    printf '#!/bin/sh\nexec %s %s "${'$'}@"\n' "${'$'}NODE" "${'$'}W" > /usr/bin/esbuild && chmod 755 /usr/bin/esbuild
         |  fi
-        |  if ok_esbuild; then cp -f /usr/bin/esbuild /usr/local/bin/esbuild 2>/dev/null; echo "[fluwy] esbuild pronto: $(/usr/bin/esbuild --version)";
-        |  else echo "[fluwy] ERRO: esbuild indisponível — passos de código do hub vão falhar: $(/usr/bin/esbuild --version 2>&1 | head -c 200)"; fi
+        |  if ok; then cp -f /usr/bin/esbuild /usr/local/bin/esbuild 2>/dev/null; echo "[fluwy] esbuild pronto: $(env -i /usr/bin/esbuild --version)"
+        |  else echo "[fluwy] ERRO: esbuild indisponível: $(env -i /usr/bin/esbuild --version 2>&1 | head -c 200)"; fi
         |fi
         |node -e "try{console.log('[fluwy] spawn esbuild (como o motor):',require('child_process').execFileSync('esbuild',['--version'],{env:{}}).toString().trim())}catch(e){console.log('[fluwy] spawn esbuild falhou:',e.code||e.message)}" 2>&1
         |""".trimMargin()
