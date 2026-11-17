@@ -237,12 +237,20 @@ object Connectors {
     }
 
     /** Executa com sessão inicializada, renovando token em 401. */
+    private val statelessReady: MutableSet<String> = java.util.concurrent.ConcurrentHashMap.newKeySet()
+
     private fun <T> withSession(store: Store, c0: Connector, block: (Connector) -> T): T {
         var c = c0
         if (c.expiresAt != null && System.currentTimeMillis() > c.expiresAt!! - 60_000) refreshToken(store, c)?.let { c = it }
         return try {
-            if (!sessions.containsKey(c.id)) initialize(c)
-            block(c)
+            // Servidores stateless (sem Mcp-Session-Id, ex.: o hub) não precisam de initialize a cada chamada.
+            if (!sessions.containsKey(c.id) && c.id !in statelessReady) {
+                initialize(c)
+                if (!sessions.containsKey(c.id)) statelessReady += c.id
+            }
+            try { block(c) } catch (e: IllegalStateException) {
+                if (c.id in statelessReady && e.message != "Sessão MCP expirada") { statelessReady -= c.id; initialize(c); block(c) } else throw e
+            }
         } catch (e: AuthRequired) {
             val r = refreshToken(store, c) ?: throw IllegalStateException("Conector ${c.name} precisa ser reconectado (login expirado).")
             sessions.remove(c.id); initialize(r); block(r)
@@ -298,7 +306,9 @@ object Connectors {
                     put("type", "function")
                     put("function", buildJsonObject {
                         put("name", name)
-                        put("description", "[${c.name}] " + t.optString("description").take(600))
+                        val hubHint = if (c.gatewayRef == ActivepiecesHub.REF)
+                            " (Hub local: use só nomes de piece/ação devolvidos por ap_list_pieces/ap_research_pieces; nunca invente.)" else ""
+                        put("description", "[${c.name}] " + t.optString("description").take(560) + hubHint)
                         put("parameters", schemaEl ?: buildJsonObject { put("type", "object") })
                     })
                 }
@@ -338,8 +348,17 @@ object Connectors {
         val arr = runCatching { JSONArray(c.toolsJson) }.getOrNull() ?: JSONArray()
         val toolName = (0 until arr.length()).map { arr.getJSONObject(it).getString("name") }
             .firstOrNull { ("mcp_${safe(c.id)}__${safe(it)}").take(64) == fnName } ?: fnName.substringAfter("__")
+        val isHub = c.gatewayRef == ActivepiecesHub.REF
+        if (isHub) ActivepiecesHub.touch()
         try {
-            val res = withSession(store, c) { cc -> rpc(cc, "tools/call", JSONObject().put("name", toolName).put("arguments", JSONObject(args.toString()))) }
+            fun call() = withSession(store, c) { cc -> rpc(cc, "tools/call", JSONObject().put("name", toolName).put("arguments", JSONObject(args.toString()))) }
+            // Hub reiniciando (rede local recusada/fechada): garante o hub no ar e tenta uma única vez de novo.
+            val res = try { call() } catch (e: java.io.IOException) {
+                if (!isHub) throw e
+                sessions.remove(c.id); statelessReady -= c.id
+                if (!ActivepiecesHub.ensureRunning()) throw e
+                call()
+            }
             val content = res.optJSONArray("content") ?: JSONArray()
             val text = (0 until content.length()).joinToString("\n") { i ->
                 val p = content.getJSONObject(i)

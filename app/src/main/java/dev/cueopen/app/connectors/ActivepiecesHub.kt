@@ -6,6 +6,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
@@ -190,10 +191,17 @@ object ActivepiecesHub {
             secret("jwt", 32); secret("enc", 16)
             val cmd = "export PATH=/usr/local/bin:/usr/local/sbin:/usr/bin:/usr/sbin:/bin:/sbin HOME=/opt/ap-home; " +
                 "mkdir -p /opt/ap-home /opt/ap-data; cd /usr/src/app; " +
+                // Passos de código do Activepieces compilam com o binário esbuild: garante que ele existe e executa.
+                "if ! esbuild --version >/dev/null 2>&1; then " +
+                "E=\$(find /usr/local/lib/node_modules /usr/src/app/node_modules -maxdepth 5 -path '*esbuild/bin/esbuild' -type f 2>/dev/null | head -n1); " +
+                "if [ -n \"\$E\" ] && \"\$E\" --version >/dev/null 2>&1; then ln -sf \"\$E\" /usr/local/bin/esbuild; echo '[fluwy] esbuild vinculado'; " +
+                "else echo '[fluwy] instalando esbuild…'; npm install -g --no-fund --no-audit esbuild@0.25.0 >/dev/null 2>&1 && echo '[fluwy] esbuild instalado' || echo '[fluwy] ERRO: esbuild não instalou'; fi; fi; " +
                 "export AP_DB_TYPE=PGLITE AP_REDIS_TYPE=STANDALONE AP_REDIS_HOST=127.0.0.1 AP_REDIS_PORT=$REDIS_PORT AP_PORT=$PORT AP_FRONTEND_URL=$BASE AP_CONFIG_PATH=/opt/ap-data " +
-                "AP_EXECUTION_MODE=UNSANDBOXED AP_TELEMETRY_ENABLED=false AP_WORKER_CONCURRENCY=2 NODE_ENV=production; " +
+                "AP_EXECUTION_MODE=UNSANDBOXED AP_TELEMETRY_ENABLED=false AP_WORKER_CONCURRENCY=1 NODE_ENV=production " +
+                "NODE_OPTIONS=--max-old-space-size=640; " +
                 "export AP_JWT_SECRET=\"\$(cat /opt/ap-secrets/jwt)\" AP_ENCRYPTION_KEY=\"\$(cat /opt/ap-secrets/enc)\"; " +
-                "exec sh ./docker-entrypoint.sh"
+                // O PM2 avisa a cada 2 s que não lê /proc/uptime (restrição do Android): ruído que só enche o log.
+                "sh ./docker-entrypoint.sh 2>&1 | grep --line-buffered -v 'pidusage'"
             logLine("🚀 Iniciando o hub (a primeira vez pode levar alguns minutos)…\n")
             if (!ensureRedis()) { _state.value = State.ERROR; return@withContext false }
             proc = sandbox.spawn(cmd, File(hostDir(), "hub.log"), mapOf("ALPINE_ROOT" to rootfs().absolutePath))
@@ -222,7 +230,45 @@ object ActivepiecesHub {
     }
 
     /** Usado pelo agente: garante o hub no ar antes de chamar ferramentas. */
-    suspend fun ensureRunning(): Boolean = healthy() || start()
+    suspend fun ensureRunning(): Boolean { touch(); return healthy() || start() }
+
+    // ---------------- Ciclo de vida automático (sem o usuário iniciar à mão) ----------------
+    @Volatile private var lastUse = 0L
+    private const val IDLE_STOP_MS = 30 * 60_000L
+    @Volatile private var watchdogStarted = false
+
+    fun touch() { lastUse = System.currentTimeMillis() }
+
+    /**
+     * Chamado quando o app abre/volta ao primeiro plano: sobe o hub em segundo plano se ele está instalado e o
+     * conector não foi desligado pelo usuário. Só um início por vez (mutex); se já está no ar, não faz nada.
+     */
+    fun onAppForeground() {
+        touch()
+        val app = CueApp.instance
+        app.applicationScope.launch(Dispatchers.IO) {
+            if (!installed() || !LocalSandbox.ready()) return@launch
+            if (app.store.connector(CONNECTOR_ID)?.enabled == false) return@launch
+            if (_state.value == State.INSTALLING || _state.value == State.STARTING) return@launch
+            if (!healthy()) runCatching { start() } else _state.value = State.RUNNING
+        }
+        startIdleWatchdog()
+    }
+
+    /** Economia de bateria/RAM: desliga o hub após 30 min sem uso; ele volta sozinho no próximo uso. */
+    private fun startIdleWatchdog() {
+        if (watchdogStarted) return
+        watchdogStarted = true
+        CueApp.instance.applicationScope.launch(Dispatchers.IO) {
+            while (true) {
+                delay(5 * 60_000L)
+                if (proc != null && System.currentTimeMillis() - lastUse > IDLE_STOP_MS && _state.value == State.RUNNING) {
+                    logLine("💤 Hub parado por inatividade (economia de bateria). Volta sozinho no próximo uso.\n")
+                    stop()
+                }
+            }
+        }
+    }
 
     fun lastLog(): String = runCatching { File(hostDir(), "hub.log").readText().takeLast(20_000) }.getOrDefault("")
 

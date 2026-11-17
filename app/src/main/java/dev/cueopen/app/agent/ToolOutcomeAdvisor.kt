@@ -30,11 +30,14 @@ object ToolOutcomeAdvisor {
             "não repita o padrão. No grep do sandbox (busybox) a repetição vai só até 255 — use {0,255} ou menos, ou grep -o com contexto menor; no Python, escape os caracteres especiais (re.escape) ou procure com str.find. Para achar um trecho num arquivo grande, prefira python com índice e fatia."),
         MISSING_DEPENDENCY("biblioteca/comando não instalado no sandbox",
             "tente instalar UMA vez (pip install <pacote> --break-system-packages, apk add <pacote> ou npm i <pacote>). Muita coisa já vem no python3 (sqlite3, json, csv, http.server, urllib): para \"sqlite3: command not found\" use python3 -c \"import sqlite3; …\". Se a instalação falhar, use uma alternativa já instalada ou entregue no formato possível (ex.: o SVG em vez do PNG) — não repita o mesmo import/comando."),
+        HUB_PIECE("nome de piece inexistente no hub Activepieces",
+            "nunca invente nomes de piece. Chame ap_list_pieces (ou ap_research_pieces com o termo, ex.: \"gmail\") e use exatamente o nome retornado (formato @activepieces/piece-xxx). Agendamento e webhook são gatilhos do fluxo: consulte as opções com ap_list_pieces antes de configurar."),
         BLOCKED("bloqueado por política de segurança",
             "esta ação não é permitida neste contexto. Não tente variações para contornar; explique ao usuário."),
     }
 
     private val rules: List<Pair<Reason, Regex>> = listOf(
+        Reason.HUB_PIECE to Regex("(?i)piece \"[^\"]{1,120}\" not found|use ap_list_pieces"),
         Reason.CHALLENGE to Regex("(?i)verify (that )?you are (a )?human|cf-mitigated|checking your browser|just a moment\\.\\.\\.|captcha|attention required.{0,20}cloudflare|confirme que você não é um robô|não sou um robô"),
         Reason.BAD_REGEX to Regex("(?i)bad regex|invalid contents of \\{\\}|re\\.error|re/_parser\\.py|patternsyntaxexception|invalid regular expression"),
         Reason.MISSING_DEPENDENCY to Regex("(?i)modulenotfounderror|no module named|cannot find module|: command not found|: not found\\s*$|importerror: cannot import"),

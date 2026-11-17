@@ -111,7 +111,8 @@ fun AgentEditScreen(nav: NavController, id: String) {
     val existing = st.agents.firstOrNull { it.id == id }
     // Foto do Agent no momento em que a tela abriu: base para saber o que o usuário mudou de fato.
     val original = remember { existing }
-    var a by remember { mutableStateOf(existing ?: AgentProfile(name = "")) }
+    // Agent novo já vem com Terminal, Browser, Autonomia do Browser e Hub de conectores ligados.
+    var a by remember { mutableStateOf(existing ?: dev.cueopen.app.device.BrowserAutonomyPolicy.setEnabled(AgentProfile(name = ""), true)) }
     val c = Cue.c
     val ctx = LocalContext.current
     var resumeTick by remember { mutableIntStateOf(0) }
@@ -245,6 +246,11 @@ fun AgentEditScreen(nav: NavController, id: String) {
                     ) { enabled ->
                         a = dev.cueopen.app.device.BrowserAutonomyPolicy.setEnabled(a, enabled)
                     }
+                    ToggleRow(
+                        "Hub de conectores",
+                        "Gmail, Planilhas, Instagram, GitHub e os outros apps conectados no Hub (Activepieces). No chat normal ele já fica sempre ativo.",
+                        a.useConnectorHub,
+                    ) { a = a.copy(useConnectorHub = it) }
 
                 }
                 1 -> {
@@ -315,12 +321,46 @@ fun AgentEditScreen(nav: NavController, id: String) {
                 }
             }
             }
-            SectionLabel("Skills em destaque (opcional)")
-            Text("Todas as skills ativas da biblioteca já ficam disponíveis para este Agent. Marcar aqui só faz as escolhidas aparecerem primeiro para ele.", fontSize = 12.sp, color = Cue.c.ink3)
-            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                st.skills.forEach { s ->
-                    val on = s.id in a.skillIds
-                    Chip(s.name, selected = on, icon = skillIcon(s.icon)) { a = a.copy(skillIds = if (on) a.skillIds - s.id else a.skillIds + s.id) }
+            // Skills em destaque: caixa recolhida por padrão; aberta, lista rolável com checkbox e busca.
+            var skillsOpen by remember { mutableStateOf(false) }
+            var skillQuery by remember { mutableStateOf("") }
+            Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).background(c.surface).border(1.dp, c.line, RoundedCornerShape(16.dp))) {
+                Row(Modifier.fillMaxWidth().clickable { skillsOpen = !skillsOpen }.padding(horizontal = 14.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Rounded.AutoAwesome, null, Modifier.size(18.dp), tint = c.accent)
+                    Spacer(Modifier.width(10.dp))
+                    Column(Modifier.weight(1f)) {
+                        Text("Skills em destaque (opcional)", fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
+                        Text(if (a.skillIds.isEmpty()) "Nenhuma marcada · ${st.skills.size} disponíveis" else "${a.skillIds.count { id -> st.skills.any { it.id == id } }} marcadas de ${st.skills.size}",
+                            fontSize = 12.sp, color = c.ink3)
+                    }
+                    Icon(if (skillsOpen) Icons.Rounded.ExpandLess else Icons.Rounded.ExpandMore, if (skillsOpen) "Recolher" else "Mostrar", tint = c.ink2)
+                }
+                androidx.compose.animation.AnimatedVisibility(skillsOpen) {
+                    Column(Modifier.padding(start = 12.dp, end = 12.dp, bottom = 12.dp)) {
+                        Text("Todas as skills ativas já ficam disponíveis para este Agent. Marcar faz as escolhidas aparecerem primeiro para ele.", fontSize = 12.sp, color = c.ink3)
+                        if (st.skills.size > 6) { Spacer(Modifier.height(8.dp)); CueField(skillQuery, { skillQuery = it }, "Buscar skill") }
+                        Spacer(Modifier.height(6.dp))
+                        val shown = st.skills.filter { skillQuery.isBlank() || it.name.contains(skillQuery, true) || it.description.contains(skillQuery, true) }
+                        if (shown.isEmpty()) Text("Nenhuma skill encontrada.", fontSize = 13.sp, color = c.ink3, modifier = Modifier.padding(8.dp))
+                        androidx.compose.foundation.lazy.LazyColumn(Modifier.fillMaxWidth().heightIn(max = 360.dp)) {
+                            items(shown.size, key = { shown[it].id }) { i ->
+                                val s = shown[i]
+                                val on = s.id in a.skillIds
+                                Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp))
+                                    .clickable { a = a.copy(skillIds = if (on) a.skillIds - s.id else a.skillIds + s.id) }.padding(vertical = 2.dp),
+                                    verticalAlignment = Alignment.CenterVertically) {
+                                    Checkbox(on, { v -> a = a.copy(skillIds = if (v) (a.skillIds + s.id).distinct() else a.skillIds - s.id) },
+                                        colors = CheckboxDefaults.colors(checkedColor = c.accent))
+                                    Icon(skillIcon(s.icon), null, Modifier.size(16.dp), tint = c.ink2)
+                                    Spacer(Modifier.width(8.dp))
+                                    Column(Modifier.weight(1f)) {
+                                        Text(s.name, fontSize = 14.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                        if (s.description.isNotBlank()) Text(s.description, fontSize = 11.sp, color = c.ink3, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
             SectionLabel("Memória do Agent")

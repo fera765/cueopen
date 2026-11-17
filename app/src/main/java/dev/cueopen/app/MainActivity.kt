@@ -57,6 +57,8 @@ class MainActivity : ComponentActivity() {
         super.onResume()
         // palco invisível do browser do agente (WebView fora da janela não renderiza SPAs)
         dev.cueopen.app.browser.OffscreenStage.onActivityResumed(this)
+        // Hub de conectores sobe sozinho ao abrir o app (se instalado); para por inatividade para poupar bateria.
+        if (!AppExit.exited(this)) runCatching { dev.cueopen.app.connectors.ActivepiecesHub.onAppForeground() }
     }
 
     override fun onPause() {

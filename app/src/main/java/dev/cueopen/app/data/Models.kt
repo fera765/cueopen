@@ -311,6 +311,8 @@ data class AgentProfile(
     /** Marca se o toggle de autonomia do Browser foi quem adicionou o consentimento BACKGROUND. */
     val browserAutonomyGrantedBackground: Boolean = false,
     val useTerminal: Boolean = true,
+    /** Hub de conectores (Activepieces) disponível para este agente. No chat normal ele é sempre ativo. */
+    val useConnectorHub: Boolean = true,
     val createdAt: Long = now(),
     // ---- Autonomia 24/7 (heartbeat) ----
     val autonomous: Boolean = false,

@@ -59,3 +59,15 @@ class LlmTransientErrorTest {
         org.junit.Assert.assertNull(dev.cueopen.app.llm.LlmRecovery.autoResumeDelayMillis(4, dev.cueopen.app.llm.LlmRecovery.Category.SERVER))
     }
 }
+
+class HubPieceAdviceTest {
+    @Test fun inventedPieceNameGetsListPiecesAdvice() {
+        val out = "❌ Piece \"@activepieces/piece-schedule\" not found. Use ap_list_pieces to get valid piece names."
+        assertEquals(ToolOutcomeAdvisor.Reason.HUB_PIECE, ToolOutcomeAdvisor.classify("mcp_activepieces_hub__ap_get_piece_props", out))
+        assertTrue(ToolOutcomeAdvisor.adviceLine(ToolOutcomeAdvisor.Reason.HUB_PIECE).contains("ap_list_pieces"))
+    }
+
+    @Test fun normalNotFoundStaysNotFound() {
+        assertEquals(ToolOutcomeAdvisor.Reason.NOT_FOUND, ToolOutcomeAdvisor.classify("shell", "cat: x.txt: No such file or directory"))
+    }
+}

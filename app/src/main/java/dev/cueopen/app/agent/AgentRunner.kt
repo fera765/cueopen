@@ -3686,7 +3686,9 @@ class AgentRunner(
                 buildJsonObject { put("text", str("Texto ou rótulo visível do controle")); put("occurrence", int("Qual correspondência tocar quando há várias (1 = primeira; padrão 1)")) }, listOf("text")))
         if ("device_accessibility_back" in deviceTools)
             add(tool("device_accessibility_back", "Aciona o Voltar do Android. O snapshot atual deixa de valer.", buildJsonObject {}))
-        if (allowMultiAgent) connectorTools().forEach { add(it) }
+        // Hub de conectores: sempre no chat normal; num Agent, só se ele estiver ativado (padrão: ligado).
+        val hubPrefix = "mcp_" + dev.cueopen.app.connectors.ActivepiecesHub.CONNECTOR_ID + "__"
+        if (allowMultiAgent) connectorTools().filter { agent?.useConnectorHub != false || !toolName(it).startsWith(hubPrefix) }.forEach { add(it) }
         // UI Connectors (ex.: IQ Option): só os que este agente pode usar (toggle por agente / "Agent required?").
         runCatching { dev.cueopen.app.CueApp.instance.uiConnectors.toolDefinitions(agent) }.getOrDefault(emptyList()).forEach { add(it) }
         add(tool("tools_load", "Carrega ferramentas que estão fora do contexto (listadas em 'Ferramentas sob demanda'): grupos (ex.: wallet, device, web_dev, agents, schedule), connector:<id> ou mcp:<servidor>. Elas ficam disponíveis a partir da sua próxima resposta e até o fim da tarefa.",
