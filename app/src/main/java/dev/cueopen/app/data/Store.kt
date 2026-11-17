@@ -46,6 +46,8 @@ class Store(context: Context) {
         // Tarefas que estavam rodando quando o app morreu viram "interrompidas"
         s.copy(
             skills = (s.skills + missing).filterNot { it.builtIn && it.id in BuiltInSkills.retiredIds },
+            // Conectores MCP antigos (catálogo fixo / registro aberto) saem: ficam só os do gateway e os personalizados.
+            connectors = s.connectors.filter { it.gatewayRef != null || it.description == "Personalizado" },
             pages = dev.cueopen.app.pages.PageOps.prune(s.pages, s.sessions.mapTo(HashSet()) { it.id }, s.agents.mapTo(HashSet()) { it.id }, s.sections.mapTo(HashSet()) { it.id }),
             // Migra uma única vez o consentimento de background dos agentes já autônomos;
             // depois disso, a remoção da capability pelo usuário nunca é revertida no próximo load.
