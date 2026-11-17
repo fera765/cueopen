@@ -1956,8 +1956,20 @@ class AgentRunner(
                 // a especificação do SDK (connector_spec) vai inteira: cortá-la fazia o agente ler a sobra por arquivo em loop
                 // nenhum valor do formulário seguro volta para o modelo, mesmo que uma ferramenta o ecoe
                 val accessibilityOutput = call.name.startsWith("device_accessibility_")
+                val redactedOut = SecretVault.redact(sessionId, result.output)
+                // Conectores devolvem JSON bruto (ex.: e-mails com cabeçalhos SMTP e HTML): compacta para alto sinal e
+                // arquiva o original — o agente não precisa reler pedaços truncados.
+                val shapedOut = if ((call.name.startsWith("mcp_") || call.name.startsWith("uic_")) && redactedOut.length > 1_500) {
+                    val sh = ToolOutputShaper.shape(redactedOut)
+                    if (!sh.changed) redactedOut else {
+                        val ptr = ctxMgr.archive(sessionId, redactedOut)
+                        sh.text + "\n[Resultado compactado: " +
+                            (if (sh.omittedKeys.isNotEmpty()) "campos omitidos " + sh.omittedKeys.take(8).joinToString() + "; " else "") +
+                            "textos longos cortados. " + (if (ptr != null) "JSON completo (${redactedOut.length} chars) em $ptr — use file_search nesse arquivo só se precisar de um campo omitido; não chame a ferramenta de novo." else "") + "]"
+                    }
+                } else redactedOut
                 val ctxOut = ctxMgr.storeToolOutput(
-                    sessionId, call.id, SecretVault.redact(sessionId, result.output),
+                    sessionId, call.id, shapedOut,
                     limit = if (call.name == "connector_spec") 60_000 else 8_000,
                     persistLongOutput = !accessibilityOutput, toolName = call.name)
                 if (accessibilityOutput) {

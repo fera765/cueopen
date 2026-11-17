@@ -54,11 +54,15 @@ object ConnectorRouting {
             "Conectores ativos: " + connected.joinToString("; ") { (n, p, hub) -> "$n → ferramentas ${p}__*" + if (hub) " (hub com centenas de apps)" else "" } + "."
         connected.firstOrNull { it.third }?.let { (_, p, _) ->
             val direct = hubTools.firstOrNull { Regex("run_action|execute_action|run_piece|execute_piece|call_action").containsMatchIn(it) }
-            lines += "6a. Hub de apps (${p}__*): roteiro curto — " +
-                (if (hubTools.any { it.contains("list_connections") }) "1) ${p}__${hubTools.first { it.contains("list_connections") }} para ver as contas conectadas; " else "") +
-                "2) ap_research_pieces/ap_list_pieces só se ainda não souber o nome exato da piece/ação; " +
-                (if (direct != null) "3) execute direto com ${p}__$direct. " else "3) execute a ação da piece. ") +
-                "Só crie fluxo/automação se o usuário pedir algo recorrente."
+            lines += if (direct != null)
+                "6a. Hub de apps (${p}__*), tarefa única (ler e-mails, enviar mensagem, criar linha…): " +
+                    "1) connectionExternalId vem das contas conectadas abaixo (ou de ${p}__ap_list_connections); " +
+                    "2) descubra actionName com ${p}__ap_search_actions e os campos exatos com ${p}__ap_get_piece_props; " +
+                    "3) execute UMA vez com ${p}__$direct {pieceName, actionName, input, connectionExternalId}. " +
+                    "NUNCA monte fluxo, webhook ou passo de código temporário para tarefa única; nunca apague passos para contornar erro. " +
+                    "Peça poucos itens (ex.: limite 5–10) para o resultado vir enxuto. Fluxos (ap_build_flow) só para automação recorrente pedida pelo usuário."
+            else
+                "6a. Hub de apps (${p}__*): descubra a piece/ação com ap_research_pieces/ap_search_actions e use os nomes exatos; fluxos só para automação recorrente."
             hubInventory?.takeIf { it.isNotBlank() }?.let { lines += "6a. Contas já conectadas no hub (não precisa listar de novo se bastar): " + it.replace(Regex("\\s+"), " ").take(700) }
         }
         if (mentioned.isNotEmpty()) lines += "6a. O usuário marcou com @: " + mentioned.joinToString() + ". Use exatamente esse(s) recurso(s) — sem procurar alternativas."

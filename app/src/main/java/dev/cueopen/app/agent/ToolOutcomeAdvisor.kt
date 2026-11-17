@@ -32,11 +32,14 @@ object ToolOutcomeAdvisor {
             "tente instalar UMA vez (pip install <pacote> --break-system-packages, apk add <pacote> ou npm i <pacote>). Muita coisa já vem no python3 (sqlite3, json, csv, http.server, urllib): para \"sqlite3: command not found\" use python3 -c \"import sqlite3; …\". Se a instalação falhar, use uma alternativa já instalada ou entregue no formato possível (ex.: o SVG em vez do PNG) — não repita o mesmo import/comando."),
         HUB_PIECE("nome de piece inexistente no hub Activepieces",
             "nunca invente nomes de piece. Chame ap_list_pieces (ou ap_research_pieces com o termo, ex.: \"gmail\") e use exatamente o nome retornado (formato @activepieces/piece-xxx). Agendamento e webhook são gatilhos do fluxo: consulte as opções com ap_list_pieces antes de configurar."),
+        BUSYBOX_OPTION("opção não suportada pelo BusyBox do sandbox",
+            "o Linux do app usa BusyBox: opções GNU (--time-style, --sort=, -printf, --format…) não existem. Use a forma simples (ls -la, find -name, date) ou python3 para formatar; não repita a mesma opção."),
         BLOCKED("bloqueado por política de segurança",
             "esta ação não é permitida neste contexto. Não tente variações para contornar; explique ao usuário."),
     }
 
     private val rules: List<Pair<Reason, Regex>> = listOf(
+        Reason.BUSYBOX_OPTION to Regex("(?i)unrecognized option|invalid option.{0,40}\\n.{0,80}busybox|busybox v\\d[^\\n]{0,60}multi-call binary"),
         Reason.HUB_PIECE to Regex("(?i)piece \"[^\"]{1,120}\" not found|use ap_list_pieces"),
         Reason.CHALLENGE to Regex("(?i)verify (that )?you are (a )?human|cf-mitigated|checking your browser|just a moment\\.\\.\\.|captcha|attention required.{0,20}cloudflare|confirme que você não é um robô|não sou um robô"),
         Reason.BAD_REGEX to Regex("(?i)bad regex|invalid contents of \\{\\}|re\\.error|re/_parser\\.py|patternsyntaxexception|invalid regular expression"),

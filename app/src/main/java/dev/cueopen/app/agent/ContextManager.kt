@@ -122,6 +122,9 @@ class ContextManager(private val store: Store, private val sandbox: Sandbox, pri
         }
     }
 
+    /** Arquiva o conteúdo completo (ex.: JSON original de um conector antes de compactar) e devolve o caminho. */
+    fun archive(sessionId: String, content: String): String? = stash(sessionId, content)
+
     /** Salva um conteúdo (endereçado pelo hash) em .cue/out e devolve o caminho relativo para file_read. */
     private fun stash(sessionId: String, content: String): String? {
         val dir = File(sandbox.workspaceFor(sessionId), ".cue/out").apply { mkdirs() }

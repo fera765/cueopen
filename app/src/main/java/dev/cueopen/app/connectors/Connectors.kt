@@ -299,8 +299,10 @@ object Connectors {
         val out = mutableListOf<JsonObject>()
         store.state.value.connectors.filter { it.enabled && it.connectedAt != null && it.toolsJson != null }.forEach { c ->
             val arr = runCatching { JSONArray(c.toolsJson) }.getOrNull() ?: return@forEach
-            for (i in 0 until minOf(arr.length(), 40)) {
-                val t = arr.getJSONObject(i)
+            val all = (0 until arr.length()).map { arr.getJSONObject(it) }
+            // Hub: as ferramentas de execução direta vêm primeiro (ap_run_action ficava fora do corte de 40).
+            val ordered = if (c.gatewayRef == ActivepiecesHub.REF) all.sortedBy { HUB_PRIORITY.indexOf(it.optString("name")).let { p -> if (p < 0) 1000 else p } } else all
+            for (t in ordered.take(if (c.gatewayRef == ActivepiecesHub.REF) 48 else 40)) {
                 if (c.toolPolicy[t.getString("name")] == POLICY_BLOCK) continue  // bloqueada: o modelo nem vê a ferramenta
                 val name = toolFunctionName(c.id, t.getString("name"))
                 val schema = t.optJSONObject("inputSchema")?.toString() ?: "{\"type\":\"object\",\"properties\":{}}"
@@ -319,6 +321,13 @@ object Connectors {
         }
         return out
     }
+
+    /** Ordem das ferramentas do hub no contexto: execução direta e descoberta primeiro, construção de fluxos depois. */
+    val HUB_PRIORITY = listOf(
+        "ap_run_action", "ap_list_connections", "ap_search_actions", "ap_get_piece_props", "ap_research_pieces",
+        "ap_resolve_property_options", "ap_resolve_property_chain", "ap_setup_guide", "ap_list_flows", "ap_test_flow", "ap_get_run", "ap_list_runs",
+        "ap_find_records", "ap_insert_records", "ap_list_tables",
+    )
 
     const val POLICY_ALLOW = "allow"
     const val POLICY_ASK = "ask"

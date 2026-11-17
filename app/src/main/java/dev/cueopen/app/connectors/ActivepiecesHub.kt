@@ -104,6 +104,33 @@ object ActivepiecesHub {
 
     fun sandboxReady(): Boolean = LocalSandbox.ready()
 
+    /**
+     * O motor do Activepieces chama `spawn("esbuild")`. Um esbuild instalado via npm -g pode não executar dentro do
+     * proot (link de binário nativo) ou não estar no PATH do processo filho. Aqui: testa candidatos (binário nativo
+     * do pacote @esbuild/linux-*, depois o do pacote esbuild), copia o primeiro que roda para /usr/bin e
+     * /usr/local/bin; se nenhum roda, baixa o binário nativo com npm pack. Por fim simula o spawn do Node e loga.
+     */
+    private val ESBUILD_FIX = """
+        |ok_esbuild() { /usr/bin/esbuild --version >/dev/null 2>&1; }
+        |if ok_esbuild; then echo "[fluwy] esbuild ok: $(/usr/bin/esbuild --version)"; else
+        |  for c in $(find /usr/local/lib/node_modules /usr/src/app/node_modules /usr/lib/node_modules -maxdepth 6 -type f -path '*@esbuild/linux-*/bin/esbuild' 2>/dev/null) /usr/local/bin/esbuild $(find /usr/local/lib/node_modules -maxdepth 4 -type f -path '*esbuild/bin/esbuild' 2>/dev/null); do
+        |    [ -f "${'$'}c" ] || continue
+        |    if "${'$'}c" --version >/dev/null 2>&1 && head -c 4 "${'$'}c" | grep -q ELF; then
+        |      cp -fL "${'$'}c" /usr/bin/esbuild.new && chmod 755 /usr/bin/esbuild.new && mv -f /usr/bin/esbuild.new /usr/bin/esbuild && break
+        |    else echo "[fluwy] esbuild candidato não roda: ${'$'}c"; fi
+        |  done
+        |  if ! ok_esbuild; then
+        |    A=$(uname -m); case "${'$'}A" in aarch64|arm64) A=arm64;; x86_64) A=x64;; armv7l|armv8l) A=arm;; esac
+        |    echo "[fluwy] baixando esbuild nativo (linux-${'$'}A)…"
+        |    mkdir -p /tmp/esb && cd /tmp/esb && rm -f ./*.tgz && npm pack "@esbuild/linux-${'$'}A@0.25.0" >/dev/null 2>&1         |      && tar -xzf ./*.tgz package/bin/esbuild && cp -f package/bin/esbuild /usr/bin/esbuild && chmod 755 /usr/bin/esbuild
+        |    cd /usr/src/app
+        |  fi
+        |  if ok_esbuild; then cp -f /usr/bin/esbuild /usr/local/bin/esbuild 2>/dev/null; echo "[fluwy] esbuild pronto: $(/usr/bin/esbuild --version)";
+        |  else echo "[fluwy] ERRO: esbuild indisponível — passos de código do hub vão falhar: $(/usr/bin/esbuild --version 2>&1 | head -c 200)"; fi
+        |fi
+        |node -e "try{console.log('[fluwy] spawn esbuild (como o motor):',require('child_process').execFileSync('esbuild',['--version'],{env:{}}).toString().trim())}catch(e){console.log('[fluwy] spawn esbuild falhou:',e.code||e.message)}" 2>&1
+        |""".trimMargin()
+
     fun installed(): Boolean = runCatching { File(rootfs(), "usr/src/app/docker-entrypoint.sh").exists() }.getOrDefault(false)
 
     /** Atualiza o estado olhando o disco e a porta. */
@@ -192,14 +219,13 @@ object ActivepiecesHub {
             File(rootfs(), "opt/ap-data").mkdirs()
             val synced = File(rootfs(), "opt/ap-data/.fluwy-synced")
             if (synced.exists() && System.currentTimeMillis() - synced.lastModified() > 7L * 24 * 3600_000) synced.delete()
+            File(rootfs(), "opt/fluwy-esbuild.sh").writeText(ESBUILD_FIX)
             val t0 = System.currentTimeMillis()
             val cmd = "export PATH=/usr/local/bin:/usr/local/sbin:/usr/bin:/usr/sbin:/bin:/sbin HOME=/opt/ap-home; " +
                 "mkdir -p /opt/ap-home /opt/ap-data; cd /usr/src/app; " +
-                // Passos de código do Activepieces compilam com o binário esbuild: garante que ele existe e executa.
-                "if ! esbuild --version >/dev/null 2>&1; then " +
-                "E=\$(find /usr/local/lib/node_modules /usr/src/app/node_modules -maxdepth 5 -path '*esbuild/bin/esbuild' -type f 2>/dev/null | head -n1); " +
-                "if [ -n \"\$E\" ] && \"\$E\" --version >/dev/null 2>&1; then ln -sf \"\$E\" /usr/local/bin/esbuild; echo '[fluwy] esbuild vinculado'; " +
-                "else echo '[fluwy] instalando esbuild…'; npm install -g --no-fund --no-audit esbuild@0.25.0 >/dev/null 2>&1 && echo '[fluwy] esbuild instalado' || echo '[fluwy] ERRO: esbuild não instalou'; fi; fi; " +
+                // Passos de código compilam com o binário esbuild: o script garante uma CÓPIA executável em /usr/bin
+                // (PATH mínimo que qualquer processo filho do motor enxerga) e registra o diagnóstico no hub.log.
+                "sh /opt/fluwy-esbuild.sh; " +
                 "export AP_DB_TYPE=PGLITE AP_REDIS_TYPE=STANDALONE AP_REDIS_HOST=127.0.0.1 AP_REDIS_PORT=$REDIS_PORT AP_PORT=$PORT AP_FRONTEND_URL=$BASE AP_CONFIG_PATH=/opt/ap-data " +
                 "AP_EXECUTION_MODE=UNSANDBOXED AP_TELEMETRY_ENABLED=false AP_WORKER_CONCURRENCY=1 NODE_ENV=production " +
                 "NODE_OPTIONS=--max-old-space-size=640 NODE_COMPILE_CACHE=/opt/ap-data/node-compile-cache; " +
