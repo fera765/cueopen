@@ -279,7 +279,10 @@ object Connectors {
                     cursor = res.optString("nextCursor").ifBlank { null }
                 } while (cursor != null)
             }
-            val updated = (store.connector(c.id) ?: c).copy(toolsJson = tools.toString(), lastError = null, connectedAt = c.connectedAt ?: System.currentTimeMillis())
+            // Hub: guarda o resumo das contas conectadas para o agente ir direto à ação certa.
+            val inventory = if (c.gatewayRef == ActivepiecesHub.REF) runCatching { hubInventory(store, c, tools) }.getOrNull() else null
+            val updated = (store.connector(c.id) ?: c).copy(toolsJson = tools.toString(), lastError = null, connectedAt = c.connectedAt ?: System.currentTimeMillis(),
+                inventory = inventory ?: (store.connector(c.id) ?: c).inventory)
             store.upsertConnector(updated); updated
         } catch (t: Throwable) {
             if (t !is kotlinx.coroutines.CancellationException)
@@ -375,6 +378,16 @@ object Connectors {
             debugLog()?.recordFailure(c.id, "tool-call", t, c.url, "POST")
             "Falha no conector ${c.name}: ${t.message}"
         }
+    }
+
+    /** Chama a ferramenta de listar conexões do hub e devolve um resumo curto (nome do app + conta). */
+    private fun hubInventory(store: Store, c: Connector, tools: JSONArray): String? {
+        val name = (0 until tools.length()).map { tools.getJSONObject(it).optString("name") }.firstOrNull { it.contains("list_connections") } ?: return null
+        val res = withSession(store, c) { cc -> rpc(cc, "tools/call", JSONObject().put("name", name).put("arguments", JSONObject())) }
+        if (res.optBoolean("isError")) return null
+        val content = res.optJSONArray("content") ?: return null
+        val text = (0 until content.length()).joinToString("\n") { content.getJSONObject(it).optString("text") }
+        return text.lines().map { it.trim() }.filter { it.isNotEmpty() }.joinToString(" | ").take(1200).ifBlank { null }
     }
 
     @Suppress("unused") private fun JsonElement.str() = toString()

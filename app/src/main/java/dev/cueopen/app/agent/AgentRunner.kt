@@ -2879,10 +2879,22 @@ class AgentRunner(
             .associateWith { mcpDisplayNames[it] ?: it.removePrefix("mcp_") }
         val used = s.items.filterIsInstance<ChatItem.Step>().map { it.tool }.toSet()
         val availableGroups = ToolContextPlanner.GROUPS.filterValues { groupTools -> groupTools.any { it in names } }.keys
+        val mcpKeywords = store.state.value.connectors.associate { cn ->
+            ("mcp_" + cn.id.replace(Regex("[^A-Za-z0-9_]"), "_")) to ConnectorRouting.keywordsFor(
+                cn.name, cn.description, dev.cueopen.app.connectors.Connectors.toolNames(cn).map { it.first },
+                cn.gatewayRef == dev.cueopen.app.connectors.ActivepiecesHub.REF, cn.inventory)
+        }
+        // Conector marcado com @ pelo usuário: as ferramentas dele ficam fixas no contexto desde o 1º passo.
+        Mentions.find(lastUserText(s), mentionTargets()).forEach { h ->
+            when (h.target.kind) {
+                Mentions.Kind.CONNECTOR -> ToolContextPlanner.load(sessionId, listOf(h.target.id))
+                else -> Unit
+            }
+        }
         val plan = ToolContextPlanner.plan(ToolContextPlanner.Input(
             sessionId = sessionId, query = contextQuery(s), usedTools = used, builder = s.connectorBuilder || s.connectorEditId != null,
             allowedGroups = availableGroups,
-            connectors = conns, mcpServers = mcp,
+            connectors = conns, mcpServers = mcp, mcpKeywords = mcpKeywords,
             historyTokens = ctxMgr.estimateTokens(s.llm) + ctxMgr.estimateTokens(s.summary),
             contextBudget = store.settings.contextBudget,
         ))
@@ -2890,6 +2902,23 @@ class AgentRunner(
         val mcpOf = { n: String -> n.substringBefore("__").takeIf { n.contains("__") } }
         val kept = buildJsonArray { all.forEach { t -> if (plan.keepTool(toolName(t), connIdOf, mcpOf)) add(t) } }
         return plan to kept
+    }
+
+    private fun lastUserText(s: Session): String = (s.items.lastOrNull { it is ChatItem.User } as? ChatItem.User)?.text.orEmpty()
+
+    /** Tudo o que pode ser marcado com @: skills, conectores (MCP e UI) e agents. */
+    fun mentionTargets(): List<Mentions.Target> {
+        val st = store.state.value
+        val out = ArrayList<Mentions.Target>()
+        st.skills.filter { it.enabled }.forEach { out += Mentions.Target(it.name, Mentions.Kind.SKILL, it.id) }
+        st.connectors.filter { it.enabled && it.connectedAt != null }.forEach {
+            out += Mentions.Target(it.name, Mentions.Kind.CONNECTOR, "mcp:" + it.id.replace(Regex("[^A-Za-z0-9_]"), "_"))
+        }
+        runCatching { dev.cueopen.app.CueApp.instance.uiConnectors.connectors }.getOrNull().orEmpty().forEach {
+            out += Mentions.Target(it.spec.name, Mentions.Kind.CONNECTOR, "connector:" + it.spec.id)
+        }
+        st.agents.forEach { out += Mentions.Target(it.name, Mentions.Kind.AGENT, it.id) }
+        return out
     }
 
     private fun systemPrompt(
@@ -2953,6 +2982,23 @@ class AgentRunner(
             appendLine("4. Use `notes_write` para registrar o que precisa lembrar ao longo da tarefa: achados, progresso e próximos passos.")
             appendLine("5. Fatos duradouros sobre o usuário ou o projeto vão em `memory_save`; para recuperar algo antigo, use `memory_search`.")
             appendLine("6. Para usar uma skill, chame `skill_load` com o nome dela e siga as instruções carregadas.")
+            run {
+                val hubRef = dev.cueopen.app.connectors.ActivepiecesHub.REF
+                val connected = store.state.value.connectors.filter { it.enabled && it.connectedAt != null && (agent?.useConnectorHub != false || it.gatewayRef != hubRef) }
+                val hub = connected.firstOrNull { it.gatewayRef == hubRef }
+                val mentioned = Mentions.find(lastUserText(session), mentionTargets()).map { h ->
+                    when (h.target.kind) {
+                        Mentions.Kind.SKILL -> "skill ${h.target.label} (skill_load)"
+                        Mentions.Kind.CONNECTOR -> "conector ${h.target.label}"
+                        Mentions.Kind.AGENT -> "agent ${h.target.label}"
+                        Mentions.Kind.COMMAND -> h.target.label
+                    }
+                }.distinct()
+                ConnectorRouting.promptLines(
+                    connected.map { Triple(it.name, "mcp_" + it.id.replace(Regex("[^A-Za-z0-9_]"), "_"), it.gatewayRef == hubRef) },
+                    hub?.inventory, hub?.let { h -> dev.cueopen.app.connectors.Connectors.toolNames(h).map { it.first } }.orEmpty(), mentioned,
+                ).forEach { appendLine(it) }
+            }
             appendLine("6b. Trabalho recorrente: quando o usuário pedir para monitorar, acompanhar ou repetir algo ao longo do tempo (ex.: \"a cada 20 min verifique o mercado\", \"uma vez por dia\"), chame set_schedule com o intervalo em minutos (1440 = diário). Quando o pedido tiver hora marcada (\"todo dia às 8h\", \"amanhã às 15:30\"), use cron_add, que dispara no horário exato numa conversa isolada. Se ele não disser o intervalo e a tarefa for contínua, escolha um intervalo razoável e econômico. Para parar, set_schedule com minutes=0.")
             val requestedCaps = if (allowDeviceTools) agent?.deviceCaps.orEmpty() else emptyList()
             val grantedCaps = requestedCaps.filter { dev.cueopen.app.device.DeviceCaps.granted(ctx, it) }

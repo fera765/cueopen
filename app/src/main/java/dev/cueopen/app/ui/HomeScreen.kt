@@ -315,20 +315,17 @@ fun Composer(
             mentionRange = null
         }
     }
-    val mentionTransformation = remember(mentionRange, editor.text) {
-        val range = mentionRange
-        val expected = range?.takeIf { it.start >= 0 && it.end <= editor.text.length }
-            ?.let { editor.text.substring(it.start, it.end) }
+    // Todas as menções conhecidas (@skill, @conector, @agent) ficam em azul enquanto o usuário digita.
+    val mentionTargets = remember(editor.text.count { it == '@' }) {
+        runCatching { CueApp.instance.agent.mentionTargets() }.getOrDefault(emptyList()) +
+            dev.cueopen.app.agent.Mentions.Target("create-agent", dev.cueopen.app.agent.Mentions.Kind.COMMAND, "create-agent")
+    }
+    val mentionTransformation = remember(mentionRange, editor.text, mentionTargets) {
         VisualTransformation { source ->
             val annotated = buildAnnotatedString {
                 append(source)
-                if (range != null && expected != null && range.end <= source.length &&
-                    source.text.substring(range.start, range.end) == expected) {
-                    addStyle(
-                        SpanStyle(color = Color.White, background = Color(0xFF246BCE), fontWeight = FontWeight.SemiBold),
-                        range.start,
-                        range.end
-                    )
+                dev.cueopen.app.agent.Mentions.find(source.text, mentionTargets).forEach { h ->
+                    addStyle(SpanStyle(color = Color.White, background = Color(0xFF246BCE), fontWeight = FontWeight.SemiBold), h.start, h.end)
                 }
             }
             TransformedText(annotated, OffsetMapping.Identity)
@@ -453,13 +450,14 @@ fun Composer(
         CueApp.instance.store.state.value.let { it.skills to it.agents }
     }
     val catalog by catalogFlow.collectAsStateWithLifecycle(initialCatalog)
-    val suggestions: List<Triple<String, String, String>> = remember(token, catalog.first, catalog.second) {
+    val suggestions: List<Triple<String, String, String>> = remember(token, catalog.first, catalog.second, mentionTargets) {
         when {
             value.startsWith("/") && !value.contains(' ') -> slashCommands.filter { it.first.startsWith(value, true) }.map { Triple(it.first, it.second, it.first + " ") }
             token.startsWith("@") -> (listOf(Triple("@create-agent", "Criar um novo agente a partir de uma descrição", "@create-agent ")) +
+                mentionTargets.filter { it.kind == dev.cueopen.app.agent.Mentions.Kind.CONNECTOR }.map { Triple("@" + it.label, "Conector", "@" + it.label + " ") } +
                 catalog.second.map { Triple("@" + it.name, "Agent", "@" + it.name + " ") } +
                 catalog.first.filter { it.enabled }.map { Triple("@" + it.name, "Skill · " + it.description.take(60), "@" + it.name + " ") })
-                .filter { it.first.contains(token.drop(1), true) }.take(12)
+                .filter { it.first.contains(token.drop(1), true) }.take(20)
             else -> emptyList()
         }
     }
@@ -482,7 +480,7 @@ fun Composer(
                         onChange(updated)
                     }
                 }.padding(horizontal = 14.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Icon(when { label.startsWith("/") -> Icons.Rounded.Terminal; desc == "Agent" -> Icons.Rounded.SmartToy; else -> Icons.Rounded.AutoAwesome },
+                    Icon(when { label.startsWith("/") -> Icons.Rounded.Terminal; desc == "Agent" -> Icons.Rounded.SmartToy; desc == "Conector" -> Icons.Rounded.Cable; else -> Icons.Rounded.AutoAwesome },
                         null, Modifier.size(18.dp), tint = c.accent)
                     Spacer(Modifier.width(10.dp))
                     Text(label, fontWeight = FontWeight.SemiBold, fontSize = 14.sp)

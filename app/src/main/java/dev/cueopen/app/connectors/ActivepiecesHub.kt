@@ -189,6 +189,10 @@ object ActivepiecesHub {
             _state.value = State.STARTING
             proc?.destroy(); proc = null
             secret("jwt", 32); secret("enc", 16)
+            File(rootfs(), "opt/ap-data").mkdirs()
+            val synced = File(rootfs(), "opt/ap-data/.fluwy-synced")
+            if (synced.exists() && System.currentTimeMillis() - synced.lastModified() > 7L * 24 * 3600_000) synced.delete()
+            val t0 = System.currentTimeMillis()
             val cmd = "export PATH=/usr/local/bin:/usr/local/sbin:/usr/bin:/usr/sbin:/bin:/sbin HOME=/opt/ap-home; " +
                 "mkdir -p /opt/ap-home /opt/ap-data; cd /usr/src/app; " +
                 // Passos de código do Activepieces compilam com o binário esbuild: garante que ele existe e executa.
@@ -198,17 +202,25 @@ object ActivepiecesHub {
                 "else echo '[fluwy] instalando esbuild…'; npm install -g --no-fund --no-audit esbuild@0.25.0 >/dev/null 2>&1 && echo '[fluwy] esbuild instalado' || echo '[fluwy] ERRO: esbuild não instalou'; fi; fi; " +
                 "export AP_DB_TYPE=PGLITE AP_REDIS_TYPE=STANDALONE AP_REDIS_HOST=127.0.0.1 AP_REDIS_PORT=$REDIS_PORT AP_PORT=$PORT AP_FRONTEND_URL=$BASE AP_CONFIG_PATH=/opt/ap-data " +
                 "AP_EXECUTION_MODE=UNSANDBOXED AP_TELEMETRY_ENABLED=false AP_WORKER_CONCURRENCY=1 NODE_ENV=production " +
-                "NODE_OPTIONS=--max-old-space-size=640; " +
+                "NODE_OPTIONS=--max-old-space-size=640 NODE_COMPILE_CACHE=/opt/ap-data/node-compile-cache; " +
+                // Boot rápido: o cache de compilação do Node evita recompilar o JS a cada início, e a sincronização
+                // do catálogo (13 mil pieces) só roda na 1ª vez e depois 1x por semana.
+                "if [ -f /opt/ap-data/.fluwy-synced ]; then export AP_PIECES_SYNC_MODE=NONE; else export AP_PIECES_SYNC_MODE=OFFICIAL_AUTO; fi; " +
                 "export AP_JWT_SECRET=\"\$(cat /opt/ap-secrets/jwt)\" AP_ENCRYPTION_KEY=\"\$(cat /opt/ap-secrets/enc)\"; " +
                 // O PM2 avisa a cada 2 s que não lê /proc/uptime (restrição do Android): ruído que só enche o log.
-                "sh ./docker-entrypoint.sh 2>&1 | grep --line-buffered -v 'pidusage'"
+                "sh ./docker-entrypoint.sh 2>&1 | grep --line-buffered -v -e 'pidusage' -e 'Socket.IO connection error'"
             logLine("🚀 Iniciando o hub (a primeira vez pode levar alguns minutos)…\n")
             if (!ensureRedis()) { _state.value = State.ERROR; return@withContext false }
             proc = sandbox.spawn(cmd, File(hostDir(), "hub.log"), mapOf("ALPINE_ROOT" to rootfs().absolutePath))
             runCatching { SandboxService.start(CueApp.instance, "Hub de conectores ativo") }
             val deadline = System.currentTimeMillis() + 10 * 60_000
             while (System.currentTimeMillis() < deadline) {
-                if (healthy()) { _state.value = State.RUNNING; logLine("✅ Hub no ar em $BASE\n"); return@withContext true }
+                if (healthy()) {
+                    _state.value = State.RUNNING
+                    runCatching { if (!synced.exists()) synced.writeText(System.currentTimeMillis().toString()) }
+                    logLine("✅ Hub no ar em $BASE (${(System.currentTimeMillis() - t0) / 1000}s)\n")
+                    return@withContext true
+                }
                 if (proc?.isAlive != true) break
                 delay(2000)
             }
@@ -234,7 +246,7 @@ object ActivepiecesHub {
 
     // ---------------- Ciclo de vida automático (sem o usuário iniciar à mão) ----------------
     @Volatile private var lastUse = 0L
-    private const val IDLE_STOP_MS = 30 * 60_000L
+    private const val IDLE_STOP_MS = 2 * 60 * 60_000L
     @Volatile private var watchdogStarted = false
 
     fun touch() { lastUse = System.currentTimeMillis() }
@@ -250,12 +262,14 @@ object ActivepiecesHub {
             if (!installed() || !LocalSandbox.ready()) return@launch
             if (app.store.connector(CONNECTOR_ID)?.enabled == false) return@launch
             if (_state.value == State.INSTALLING || _state.value == State.STARTING) return@launch
-            if (!healthy()) runCatching { start() } else _state.value = State.RUNNING
+            val ok = if (!healthy()) runCatching { start() }.getOrDefault(false) else { _state.value = State.RUNNING; true }
+            // Atualiza ferramentas + contas conectadas do hub (o usuário pode ter ligado um app novo no painel).
+            if (ok) app.store.connector(CONNECTOR_ID)?.takeIf { it.connectedAt != null && it.enabled }?.let { runCatching { Connectors.refreshTools(app.store, it) } }
         }
         startIdleWatchdog()
     }
 
-    /** Economia de bateria/RAM: desliga o hub após 30 min sem uso; ele volta sozinho no próximo uso. */
+    /** Economia de bateria/RAM: desliga o hub após 2 h sem uso; ele volta sozinho ao abrir o app ou no próximo uso. */
     private fun startIdleWatchdog() {
         if (watchdogStarted) return
         watchdogStarted = true
@@ -263,7 +277,7 @@ object ActivepiecesHub {
             while (true) {
                 delay(5 * 60_000L)
                 if (proc != null && System.currentTimeMillis() - lastUse > IDLE_STOP_MS && _state.value == State.RUNNING) {
-                    logLine("💤 Hub parado por inatividade (economia de bateria). Volta sozinho no próximo uso.\n")
+                    logLine("💤 Hub parado após 2 h sem uso (economia de bateria). Volta sozinho ao abrir o app ou no próximo uso.\n")
                     stop()
                 }
             }

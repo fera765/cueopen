@@ -488,7 +488,17 @@ private fun UserBubble(i: ChatItem.User) {
             }
         }
         SelectionContainer {
-            Text(i.text, Modifier.widthIn(max = 320.dp).clip(RoundedCornerShape(20.dp, 20.dp, 6.dp, 20.dp)).background(c.bubble).padding(horizontal = 14.dp, vertical = 10.dp),
+            // Menções (@skill, @conector, @agent) destacadas também na mensagem enviada.
+            val targets = remember(i.text) { if ('@' in i.text) runCatching { dev.cueopen.app.CueApp.instance.agent.mentionTargets() }.getOrDefault(emptyList()) else emptyList() }
+            val shown = remember(i.text, targets) {
+                androidx.compose.ui.text.buildAnnotatedString {
+                    append(i.text)
+                    dev.cueopen.app.agent.Mentions.find(i.text, targets).forEach { h ->
+                        addStyle(androidx.compose.ui.text.SpanStyle(color = Color.White, background = Color(0xFF246BCE), fontWeight = FontWeight.SemiBold), h.start, h.end)
+                    }
+                }
+            }
+            Text(shown, Modifier.widthIn(max = 320.dp).clip(RoundedCornerShape(20.dp, 20.dp, 6.dp, 20.dp)).background(c.bubble).padding(horizontal = 14.dp, vertical = 10.dp),
                 style = MaterialTheme.typography.bodyLarge)
         }
     }

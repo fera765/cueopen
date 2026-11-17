@@ -59,7 +59,8 @@ object ToolContextPlanner {
         "skills_admin" to listOf("crie uma skill", "criar skill", "nova skill", "salve como skill", "skill.md", "instale a skill", "instalar skill", "instalar a skill", "install skill", "set up http", "setup http", "skill local"),
         "wallet" to listOf("carteira", "wallet", "solana", "sol ", "token", "swap", "saldo", "comprar", "vender", "day trade", "daytrade", "trade", "cripto", "crypto", "memecoin", "stop loss", "take profit", "liquidez", "pump", "jupiter", "usdc"),
         "device" to listOf("notifica", "whatsapp", "zap", "telegram", "instagram", "messenger", "direct", "responda", "responder", "mensagem", "spotify", "youtube", "uber", "99", "ifood", "abra o app", "abrir o app", "print da tela", "captura de tela", "screenshot", "balao", "overlay", "celular", "aparelho", "bluetooth", "dispositivo pareado", "dispositivos pareados", "dispositivos proximos", "calendario", "ligaçao", "ligacao", "chamada", "contato", "contacts", "contact list", "address book", "agenda telefonica", "agenda de contatos", "telefone", "numero do contato", "localizaçao", "localizacao", "microfone", "navegar no aplicativo", "navegar nos apps", "abrir aplicativo", "abrir app", "acessar app", "acessar aplicativo", "outro aplicativo", "instagram", "whatsapp", "spotify"),
-        "connector_builder" to listOf("conector", "connector"),
+        // Só CRIAR/editar conector abre o construtor; "use o conector…" vai direto para as ferramentas do conector.
+        "connector_builder" to listOf("crie um conector", "criar um conector", "criar conector", "crie o conector", "novo conector", "construa um conector", "construir um conector", "create a connector", "build a connector", "edite o conector", "editar o conector"),
     )
 
     data class Input(
@@ -75,6 +76,8 @@ object ToolContextPlanner {
         val connectors: Map<String, Pair<String, String>> = emptyMap(),
         /** Servidores MCP: prefixo (ex.: "mcp_github") → nome. */
         val mcpServers: Map<String, String> = emptyMap(),
+        /** Palavras que ligam cada servidor MCP ao pedido (prefixo → palavras normalizadas). */
+        val mcpKeywords: Map<String, Set<String>> = emptyMap(),
         /** Tokens estimados do histórico atual e orçamento de contexto. */
         val historyTokens: Int = 0,
         val contextBudget: Int = 24_000,
@@ -153,14 +156,20 @@ object ToolContextPlanner {
         // Conectores: nome/id/descrição batem com o pedido, já usados, ou carregados.
         val qWords = words(i.query)
         val usedConn = i.usedTools.filter { it.startsWith("uic_") }.map { it.removePrefix("uic_") }
+        // "Use o conector…" sem dizer qual: todos os conectores entram (são poucos) e o modelo escolhe no 1º passo.
+        val useConnector = ConnectorRouting.wantsToUseConnector(q)
         val conns = i.connectors.filter { (id, nd) ->
+            useConnector ||
+            run {
             val nameHit = q.contains(" " + norm(id)) || norm(nd.first).split(Regex("\\s+")).filter { it.length >= 3 }.any { q.contains(it) }
             val descHit = words(nd.first + " " + nd.second).intersect(qWords).size >= 2
             nameHit || descHit || usedConn.any { it.startsWith(id + "_") } || "connector:$id" in sticky || id in sticky
+            }
         }.keys
         val usedMcp = i.usedTools.filter { it.startsWith("mcp_") }
         val mcp = i.mcpServers.filter { (pfx, name) ->
-            q.contains(norm(name)) || usedMcp.any { it.startsWith(pfx) } || "mcp:${pfx.removePrefix("mcp_")}" in sticky || pfx in sticky
+            useConnector || q.contains(norm(name)) || i.mcpKeywords[pfx].orEmpty().any { hit(q, it) } ||
+                usedMcp.any { it.startsWith(pfx) } || "mcp:${pfx.removePrefix("mcp_")}" in sticky || pfx in sticky
         }.keys
         // Orçamento: o histórico consome o contexto; knowledge e memórias dividem a sobra.
         val free = (i.contextBudget - i.historyTokens).coerceAtLeast(0)

@@ -421,8 +421,10 @@ data class Connector(
     val lastError: String? = null,
     /** Política por ferramenta, como no Executor: "allow" (sempre liberada), "ask" (pede aprovação), "block" (bloqueada). Sem entrada = padrão do app. */
     val toolPolicy: Map<String, String> = emptyMap(),
-    /** Servidor do gateway MCP local (Alpine): "local:{nome}". Null = conector MCP personalizado. */
+    /** Hub local: "hub:activepieces". Null = conector MCP personalizado. */
     val gatewayRef: String? = null,
+    /** Resumo das contas/apps conectados no hub (cache para o prompt: o agente não precisa listar de novo). */
+    val inventory: String? = null,
 )
 
 @Serializable
