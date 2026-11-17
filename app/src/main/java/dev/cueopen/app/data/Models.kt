@@ -417,6 +417,8 @@ data class Connector(
     val toolsJson: String? = null,
     val connectedAt: Long? = null,
     val lastError: String? = null,
+    /** Política por ferramenta, como no Executor: "allow" (sempre liberada), "ask" (pede aprovação), "block" (bloqueada). Sem entrada = padrão do app. */
+    val toolPolicy: Map<String, String> = emptyMap(),
 )
 
 @Serializable

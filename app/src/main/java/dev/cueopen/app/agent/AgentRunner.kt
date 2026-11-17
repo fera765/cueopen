@@ -461,7 +461,10 @@ class AgentRunner(
     private suspend fun actionGate(sessionId: String, call: dev.cueopen.app.llm.ToolCall): ToolResult? {
         val sess = store.session(sessionId) ?: return null
         val agent = store.agent(sess.agentId)
-        if (agent?.confirmMode == "auto") return null
+        // Política por ferramenta do conector (como no Executor): "ask" sempre pede aprovação; "allow" nunca pede.
+        val mcpPolicy = if (call.name.startsWith("mcp_")) dev.cueopen.app.connectors.Connectors.policyFor(store, call.name) else null
+        if (mcpPolicy == dev.cueopen.app.connectors.Connectors.POLICY_ALLOW) return null
+        if (agent?.confirmMode == "auto" && mcpPolicy != dev.cueopen.app.connectors.Connectors.POLICY_ASK) return null
         val args = runCatching { json.parseToJsonElement(call.argsJson).jsonObject }.getOrNull()
         fun arg(k: String) = runCatching { args?.get(k)?.jsonPrimitive?.content }.getOrNull().orEmpty()
         var host: String? = null
@@ -479,8 +482,9 @@ class AgentRunner(
             "shell" -> arg("command")
             else -> null
         }
-        val category = ActionGate.classify(call.name, label) ?: return null
-        if (!ActionGate.requiresConfirmation(agent?.confirmMode, agent?.confirmCategories, category)) return null
+        val category = ActionGate.classify(call.name, label)
+            ?: (if (mcpPolicy == dev.cueopen.app.connectors.Connectors.POLICY_ASK) ActionGate.Category.SEND else null) ?: return null
+        if (mcpPolicy != dev.cueopen.app.connectors.Connectors.POLICY_ASK && !ActionGate.requiresConfirmation(agent?.confirmMode, agent?.confirmCategories, category)) return null
         val key = ActionGate.approvalKey(call.name, normArgs(call.argsJson), label, host)
         val now = System.currentTimeMillis()
         val recent = sess.items.filterIsInstance<ChatItem.Approval>()

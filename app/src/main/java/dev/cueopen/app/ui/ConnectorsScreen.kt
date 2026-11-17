@@ -1,5 +1,11 @@
 package dev.cueopen.app.ui
 
+import androidx.compose.foundation.verticalScroll
+
+import androidx.compose.foundation.rememberScrollState
+
+import androidx.compose.foundation.horizontalScroll
+
 import android.net.Uri
 import androidx.browser.customtabs.CustomTabsIntent
 import androidx.compose.foundation.background
@@ -46,6 +52,17 @@ fun ConnectorsScreen(nav: NavController) {
     var searching by remember { mutableStateOf(false) }
     var found by remember { mutableStateOf<List<Connectors.Catalog>>(emptyList()) }
     var searchErr by remember { mutableStateOf<String?>(null) }
+    var category by remember { mutableStateOf("Todos") }
+    var policyFor by remember { mutableStateOf<Connector?>(null) }
+    fun exploreRegistry() {
+        searching = true; searchErr = null
+        scope.launch {
+            runCatching { Connectors.browseRegistry() }
+                .onSuccess { r -> found = r; if (r.isEmpty()) searchErr = "O registro não devolveu servidores remotos agora." }
+                .onFailure { searchErr = "Falha ao ler o registro MCP: ${it.message ?: it::class.java.simpleName}." }
+            searching = false
+        }
+    }
     fun doSearch() {
         if (query.isBlank()) { found = emptyList(); return }
         searching = true; searchErr = null
@@ -91,6 +108,32 @@ fun ConnectorsScreen(nav: NavController) {
         }
     }
 
+    policyFor?.let { pc ->
+        val live = st.connectors.firstOrNull { it.id == pc.id } ?: pc
+        AlertDialog(onDismissRequest = { policyFor = null }, title = { Text("Permissões · ${live.name}") },
+            text = {
+                Column(Modifier.heightIn(max = 460.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text("Como no Executor: escolha, por ferramenta, se o agente usa livremente, pede sua aprovação ou não pode usar.", fontSize = 12.sp, color = c.ink2)
+                    Connectors.toolNames(live).forEach { (tool, desc) ->
+                        val cur = live.toolPolicy[tool]
+                        Column {
+                            Text(tool, fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
+                            if (desc.isNotBlank()) Text(desc, fontSize = 11.sp, color = c.ink3, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                            Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                listOf(null to "Padrão", Connectors.POLICY_ALLOW to "Liberada", Connectors.POLICY_ASK to "Aprovação", Connectors.POLICY_BLOCK to "Bloqueada").forEach { (v, label) ->
+                                    FilterChip(cur == v, {
+                                        val next = if (v == null) live.toolPolicy - tool else live.toolPolicy + (tool to v)
+                                        app.store.upsertConnector(live.copy(toolPolicy = next))
+                                    }, label = { Text(label, fontSize = 11.sp) })
+                                }
+                            }
+                        }
+                    }
+                    if (Connectors.toolNames(live).isEmpty()) Text("Conecte e atualize as ferramentas para configurar.", fontSize = 12.sp, color = c.ink3)
+                }
+            },
+            confirmButton = { TextButton({ policyFor = null }) { Text("Pronto") } })
+    }
     Scaffold(containerColor = c.bg, topBar = { CueTopBar("Conectores", { nav.popBackStack() }) {
         IconButton({ custom = true }) { Icon(Icons.Rounded.Add, "Conector personalizado") }
     } }) { pad ->
@@ -118,6 +161,12 @@ fun ConnectorsScreen(nav: NavController) {
                     keyboardActions = androidx.compose.foundation.text.KeyboardActions(onSearch = { doSearch() }),
                     colors = OutlinedTextFieldDefaults.colors(focusedBorderColor = c.accent, unfocusedBorderColor = c.line, focusedContainerColor = c.surface, unfocusedContainerColor = c.surface)
                 )
+            }
+            item {
+                TextButton(onClick = { exploreRegistry() }, enabled = !searching) {
+                    Icon(Icons.Rounded.TravelExplore, null, tint = c.accent); Spacer(Modifier.width(6.dp))
+                    Text("Explorar todo o Registro MCP (aberto e gratuito)", color = c.accent)
+                }
             }
             searchErr?.let { item { Text(it, color = c.ink2, fontSize = 13.sp) } }
             if (found.isNotEmpty()) {
@@ -152,7 +201,14 @@ fun ConnectorsScreen(nav: NavController) {
                         }
                     }
                 }
-                item { SectionLabel("Destaques") }
+                item {
+                    SectionLabel("Catálogo")
+                    Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        (listOf("Todos", "Conectados") + Connectors.categories).forEach { cat ->
+                            FilterChip(category == cat, { category = cat }, label = { Text(cat, fontSize = 12.sp) })
+                        }
+                    }
+                }
             }
             val installed = st.connectors
             // Conectores instalados aparecem primeiro para o usuário ver o resultado sem rolar até o fim.
@@ -160,7 +216,14 @@ fun ConnectorsScreen(nav: NavController) {
                 Connectors.catalog.firstOrNull { it.id == i.id }?.let { cat -> i.copy(name = cat.name, description = cat.description, url = cat.url, needsAuth = cat.needsAuth) } ?: i
             } + Connectors.catalog.filter { cat -> installed.none { it.id == cat.id } }
                 .map { cat -> Connector(cat.id, cat.name, cat.url, cat.description, cat.needsAuth, enabled = false) }
-            items(all, key = { it.id }) { conn ->
+            val shown = all.filter { conn ->
+                when (category) {
+                    "Todos" -> true
+                    "Conectados" -> conn.connectedAt != null
+                    else -> (Connectors.catalog.firstOrNull { it.id == conn.id }?.category ?: "Outros") == category
+                }
+            }
+            items(shown, key = { it.id }) { conn ->
                 val connected = conn.connectedAt != null
                 val toolsCount = runCatching { org.json.JSONArray(conn.toolsJson ?: "[]").length() }.getOrDefault(0)
                 CueCard {
@@ -198,6 +261,7 @@ fun ConnectorsScreen(nav: NavController) {
                                 IconButton(onClick = { menu = true }) { Icon(Icons.Rounded.MoreVert, "Opções") }
                                 DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
                                     if (connected) {
+                                        DropdownMenuItem(text = { Text("Permissões das ferramentas") }, onClick = { menu = false; policyFor = conn })
                                         DropdownMenuItem(text = { Text("Atualizar ferramentas") }, onClick = { menu = false; scope.launch { Connectors.refreshTools(app.store, conn) } })
                                         DropdownMenuItem(text = { Text("Reconectar") }, onClick = { menu = false; connect(conn.copy(accessToken = null)) })
                                     }

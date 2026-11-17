@@ -41,22 +41,55 @@ import java.util.concurrent.TimeUnit
  */
 object Connectors {
 
-    data class Catalog(val id: String, val name: String, val url: String, val description: String, val needsAuth: Boolean = true)
+    data class Catalog(val id: String, val name: String, val url: String, val description: String, val needsAuth: Boolean = true, val category: String = "Outros")
 
+    /**
+     * Catálogo curado de servidores MCP remotos oficiais (endpoint público de cada serviço). Mais servidores vêm do
+     * Registro MCP oficial (aberto e gratuito) em "Explorar o registro".
+     */
     val catalog = listOf(
-        Catalog("github", "GitHub", "https://api.githubcopilot.com/mcp/", "Repositórios, issues, pull requests, code search e Actions"),
-        Catalog("supabase", "Supabase", "https://mcp.supabase.com/mcp", "Projetos, banco Postgres, SQL, migrations, edge functions, logs"),
-        Catalog("cloudflare", "Cloudflare", "https://mcp.cloudflare.com/mcp", "Workers, KV, R2, D1, DNS e a API da Cloudflare"),
-        Catalog("notion", "Notion", "https://mcp.notion.com/mcp", "Páginas, bancos de dados e busca no seu workspace"),
-        Catalog("linear", "Linear", "https://mcp.linear.app/mcp", "Issues, projetos e ciclos"),
-        Catalog("sentry", "Sentry", "https://mcp.sentry.dev/mcp", "Erros, issues e performance dos seus apps"),
-        Catalog("vercel", "Vercel", "https://mcp.vercel.com", "Projetos, deploys e logs"),
-        Catalog("huggingface", "Hugging Face", "https://huggingface.co/mcp", "Modelos, datasets e Spaces"),
-        Catalog("stripe", "Stripe", "https://mcp.stripe.com", "Clientes, pagamentos, produtos e faturas"),
-        Catalog("context7", "Context7", "https://mcp.context7.com/mcp", "Documentação atualizada de bibliotecas (sem login)", needsAuth = false),
-        Catalog("deepwiki", "DeepWiki", "https://mcp.deepwiki.com/mcp", "Pergunte sobre qualquer repositório do GitHub (sem login)", needsAuth = false),
-        Catalog("microsoftlearn", "Microsoft Learn", "https://learn.microsoft.com/api/mcp", "Documentação oficial da Microsoft/Azure (sem login)", needsAuth = false),
+        // Sem login (gratuitos)
+        Catalog("context7", "Context7", "https://mcp.context7.com/mcp", "Documentação atualizada de bibliotecas", needsAuth = false, category = "Sem login"),
+        Catalog("deepwiki", "DeepWiki", "https://mcp.deepwiki.com/mcp", "Pergunte sobre qualquer repositório do GitHub", needsAuth = false, category = "Sem login"),
+        Catalog("microsoftlearn", "Microsoft Learn", "https://learn.microsoft.com/api/mcp", "Documentação oficial da Microsoft e Azure", needsAuth = false, category = "Sem login"),
+        Catalog("cloudflare-docs", "Cloudflare Docs", "https://docs.mcp.cloudflare.com/mcp", "Documentação da Cloudflare", needsAuth = false, category = "Sem login"),
+        Catalog("globalping", "Globalping", "https://mcp.globalping.dev/sse", "Ping, traceroute, DNS e HTTP de vários países", needsAuth = false, category = "Sem login"),
+        Catalog("semgrep", "Semgrep", "https://mcp.semgrep.ai/mcp", "Análise de segurança de código", needsAuth = false, category = "Sem login"),
+        // Desenvolvimento
+        Catalog("github", "GitHub", "https://api.githubcopilot.com/mcp/", "Repositórios, issues, pull requests, code search e Actions", category = "Desenvolvimento"),
+        Catalog("sentry", "Sentry", "https://mcp.sentry.dev/mcp", "Erros, issues e performance dos seus apps", category = "Desenvolvimento"),
+        Catalog("vercel", "Vercel", "https://mcp.vercel.com", "Projetos, deploys e logs", category = "Desenvolvimento"),
+        Catalog("cloudflare", "Cloudflare", "https://mcp.cloudflare.com/mcp", "Workers, KV, R2, D1, DNS e a API da Cloudflare", category = "Desenvolvimento"),
+        Catalog("huggingface", "Hugging Face", "https://huggingface.co/mcp", "Modelos, datasets e Spaces", category = "Desenvolvimento"),
+        Catalog("jam", "Jam", "https://mcp.jam.dev/mcp", "Relatos de bug com gravação, console e rede", category = "Desenvolvimento"),
+        Catalog("apify", "Apify", "https://mcp.apify.com", "Milhares de scrapers e automações prontas (Actors)", category = "Desenvolvimento"),
+        // Banco de dados
+        Catalog("supabase", "Supabase", "https://mcp.supabase.com/mcp", "Projetos, Postgres, SQL, migrations, edge functions, logs", category = "Banco de dados"),
+        Catalog("neon", "Neon", "https://mcp.neon.tech/mcp", "Postgres serverless: bancos, branches e SQL", category = "Banco de dados"),
+        Catalog("prisma", "Prisma Postgres", "https://mcp.prisma.io/mcp", "Bancos Prisma Postgres e migrations", category = "Banco de dados"),
+        // Produtividade
+        Catalog("notion", "Notion", "https://mcp.notion.com/mcp", "Páginas, bancos de dados e busca no seu workspace", category = "Produtividade"),
+        Catalog("linear", "Linear", "https://mcp.linear.app/mcp", "Issues, projetos e ciclos", category = "Produtividade"),
+        Catalog("atlassian", "Atlassian (Jira e Confluence)", "https://mcp.atlassian.com/v1/sse", "Issues do Jira e páginas do Confluence", category = "Produtividade"),
+        Catalog("asana", "Asana", "https://mcp.asana.com/sse", "Tarefas, projetos e equipes", category = "Produtividade"),
+        Catalog("monday", "monday.com", "https://mcp.monday.com/sse", "Quadros, itens e atualizações", category = "Produtividade"),
+        Catalog("box", "Box", "https://mcp.box.com", "Arquivos e pastas no Box", category = "Produtividade"),
+        Catalog("intercom", "Intercom", "https://mcp.intercom.com/mcp", "Conversas e contatos de suporte", category = "Produtividade"),
+        // Design e conteúdo
+        Catalog("canva", "Canva", "https://mcp.canva.com/mcp", "Designs, modelos e exportações", category = "Design e sites"),
+        Catalog("figma", "Figma", "https://mcp.figma.com/mcp", "Arquivos, frames e componentes de design", category = "Design e sites"),
+        Catalog("webflow", "Webflow", "https://mcp.webflow.com/sse", "Sites, páginas e CMS", category = "Design e sites"),
+        Catalog("wix", "Wix", "https://mcp.wix.com/sse", "Sites, lojas e conteúdo da Wix", category = "Design e sites"),
+        Catalog("invideo", "invideo", "https://mcp.invideo.io/sse", "Criação de vídeos a partir de texto", category = "Design e sites"),
+        // Pagamentos e vendas
+        Catalog("stripe", "Stripe", "https://mcp.stripe.com", "Clientes, pagamentos, produtos e faturas", category = "Pagamentos"),
+        Catalog("paypal", "PayPal", "https://mcp.paypal.com/mcp", "Pedidos, faturas e transações", category = "Pagamentos"),
+        Catalog("square", "Square", "https://mcp.squareup.com/sse", "Vendas, catálogo e clientes", category = "Pagamentos"),
+        Catalog("mercadopago", "Mercado Pago", "https://mcp.mercadopago.com/mcp", "Pagamentos, links e documentação do Mercado Pago", category = "Pagamentos"),
     )
+
+    /** Categorias na ordem de exibição. */
+    val categories: List<String> get() = catalog.map { it.category }.distinct()
 
     /** Busca servidores MCP remotos no registro oficial. Usa busca remota e fallback local para versões do registro que não aceitam o parâmetro search. */
     suspend fun searchRegistry(query: String, limit: Int = 30): List<Catalog> = withContext(Dispatchers.IO) {
@@ -107,6 +140,41 @@ object Connectors {
             val matching = out.filter { it.name.contains(q, true) || it.description.contains(q, true) || it.url.contains(q, true) }
             matching
         }
+    }
+
+    /**
+     * Lista o Registro MCP oficial (registry.modelcontextprotocol.io — aberto e gratuito) página a página,
+     * mantendo só servidores com endpoint remoto https e só a versão mais recente de cada um.
+     */
+    suspend fun browseRegistry(maxPages: Int = 6, pageSize: Int = 100): List<Catalog> = withContext(Dispatchers.IO) {
+        val byName = LinkedHashMap<String, Catalog>()
+        var cursor: String? = null
+        for (page in 0 until maxPages) {
+            val url = "https://registry.modelcontextprotocol.io/v0/servers?limit=$pageSize" + (cursor?.let { "&cursor=" + Uri.encode(it) } ?: "")
+            val body = httpCall("mcp-registry", Request.Builder().url(url).header("Accept", "application/json").build(), "registry page; body omitted").use { r ->
+                if (!r.isSuccessful) error("Registro MCP respondeu HTTP ${r.code}")
+                r.body?.string().orEmpty()
+            }
+            val root = JSONObject(body)
+            val servers = root.optJSONArray("servers") ?: JSONArray()
+            for (i in 0 until servers.length()) {
+                val wrap = servers.optJSONObject(i) ?: continue
+                val srv = wrap.optJSONObject("server") ?: continue
+                val meta = wrap.optJSONObject("_meta")?.optJSONObject("io.modelcontextprotocol.registry/official")
+                if (meta?.optString("status")?.let { it.isNotBlank() && it != "active" } == true) continue
+                val name = srv.optString("name")
+                if (name.isBlank()) continue
+                var remote: String? = null
+                srv.optJSONArray("remotes")?.let { rem -> for (j in 0 until rem.length()) rem.optJSONObject(j)?.optString("url")?.takeIf { it.startsWith("https://") }?.let { if (remote == null) remote = it } }
+                val u = remote ?: continue
+                val id = name.lowercase().replace(Regex("[^a-z0-9]+"), "_").trim('_').take(80)
+                val title = srv.optString("title").ifBlank { name.substringAfterLast('/') }
+                // Entradas repetidas do mesmo servidor: fica a última (versões mais novas vêm depois).
+                byName[name] = Catalog(id, title, u, srv.optString("description").take(200), needsAuth = true, category = "Registro MCP")
+            }
+            cursor = root.optJSONObject("metadata")?.optString("nextCursor")?.takeIf { it.isNotBlank() } ?: break
+        }
+        byName.values.filter { cat -> catalog.none { it.url.trimEnd('/') == cat.url.trimEnd('/') } }.sortedBy { it.name.lowercase() }
     }
 
     private val baseHttp = OkHttpClient.Builder().connectTimeout(12, TimeUnit.SECONDS).readTimeout(30, TimeUnit.SECONDS).callTimeout(45, TimeUnit.SECONDS).retryOnConnectionFailure(true).build()
@@ -355,7 +423,8 @@ object Connectors {
             val arr = runCatching { JSONArray(c.toolsJson) }.getOrNull() ?: return@forEach
             for (i in 0 until minOf(arr.length(), 40)) {
                 val t = arr.getJSONObject(i)
-                val name = ("mcp_${safe(c.id)}__${safe(t.getString("name"))}").take(64)
+                if (c.toolPolicy[t.getString("name")] == POLICY_BLOCK) continue  // bloqueada: o modelo nem vê a ferramenta
+                val name = toolFunctionName(c.id, t.getString("name"))
                 val schema = t.optJSONObject("inputSchema")?.toString() ?: "{\"type\":\"object\",\"properties\":{}}"
                 val schemaEl = runCatching { kotlinx.serialization.json.Json.parseToJsonElement(schema) as JsonObject }.getOrNull()
                 out += buildJsonObject {
@@ -371,8 +440,30 @@ object Connectors {
         return out
     }
 
+    const val POLICY_ALLOW = "allow"
+    const val POLICY_ASK = "ask"
+    const val POLICY_BLOCK = "block"
+
+    fun toolFunctionName(connectorId: String, tool: String): String = ("mcp_${safe(connectorId)}__${safe(tool)}").take(64)
+
+    /** Política da ferramenta chamada pelo modelo (mcp_<conector>__<ferramenta>), ou null = padrão do app. */
+    fun policyFor(store: Store, fnName: String): String? {
+        for (c in store.state.value.connectors) {
+            if (c.toolPolicy.isEmpty() || !fnName.startsWith("mcp_${safe(c.id)}__")) continue
+            c.toolPolicy.entries.firstOrNull { (tool, _) -> toolFunctionName(c.id, tool) == fnName }?.let { return it.value }
+        }
+        return null
+    }
+
+    /** Nomes das ferramentas de um conector (para a tela de permissões). */
+    fun toolNames(c: Connector): List<Pair<String, String>> = runCatching {
+        val arr = JSONArray(c.toolsJson ?: "[]")
+        (0 until arr.length()).map { arr.getJSONObject(it).let { t -> t.getString("name") to t.optString("description") } }
+    }.getOrDefault(emptyList())
+
     /** Executa mcp_<conector>__<ferramenta> com os argumentos do modelo. */
     suspend fun callTool(store: Store, fnName: String, args: JsonObject): String = withContext(Dispatchers.IO) {
+        if (policyFor(store, fnName) == POLICY_BLOCK) return@withContext "RECUSADO: esta ferramenta está bloqueada pelo usuário em Conectores › Permissões das ferramentas."
         val c = store.state.value.connectors.firstOrNull { fnName.startsWith("mcp_${safe(it.id)}__") }
             ?: return@withContext "Conector não encontrado para $fnName"
         val arr = runCatching { JSONArray(c.toolsJson) }.getOrNull() ?: JSONArray()
