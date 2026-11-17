@@ -2916,6 +2916,20 @@ class AgentRunner(
         return plan to kept
     }
 
+    /** Recusa abrir no browser um app que o hub cobre antes de tentar o conector nesta tarefa (ver ConnectorRouting.browserGuard). */
+    private fun hubBrowserGuard(sessionId: String, url: String): String? {
+        val hubRef = dev.cueopen.app.connectors.ActivepiecesHub.REF
+        val hub = store.state.value.connectors.firstOrNull { it.gatewayRef == hubRef && it.enabled && it.connectedAt != null } ?: return null
+        val agent = store.agent(store.session(sessionId)?.agentId)
+        if (agent?.useConnectorHub == false) return null
+        val prefix = "mcp_" + hub.id.replace(Regex("[^A-Za-z0-9_]"), "_")
+        val items = store.session(sessionId)?.items.orEmpty()
+        val sinceUser = items.drop(items.indexOfLast { it is ChatItem.User }.coerceAtLeast(0))
+        val hubSteps = sinceUser.filterIsInstance<ChatItem.Step>().filter { it.tool.startsWith(prefix + "__") }
+        val failures = hubSteps.count { it.status == StepStatus.ERROR || it.result.startsWith("ERRO") || it.result.startsWith("Falha") || it.result.contains("❌") }
+        return ConnectorRouting.browserGuard(url, true, prefix, hubSteps.size, failures, hub.inventory)
+    }
+
     private fun lastUserText(s: Session): String = (s.items.lastOrNull { it is ChatItem.User } as? ChatItem.User)?.text.orEmpty()
 
     /** Tudo o que pode ser marcado com @: skills, conectores (MCP e UI) e agents. */
@@ -5049,7 +5063,9 @@ class AgentRunner(
                     val guest = raw.removePrefix("file://").let { if (raw.startsWith("file://")) it.substringBefore('?').substringBefore('#') else it }
                     val isSandboxPath = guest.startsWith("/root") || guest.startsWith("/public") || guest.startsWith("/home") || (raw.startsWith("file://") && !guest.startsWith("/data/") && !guest.startsWith("/storage/") && !guest.startsWith("/sdcard"))
                     val hostF = if (isSandboxPath) sandbox.hostFile(guest, sessionId) else null
-                    if (hostF != null && !hostF.exists()) {
+                    val hubGuard = if (hostF != null) null else hubBrowserGuard(sessionId, raw)
+                    if (hubGuard != null) hubGuard
+                    else if (hostF != null && !hostF.exists()) {
                         "ERROR: arquivo não existe no workspace: $guest. Use file_list para achar o caminho certo (arquivos de conectores ficam em /root/connectors/<id>/workspace)."
                     } else {
                         val url = hostF?.let { "file://" + it.absolutePath } ?: BrowserVisitLog.canonical(raw)

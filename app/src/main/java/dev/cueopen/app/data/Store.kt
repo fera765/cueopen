@@ -275,6 +275,7 @@ class Store(context: Context) {
         st.copy(memories = if (st.memories.any { it.id == m.id }) st.memories.map { if (it.id == m.id) m else it } else st.memories + m)
     }
     fun deleteMemory(id: String) = update { it.copy(memories = it.memories.filterNot { m -> m.id == id }) }
+    fun deleteMemories(ids: Set<String>) = update { it.copy(memories = it.memories.filterNot { m -> m.id in ids }) }
 
     fun updateSettings(fn: (Settings) -> Settings) = update { it.copy(settings = fn(it.settings)) }
 

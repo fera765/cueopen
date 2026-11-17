@@ -21,6 +21,38 @@ object ConnectorRouting {
         "google analytics", "analytics", "slack", "zapier", "webhook", "automacao", "automatize", "fluxo", "activepieces",
     )
 
+    /** Sites de apps que o hub cobre: com o hub conectado, o browser não é o 1º caminho para eles. */
+    private val HUB_APP_HOSTS: Map<String, String> = linkedMapOf(
+        "mail.google.com" to "Gmail", "gmail.com" to "Gmail", "inbox.google.com" to "Gmail",
+        "docs.google.com" to "Google Docs/Planilhas", "sheets.google.com" to "Google Planilhas", "drive.google.com" to "Google Drive",
+        "calendar.google.com" to "Google Agenda", "outlook.live.com" to "Outlook", "outlook.office.com" to "Outlook",
+        "business.facebook.com" to "Meta Business", "adsmanager.facebook.com" to "Meta Ads", "ads.tiktok.com" to "TikTok Ads",
+        "app.hubspot.com" to "HubSpot", "dashboard.stripe.com" to "Stripe", "notion.so" to "Notion", "www.notion.so" to "Notion",
+        "airtable.com" to "Airtable", "trello.com" to "Trello", "app.slack.com" to "Slack",
+    )
+
+    fun hubAppForUrl(url: String): String? {
+        val host = runCatching { java.net.URI(url.trim()).host }.getOrNull()?.lowercase()?.removePrefix("m.") ?: return null
+        return HUB_APP_HOSTS.entries.firstOrNull { (h, _) -> host == h || host.endsWith(".$h") }?.value
+    }
+
+    /**
+     * Guarda do browser: com o hub conectado, abrir o site de um app que o hub cobre (Gmail, Planilhas…) só é
+     * permitido depois de o conector ter sido tentado e falhado nesta tarefa — assim o resultado vem do conector,
+     * não de raspagem de página, e o usuário sabe a fonte. Devolve a recusa (texto para o modelo) ou null.
+     */
+    fun browserGuard(url: String, hubConnected: Boolean, hubPrefix: String, hubCalls: Int, hubFailures: Int, inventory: String?): String? {
+        if (!hubConnected) return null
+        val app = hubAppForUrl(url) ?: return null
+        // Se o hub já sabe que esse app não está conectado, o browser é o caminho legítimo.
+        val appWord = ToolContextPlanner.norm(app.substringBefore('/').substringBefore(' '))
+        if (inventory != null && inventory.isNotBlank() && !ToolContextPlanner.norm(inventory).contains(appWord)) return null
+        if (hubFailures > 0) return null
+        if (hubCalls > 0 && hubFailures == 0) return null
+        return "RECUSADO: $app está disponível pelo conector do hub. Use primeiro ${hubPrefix}__ap_run_action (contas em ${hubPrefix}__ap_list_connections) — " +
+            "o browser só é permitido se o conector falhar, e aí diga ao usuário que os dados vieram do browser."
+    }
+
     fun wantsToUseConnector(qNorm: String): Boolean =
         USE_CONNECTOR.any { qNorm.contains(it) } && CREATE_CONNECTOR.none { qNorm.contains(it) }
 
@@ -65,6 +97,7 @@ object ConnectorRouting {
                 "6a. Hub de apps (${p}__*): descubra a piece/ação com ap_research_pieces/ap_search_actions e use os nomes exatos; fluxos só para automação recorrente."
             hubInventory?.takeIf { it.isNotBlank() }?.let { lines += "6a. Contas já conectadas no hub (não precisa listar de novo se bastar): " + it.replace(Regex("\\s+"), " ").take(700) }
         }
+        lines += "6a. Transparência: na resposta final diga de onde vieram os dados (ex.: \"via conector Gmail\" ou \"via browser, porque o conector falhou: <motivo>\")."
         if (mentioned.isNotEmpty()) lines += "6a. O usuário marcou com @: " + mentioned.joinToString() + ". Use exatamente esse(s) recurso(s) — sem procurar alternativas."
         return lines
     }

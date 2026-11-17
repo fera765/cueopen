@@ -799,8 +799,16 @@ private fun ShortcutTile(sc: DrawerShortcut, modifier: Modifier) {
             Box(Modifier.size(42.dp).clip(RoundedCornerShape(14.dp)).background(tint.copy(alpha = if (c.dark) 0.18f else 0.14f)), contentAlignment = Alignment.Center) {
                 Icon(sc.icon, null, Modifier.size(20.dp), tint = tint)
             }
-            if (sc.badge != null) Box(Modifier.align(Alignment.TopEnd).offset(x = 4.dp, y = (-4).dp).clip(CircleShape).background(c.accent).padding(horizontal = 5.dp, vertical = 1.dp)) {
-                Text(sc.badge, color = Color.White, fontSize = 9.sp, fontWeight = FontWeight.Bold)
+            // Selo redondo de tamanho fixo: o número se ajusta ao círculo (até "99+"), o círculo nunca cresce.
+            if (sc.badge != null) {
+                val n = sc.badge.toIntOrNull()
+                val label = if (n != null && n > 99) "99+" else sc.badge
+                Box(Modifier.align(Alignment.TopEnd).offset(x = 5.dp, y = (-5).dp).size(20.dp).clip(CircleShape).background(c.accent)
+                    .border(1.5.dp, c.bg, CircleShape), contentAlignment = Alignment.Center) {
+                    Text(label, color = Color.White, fontWeight = FontWeight.Bold, maxLines = 1, softWrap = false,
+                        fontSize = when (label.length) { 1 -> 10.sp; 2 -> 9.sp; else -> 7.sp },
+                        style = androidx.compose.ui.text.TextStyle(platformStyle = androidx.compose.ui.text.PlatformTextStyle(includeFontPadding = false), lineHeight = 10.sp))
+                }
             }
         }
         Spacer(Modifier.height(4.dp))

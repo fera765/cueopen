@@ -78,3 +78,26 @@ class MentionsTest {
         assertTrue(Mentions.find("@glassers", targets).isEmpty())
     }
 }
+
+class HubBrowserGuardTest {
+    private val pfx = "mcp_activepieces_hub"
+
+    @Test fun gmailInBrowserIsRefusedBeforeTryingTheConnector() {
+        val r = ConnectorRouting.browserGuard("https://mail.google.com/mail/u/0/#inbox", true, pfx, hubCalls = 0, hubFailures = 0, inventory = "Gmail (lord@x.com)")
+        assertTrue(r!!.startsWith("RECUSADO"))
+        assertTrue(r.contains("${pfx}__ap_run_action"))
+    }
+
+    @Test fun browserAllowedWhenConnectorFailedOrAppNotConnectedOrUnrelatedSite() {
+        assertEquals(null, ConnectorRouting.browserGuard("https://mail.google.com", true, pfx, 2, 1, "Gmail"))
+        assertEquals(null, ConnectorRouting.browserGuard("https://mail.google.com", true, pfx, 0, 0, "Slack (time)"))
+        assertEquals(null, ConnectorRouting.browserGuard("https://g1.globo.com", true, pfx, 0, 0, null))
+        assertEquals(null, ConnectorRouting.browserGuard("https://mail.google.com", false, pfx, 0, 0, null))
+    }
+
+    @Test fun recognizesHubAppHosts() {
+        assertEquals("Gmail", ConnectorRouting.hubAppForUrl("https://mail.google.com/mail"))
+        assertEquals("Google Docs/Planilhas", ConnectorRouting.hubAppForUrl("https://docs.google.com/spreadsheets/d/1"))
+        assertEquals(null, ConnectorRouting.hubAppForUrl("https://www.google.com/search?q=x"))
+    }
+}

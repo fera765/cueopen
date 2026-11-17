@@ -742,7 +742,32 @@ fun MemoryScreen(nav: NavController) {
     var q by remember { mutableStateOf("") }
     var new by remember { mutableStateOf("") }
     val list = st.memories.filter { q.isBlank() || it.text.contains(q, true) || it.tags.any { t -> t.contains(q, true) } }.sortedByDescending { it.lastUsedAt }
-    Scaffold(containerColor = c.bg, topBar = { CueTopBar("Memória", { nav.popBackStack() }) }) { pad ->
+    // Modo seleção ("Excluir…"): checkbox em cada memória + "Selecionar tudo"; nada é apagado até confirmar no rodapé.
+    var selecting by remember { mutableStateOf(false) }
+    var selected by remember { mutableStateOf(setOf<String>()) }
+    var confirmDelete by remember { mutableStateOf(false) }
+    androidx.activity.compose.BackHandler(enabled = selecting) { selecting = false; selected = emptySet() }
+    if (confirmDelete) AlertDialog(onDismissRequest = { confirmDelete = false },
+        title = { Text("Excluir ${selected.size} memória${if (selected.size == 1) "" else "s"}?") },
+        text = { Text("Essa ação não pode ser desfeita.") },
+        confirmButton = { TextButton({ app.store.deleteMemories(selected); confirmDelete = false; selecting = false; selected = emptySet() }) { Text("Excluir", color = c.err) } },
+        dismissButton = { TextButton({ confirmDelete = false }) { Text("Cancelar") } })
+    Scaffold(containerColor = c.bg, topBar = {
+        CueTopBar("Memória", { if (selecting) { selecting = false; selected = emptySet() } else nav.popBackStack() }) {
+            if (!selecting && st.memories.isNotEmpty()) TextButton({ selecting = true; selected = emptySet() }) {
+                Icon(Icons.Rounded.DeleteSweep, null, Modifier.size(18.dp), tint = c.err); Spacer(Modifier.width(4.dp)); Text("Excluir…", color = c.err)
+            }
+        }
+    }, bottomBar = {
+        if (selecting) Row(Modifier.fillMaxWidth().background(c.surface).navigationBarsPadding().padding(horizontal = 16.dp, vertical = 10.dp),
+            horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
+            OutlinedButton({ selecting = false; selected = emptySet() }, Modifier.weight(1f)) { Text("Cancelar") }
+            Button({ confirmDelete = true }, Modifier.weight(1f), enabled = selected.isNotEmpty(),
+                colors = ButtonDefaults.buttonColors(containerColor = c.err, contentColor = Color.White)) {
+                Icon(Icons.Rounded.DeleteOutline, null, Modifier.size(18.dp)); Spacer(Modifier.width(6.dp)); Text("Deletar (${selected.size})")
+            }
+        }
+    }) { pad ->
         LazyColumn(Modifier.padding(pad), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             item {
                 // card de destaque
@@ -772,9 +797,24 @@ fun MemoryScreen(nav: NavController) {
                     colors = OutlinedTextFieldDefaults.colors(focusedBorderColor = c.ink, unfocusedBorderColor = c.line, focusedContainerColor = c.surface, unfocusedContainerColor = c.surface))
             }
             if (list.isEmpty()) item { EmptyState(Icons.Rounded.Psychology, "Sem memórias", "Elas aparecem aqui conforme o agente aprende sobre você e seus projetos.") }
+            if (selecting && list.isNotEmpty()) item {
+                val allIds = list.map { it.id }.toSet()
+                val all = selected.containsAll(allIds)
+                Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(c.surface2)
+                    .clickable { selected = if (all) selected - allIds else selected + allIds }.padding(horizontal = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Checkbox(all, { v -> selected = if (v) selected + allIds else selected - allIds }, colors = CheckboxDefaults.colors(checkedColor = c.err))
+                    Text("Selecionar tudo" + if (q.isNotBlank()) " (da busca)" else "", fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+                    Text("${selected.size} selecionada${if (selected.size == 1) "" else "s"}", fontSize = 12.sp, color = c.ink3, modifier = Modifier.padding(end = 10.dp))
+                }
+            }
             items(list, key = { it.id }) { m ->
                 val agentName = m.agentId?.let { id -> st.agents.firstOrNull { it.id == id }?.name }
-                CueCard {
+                val isSel = m.id in selected
+                CueCard(onClick = if (selecting) ({ selected = if (isSel) selected - m.id else selected + m.id }) else null) {
+                    if (selecting) Row(verticalAlignment = Alignment.CenterVertically) {
+                        Checkbox(isSel, { v -> selected = if (v) selected + m.id else selected - m.id }, colors = CheckboxDefaults.colors(checkedColor = c.err))
+                        Text(if (isSel) "Selecionada" else "Toque para selecionar", fontSize = 12.sp, color = c.ink3)
+                    }
                     Text(m.text, fontSize = 14.sp, lineHeight = 20.sp)
                     Spacer(Modifier.height(8.dp))
                     Row(verticalAlignment = Alignment.CenterVertically) {
@@ -784,7 +824,7 @@ fun MemoryScreen(nav: NavController) {
                         if (m.tags.isNotEmpty()) { Spacer(Modifier.width(8.dp)); Text(m.tags.joinToString(" · "), fontSize = 11.sp, color = c.ink3, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f)) }
                         else Spacer(Modifier.weight(1f))
                         if (m.uses > 0) Text("${m.uses}×", fontSize = 11.sp, color = c.ink3)
-                        IconButton({ app.store.deleteMemory(m.id) }, Modifier.size(32.dp)) { Icon(Icons.Rounded.Close, "Excluir", Modifier.size(16.dp), tint = c.ink3) }
+                        if (!selecting) IconButton({ app.store.deleteMemory(m.id) }, Modifier.size(32.dp)) { Icon(Icons.Rounded.Close, "Excluir", Modifier.size(16.dp), tint = c.ink3) }
                     }
                 }
             }
