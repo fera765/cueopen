@@ -45,14 +45,17 @@ class Store(context: Context) {
         val missing = BuiltInSkills.all.filter { b -> s.skills.none { it.id == b.id } }
         // Tarefas que estavam rodando quando o app morreu viram "interrompidas"
         s.copy(
-            skills = s.skills + missing,
+            skills = (s.skills + missing).filterNot { it.builtIn && it.id in BuiltInSkills.retiredIds },
             // Migra uma única vez o consentimento de background dos agentes já autônomos;
             // depois disso, a remoção da capability pelo usuário nunca é revertida no próximo load.
             agents = s.agents.map { agent ->
                 val activeCaps = dev.cueopen.app.device.DeviceCapPolicy.removeRetiredCapabilities(agent.deviceCaps)
                 val migrated = dev.cueopen.app.device.DeviceCapPolicy.migrateLegacyBackgroundConsent(
                     activeCaps, agent.autonomous, s.settings.deviceBackgroundConsentMigrated)
-                if (migrated == agent.deviceCaps) agent else agent.copy(deviceCaps = migrated)
+                (if (migrated == agent.deviceCaps) agent else agent.copy(deviceCaps = migrated)).let { a ->
+                    // Skills nativas retiradas deixam de estar ligadas ao agent.
+                    if (a.skillIds.any { it in BuiltInSkills.retiredIds }) a.copy(skillIds = a.skillIds.filterNot { it in BuiltInSkills.retiredIds }) else a
+                }
             },
             settings = s.settings.let { st ->
                 st.copy(
