@@ -29,6 +29,7 @@ object ToolContextPlanner {
         "schedule" to setOf("sleep", "set_schedule", "cron_add", "cron_list", "cron_remove"),
         "channels" to setOf("send_file"),
         "pages" to setOf("page_create", "page_update", "page_read", "page_list"),
+        "live" to setOf("live_server"),
         "skills_admin" to setOf("skill_install", "create_skill", "skill_list", "skill_revise"),
         "wallet" to setOf("wallet_get_address", "wallet_get_balance", "wallet_list_tokens", "wallet_swap",
             "market_price", "market_candles", "market_liquidity", "market_discover", "market_token_info",
@@ -55,6 +56,10 @@ object ToolContextPlanner {
         "schedule" to listOf("monitor", "acompanh", "a cada", "agend", "todo dia", "toda segunda", "amanhã às", "às ", "toda hora", "de hora em hora", "continu", "periodic", "lembr", "aguard", "espera", "minutos", "vela"),
         // Só pedidos explícitos de Fluwy Pages; "crie uma página html/site" continua sendo arquivo comum.
         "pages" to listOf("fluwy pages", "pages", "page_", "kanban", "quadro", "painel", "dashboard", "checklist", "tracker", "acompanhamento"),
+        // Live Server: só quando o usuário pede para publicar/expor (não em qualquer menção a site).
+        "live" to listOf("publique", "publicar", "publica o", "publica a", "publicacao", "deploy", "coloque no ar", "colocar no ar", "por no ar", "ponha no ar",
+            "link publico", "url publica", "endereco publico", "expor", "exponha", "hospede", "hospedar", "deixe online", "deixar online", "acessar de fora",
+            "compartilhar o site", "live server", "go live"),
         "channels" to listOf("telegram", "discord", "slack", "envie o arquivo", "enviar o arquivo", "mande o arquivo", "mandar o arquivo", "envie a imagem", "mande a imagem", "enviar imagem", "mandar imagem", "envie o pdf", "mande o pdf", "enviar o relatório", "mande o relatório"),
         "skills_admin" to listOf("crie uma skill", "criar skill", "nova skill", "salve como skill", "skill.md", "instale a skill", "instalar skill", "instalar a skill", "install skill", "set up http", "setup http", "skill local"),
         "wallet" to listOf("carteira", "wallet", "solana", "sol ", "token", "swap", "saldo", "comprar", "vender", "day trade", "daytrade", "trade", "cripto", "crypto", "memecoin", "stop loss", "take profit", "liquidez", "pump", "jupiter", "usdc"),

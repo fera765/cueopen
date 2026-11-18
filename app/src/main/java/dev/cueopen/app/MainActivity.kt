@@ -59,6 +59,11 @@ class MainActivity : ComponentActivity() {
         dev.cueopen.app.browser.OffscreenStage.onActivityResumed(this)
         // Hub de conectores sobe sozinho ao abrir o app (se instalado); para por inatividade para poupar bateria.
         if (!AppExit.exited(this)) runCatching { dev.cueopen.app.connectors.ActivepiecesHub.onAppForeground() }
+        // Live Server: projetos publicados voltam ao ar sozinhos, na mesma URL.
+        if (!AppExit.exited(this) && !dev.cueopen.app.live.LiveServer.restoreStarted) {
+            dev.cueopen.app.live.LiveServer.restoreStarted = true
+            (application as CueApp).applicationScope.launch(kotlinx.coroutines.Dispatchers.IO) { runCatching { dev.cueopen.app.live.LiveServer.restoreActive() } }
+        }
     }
 
     override fun onPause() {

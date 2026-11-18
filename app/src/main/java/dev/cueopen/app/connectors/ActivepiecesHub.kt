@@ -1,6 +1,7 @@
 package dev.cueopen.app.connectors
 
 import dev.cueopen.app.CueApp
+import dev.cueopen.app.sandbox.Sandbox
 import dev.cueopen.app.sandbox.SandboxService
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -76,7 +77,7 @@ object ActivepiecesHub {
      */
     private suspend fun ensureRedis(): Boolean {
         if (portOpen(REDIS_PORT)) return true
-        val has = sandbox.exec("command -v redis-server >/dev/null || apk add --no-cache redis 2>&1 | tail -n 2; command -v redis-server",
+        val has = if (File(sandbox.alpineDir, "usr/bin/redis-server").exists()) Sandbox.ExecResult(0, "", false) else sandbox.exec("command -v redis-server >/dev/null || apk add --no-cache redis 2>&1 | tail -n 2; command -v redis-server",
             cwd = "/tmp", timeoutSec = 600, onOutput = { logLine(it) }, idleTimeoutSec = 300)
         if (has.exitCode != 0) { logLine("❌ Não consegui instalar o Redis no Linux do app.\n"); return false }
         redisProc?.destroy()
@@ -113,6 +114,7 @@ object ActivepiecesHub {
      */
     private val ESBUILD_FIX = """
         |ok() { env -i /usr/bin/esbuild --version >/dev/null 2>&1; }
+        |[ -f /opt/.fluwy-esbuild-ok ] && [ -x /usr/bin/esbuild ] && exit 0
         |if ok; then echo "[fluwy] esbuild ok: $(env -i /usr/bin/esbuild --version)"; else
         |  for c in $(find /usr/local/lib/node_modules /usr/src/app/node_modules -maxdepth 6 -type f -path '*@esbuild/linux-*/bin/esbuild' 2>/dev/null); do
         |    if "${'$'}c" --version >/dev/null 2>&1; then cp -fL "${'$'}c" /usr/bin/esbuild && chmod 755 /usr/bin/esbuild; ok && break
@@ -128,7 +130,38 @@ object ActivepiecesHub {
         |  if ok; then cp -f /usr/bin/esbuild /usr/local/bin/esbuild 2>/dev/null; echo "[fluwy] esbuild pronto: $(env -i /usr/bin/esbuild --version)"
         |  else echo "[fluwy] ERRO: esbuild indisponível: $(env -i /usr/bin/esbuild --version 2>&1 | head -c 200)"; fi
         |fi
-        |node -e "try{console.log('[fluwy] spawn esbuild (como o motor):',require('child_process').execFileSync('esbuild',['--version'],{env:{}}).toString().trim())}catch(e){console.log('[fluwy] spawn esbuild falhou:',e.code||e.message)}" 2>&1
+        |node -e "try{console.log('[fluwy] spawn esbuild (como o motor):',require('child_process').execFileSync('esbuild',['--version'],{env:{}}).toString().trim())}catch(e){console.log('[fluwy] spawn esbuild falhou:',e.code||e.message);process.exit(1)}" 2>&1 && touch /opt/.fluwy-esbuild-ok
+        |""".trimMargin()
+
+
+    /**
+     * Início rápido: app e worker direto no Node — sem PM2 e sem `--enable-source-maps` (o parse dos source maps
+     * de um bundle grande é o que mais pesava no boot). O token do worker é gerado uma vez e reaproveitado.
+     * Se o app cair nos primeiros segundos, marca o modo direto como incompatível e volta ao entrypoint oficial.
+     */
+    private val START_SCRIPT = """
+        |APP=packages/server/api/dist/src/bootstrap.js
+        |WORKER=packages/server/worker/dist/src/bootstrap.js
+        |export AP_CONTAINER_TYPE=WORKER_AN${'$'}APP
+        |if [ -f "${'$'}APP" ] && [ -f "${'$'}WORKER" ] && [ ! -f /opt/ap-data/.fluwy-direct-failed ]; then
+        |  if [ ! -s /opt/ap-secrets/worker-token ]; then
+        |    node -e "const j=require('jsonwebtoken');const c=require('crypto');process.stdout.write(j.sign({id:c.randomUUID(),type:'WORKER'},process.env.AP_JWT_SECRET,{expiresIn:'100y',keyid:'1',algorithm:'HS256',issuer:'activepieces'}))" > /opt/ap-secrets/worker-token.tmp && mv -f /opt/ap-secrets/worker-token.tmp /opt/ap-secrets/worker-token
+        |  fi
+        |  export AP_WORKER_TOKEN="$(cat /opt/ap-secrets/worker-token 2>/dev/null)"
+        |  echo "[fluwy] início direto (sem PM2 e sem source maps)"
+        |  AP_CONTAINER_TYPE=APP node "${'$'}APP" & A=${'$'}!
+        |  node "${'$'}WORKER" & W=${'$'}!
+        |  trap 'kill ${'$'}A ${'$'}W 2>/dev/null' TERM INT HUP
+        |  i=0; while [ ${'$'}i -lt 25 ]; do kill -0 ${'$'}A 2>/dev/null || break; sleep 1; i=${'$'}((i+1)); done
+        |  if ! kill -0 ${'$'}A 2>/dev/null; then
+        |    echo "[fluwy] modo direto falhou; voltando ao entrypoint oficial"; kill ${'$'}W 2>/dev/null
+        |    touch /opt/ap-data/.fluwy-direct-failed; exec sh ./docker-entrypoint.sh
+        |  fi
+        |  while kill -0 ${'$'}A 2>/dev/null && kill -0 ${'$'}W 2>/dev/null; do sleep 2; done
+        |  kill ${'$'}A ${'$'}W 2>/dev/null; exit 1
+        |else
+        |  exec sh ./docker-entrypoint.sh
+        |fi
         |""".trimMargin()
 
     fun installed(): Boolean = runCatching { File(rootfs(), "usr/src/app/docker-entrypoint.sh").exists() }.getOrDefault(false)
@@ -220,6 +253,7 @@ object ActivepiecesHub {
             val synced = File(rootfs(), "opt/ap-data/.fluwy-synced")
             if (synced.exists() && System.currentTimeMillis() - synced.lastModified() > 7L * 24 * 3600_000) synced.delete()
             File(rootfs(), "opt/fluwy-esbuild.sh").writeText(ESBUILD_FIX)
+            File(rootfs(), "opt/fluwy-start.sh").writeText(START_SCRIPT)
             val t0 = System.currentTimeMillis()
             val cmd = "export PATH=/usr/local/bin:/usr/local/sbin:/usr/bin:/usr/sbin:/bin:/sbin HOME=/opt/ap-home; " +
                 "mkdir -p /opt/ap-home /opt/ap-data; cd /usr/src/app; " +
@@ -234,7 +268,7 @@ object ActivepiecesHub {
                 "if [ -f /opt/ap-data/.fluwy-synced ]; then export AP_PIECES_SYNC_MODE=NONE; else export AP_PIECES_SYNC_MODE=OFFICIAL_AUTO; fi; " +
                 "export AP_JWT_SECRET=\"\$(cat /opt/ap-secrets/jwt)\" AP_ENCRYPTION_KEY=\"\$(cat /opt/ap-secrets/enc)\"; " +
                 // O PM2 avisa a cada 2 s que não lê /proc/uptime (restrição do Android): ruído que só enche o log.
-                "sh ./docker-entrypoint.sh 2>&1 | grep --line-buffered -v -e 'pidusage' -e 'Socket.IO connection error'"
+                "sh /opt/fluwy-start.sh 2>&1 | grep --line-buffered -v -e 'pidusage' -e 'Socket.IO connection error'"
             logLine("🚀 Iniciando o hub (a primeira vez pode levar alguns minutos)…\n")
             if (!ensureRedis()) { _state.value = State.ERROR; return@withContext false }
             proc = sandbox.spawn(cmd, File(hostDir(), "hub.log"), mapOf("ALPINE_ROOT" to rootfs().absolutePath))
@@ -248,7 +282,7 @@ object ActivepiecesHub {
                     return@withContext true
                 }
                 if (proc?.isAlive != true) break
-                delay(2000)
+                delay(700)
             }
             logLine("❌ O hub não iniciou.\n${lastLog().takeLast(3000)}\n")
             dev.cueopen.app.diag.ErrorLog.log("hub", "O hub não iniciou.\n${lastLog().takeLast(3000)}")
