@@ -287,10 +287,10 @@ fun ConnectorsScreen(nav: NavController) {
             }
         },
         confirmButton = { TextButton({
-            val ids = cleanupPick; cleanup = emptyList()
+            val picked = cleanup.filter { it.id in cleanupPick }; cleanup = emptyList()
             scope.launch {
-                val n = ActivepiecesHub.deleteFlows(ids)
-                android.widget.Toast.makeText(ctx, "$n automação(ões) apagada(s).", android.widget.Toast.LENGTH_SHORT).show()
+                val msg = runCatching { ActivepiecesHub.deleteFlows(picked) }.getOrElse { "Falha: ${it.message}" }
+                android.widget.Toast.makeText(ctx, msg, android.widget.Toast.LENGTH_LONG).show()
             }
         }, enabled = cleanupPick.isNotEmpty()) { Text("Apagar (${cleanupPick.size})", color = c.err) } },
         dismissButton = { TextButton({ cleanup = emptyList() }) { Text("Cancelar") } })

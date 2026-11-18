@@ -122,8 +122,11 @@ object ActivepiecesHub {
         |  done
         |  if ! ok; then
         |    # O binário nativo (Go) não executa neste aparelho: usa o esbuild-wasm (mesma CLI, roda no Node).
-        |    W="$(npm root -g)/esbuild-wasm/bin/esbuild"
-        |    if [ ! -f "${'$'}W" ]; then echo "[fluwy] instalando esbuild-wasm…"; npm install -g --no-fund --no-audit esbuild-wasm@0.25.0 >/tmp/esbw.log 2>&1 || tail -n 5 /tmp/esbw.log; fi
+        |    # Pasta própria (--prefix): o npm -g deste ambiente aponta para uma pasta que já tem um "bin/esbuild"
+        |    # e falha com EEXIST; instalar localmente em /opt/esbuild-wasm evita esse conflito.
+        |    W=/opt/esbuild-wasm/node_modules/esbuild-wasm/bin/esbuild
+        |    if [ ! -f "${'$'}W" ]; then echo "[fluwy] instalando esbuild-wasm…"; mkdir -p /opt/esbuild-wasm
+        |      env -u PREFIX -u npm_config_prefix npm install --prefix /opt/esbuild-wasm --no-save --no-fund --no-audit --no-package-lock esbuild-wasm@0.25.0 >/tmp/esbw.log 2>&1 || tail -n 5 /tmp/esbw.log; fi
         |    NODE="$(command -v node)"
         |    printf '#!/bin/sh\nexec %s %s "${'$'}@"\n' "${'$'}NODE" "${'$'}W" > /usr/bin/esbuild && chmod 755 /usr/bin/esbuild
         |  fi
@@ -359,17 +362,43 @@ object ActivepiecesHub {
         return dev.cueopen.app.agent.HubGuard.cleanupCandidates(dev.cueopen.app.agent.HubGuard.parseFlows(out))
     }
 
-    /** Apaga as automações escolhidas pelo usuário. Devolve quantas saíram. */
-    suspend fun deleteFlows(ids: Collection<String>): Int {
+    /**
+     * Apaga as automações escolhidas pelo usuário e devolve o resumo para mostrar na tela. Versões do hub sem a
+     * ferramenta `ap_delete_flow` (o MCP do Activepieces só a ganhou recentemente) não permitem apagar: nesse caso a
+     * automação vai para a "lixeira" (renomeada com 🗑, fora das próximas limpezas) em vez de falhar em silêncio.
+     */
+    suspend fun deleteFlows(flows: Collection<dev.cueopen.app.agent.HubGuard.FlowLine>): String {
         val store = CueApp.instance.store
-        var n = 0
-        ids.forEach { id ->
-            val r = Connectors.callTool(store, fn("ap_delete_flow"), kotlinx.serialization.json.buildJsonObject { put("flowId", kotlinx.serialization.json.JsonPrimitive(id)) })
-            if (!r.startsWith("ERRO") && !r.startsWith("Falha") && !r.contains("❌")) n++
-            else dev.cueopen.app.diag.ErrorLog.log("hub", "Falha ao apagar automação $id: ${r.take(300)}")
+        val hub = store.state.value.connectors.firstOrNull { it.gatewayRef == REF }
+        var names = hub?.let { h -> Connectors.toolNames(h).map { it.first } }.orEmpty()
+        if ("ap_delete_flow" !in names && hub != null) names = Connectors.toolNames(Connectors.refreshTools(store, hub)).map { it.first }
+        val canDelete = "ap_delete_flow" in names
+        val canRename = "ap_rename_flow" in names
+        val okRes = { r: String -> !r.startsWith("ERRO") && !r.startsWith("Falha") && !r.contains("❌") }
+        var deleted = 0; var archived = 0; var failed = 0
+        flows.forEach { f ->
+            val id = kotlinx.serialization.json.JsonPrimitive(f.id)
+            when {
+                canDelete -> {
+                    val r = Connectors.callTool(store, fn("ap_delete_flow"), kotlinx.serialization.json.buildJsonObject { put("flowId", id) })
+                    if (okRes(r)) deleted++ else { failed++; dev.cueopen.app.diag.ErrorLog.log("hub", "Falha ao apagar automação ${f.id}: ${r.take(300)}") }
+                }
+                canRename -> {
+                    val r = Connectors.callTool(store, fn("ap_rename_flow"), kotlinx.serialization.json.buildJsonObject {
+                        put("flowId", id); put("displayName", kotlinx.serialization.json.JsonPrimitive(dev.cueopen.app.agent.HubGuard.archivedName(f.name)))
+                    })
+                    if (okRes(r)) archived++ else { failed++; dev.cueopen.app.diag.ErrorLog.log("hub", "Falha ao arquivar automação ${f.id}: ${r.take(300)}") }
+                }
+                else -> failed++
+            }
         }
-        logLine("🧹 $n automação(ões) sem uso apagada(s).\n")
-        return n
+        val msg = buildList {
+            if (deleted > 0) add("$deleted apagada(s)")
+            if (archived > 0) add("$archived movida(s) para a lixeira 🗑 (esta versão do hub não permite apagar)")
+            if (failed > 0) add("$failed não saíram${if (!canDelete && !canRename) " (esta versão do hub não permite apagar nem renomear)" else ""}")
+        }.joinToString(" · ").ifBlank { "Nada para limpar." }
+        logLine("🧹 $msg\n")
+        return msg
     }
 
     fun connector() = dev.cueopen.app.data.Connector(

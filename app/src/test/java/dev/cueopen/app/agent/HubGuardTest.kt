@@ -90,4 +90,13 @@ class HubRecipesTest {
         assertTrue(HubRecipes.promptLines(cat, ToolContextPlanner.norm("todo dia me mande os e-mails"), true, "p").joinToString().contains("every_day"))
         assertTrue(HubRecipes.promptLines(cat, ToolContextPlanner.norm("crie um site bonito"), false, "p").isEmpty())
     }
+
+    @org.junit.Test fun archivedFlowsLeaveCleanup() {
+        val flows = listOf(
+            HubGuard.FlowLine("teste envio", "a", "DISABLED", false),
+            HubGuard.FlowLine(HubGuard.archivedName("teste antigo"), "b", "DISABLED", false),
+        )
+        org.junit.Assert.assertEquals(listOf("a"), HubGuard.cleanupCandidates(flows).map { it.id })
+        org.junit.Assert.assertEquals("🗑 x", HubGuard.archivedName(HubGuard.archivedName("x")))
+    }
 }

@@ -87,6 +87,10 @@ object HubGuard {
         LINE.find(l)?.groupValues?.let { g -> FlowLine(g[1].trim(), g[2], g[3], g[4] == "published") }
     }
 
+    /** Prefixo das automações "na lixeira" (hub sem ap_delete_flow): ficam fora das próximas limpezas. */
+    const val ARCHIVE_PREFIX = "🗑 "
+    fun archivedName(name: String) = if (name.startsWith(ARCHIVE_PREFIX)) name else ARCHIVE_PREFIX + name
+
     private val TEMP = Regex("(?i)^(fluwy · )?(tmp|temp|teste|test|rascunho|draft)\\b|_tmp|tmp_|\\(teste\\)|\\btemporári")
 
     /**
@@ -96,6 +100,7 @@ object HubGuard {
     fun cleanupCandidates(flows: List<FlowLine>): List<FlowLine> {
         val out = LinkedHashMap<String, FlowLine>()
         val live = { f: FlowLine -> f.published || f.status == "ENABLED" }
+        @Suppress("NAME_SHADOWING") val flows = flows.filter { !it.name.startsWith(ARCHIVE_PREFIX) }
         flows.filter { !live(it) && TEMP.containsMatchIn(it.name) }.forEach { out[it.id] = it }
         flows.groupBy { it.name.lowercase().removePrefix(FLOW_PREFIX.lowercase()).trim() }.values.filter { it.size > 1 }.forEach { group ->
             val keep = group.firstOrNull(live) ?: group.first()
