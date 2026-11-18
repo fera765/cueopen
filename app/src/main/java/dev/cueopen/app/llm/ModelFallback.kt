@@ -52,5 +52,21 @@ object ModelFallback {
     /** Modelos em espera agora (bateram limite) e até quando. */
     fun limited(now: Long = System.currentTimeMillis()): Map<String, Long> = states.filterValues { it.until > now }.mapValues { it.value.until }
 
-    fun reset() = states.clear()
+    private val lastChosen = java.util.concurrent.ConcurrentHashMap<String, String>()
+
+    /**
+     * (OpenBot 0.73) O usuário/agente ESCOLHEU um modelo de novo (troca do principal): ele ganha uma tentativa
+     * mesmo estando em espera por erro do provedor. Se falhar de novo, volta ao alternativo e a escada de espera
+     * continua de onde estava (não recomeça em 10 min). Retorna true quando liberou a tentativa.
+     */
+    fun chosen(scope: String, model: String, now: Long = System.currentTimeMillis()): Boolean {
+        val prev = lastChosen.put(scope, model)
+        if (prev == null || prev == model) return false
+        val st = states[model] ?: return false
+        if (st.until <= now) return false
+        states[model] = State(0L, st.cooldown)
+        return true
+    }
+
+    fun reset() { states.clear(); lastChosen.clear() }
 }

@@ -173,6 +173,15 @@ class Store(context: Context) {
     }
 
     /** Cria a sessão de execução e atualiza o registro da agenda sob o mesmo lock da exclusão. */
+    internal fun setScheduledResult(taskId: String, failed: Boolean) = synchronized(stateLock) {
+        val cur = _state.value
+        if (cur.scheduled.none { it.id == taskId }) return@synchronized
+        val next = cur.copy(scheduled = cur.scheduled.map { if (it.id == taskId) it.copy(lastFailed = failed) else it })
+        revision += 1
+        _state.value = next
+        snapshots.value = VersionedState(revision, next)
+    }
+
     internal fun beginScheduledRun(taskId: String, session: Session): Boolean = synchronized(stateLock) {
         val current = _state.value
         val task = current.scheduled.firstOrNull { it.id == taskId } ?: return@synchronized false

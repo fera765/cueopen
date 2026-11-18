@@ -458,6 +458,8 @@ data class ScheduledTask(
     val enabled: Boolean = true,
     val lastRunAt: Long? = null,
     val lastSessionId: String? = null,
+    /** Última execução terminou sem resultado (erro ou resposta vazia). */
+    val lastFailed: Boolean = false,
     /** Chat de origem; excluir esse chat também encerra somente esta agenda. */
     val sourceSessionId: String? = null,
 )

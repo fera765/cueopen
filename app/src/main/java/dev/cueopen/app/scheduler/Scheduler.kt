@@ -62,7 +62,7 @@ class ScheduledWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(
         val task = app.store.state.value.scheduled.firstOrNull { it.id == id } ?: return Result.failure()
         val session = Session(title = "⏰ ${task.title}", agentId = task.agentId, scheduledTaskId = task.id)
         if (!app.store.beginScheduledRun(id, session)) return Result.failure()
-        val job = app.agent.send(session.id, task.prompt)
+        val job = app.agent.send(session.id, "[Execução agendada · horário local: ${dev.cueopen.app.agent.LocalClock.line()}]\n" + task.prompt)
         try {
             if (isStopped || !app.store.isScheduledRunActive(id, session.id)) {
                 app.agent.stop(session.id)
@@ -81,8 +81,10 @@ class ScheduledWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(
             throw cancelled
         }
         if (!app.store.isScheduledRunActive(id, session.id)) return Result.failure()
+        val failed = app.store.session(session.id)?.status == dev.cueopen.app.data.SessionStatus.ERROR
+        app.store.setScheduledResult(id, failed)
         app.store.flush()
-        if (app.store.settings.notifyOnDone) notify(app, session.id, task.title)
+        if (app.store.settings.notifyOnDone) notify(app, session.id, if (failed) "${task.title} (falhou)" else task.title)
         return Result.success()
     }
 

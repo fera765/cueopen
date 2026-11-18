@@ -516,7 +516,7 @@ fun ScheduledScreen(nav: NavController) {
                         Column(Modifier.weight(1f)) {
                             Text(t.title, fontWeight = FontWeight.SemiBold)
                             Text("${repeatLabel(t.repeat)} · desde ${dateFmt.format(Date(t.startAt))}", fontSize = 13.sp, color = c.ink2)
-                            t.lastRunAt?.let { Text("Última execução: ${dateFmt.format(Date(it))}", fontSize = 12.sp, color = c.ink3) }
+                            t.lastRunAt?.let { Text("Última execução: ${dateFmt.format(Date(it))}" + if (t.lastFailed) " · falhou" else "", fontSize = 12.sp, color = if (t.lastFailed) androidx.compose.ui.graphics.Color(0xFFE5484D) else c.ink3) }
                         }
                         Switch(t.enabled, { on -> val n = t.copy(enabled = on); app.store.upsertScheduled(n); Scheduler.schedule(ctx, n) },
                             colors = SwitchDefaults.colors(checkedTrackColor = c.ink, checkedThumbColor = c.bg))

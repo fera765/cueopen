@@ -51,4 +51,20 @@ class ModelFallbackTest {
         assertEquals("c", ModelFallback.resolve("a", "groq::b, c", t0 + 3))
         assertEquals("a", ModelFallback.resolve("a", "groq::b, c", t0 + ModelFallback.FIRST_COOLDOWN_MS + 1))
     }
+
+    @Test fun `choosing a held model again gives it one try and a new failure keeps the cooldown ladder`() {
+        val t = 1_000_000L
+        ModelFallback.chosen("ag", "main", t)
+        ModelFallback.onRateLimit("main", "alt", t)
+        assertEquals("alt", ModelFallback.resolve("main", "alt", t + 1))
+        // usuário troca para outro e volta ao principal: uma tentativa liberada
+        assertFalse(ModelFallback.chosen("ag", "alt", t + 2))
+        assertTrue(ModelFallback.chosen("ag", "main", t + 3))
+        assertEquals("main", ModelFallback.resolve("main", "alt", t + 4))
+        // falhou de novo: espera dobra (20 min), não recomeça em 10
+        ModelFallback.onRateLimit("main", "alt", t + 5)
+        assertEquals("alt", ModelFallback.resolve("main", "alt", t + 5 + ModelFallback.FIRST_COOLDOWN_MS + 1))
+        // mesma escolha repetida não libera nada
+        assertFalse(ModelFallback.chosen("ag", "main", t + 6))
+    }
 }

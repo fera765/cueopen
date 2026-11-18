@@ -898,8 +898,13 @@ private fun LlmRecoveryCard(p: ChatItem.LlmRecovery, sessionId: String?, nav: Na
         Text("⚠ " + p.category.replaceFirstChar { it.uppercase() }, fontWeight = FontWeight.SemiBold, color = c.ink, fontSize = 16.sp)
         Text("Provedor: ${p.provider}\nModelo: ${p.model}\nFalha às ${fmt.format(java.util.Date(p.time))} · ${p.attempts} tentativa(s)" +
             (if (p.round > 0) " · retomada ${p.round}/${dev.cueopen.app.llm.LlmRecovery.AUTO_RESUME_ROUNDS}" else ""), fontSize = 12.sp, color = c.ink2, lineHeight = 17.sp)
-        if (p.detail.isNotBlank()) Text(p.detail, fontSize = 12.sp, color = c.ink3, fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace)
         Text(p.advice, fontSize = 13.sp, color = c.ink)
+        if (p.detail.isNotBlank()) {
+            var showDetail by remember(p.time) { mutableStateOf(false) }
+            Text(if (showDetail) "Ocultar detalhes técnicos" else "Detalhes técnicos", fontSize = 12.sp, color = c.ink3,
+                modifier = Modifier.clickable { showDetail = !showDetail })
+            if (showDetail) Text(p.detail, fontSize = 12.sp, color = c.ink3, fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace)
+        }
         Text(when {
             p.resumeAt != null -> "Estado: suspenso. O app tenta de novo sozinho às ${fmt.format(java.util.Date(p.resumeAt))} e continua de onde parou."
             p.permanent -> "Estado: aguardando você. Este erro não se resolve sozinho."

@@ -153,8 +153,14 @@ class ContextManager(private val store: Store, private val sandbox: Sandbox, pri
         ContextOutputRetentionPolicy.filesToDelete(files, referenced).forEach { file -> runCatching { file.delete() } }
     }
 
-    private companion object {
-        val OUTPUT_POINTER = Regex("""\.cue/out/(o[0-9a-f]+_\d+\.txt)""")
+    companion object {
+        private val OUTPUT_POINTER = Regex("""\.cue/out/(o[0-9a-f]+_\d+\.txt)""")
+        const val MEMORY_MAX_CHARS = 500
+
+        /** Erro para o agente quando a memória passa do limite (null = cabe). */
+        fun memoryTooLong(text: String): String? = text.trim().length.takeIf { it > MEMORY_MAX_CHARS }?.let {
+            "ERRO: uma memória tem no máximo $MEMORY_MAX_CHARS caracteres e este texto tem $it. Salve cada fato como uma memória separada e mais curta."
+        }
     }
 
     // ---------- Camada 2 ----------
@@ -331,7 +337,7 @@ class ContextManager(private val store: Store, private val sandbox: Sandbox, pri
 
     /** Salva com deduplicação: fatos quase iguais atualizam o existente em vez de duplicar. */
     fun saveMemory(text: String, agentId: String?, tags: List<String> = emptyList()): String {
-        val t = text.trim().take(500)
+        val t = text.trim().take(MEMORY_MAX_CHARS)
         if (t.isBlank()) return "Nada a salvar."
         val dup = store.state.value.memories.firstOrNull { (it.agentId == agentId) && jaccard(it.text, t) >= 0.7 }
         return if (dup != null) {

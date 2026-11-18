@@ -1564,6 +1564,7 @@ class AgentRunner(
         val recentTexts = ArrayDeque<String>()
         // Quantas vezes seguidas o modelo ANUNCIOU uma ação ("vou pesquisar…") sem chamar ferramenta.
         var intentNoActionTurns = 0
+        var emptyReplyTurns = 0
         // Supervisão de agente de Seção: rodadas só com ferramentas, sem nenhuma frase de feedback.
         var silentRounds = 0
         // Detecção de loop de ferramentas: mesma chamada (nome+args) repetida sem progresso.
@@ -1834,6 +1835,19 @@ class AgentRunner(
                     continue
                 }
                 intentNoActionTurns = 0
+                // OpenBot 0.73: turno sem texto e sem ferramenta não é sucesso. Pede a resposta uma vez; se vier vazio
+                // de novo, encerra como falha (tarefas agendadas ficam marcadas como "falhou", não "concluída").
+                if (cNow.isBlank() && store.session(sessionId)?.continuous != true) {
+                    if (++emptyReplyTurns >= 2) {
+                        runCatching { dev.cueopen.app.diag.ErrorLog.log("agent", "Modelo terminou o turno sem texto e sem ferramentas.", sessionId, "llm") }
+                        store.addItemUnique(sessionId, ChatItem.Error(text = "O modelo terminou sem responder nada. Envie \"continue\" para tentar de novo ou troque de modelo."))
+                        store.editSession(sessionId) { it.copy(status = SessionStatus.ERROR) }
+                        return
+                    }
+                    store.editSession(sessionId) { it.copy(llm = it.llm + LlmMessage("user",
+                        "[Sistema] Sua última resposta veio vazia. Entregue agora o resultado ao usuário (ou chame a ferramenta necessária).")) }
+                    continue
+                }
                 if (store.session(sessionId)?.continuous == true) {
                     // modo contínuo: sem ferramenta = lembra de dormir até a próxima verificação
                     store.editSession(sessionId) { it.copy(llm = it.llm + LlmMessage("user", "[Sistema] Você está em modo contínuo. Use `sleep` para aguardar a próxima verificação, ou `finish` se o usuário pediu para encerrar.")) }
@@ -1983,6 +1997,7 @@ class AgentRunner(
                 // OpenBot: conteúdo externo vai como dado não confiável + falhas ganham motivo e próximo passo.
                 val durableToolOutput = ToolOutcomeAdvisor.decorate(
                     call.name, AccessibilityToolHistory.durableResult(call.name, ctxOut), result.output)
+                    .let { o -> dev.cueopen.app.browser.BrowserDownloads.drain(sessionId)?.let { "$o\n\n$it" } ?: o }
                 // Como o Manus: página pede login → o app pede ao usuário (o agente nunca digita senha), e a tarefa continua depois.
                 if (call.name.startsWith("browser_") && ToolOutcomeAdvisor.classify(call.name, result.output) == ToolOutcomeAdvisor.Reason.LOGIN_WALL)
                     runCatching { requestUserLogin(sessionId) }
@@ -2481,7 +2496,7 @@ class AgentRunner(
         val before = store.session(sid)!!
         val llmMark = before.llm.size; val itemsMark = before.items.size
         val tokMark = before.tokensIn + before.tokensOut
-        val stamp = SimpleDateFormat("dd/MM HH:mm", Locale.getDefault()).format(Date())
+        val stamp = LocalClock.line()
         val cycleSection = store.state.value.sections.firstOrNull { it.sessionId == sid && it.configured }
         cycleSection?.let { autoDone.remove(it.id); autoNudges.remove(it.id); planNudges.remove(it.id); finalReportAsked.remove(it.id) }
         store.editSession(sid) {
@@ -2867,8 +2882,11 @@ class AgentRunner(
 
     private fun primaryModel(agent: AgentProfile?): String = agent?.model?.takeIf { it.isNotBlank() } ?: store.settings.model
     /** Modelo desta chamada: o principal, ou o alternativo enquanto o principal está em limite de requisições. */
-    private fun stepModel(agent: AgentProfile?): String =
-        dev.cueopen.app.llm.ModelFallback.resolve(primaryModel(agent), fallbackChain())
+    private fun stepModel(agent: AgentProfile?): String {
+        val primary = primaryModel(agent)
+        dev.cueopen.app.llm.ModelFallback.chosen(agent?.id ?: "_default", primary)
+        return dev.cueopen.app.llm.ModelFallback.resolve(primary, fallbackChain())
+    }
 
     private fun toolName(o: kotlinx.serialization.json.JsonElement): String =
         runCatching { o.jsonObject["function"]!!.jsonObject["name"]!!.jsonPrimitive.content }.getOrDefault("")
@@ -3003,7 +3021,7 @@ class AgentRunner(
         return buildString {
             // ---- parte estável (favorece cache de prompt) ----
             appendLine("Você é ${agent?.name ?: "Cue"}, um agente autônomo de uso geral que roda dentro do app Fluwy Bot (Android) e conclui tarefas de ponta a ponta para o usuário.")
-            appendLine("Data de hoje: $date. Usuário: ${st.settings.userName.ifBlank { "não informado" }}.")
+            appendLine("Data de hoje: $date (fuso ${LocalClock.zone()}). Usuário: ${st.settings.userName.ifBlank { "não informado" }}.")
             appendLine()
             appendLine("Você tem um computador próprio, com três recursos:")
             appendLine("- Terminal Linux (Alpine, via proot), pela ferramenta `shell`. O workspace desta tarefa é ${sandbox.guestPath(sessionId)}. Instale o que faltar com `apk add`, `pip install` ou `npm i`. O usuário acompanha cada comando ao vivo.")
@@ -3038,6 +3056,9 @@ class AgentRunner(
             appendLine("5. Fatos duradouros sobre o usuário ou o projeto vão em `memory_save`; para recuperar algo antigo, use `memory_search`.")
             appendLine("6. Para usar uma skill, chame `skill_load` com o nome dela e siga as instruções carregadas.")
             appendLine("6a. " + BrowserRedirect.PROMPT_LINE)
+            appendLine("6b. Idioma: escreva TUDO no idioma do usuário — respostas, notas de status, planos, perguntas e relatórios.")
+            appendLine("6c. Antes de pedir ao usuário para conectar um app/serviço, tente com o que você já tem (conectores ligados, web, shell, browser_*). Só peça a conexão quando não houver outro caminho; depois de pedir, termine o que der por outro caminho.")
+            appendLine("6d. Downloads feitos no navegador vão para /root/workspace/downloads; o resultado chega numa linha [Download] junto da próxima saída de ferramenta.")
             run {
                 val hubRef = dev.cueopen.app.connectors.ActivepiecesHub.REF
                 val connected = store.state.value.connectors.filter { it.enabled && it.connectedAt != null && (agent?.useConnectorHub != false || it.gatewayRef != hubRef) }
@@ -3585,7 +3606,7 @@ class AgentRunner(
         add(tool("notes_write", "Escreve no NOTES.md da tarefa: a sua memória de trabalho, que volta ao seu contexto a cada passo. Registre achados, estado e próximos passos.", buildJsonObject {
             put("content", str("Texto da anotação")); put("append", bool("true = acrescenta; false = substitui tudo"))
         }, listOf("content")))
-        if (allowMultiAgent) add(tool("memory_save", "Salva na memória de longo prazo um fato duradouro sobre o usuário ou o projeto, útil em conversas futuras.", buildJsonObject {
+        if (allowMultiAgent) add(tool("memory_save", "Salva na memória de longo prazo um fato duradouro sobre o usuário ou o projeto, útil em conversas futuras. Cada memória tem no máximo ${ContextManager.MEMORY_MAX_CHARS} caracteres: um fato por memória.", buildJsonObject {
             put("fact", str("O fato, em uma frase autossuficiente")); put("scope", str("global (vale para todos os agentes) ou agent (só este)")); put("tags", strArray("Palavras-chave"))
         }, listOf("fact")))
         add(tool("memory_search", "Busca fatos na memória de longo prazo.", buildJsonObject { put("query", str("O que procurar")) }, listOf("query")))
@@ -5150,7 +5171,12 @@ class AgentRunner(
                         else {
                             val page = browserFor(sessionId).read(4000, trackRepeat = false)
                             val notFound = Regex("(?i)(t[ií]tulo:[^\\n]*(404|not found|n[aã]o encontrad)|this page doesn.t exist|page not found|p[aá]gina n[aã]o encontrada)").containsMatchIn(page.take(600))
-                            (if (notFound) "⚠ A página carregou, mas é um ERRO 404 (não existe). Não use este conteúdo; procure o endereço correto.\n" else "") + navigation + "\n\n" + page
+                            val loginHint = runCatching {
+                                val finalHost = dev.cueopen.app.browser.BrowserPolicies.hostOf(browserFor(sessionId).ui.value.url.ifBlank { url })
+                                dev.cueopen.app.browser.BrowserPolicies.noLoginHint(finalHost, page, store.state.value.browserLogins)
+                            }.getOrNull()
+                            (if (notFound) "⚠ A página carregou, mas é um ERRO 404 (não existe). Não use este conteúdo; procure o endereço correto.\n" else "") + navigation + "\n\n" + page +
+                                (loginHint?.let { "\n\n$it" } ?: "")
                         }
                         }
                     }
@@ -5316,7 +5342,9 @@ class AgentRunner(
                     val sess = store.session(sessionId)
                     val agentScoped = s("scope") == "agent" && sess?.agentId != null
                     val tags = a["tags"]?.jsonArray?.map { it.jsonPrimitive.content }.orEmpty()
-                    ctxMgr.saveMemory(s("fact"), if (agentScoped) sess?.agentId else null, tags)
+                    val fact = s("fact").trim()
+                    // OpenBot 0.73: em vez de cortar em silêncio, diz o limite para o agente salvar fatos menores.
+                    ContextManager.memoryTooLong(fact) ?: ctxMgr.saveMemory(fact, if (agentScoped) sess?.agentId else null, tags)
                 }
                 "memory_search" -> ctxMgr.searchMemories(s("query"), store.session(sessionId)?.agentId)
                     .joinToString("\n") { "- ${it.text}" }.ifBlank { "Nada encontrado." }

@@ -446,6 +446,13 @@ class BrowserHost(private val appCtx: Context, private val sessionId: String = "
         _ui.value = _ui.value.copy(profileIsolated = isolated)
         // Ponte do GM_xmlhttpRequest para os User Scripts (só responde a quem tem o token do envelope).
         if (sessionId != BrowserFeatures.LOGIN_BROWSER_KEY) BrowserFeatures.installBridge(v)
+        // Downloads da página vão para downloads/ do workspace da tarefa e o agente recebe o resultado.
+        if (sessionId != BrowserFeatures.LOGIN_BROWSER_KEY) v.setDownloadListener { dUrl, ua, cd, mime, len ->
+            runCatching {
+                val sb = dev.cueopen.app.CueApp.instance.sandbox
+                BrowserDownloads.start(sessionId, sb.workspaceFor(sessionId), sb.guestPath(sessionId), dUrl, ua, cd, mime, len)
+            }
+        }
         runCatching {
             val cm = cookieManagerFor(v)
             cm.setAcceptCookie(true)

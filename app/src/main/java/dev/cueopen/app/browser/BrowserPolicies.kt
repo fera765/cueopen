@@ -69,6 +69,23 @@ object BrowserPolicies {
         return null
     }
 
+    private val loginForm = Regex("(?i)\\b(password|senha|palavra-passe)\\b")
+
+    /**
+     * (OpenBot 0.73) Página de login sem login salvo para ESTE site: explica por quê, em vez de o agente ficar tentando.
+     * Só fala quando a página parece pedir senha e o usuário tem logins salvos (de outros sites).
+     */
+    fun noLoginHint(host: String, page: String, logins: List<BrowserLogin>): String? {
+        val active = logins.filter { it.status != "revoked" }
+        if (host.isBlank() || active.isEmpty() || loginFor(host, active) != null) return null
+        if (!loginForm.containsMatchIn(page.take(6000))) return null
+        val words = host.split('.', '-').filter { it.length >= 4 }.toSet()
+        val similar = active.filter { l -> l.domain.removePrefix("*.").split('.', '-').any { it.length >= 4 && it in words } }.map { it.domain }.distinct().take(3)
+        return "[Login] Nenhum login salvo é do site $host. Um login salvo vale só para o site dele e seus subdomínios" +
+            (if (similar.isNotEmpty()) " (há login para ${similar.joinToString()}, mas este serviço pede a entrada em outro endereço)" else "") +
+            ". Nunca digite senha nem código: peça ao usuário para salvar um login para este endereço em Browser › Sessões, ou siga sem este site."
+    }
+
     /** Sessão salva que cobre este host (a mais específica). */
     fun loginFor(host: String, logins: List<BrowserLogin>): BrowserLogin? =
         logins.filter { domainMatches(host, it.domain) }.maxByOrNull { it.domain.length }
