@@ -93,7 +93,7 @@ object LiveServer {
                 "  ln -sf \"$(command -v cloudflared)\" $CF_BIN; $CF_BIN --version >/dev/null 2>&1 && { echo OK; exit 0; }; fi; " +
                 "case $(uname -m) in aarch64|arm64) A=arm64;; x86_64) A=amd64;; armv7*|armv8l|arm*) A=arm;; i?86) A=386;; *) A=arm64;; esac; " +
                 "command -v curl >/dev/null || apk add --no-cache curl >/dev/null 2>&1; " +
-                "rm -f $CF_BIN; curl -fsSL --retry 3 -o $CF_BIN.tmp https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-$A " +
+                "rm -f $CF_BIN; curl -fsSL --retry 3 -o $CF_BIN.tmp https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${'$'}A " +
                 "&& chmod +x $CF_BIN.tmp && mv $CF_BIN.tmp $CF_BIN && $CF_BIN --version && echo OK",
             cwd = "/tmp", timeoutSec = 600, idleTimeoutSec = 240,
         )
