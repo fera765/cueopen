@@ -3037,6 +3037,7 @@ class AgentRunner(
             appendLine("4. Use `notes_write` para registrar o que precisa lembrar ao longo da tarefa: achados, progresso e próximos passos.")
             appendLine("5. Fatos duradouros sobre o usuário ou o projeto vão em `memory_save`; para recuperar algo antigo, use `memory_search`.")
             appendLine("6. Para usar uma skill, chame `skill_load` com o nome dela e siga as instruções carregadas.")
+            appendLine("6a. " + BrowserRedirect.PROMPT_LINE)
             run {
                 val hubRef = dev.cueopen.app.connectors.ActivepiecesHub.REF
                 val connected = store.state.value.connectors.filter { it.enabled && it.connectedAt != null && (agent?.useConnectorHub != false || it.gatewayRef != hubRef) }
@@ -4902,7 +4903,10 @@ class AgentRunner(
                             val f = sandbox.hostFile(path, sessionId)
                             if (!f.exists() || !f.isDirectory) path else null
                         }
-                    if (ShellCommandPolicy.isWholeSystemSearch(command)) {
+                    val browserGuard = BrowserRedirect.guard(command)
+                    if (browserGuard != null) {
+                        browserGuard
+                    } else if (ShellCommandPolicy.isWholeSystemSearch(command)) {
                         "GUARDRAIL: não vasculhe o sistema inteiro (/, /vendor, /system…): isso leva horas e não encontra os arquivos do agente. " +
                             "Tudo o que importa fica em /root/workspace" + (if (store.session(sessionId)?.sectionId != null) " (compartilhado por todos os agentes da seção)" else "") +
                             ". Use file_list ou `find /root/workspace -maxdepth 3`. Se o arquivo não estiver lá, ele não existe: diga o que falta e encerre a tarefa."

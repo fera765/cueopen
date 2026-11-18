@@ -134,7 +134,7 @@ fun ChatScreen(nav: NavController, sessionId: String, onMenu: () -> Unit = {}) {
     Scaffold(containerColor = c.bg, topBar = {
         TopAppBar(
             colors = TopAppBarDefaults.topAppBarColors(containerColor = c.bg),
-            navigationIcon = { IconButton({ onMenu() }) { Icon(Icons.Rounded.Menu, "Menu") } },
+            navigationIcon = { IconButton({ onMenu() }) { SidebarIcon() } },
             title = {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     if (agent != null) { AnimatedAgentFace(Color(agent.color), agent.face, 24.dp, state = when { running -> dev.cueopen.app.ui.mascot.MascotState.THINKING; session.status == SessionStatus.SLEEPING -> dev.cueopen.app.ui.mascot.MascotState.SLEEPING; else -> dev.cueopen.app.ui.mascot.MascotState.IDLE }); Spacer(Modifier.width(8.dp)) }

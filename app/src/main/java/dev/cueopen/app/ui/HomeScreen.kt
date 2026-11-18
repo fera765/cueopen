@@ -243,7 +243,7 @@ private fun SuggestionPill(s: Starter, onClick: () -> Unit) {
 
 /** Ícone da sidebar: painel lateral desenhado (mais leve que o "hambúrguer"). */
 @Composable
-private fun SidebarIcon() {
+internal fun SidebarIcon() {
     val color = Cue.c.ink
     androidx.compose.foundation.Canvas(Modifier.size(22.dp)) {
         val s = size.minDimension

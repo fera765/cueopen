@@ -19,6 +19,8 @@ import dev.cueopen.app.MainActivity
  */
 class SandboxService : Service() {
     private var wake: PowerManager.WakeLock? = null
+    /** Só com Live Server no ar: o Wi-Fi não dorme com a tela apagada, então o túnel (e o link) não cai. */
+    private var wifi: android.net.wifi.WifiManager.WifiLock? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -47,10 +49,18 @@ class SandboxService : Service() {
         if (wake == null) {
             wake = getSystemService(PowerManager::class.java).newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "cueopen:terminal").apply { setReferenceCounted(false); acquire() }
         }
+        runCatching {
+            val live = dev.cueopen.app.live.LiveServer.hasActive()
+            if (live && wifi == null) {
+                @Suppress("DEPRECATION")
+                wifi = applicationContext.getSystemService(android.net.wifi.WifiManager::class.java)
+                    .createWifiLock(android.net.wifi.WifiManager.WIFI_MODE_FULL_HIGH_PERF, "cueopen:live").apply { setReferenceCounted(false); acquire() }
+            } else if (!live) { wifi?.release(); wifi = null }
+        }
         return START_STICKY
     }
 
-    override fun onDestroy() { runCatching { wake?.release() }; wake = null; super.onDestroy() }
+    override fun onDestroy() { runCatching { wake?.release() }; wake = null; runCatching { wifi?.release() }; wifi = null; super.onDestroy() }
 
     // App removido dos recentes: o serviço continua vivo (agente segue em background).
     override fun onTaskRemoved(rootIntent: Intent?) {}

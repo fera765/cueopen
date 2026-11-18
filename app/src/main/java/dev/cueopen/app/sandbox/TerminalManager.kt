@@ -386,7 +386,10 @@ class TerminalManager(private val ctx: Context, private val sandbox: Sandbox) {
             "# CueOpen: avisa o app (sequência OSC invisível) sempre que o prompt volta\n" +
             "set +H 2>/dev/null  # sem expansão de histórico: '!' em HTML/JS não quebra comandos\n" +
             "__cue_pc() { local e=\$?; (umask 077; printf '%s\\n' \"\$PWD\" > /root/.cue/terminal_cwd.tmp && mv -f /root/.cue/terminal_cwd.tmp /root/.cue/terminal_cwd) 2>/dev/null; printf '\\033]777;cue;done;%s\\007' \"\$e\"; return \$e; }\n" +
-            "case \"\$PROMPT_COMMAND\" in *__cue_pc*) ;; *) PROMPT_COMMAND=\"__cue_pc\${PROMPT_COMMAND:+;\$PROMPT_COMMAND}\" ;; esac\n")
+            "case \"\$PROMPT_COMMAND\" in *__cue_pc*) ;; *) PROMPT_COMMAND=\"__cue_pc\${PROMPT_COMMAND:+;\$PROMPT_COMMAND}\" ;; esac\n" +
+            "# Navegador do app como única fonte de verdade (puppeteer/playwright/selenium não baixam nem abrem Chrome/Firefox)\n" +
+            dev.cueopen.app.agent.BrowserRedirect.ENV_EXPORTS)
+        runCatching { dev.cueopen.app.agent.BrowserRedirect.installShims(cue) }
         val rc = File(sandbox.publicFor(key), ".bashrc")
         val line = "[ -f /root/.cue/hook.sh ] && . /root/.cue/hook.sh"
         val cur = if (rc.exists()) rc.readText() else "cd /root/workspace 2>/dev/null\n"

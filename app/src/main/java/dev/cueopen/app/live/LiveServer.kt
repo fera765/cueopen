@@ -149,9 +149,10 @@ object LiveServer {
             val cf = ensureCloudflared { logs.appendLine(it) }
             if (cf != null) {
                 val cfLog = File(hostDir(), "$slug.cloudflared.log").apply { delete() }
-                // Loop: se o cloudflared cair, volta sozinho (com URL nova, registrada no log).
+                // O link vive enquanto ESTE processo viver: --retries alto faz o cloudflared reconectar por quedas de rede
+                // sem sair (mesma URL). O loop só age se o processo morrer de vez (aí sai URL nova, registrada no log).
                 tunnels[slug] = sandbox.spawn(
-                    "while true; do $cf tunnel --no-autoupdate --protocol http2 --url http://127.0.0.1:$targetPort; sleep 5; done", cfLog,
+                    "while true; do $cf tunnel --no-autoupdate --protocol http2 --edge-ip-version auto --retries 100000 --grace-period 30s --url http://127.0.0.1:$targetPort; echo FLUWY_TUNNEL_RESTART; sleep 3; done", cfLog,
                 )
                 val deadline = System.currentTimeMillis() + 45_000
                 while (System.currentTimeMillis() < deadline && url == null) {
@@ -184,6 +185,7 @@ object LiveServer {
                     return@withContext "ERRO: o túnel público não abriu em 45 s (sem internet ou serviço indisponível). Detalhe: $logs $tail"
                 }
             }
+            runCatching { SandboxService.start(CueApp.instance, "Live Server no ar") } // agora com túnel vivo: segura o Wi-Fi
             all[slug] = Project(slug, title, url, targetPort, dirHost, true)
             save(all)
             val serve = if (dirHost != null) "site estático da pasta" else "servidor local na porta $targetPort"
@@ -201,9 +203,13 @@ object LiveServer {
             val all = readAll()
             val p = all[slug] ?: return@withContext "Nenhum projeto publicado com o nome \"$title\"."
             all[slug] = p.copy(active = false); save(all)
+            if (!hasActive()) runCatching { SandboxService.start(CueApp.instance, "Terminal ativo") }
             "⏹ \"$title\" saiu do ar (${p.url ?: ""})."
         }
     }
+
+    /** Há projeto ativo (o serviço segura o Wi-Fi acordado só nesse caso). */
+    fun hasActive(): Boolean = tunnels.values.any { it.isAlive }
 
     fun status(): String {
         val list = projects()
