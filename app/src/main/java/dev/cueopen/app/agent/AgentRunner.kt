@@ -3778,12 +3778,12 @@ class AgentRunner(
             add(tool("device_share_file", "Abre o WhatsApp, Telegram, Slack ou Discord com um arquivo do workspace pronto para envio (no WhatsApp, com phone, direto na conversa do número). O envio final é um toque em \"Enviar\".",
                 buildJsonObject { put("path", str("Arquivo do workspace")); put("app", str("whatsapp | telegram | slack | discord")); put("phone", str("WhatsApp: número com DDI e DDD, ex.: 5511999998888 (opcional)")); put("text", str("Legenda opcional")) }, listOf("path", "app")))
         if (allowMultiAgent) add(tool("live_server",
-                "Live Server: publica um site (pasta do workspace com index.html) ou um servidor/API já rodando (porta local) numa URL pública HTTPS DEFINITIVA, sem conta. " +
-                    "Use SÓ quando o usuário pedir para publicar/colocar no ar/expor. Cada projeto tem sua URL fixa: publicar de novo o mesmo projeto reutiliza a mesma URL (atualiza o conteúdo). " +
+                "Live Server: publica um site (pasta do workspace com index.html) ou um servidor/API já rodando (porta local) numa URL pública HTTPS de acesso direto (sem tela de aviso), sem conta. " +
+                    "Use SÓ quando o usuário pedir para publicar/colocar no ar/expor. Publicar de novo gera um link novo; para mudar só o conteúdo de um site já no ar, edite os arquivos da pasta (o link continua o mesmo). " +
                     "action=publish (dir OU port), stop, status. Mostre a URL ao usuário.",
                 buildJsonObject {
                     put("action", str("publish | stop | status"))
-                    put("project", str("Nome do projeto (define a URL fixa). Use sempre o mesmo nome para o mesmo site."))
+                    put("project", str("Nome do projeto. Use sempre o mesmo nome para o mesmo site."))
                     put("dir", str("Pasta do site no workspace, ex.: /root/workspace/site (para sites estáticos)"))
                     put("port", int("Porta local de um servidor/API já em execução (em vez de dir)"))
                 }, listOf("action")))

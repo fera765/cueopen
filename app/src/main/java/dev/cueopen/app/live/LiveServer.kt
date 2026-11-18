@@ -15,15 +15,19 @@ import java.util.concurrent.ConcurrentHashMap
  * Live Server: publica um site (pasta do workspace) ou uma API/servidor (porta local) numa URL pública HTTPS
  * DEFINITIVA, sem conta nem API key.
  *
- * Túnel: tunnl.gg (github.com/klipitkas/tunnl.gg, MIT) por SSH com `stable@` — a URL é derivada da chave SSH, então
- * cada projeto tem a sua chave (gerada uma vez e guardada no app) e volta SEMPRE na mesma URL, inclusive depois de
- * reiniciar o app. Um loop reconecta se a conexão cair (limites do plano grátis: 2 h ocioso / 24 h por conexão).
+ * Túnel principal: Cloudflare Quick Tunnel (`cloudflared tunnel --url`, sem conta) — link DIRETO, sem tela de aviso,
+ * captcha ou autorização. A URL (*.trycloudflare.com) é nova a cada publicação/reinício do túnel.
+ * Reserva: tunnl.gg (`stable@`, URL fixa por chave SSH, mas navegadores veem um aviso semanal) — só se o cloudflared
+ * não rodar no aparelho.
  * Sites estáticos são servidos por `python3 -m http.server` no Linux do app; APIs usam a porta que o agente já subiu.
  */
 object LiveServer {
     private const val DIR = "/opt/fluwy-live"
     private const val HOST = "proxy.tunnl.gg"
     private val URL_RE = Regex("\"url\"\\s*:\\s*\"(https://[a-z0-9.-]+)\"")
+    /** URL do Quick Tunnel (ignora api.trycloudflare.com, que não tem hífen). */
+    val CF_URL_RE = Regex("https://[a-z0-9]+(?:-[a-z0-9]+)+\\.trycloudflare\\.com")
+    private const val CF_BIN = "$DIR/bin/cloudflared"
 
     data class Project(val slug: String, val title: String, val url: String?, val port: Int, val dir: String?, val active: Boolean)
 
@@ -80,6 +84,28 @@ object LiveServer {
         return key
     }
 
+    /** cloudflared: pacote do Alpine ou binário oficial do GitHub (cloudflare/cloudflared, Apache-2.0). */
+    private suspend fun ensureCloudflared(log: (String) -> Unit): String? {
+        val r = sandbox.exec(
+            "mkdir -p $DIR/bin; " +
+                "if $CF_BIN --version >/dev/null 2>&1; then echo OK; exit 0; fi; " +
+                "if command -v cloudflared >/dev/null || apk add --no-cache cloudflared >/dev/null 2>&1; then " +
+                "  ln -sf \"$(command -v cloudflared)\" $CF_BIN; $CF_BIN --version >/dev/null 2>&1 && { echo OK; exit 0; }; fi; " +
+                "case $(uname -m) in aarch64|arm64) A=arm64;; x86_64) A=amd64;; armv7*|armv8l|arm*) A=arm;; i?86) A=386;; *) A=arm64;; esac; " +
+                "command -v curl >/dev/null || apk add --no-cache curl >/dev/null 2>&1; " +
+                "rm -f $CF_BIN; curl -fsSL --retry 3 -o $CF_BIN.tmp https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-$A " +
+                "&& chmod +x $CF_BIN.tmp && mv $CF_BIN.tmp $CF_BIN && $CF_BIN --version && echo OK",
+            cwd = "/tmp", timeoutSec = 600, idleTimeoutSec = 240,
+        )
+        if (r.output.contains("OK") && File(hostDir(), "bin/cloudflared").exists()) return CF_BIN
+        log("cloudflared indisponível: ${r.output.takeLast(300)}")
+        dev.cueopen.app.diag.ErrorLog.log("live", "cloudflared indisponível: ${r.output.takeLast(500)}")
+        return null
+    }
+
+    /** Lê a URL mais recente do log do túnel (o Quick Tunnel gera outra ao reconectar). */
+    private fun latestCfUrl(f: File): String? = runCatching { CF_URL_RE.findAll(f.readText()).lastOrNull()?.value }.getOrNull()
+
     private fun alive(port: Int): Boolean = runCatching {
         java.net.Socket().use { it.connect(java.net.InetSocketAddress("127.0.0.1", port), 600); true }
     }.getOrDefault(false)
@@ -96,7 +122,6 @@ object LiveServer {
             if (!ensureTools { logs.appendLine(it) }) return@withContext "ERRO: $logs"
             val slug = slugOf(title)
             val all = readAll()
-            val prev = all[slug]
             // 1) O que vai ao ar: pasta estática (servidor próprio) ou porta já aberta.
             val targetPort: Int
             if (dirHost != null) {
@@ -116,33 +141,56 @@ object LiveServer {
                 targetPort = port ?: return@withContext "ERRO: informe dir (pasta do site) ou port (servidor/API já rodando)."
                 if (!alive(targetPort)) return@withContext "ERRO: nada respondendo em 127.0.0.1:$targetPort. Suba o servidor (em segundo plano) antes de publicar."
             }
-            // 2) Túnel estável (reconecta sozinho; mesma chave ⇒ mesma URL).
-            val key = ensureKey(slug)
+            // 2) Túnel: Cloudflare Quick Tunnel (link direto, sem aviso); tunnl.gg só como reserva.
             tunnels.remove(slug)?.destroy()
-            val tLog = File(hostDir(), "$slug.tunnel.jsonl").apply { delete() }
-            val cmd = "mkdir -p $DIR && while true; do ssh -n -T -i $key -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new " +
-                "-o UserKnownHostsFile=$DIR/known_hosts -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -o ExitOnForwardFailure=yes " +
-                "-R 80:localhost:$targetPort stable@$HOST output=json host=localhost:$targetPort; sleep 5; done"
-            tunnels[slug] = sandbox.spawn(cmd, tLog)
             runCatching { SandboxService.start(CueApp.instance, "Live Server no ar") }
             var url: String? = null
-            val deadline = System.currentTimeMillis() + 45_000
-            while (System.currentTimeMillis() < deadline && url == null) {
-                url = runCatching { URL_RE.find(tLog.readText())?.groupValues?.get(1) }.getOrNull()
-                if (url == null) delay(700)
+            var direct = true
+            val cf = ensureCloudflared { logs.appendLine(it) }
+            if (cf != null) {
+                val cfLog = File(hostDir(), "$slug.cloudflared.log").apply { delete() }
+                // Loop: se o cloudflared cair, volta sozinho (com URL nova, registrada no log).
+                tunnels[slug] = sandbox.spawn(
+                    "while true; do $cf tunnel --no-autoupdate --protocol http2 --url http://127.0.0.1:$targetPort; sleep 5; done", cfLog,
+                )
+                val deadline = System.currentTimeMillis() + 45_000
+                while (System.currentTimeMillis() < deadline && url == null) {
+                    url = latestCfUrl(cfLog)
+                    if (url == null) delay(600)
+                }
+                if (url == null) {
+                    val tail = runCatching { cfLog.readText().takeLast(500) }.getOrDefault("")
+                    dev.cueopen.app.diag.ErrorLog.log("live", "Quick Tunnel de '$title' não abriu: $tail")
+                    tunnels.remove(slug)?.destroy()
+                }
             }
             if (url == null) {
-                val tail = runCatching { tLog.readText().takeLast(500) }.getOrDefault("")
-                dev.cueopen.app.diag.ErrorLog.log("live", "Túnel de '$title' não abriu: $tail")
-                return@withContext "ERRO: o túnel público não abriu em 45 s (sem internet ou serviço indisponível). Detalhe: $tail"
+                direct = false
+                if (!ensureTools { logs.appendLine(it) }) return@withContext "ERRO: $logs"
+                val key = ensureKey(slug)
+                val tLog = File(hostDir(), "$slug.tunnel.jsonl").apply { delete() }
+                val cmd = "mkdir -p $DIR && while true; do ssh -n -T -i $key -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new " +
+                    "-o UserKnownHostsFile=$DIR/known_hosts -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -o ExitOnForwardFailure=yes " +
+                    "-R 80:localhost:$targetPort stable@$HOST output=json host=localhost:$targetPort; sleep 5; done"
+                tunnels[slug] = sandbox.spawn(cmd, tLog)
+                val deadline = System.currentTimeMillis() + 45_000
+                while (System.currentTimeMillis() < deadline && url == null) {
+                    url = runCatching { URL_RE.find(tLog.readText())?.groupValues?.get(1) }.getOrNull()
+                    if (url == null) delay(700)
+                }
+                if (url == null) {
+                    val tail = runCatching { tLog.readText().takeLast(500) }.getOrDefault("")
+                    dev.cueopen.app.diag.ErrorLog.log("live", "Túnel de '$title' não abriu: $tail")
+                    return@withContext "ERRO: o túnel público não abriu em 45 s (sem internet ou serviço indisponível). Detalhe: $logs $tail"
+                }
             }
-            if (prev?.url != null && prev.url != url)
-                dev.cueopen.app.diag.ErrorLog.log("live", "URL de '$title' mudou de ${prev.url} para $url (o servidor de túnel trocou a chave de host).")
             all[slug] = Project(slug, title, url, targetPort, dirHost, true)
             save(all)
-            "✅ Publicado: $url\nProjeto: $title (URL definitiva — publicar de novo usa sempre esta mesma URL). " +
-                "Serve: ${if (dirHost != null) "site estático da pasta" else "servidor local na porta $targetPort"}. " +
-                "Visitantes no navegador podem ver um aviso de segurança do túnel (uma vez por semana) antes do site."
+            val serve = if (dirHost != null) "site estático da pasta" else "servidor local na porta $targetPort"
+            if (direct) "✅ Publicado: $url\nProjeto: $title · Serve: $serve. Link direto (abre o site na hora, sem tela de aviso). " +
+                "Atenção: este link vale enquanto o túnel estiver no ar; ao publicar de novo ou reiniciar o app, sai um link novo."
+            else "✅ Publicado (modo reserva): $url\nProjeto: $title · Serve: $serve. O túnel direto não funcionou neste aparelho; " +
+                "neste modo a URL é fixa, mas navegadores podem ver um aviso semanal antes do site."
         }
     }
 
@@ -153,7 +201,7 @@ object LiveServer {
             val all = readAll()
             val p = all[slug] ?: return@withContext "Nenhum projeto publicado com o nome \"$title\"."
             all[slug] = p.copy(active = false); save(all)
-            "⏹ \"$title\" saiu do ar. A URL ${p.url ?: ""} continua reservada para este projeto e volta igual ao publicar de novo."
+            "⏹ \"$title\" saiu do ar (${p.url ?: ""})."
         }
     }
 
@@ -161,7 +209,8 @@ object LiveServer {
         val list = projects()
         if (list.isEmpty()) return "Nenhum projeto publicado ainda."
         return list.joinToString("\n") { p ->
-            "- ${p.title}: ${p.url ?: "(sem URL ainda)"} · ${if (p.active && tunnels[p.slug]?.isAlive == true) "no ar" else if (p.active) "ativo (reconecta ao abrir o app)" else "parado"}"
+            val u = latestCfUrl(File(hostDir(), "${p.slug}.cloudflared.log"))?.takeIf { tunnels[p.slug]?.isAlive == true } ?: p.url
+            "- ${p.title}: ${u ?: "(sem URL ainda)"} · ${if (p.active && tunnels[p.slug]?.isAlive == true) "no ar" else if (p.active) "ativo (reconecta ao abrir o app)" else "parado"}"
         }
     }
 
