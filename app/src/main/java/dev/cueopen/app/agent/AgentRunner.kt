@@ -128,7 +128,7 @@ class AgentRunner(
     }
 
     // ───────── Fila de mensagens do usuário (FIFO), com pausar e cancelar ─────────
-    data class QueuedMessage(val id: String, val text: String, val quote: String? = null)
+    data class QueuedMessage(val id: String, val text: String, val quote: String? = null, val attachments: List<String> = emptyList())
     /** Mensagens aguardando entrega, por chat (a tela do chat mostra e permite cancelar). */
     val messageQueue = MutableStateFlow<Map<String, List<QueuedMessage>>>(emptyMap())
     /** Chats com a fila pausada: nada é entregue até retomar. */
@@ -139,17 +139,17 @@ class AgentRunner(
      * Agente no meio de um trabalho: a mensagem não cancela nada — entra na fila e chega a ele no próximo passo seguro.
      * Agente parado ou em espera: envia na hora, como antes.
      */
-    fun sendOrQueue(sessionId: String, text: String, quotedReply: String? = null): Job {
+    fun sendOrQueue(sessionId: String, text: String, quotedReply: String? = null, attachments: List<String> = emptyList()): Job {
         // Ordem de parar: interrompe tudo na hora (não entra na fila) e, se pedida, faz só a entrega final.
         StopIntent.parse(text).takeIf { it.stop }?.let { return stopAndDeliver(sessionId, text, it.deliver, quotedReply) }
         val session = store.session(sessionId)
         val busy = isRunning(sessionId) && session?.status == SessionStatus.RUNNING
         val hasQueue = messageQueue.value[sessionId].orEmpty().isNotEmpty()
-        if ((!busy && !hasQueue) || text.trim().startsWith("/")) return send(sessionId, text, emptyList(), quotedReply = quotedReply)
+        if ((!busy && !hasQueue) || text.trim().startsWith("/")) return send(sessionId, text, attachments, quotedReply = quotedReply)
         val quote = quotedReply?.trim()?.take(800)?.takeIf { it.isNotBlank() }
         synchronized(queueLock) {
             val cur = messageQueue.value
-            messageQueue.value = cur + (sessionId to (cur[sessionId].orEmpty() + QueuedMessage(newId(), text, quote)).takeLast(20))
+            messageQueue.value = cur + (sessionId to (cur[sessionId].orEmpty() + QueuedMessage(newId(), text, quote, attachments)).takeLast(20))
         }
         val running = jobs[sessionId]
         // Se o trabalho terminar antes de a fila ser lida, o que sobrou é enviado em seguida (nada se perde).
@@ -201,7 +201,9 @@ class AgentRunner(
         list
     }
 
-    private fun queuedAsPrompt(q: QueuedMessage) = "[Mensagem do usuário recebida enquanto você trabalhava — tem prioridade sobre o que você estava fazendo; ajuste o rumo se ela pedir]\n${q.text}" +
+    private fun queuedAsPrompt(q: QueuedMessage) = "[Nova mensagem do usuário recebida enquanto você trabalhava. É um pedido A MAIS: não descarta o que ele pediu antes, " +
+        "a menos que diga para cancelar, trocar ou corrigir. Se for uma correção/complemento do pedido atual, ajuste o rumo; se for outro pedido, faça também, depois ou em paralelo.]\n${q.text}" +
+        (if (q.attachments.isNotEmpty()) "\n\n[Arquivos anexados no workspace: ${q.attachments.joinToString()}]" else "") +
         (if (q.quote != null) "\n[O usuário respondia a esta mensagem sua: ${q.quote}]" else "")
 
     /** Entrega a fila ao agente que está rodando (chamado num ponto seguro do loop). */
@@ -210,7 +212,7 @@ class AgentRunner(
         if (list.isEmpty()) return
         store.session(sessionId)?.sectionId?.let { autoNudges.remove(it); autoDone.remove(it) }
         list.forEach { q ->
-            store.addItem(sessionId, ChatItem.User(text = q.text, replyTo = q.quote))
+            store.addItem(sessionId, ChatItem.User(text = q.text, attachments = q.attachments, replyTo = q.quote))
             skillsFor(q.text).forEach { sk -> store.addItem(sessionId, ChatItem.Step(tool = "skill_load", title = "Skill ativa: ${sk.name}", args = sk.description.take(90), result = "", status = StepStatus.OK)) }
         }
         store.editSession(sessionId) { it.copy(llm = it.llm + list.map { q -> LlmMessage("user", queuedAsPrompt(q) + skillsFor(q.text).joinToString("") { sk -> skillBlock(sk) }) }) }
@@ -221,8 +223,8 @@ class AgentRunner(
         if (isRunning(sessionId)) return
         val list = takeQueue(sessionId)
         if (list.isEmpty()) return
-        list.forEach { store.addItem(sessionId, ChatItem.User(text = it.text, replyTo = it.quote)) }
-        send(sessionId, list.joinToString("\n\n") { it.text }, showUserMessage = false)
+        list.forEach { store.addItem(sessionId, ChatItem.User(text = it.text, attachments = it.attachments, replyTo = it.quote)) }
+        send(sessionId, MultiRequest.combine(list.map { it.text }), list.flatMap { it.attachments }.distinct(), showUserMessage = false)
     }
 
     /** Remove uma mensagem da fila antes de ela chegar ao agente. */
@@ -1244,7 +1246,18 @@ class AgentRunner(
                 child?.status == SessionStatus.ERROR -> append("${member.name} terminou com erro.\n")
             }
             append("Resposta de ${member.name}:\n")
-            append(answer?.text?.take(4_000) ?: "(sem resposta final)")
+            val text = answer?.text?.takeIf { it.isNotBlank() }
+            if (text != null) append(text.take(4_000))
+            else {
+                // OpenBot 0.70: terminou sem texto → o coordenador recebe o que foi feito, não um vazio (evita re-delegar).
+                val steps = newItems.filterIsInstance<ChatItem.Step>().filter { it.tool !in setOf("model_switch", "undo") }.takeLast(5)
+                append("(${member.name} terminou sem escrever uma resposta final.)")
+                if (steps.isNotEmpty()) {
+                    append("\nÚltimos passos executados:")
+                    steps.forEach { st -> append("\n- ${st.tool}: ${st.title.take(100)} [${st.status.name.lowercase()}]" + (st.result.takeIf { it.isNotBlank() }?.let { " → " + it.replace('\n', ' ').take(160) } ?: "")) }
+                }
+                append("\nAntes de re-delegar, confira esses passos e os arquivos do workspace listados abaixo: o trabalho pode já estar feito.")
+            }
             newItems.filterIsInstance<ChatItem.Error>().lastOrNull()?.let { append("\nÚltimo erro: " + it.text.take(300)) }
         }
     }
@@ -1557,6 +1570,8 @@ class AgentRunner(
         val sectionMember = store.session(sessionId)?.let { s -> s.sectionId != null && store.section(s.sectionId)?.sessionId != sessionId } == true
         val startingTokens = store.session(sessionId)?.let { it.tokensIn + it.tokensOut } ?: 0L
         var steps = 0
+        val itemsAtRunStart = store.session(sessionId)?.items?.size ?: 0
+        var multiRequestChecked = false
         var repeats = 0
         var lastContent = ""
         var lastToolSig = ""
@@ -1583,6 +1598,7 @@ class AgentRunner(
         val truncatedOutput = LlmTruncationPolicy(maxFragments = if (tokenBudgetOverride == null) 3 else 1)
         val fileToolFailureGuard = AgentFileToolFailureGuard()
         val repeatGuard = RepeatedToolFailureGuard()
+        var uselessCompactions = 0
         val controlTools = setOf("tools_load", "sleep", "set_schedule", "ask_user", "ask_question", "ask_secure", "finish", "complete_step", "notes_write", "notes_read")
         while (scope.isActive) {
             val workerUsed = if (tokenBudgetOverride != null) {
@@ -1604,6 +1620,7 @@ class AgentRunner(
             if (s.autoCompact && ctxMgr.estimateTokens(s.llm) + ctxMgr.estimateTokens(s.summary) >= store.settings.contextBudget) {
                 setActivity(sessionId, Activity(Activity.Kind.THINKING, "Compactando contexto"))
                 val before = s.compactions
+                val tokensBefore = ctxMgr.estimateTokens(s.llm) + ctxMgr.estimateTokens(s.summary)
                 s = try { ctxMgr.compactIfNeeded(s) } catch (c: kotlinx.coroutines.CancellationException) { throw c } catch (t: Throwable) {
                     // Compactar NUNCA pode derrubar o agente: corta o histórico antigo com segurança e segue.
                     runCatching { dev.cueopen.app.diag.ErrorLog.log("agent", "Falha na compactação (${t.javaClass.simpleName}: ${t.message}); usando corte seguro.\n" + t.stackTraceToString().take(1_500), sessionId, "compact") }
@@ -1611,6 +1628,16 @@ class AgentRunner(
                 }
                 // Guarda pós-compactação (OpenClaw): se o agente repetir o mesmo loop logo depois, interrompe.
                 if (s.compactions > before) toolLoops.armPostCompaction()
+                // OpenBot 0.71: compactar sem liberar espaço vira ciclo (um chat chegou a 559 compactações). Na 3ª, para.
+                val tokensAfter = ctxMgr.estimateTokens(s.llm) + ctxMgr.estimateTokens(s.summary)
+                if (CompactionProgress.useless(tokensBefore, tokensAfter, store.settings.contextBudget)) {
+                    if (++uselessCompactions >= CompactionProgress.MAX_USELESS) {
+                        runCatching { dev.cueopen.app.diag.ErrorLog.log("agent", "Compactação sem efeito $uselessCompactions vezes ($tokensBefore → $tokensAfter tokens; orçamento ${store.settings.contextBudget}); turno encerrado.", sessionId, "compact") }
+                        store.addItemUnique(sessionId, ChatItem.Error(text = CompactionProgress.message(tokensAfter, store.settings.contextBudget)))
+                        store.editSession(sessionId) { it.copy(status = SessionStatus.WAITING_USER) }
+                        return
+                    }
+                } else uselessCompactions = 0
             }
             // Planejamento contextual: decide quais ferramentas/conectores e quanto conhecimento/memória entram neste passo
             val allTools = tools(agent, allowMultiAgent = tokenBudgetOverride == null, builder = s.connectorBuilder, connectorEditId = s.connectorEditId, sectionId = s.sectionId, scriptBuilder = s.scriptBuilder)
@@ -1854,6 +1881,15 @@ class AgentRunner(
                     store.editSession(sessionId) { it.copy(llm = it.llm + LlmMessage("user", "[Sistema] Você está em modo contínuo. Use `sleep` para aguardar a próxima verificação, ou `finish` se o usuário pediu para encerrar.")) }
                     if (++steps >= maxSteps) { sleepAndWake(sessionId, 5 * 60, "verificação periódica"); steps = 0 }
                     continue
+                }
+                // Várias mensagens do usuário nesta rodada: antes de encerrar, confere uma vez se TODAS foram atendidas.
+                if (!multiRequestChecked && tokenBudgetOverride == null) {
+                    val reqs = store.session(sessionId)?.items?.let { MultiRequest.pending(it, itemsAtRunStart) }.orEmpty()
+                    if (reqs.size >= 2) {
+                        multiRequestChecked = true
+                        store.editSession(sessionId) { it.copy(llm = it.llm + LlmMessage("user", MultiRequest.checkPrompt(reqs))) }
+                        continue
+                    }
                 }
                 store.editSession(sessionId) { it.copy(status = SessionStatus.DONE) }
                 if (tokenBudgetOverride == null) store.session(sessionId)?.let { done -> scope.launch { ctxMgr.extractMemories(done) } }
@@ -3075,6 +3111,7 @@ class AgentRunner(
             appendLine("6a. " + BrowserRedirect.PROMPT_LINE)
             appendLine("6b. Idioma: escreva TUDO no idioma do usuário — respostas, notas de status, planos, perguntas e relatórios.")
             appendLine("6c. Antes de pedir ao usuário para conectar um app/serviço, tente com o que você já tem (conectores ligados, web, shell, browser_*). Só peça a conexão quando não houver outro caminho; depois de pedir, termine o que der por outro caminho.")
+            appendLine("6e. ${MultiRequest.PROMPT_LINE}")
             appendLine("6d. Downloads feitos no navegador vão para /root/workspace/downloads; o resultado chega numa linha [Download] junto da próxima saída de ferramenta.")
             run {
                 val hubRef = dev.cueopen.app.connectors.ActivepiecesHub.REF
@@ -5202,7 +5239,19 @@ class AgentRunner(
                 "browser_new_tab" -> browserFor(sessionId).newTab(SecretVault.resolve(sessionId, s("url")))
                 "browser_select_tab" -> browserFor(sessionId).selectTabForAgent(s("tab_id"))
                 "browser_close_tab" -> browserFor(sessionId).closeTabForAgent(s("tab_id"))
-                "browser_read", "browser_snapshot" -> browserFor(sessionId).read((i("max_chars") ?: 9000).coerceIn(1000, 20000))
+                "browser_read", "browser_snapshot" -> {
+                    val host = browserFor(sessionId)
+                    val out = host.read((i("max_chars") ?: 9000).coerceIn(1000, 20000))
+                    // OpenBot 0.70: página que abriu sem texto nem controles (canvas/JS) → print automático descrito pelo modelo.
+                    if (!out.contains(dev.cueopen.app.browser.BrowserHost.EMPTY_PAGE_MARK)) out else {
+                        val jpeg = runCatching { host.captureJpeg() }.getOrNull()
+                        val seen = if (jpeg == null) null else try {
+                            runCatching { llm.inspectImage("Esta página do navegador carregou sem texto legível para leitura. Descreva em português o que aparece na tela (textos visíveis, botões, imagens, mensagens de erro ou de carregamento). Seja objetivo.", jpeg, model = model, conversationId = sessionId) }.getOrNull()
+                        } finally { jpeg.fill(0) }
+                        out + "\n\n--- Print automático (a página não tem texto legível) ---\n" +
+                            (seen?.takeIf { it.isNotBlank() } ?: "Não foi possível descrever o print (modelo sem visão ou captura vazia). Espere alguns segundos e leia de novo, ou role a página.")
+                    }
+                }
                 "browser_wait_for" -> {
                     val br = browserFor(sessionId)
                     val waited = br.waitFor(s("text"), s("text_gone"), i("seconds") ?: 10)

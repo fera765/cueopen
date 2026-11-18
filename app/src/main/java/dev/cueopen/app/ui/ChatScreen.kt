@@ -185,7 +185,7 @@ fun ChatScreen(nav: NavController, sessionId: String, onMenu: () -> Unit = {}) {
             LazyColumn(Modifier.fillMaxSize(), state = list, contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 items(visibleItems, key = { it.id }) { item ->
                     TimelineItem(item, onOpenComputer = { tab -> nav.navigate("computer/$sessionId?tab=$tab") }, onOpenMedia = { mediaOpen = it }, sessionId = sessionId, nav = nav,
-                        onSend = { msg -> app.agent.send(sessionId, msg, emptyList()) },
+                        onSend = { msg -> app.agent.sendOrQueue(sessionId, msg) },
                         onReply = { replyingTo = it })
                 }
                 if (running) item { ThinkingRow(act) }
@@ -322,7 +322,8 @@ fun ChatScreen(nav: NavController, sessionId: String, onMenu: () -> Unit = {}) {
                                         name
                                     }.getOrNull() }
                                 }
-                                app.agent.send(sessionId, text, names, quotedReply = reply)
+                                // Agente ocupado: anexos também entram na fila (antes derrubavam o trabalho em andamento).
+                                app.agent.sendOrQueue(sessionId, text, quotedReply = reply, attachments = names)
                             } finally {
                                 copyingAttachments = false
                             }

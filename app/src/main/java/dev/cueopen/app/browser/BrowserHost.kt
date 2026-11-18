@@ -69,6 +69,8 @@ class BrowserHost(private val appCtx: Context, private val sessionId: String = "
         val diag: NavDiag = NavDiag(),
         /** Último uso (para estacionar WebViews ociosos e liberar memória). */
         var lastUsed: Long = System.currentTimeMillis(),
+        /** OpenBot 0.71: a aba foi recarregada sem o agente pedir (scripts/formulários perdidos) — vai na próxima leitura. */
+        var reloadNote: String? = null,
     )
 
     /** Linha do tempo de uma navegação: eventos do WebView com o tempo desde o início. */
@@ -284,6 +286,7 @@ class BrowserHost(private val appCtx: Context, private val sessionId: String = "
         runCatching { v.stopLoading(); (v.parent as? android.view.ViewGroup)?.removeView(v); v.destroy() }
         tab.webView = null
         tab.lastSnapshotDigest = null
+        tab.reloadNote = "a aba ficou ociosa e foi liberada para economizar memória; ao voltar, a página foi carregada de novo"
     }
 
     /** Recria o motor de uma aba travada (sem histórico corrompido): a próxima navegação começa limpa. */
@@ -292,6 +295,7 @@ class BrowserHost(private val appCtx: Context, private val sessionId: String = "
         runCatching { v?.stopLoading(); (v?.parent as? android.view.ViewGroup)?.removeView(v); v?.destroy() }
         tab.webView = null
         tab.lastSnapshotDigest = null
+        tab.reloadNote = "a aba travou e o motor dela foi recriado"
         tab.pageDone?.complete("ERROR: aba recriada")
     }
 
@@ -586,6 +590,7 @@ class BrowserHost(private val appCtx: Context, private val sessionId: String = "
                 tab.pageDone?.complete("ERROR: o motor do browser foi encerrado pelo Android (" + (if (crashed) "falha" else "memória") + "). A aba será recriada; abra a página de novo uma vez.")
                 runCatching { (view.parent as? android.view.ViewGroup)?.removeView(view); view.destroy() }
                 if (tab.webView === view) tab.webView = null
+                tab.reloadNote = "o Android encerrou o motor do browser (" + (if (crashed) "falha" else "memória") + ") e a aba foi recriada"
                 return true
             }
             override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
@@ -756,6 +761,8 @@ class BrowserHost(private val appCtx: Context, private val sessionId: String = "
         """.trimIndent()
 
         const val HOME = "file:///android_asset/start/index.html"
+        /** Marca de leitura sem texto e sem controles (canvas, app JS que não renderizou, página em branco). */
+        const val EMPTY_PAGE_MARK = "(Página sem texto e sem controles legíveis.)"
         const val MAX_TABS = BrowserSessionPersistence.MAX_TABS
         /** WebViews vivos ao mesmo tempo por conversa (o resto fica estacionado). */
         const val MAX_LIVE_VIEWS = 3
@@ -1222,6 +1229,19 @@ class BrowserHost(private val appCtx: Context, private val sessionId: String = "
     }
 
     /** Snapshot semântico da página, próximo ao formato Playwright: landmarks, headings, texto e controles nomeados. */
+    /** Print da aba ativa em JPEG (para páginas que abrem sem texto: canvas/JS). Null se não houver o que capturar. */
+    suspend fun captureJpeg(maxSide: Int = 1024): ByteArray? = onMain {
+        val v = activeTab()?.webView ?: return@onMain null
+        val w = v.width; val h = v.height
+        if (w < 10 || h < 10) return@onMain null
+        val scale = minOf(1f, maxSide.toFloat() / maxOf(w, h))
+        val bmp = Bitmap.createBitmap((w * scale).toInt().coerceAtLeast(1), (h * scale).toInt().coerceAtLeast(1), Bitmap.Config.RGB_565)
+        runCatching {
+            val c = android.graphics.Canvas(bmp); c.scale(scale, scale); v.draw(c)
+            java.io.ByteArrayOutputStream().use { out -> bmp.compress(Bitmap.CompressFormat.JPEG, 70, out); out.toByteArray() }
+        }.getOrNull().also { bmp.recycle() }
+    }
+
     suspend fun read(maxChars: Int = 9000, trackRepeat: Boolean = true): String {
         val js = """
             (function(){
@@ -1256,8 +1276,12 @@ class BrowserHost(private val appCtx: Context, private val sessionId: String = "
         return runCatching {
             val o = JSONObject(raw)
             val els = o.getJSONArray("elements")
+            val reload = tab.reloadNote?.also { tab.reloadNote = null }
+            val empty = o.optString("text").isBlank() && els.length() == 0
             buildString {
+                if (reload != null) append("⚠ PÁGINA RECARREGADA: $reload. Scripts injetados (browser_js), campos preenchidos e o estado da página se perderam; refaça esses passos se precisar deles.\n\n")
                 append("Aba: ${tab.id}\nURL: ${o.optString("url")}\nTítulo: ${o.optString("title")}\n\n--- Conteúdo ---\n")
+                if (empty) append("$EMPTY_PAGE_MARK\n")
                 append("--- Estrutura (headings) ---\n")
                 val hs = o.optJSONArray("headings") ?: JSONArray()
                 for (i in 0 until hs.length()) { val h=hs.optJSONObject(i) ?: continue; append("${h.optString("level")} ${h.optString("text")}\n") }

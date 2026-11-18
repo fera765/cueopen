@@ -30,6 +30,7 @@ object WebTools {
 
     suspend fun fetch(url: String, maxChars: Int): String = withContext(Dispatchers.IO) {
         if (!url.startsWith("http://") && !url.startsWith("https://")) return@withContext "ERRO: informe uma URL http(s) completa."
+        YouTubeTranscript.videoId(url)?.let { id -> youtube(id, maxChars)?.let { return@withContext it } }
         runCatching {
             val (code, body) = get(url)
             when {
@@ -44,6 +45,22 @@ object WebTools {
             }
         }.getOrElse { "ERRO: falha ao abrir $url (${it.javaClass.simpleName}). Tente browser_navigate." }
     }
+
+    /** Transcrição pela legenda do vídeo; null = sem legenda acessível (segue a leitura normal da página). */
+    private fun youtube(id: String, maxChars: Int): String? = runCatching {
+        val (code, html) = get("https://www.youtube.com/watch?v=$id&hl=pt-BR")
+        if (code != 200) return null
+        val title = Regex("<title>(.*?)</title>", RegexOption.DOT_MATCHES_ALL).find(html)?.groupValues?.get(1)
+            ?.let { YouTubeTranscript.unescape(it) }?.removeSuffix(" - YouTube").orEmpty()
+        val track = YouTubeTranscript.pick(YouTubeTranscript.tracks(html)) ?: return "Vídeo: $title (https://youtu.be/$id)\n" +
+            "Este vídeo não tem legenda disponível, então não há transcrição. Não tente baixar o vídeo; use a descrição (browser_navigate + browser_read) ou outra fonte."
+        val (c2, xml) = get(track.baseUrl)
+        val lines = if (c2 == 200) YouTubeTranscript.parse(xml) else emptyList()
+        if (lines.isEmpty()) return null
+        val dur = YouTubeTranscript.clock(lines.last().first)
+        "Vídeo: $title (https://youtu.be/$id)\nTranscrição pela legenda ${if (track.auto) "automática" else "do autor"} (${track.lang}${track.name.takeIf { it.isNotBlank() }?.let { " · $it" } ?: ""}), duração ~$dur:\n\n" +
+            YouTubeTranscript.format(lines, maxChars)
+    }.getOrNull()
 
     suspend fun search(query: String, max: Int): String = withContext(Dispatchers.IO) {
         if (query.isBlank()) return@withContext "ERRO: informe query."
