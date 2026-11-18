@@ -1,6 +1,10 @@
 package dev.cueopen.app.web
 
-import org.json.JSONArray
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.contentOrNull
 
 /**
  * OpenBot 0.69: vídeo do YouTube com legenda → a transcrição completa vem da legenda (sem baixar o vídeo).
@@ -27,13 +31,14 @@ object YouTubeTranscript {
             i++
         }
         return runCatching {
-            val arr = JSONArray(watchHtml.substring(start, i + 1))
-            (0 until arr.length()).mapNotNull { n ->
-                val o = arr.optJSONObject(n) ?: return@mapNotNull null
-                val name = o.optJSONObject("name")?.let { nm -> nm.optString("simpleText").ifBlank {
-                    nm.optJSONArray("runs")?.optJSONObject(0)?.optString("text").orEmpty() } }.orEmpty()
-                Track(o.optString("baseUrl"), o.optString("languageCode"), name, o.optString("kind") == "asr")
-                    .takeIf { it.baseUrl.isNotBlank() }
+            // kotlinx (e não org.json): roda igual no app e nos testes da JVM.
+            val arr = Json.parseToJsonElement(watchHtml.substring(start, i + 1)) as JsonArray
+            fun JsonObject.str(k: String) = (this[k] as? JsonPrimitive)?.contentOrNull.orEmpty()
+            arr.mapNotNull { el ->
+                val o = el as? JsonObject ?: return@mapNotNull null
+                val nm = o["name"] as? JsonObject
+                val name = nm?.str("simpleText")?.ifBlank { ((nm["runs"] as? JsonArray)?.firstOrNull() as? JsonObject)?.str("text").orEmpty() }.orEmpty()
+                Track(o.str("baseUrl"), o.str("languageCode"), name, o.str("kind") == "asr").takeIf { it.baseUrl.isNotBlank() }
             }
         }.getOrDefault(emptyList())
     }
