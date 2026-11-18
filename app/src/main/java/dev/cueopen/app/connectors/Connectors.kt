@@ -44,12 +44,15 @@ object Connectors {
     // Catálogo de apps vem do hub local (ActivepiecesHub); conectores avulsos entram pelo "+" (URL MCP).
 
     private val baseHttp = OkHttpClient.Builder().connectTimeout(12, TimeUnit.SECONDS).readTimeout(30, TimeUnit.SECONDS).callTimeout(45, TimeUnit.SECONDS).retryOnConnectionFailure(true).build()
+    private val localHttp by lazy { baseHttp.newBuilder().readTimeout(180, TimeUnit.SECONDS).callTimeout(200, TimeUnit.SECONDS).build() }
     private fun httpClient() = dev.cueopen.app.CueApp.instance.proxyHttpClient(dev.cueopen.app.proxy.ProxyScope.AGENT_API, baseHttp)
     private fun debugLog() = runCatching { dev.cueopen.app.CueApp.instance.connectorDebugLog }.getOrNull()
     private fun httpCall(connectorId: String, request: Request, summary: String): Response {
         val started = System.nanoTime()
         try {
-            val response = httpClient().newCall(request).execute()
+            // Hub local (127.0.0.1): testar/rodar automação no celular pode passar de 30 s — espera até 3 min.
+            val client = if (request.url.host == "127.0.0.1") localHttp else httpClient()
+            val response = client.newCall(request).execute()
             debugLog()?.recordHttp(connectorId, request.method, request.url.toString(), request.headers.names(),
                 (System.nanoTime() - started) / 1_000_000L, response.code, summary)
             return response

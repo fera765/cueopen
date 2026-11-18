@@ -39,7 +39,7 @@ object LlmRecovery {
             truncated -> Category.STREAM
             Regex("context.?length|maximum context|context window|too many tokens|prompt is too long|reduce the length").containsMatchIn(low) -> Category.CONTEXT
             code == 429 || Regex("rate.?limit|too many requests").containsMatchIn(low) -> Category.RATE_LIMIT
-            code == 402 || Regex("insufficient (credits|funds|balance|quota)|quota exceeded|billing|payment required").containsMatchIn(low) -> Category.CREDITS
+            code == 402 || Regex("insufficient (credits|funds|balance|quota)|quota exceeded|billing|payment required|spend(ing)? limit|out of (usage )?credits|usage credits|credit balance|past.?due|exceeded your (current )?quota|monthly (usage )?limit").containsMatchIn(low) -> Category.CREDITS
             code == 401 || Regex("invalid api key|incorrect api key|unauthorized|no auth credentials|authentication").containsMatchIn(low) -> Category.AUTH
             code == 403 && !transient.containsMatchIn(m) -> Category.AUTH
             code == 404 && transient.containsMatchIn(m) -> Category.SERVER

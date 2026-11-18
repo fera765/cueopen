@@ -37,10 +37,28 @@ object PageOps {
     private fun JsonObject.list(k: String) = (this[k] as? JsonArray)?.mapNotNull { (it as? JsonPrimitive)?.contentOrNull } .orEmpty()
 
     private fun findCard(p: FluwyPage, o: JsonObject): PageCard? {
-        val id = o.s("card_id"); val title = o.s("title")
-        return p.cards.firstOrNull { id.isNotBlank() && it.id == id }
-            ?: p.cards.firstOrNull { id.isBlank() && title.isNotBlank() && it.title.equals(title, ignoreCase = true) }
+        val id = o.s("card_id").ifBlank { o.s("id") }.ifBlank { o.s("card") }
+        val title = o.s("title").ifBlank { o.s("card_title") }
+        fun byTitle(t: String): PageCard? {
+            if (t.isBlank()) return null
+            p.cards.firstOrNull { it.title.equals(t, ignoreCase = true) }?.let { return it }
+            return p.cards.filter { it.title.contains(t, ignoreCase = true) }.singleOrNull()
+        }
+        return p.cards.firstOrNull { id.isNotBlank() && it.id.equals(id, ignoreCase = true) }
+            // id inventado ou de outra página: tenta pelo título (o id pode ter vindo no lugar do título e vice-versa)
+            ?: byTitle(title) ?: byTitle(id)
     }
+
+    private fun cardList(p: FluwyPage) = if (p.cards.isEmpty()) "a página não tem cartões" else
+        "cartões existentes: " + p.cards.take(8).joinToString("; ") { "${it.id} = \"${it.title.take(40)}\" (${it.column})" } + (if (p.cards.size > 8) "; …" else "")
+
+    /** Nome da operação: aceita "op" e os apelidos que os modelos costumam mandar ("type", "action", "operation"). */
+    private fun opName(o: JsonObject): String =
+        listOf("op", "type", "action", "operation").firstNotNullOfOrNull { k -> o.s(k).takeIf { it.isNotBlank() } }
+            .orEmpty().lowercase().replace('-', '_').replace(' ', '_')
+
+    const val OPS_HELP = "rename, set_markdown, append_markdown, replace_text, replace_section, set_data, set_html, add_column, " +
+        "add_card, move_card, update_card, remove_card, check, uncheck, set_headers, add_row, update_row, remove_row"
 
     private fun column(p: FluwyPage, name: String): String? =
         p.columns.firstOrNull { it.equals(name.trim(), ignoreCase = true) }
@@ -54,7 +72,7 @@ object PageOps {
         if (ops.isEmpty()) return Result.failure(IllegalArgumentException("ops vazio"))
         var p = page
         ops.forEachIndexed { n, o ->
-            val op = o.s("op")
+            val op = opName(o)
             fun fail(msg: String): Result<FluwyPage> = Result.failure(IllegalArgumentException("operação ${n + 1} ($op): $msg — nada foi alterado"))
             p = when (op) {
                 "rename" -> o.s("title").takeIf { it.isNotBlank() }?.let { p.copy(title = it.take(120)) } ?: return fail("informe title")
@@ -93,7 +111,7 @@ object PageOps {
                     p.copy(cards = p.cards + PageCard(newId("c"), title.take(200), col, o.s("assignee").take(60), o.s("note").take(2_000), by, now))
                 }
                 "move_card", "check", "uncheck" -> {
-                    val card = findCard(p, o) ?: return fail("cartão não encontrado (use card_id do page_read)")
+                    val card = findCard(p, o) ?: return fail("cartão não encontrado (use card_id do page_read) — ${cardList(p)}")
                     val target = when (op) {
                         "check" -> p.columns.last()
                         "uncheck" -> p.columns.first()
@@ -102,7 +120,7 @@ object PageOps {
                     p.copy(cards = p.cards.map { if (it.id == card.id) it.copy(column = target, updatedBy = by, updatedAt = now) else it })
                 }
                 "update_card" -> {
-                    val card = findCard(p, o) ?: return fail("cartão não encontrado")
+                    val card = findCard(p, o) ?: return fail("cartão não encontrado — ${cardList(p)}")
                     p.copy(cards = p.cards.map {
                         if (it.id != card.id) it else it.copy(
                             title = o.s("new_title").ifBlank { it.title }.take(200),
@@ -113,7 +131,7 @@ object PageOps {
                     })
                 }
                 "remove_card" -> {
-                    val card = findCard(p, o) ?: return fail("cartão não encontrado")
+                    val card = findCard(p, o) ?: return fail("cartão não encontrado — ${cardList(p)}")
                     p.copy(cards = p.cards.filterNot { it.id == card.id })
                 }
                 "set_headers" -> {
@@ -135,7 +153,8 @@ object PageOps {
                     if (idx !in p.rows.indices) return fail("linha ${idx + 1} não existe")
                     p.copy(rows = p.rows.filterIndexed { i, _ -> i != idx })
                 }
-                else -> return fail("operação desconhecida")
+                else -> return fail(if (op.isBlank()) "faltou o campo \"op\" (ex.: {\"op\":\"add_card\",\"title\":\"…\"}); operações: $OPS_HELP"
+                    else "operação desconhecida; use uma de: $OPS_HELP")
             }
         }
         return Result.success(p.copy(version = page.version + 1, updatedAt = now, updatedBy = by))

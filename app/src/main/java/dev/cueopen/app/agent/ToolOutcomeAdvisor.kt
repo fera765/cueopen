@@ -30,6 +30,8 @@ object ToolOutcomeAdvisor {
             "não repita o padrão. No grep do sandbox (busybox) a repetição vai só até 255 — use {0,255} ou menos, ou grep -o com contexto menor; no Python, escape os caracteres especiais (re.escape) ou procure com str.find. Para achar um trecho num arquivo grande, prefira python com índice e fatia."),
         MISSING_DEPENDENCY("biblioteca/comando não instalado no sandbox",
             "tente instalar UMA vez (pip install <pacote> --break-system-packages, apk add <pacote> ou npm i <pacote>). Muita coisa já vem no python3 (sqlite3, json, csv, http.server, urllib): para \"sqlite3: command not found\" use python3 -c \"import sqlite3; …\". Se a instalação falhar, use uma alternativa já instalada ou entregue no formato possível (ex.: o SVG em vez do PNG) — não repita o mesmo import/comando."),
+        HUB_FLOW("automação (flowId) inexistente no hub",
+            "o flowId usado não existe (foi apagado, é de outra automação ou foi inventado). Chame ap_list_flows, pegue o id exato da automação pelo nome e repita uma vez com ele."),
         HUB_PIECE("nome de piece inexistente no hub Activepieces",
             "nunca invente nomes de piece. Chame ap_list_pieces (ou ap_research_pieces com o termo, ex.: \"gmail\") e use exatamente o nome retornado (formato @activepieces/piece-xxx). Agendamento e webhook são gatilhos do fluxo: consulte as opções com ap_list_pieces antes de configurar."),
         BUSYBOX_OPTION("opção não suportada pelo BusyBox do sandbox",
@@ -43,6 +45,7 @@ object ToolOutcomeAdvisor {
     private val rules: List<Pair<Reason, Regex>> = listOf(
         Reason.BUSYBOX_OPTION to Regex("(?i)unrecognized option|invalid option.{0,40}\\n.{0,80}busybox|busybox v\\d[^\\n]{0,60}multi-call binary"),
         Reason.HEADLESS_BROWSER to BrowserRedirect.failureRe,
+        Reason.HUB_FLOW to Regex("(?i)\\bflow (version )?not found\\b|automação não encontrada"),
         Reason.HUB_PIECE to Regex("(?i)piece \"[^\"]{1,120}\" not found|use ap_list_pieces"),
         Reason.CHALLENGE to Regex("(?i)verify (that )?you are (a )?human|cf-mitigated|checking your browser|just a moment\\.\\.\\.|captcha|attention required.{0,20}cloudflare|confirme que você não é um robô|não sou um robô"),
         Reason.BAD_REGEX to Regex("(?i)bad regex|invalid contents of \\{\\}|re\\.error|re/_parser\\.py|patternsyntaxexception|invalid regular expression"),

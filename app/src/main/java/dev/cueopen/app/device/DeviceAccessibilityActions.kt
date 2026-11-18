@@ -45,7 +45,11 @@ object DeviceAccessibilityActions {
                 .addCategory(Intent.CATEGORY_LAUNCHER)
                 .setClassName(app.packageName, app.className)
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            context.applicationContext.startActivity(intent)
+            try { context.applicationContext.startActivity(intent) }
+            catch (e: Exception) {
+                error("O Android não deixou abrir ${app.label} com o app em segundo plano (${e.javaClass.simpleName}). " +
+                    "Peça ao usuário para abrir o Fluwy Bot na tela ou permitir \"Sobrepor a outros apps\" e tente de novo uma vez.")
+            }
         }
         delay(APP_OPEN_SETTLE_MS)
         return "Abri ${app.label}. Use device_accessibility_read_screen para inspecionar a tela atual."
@@ -95,11 +99,12 @@ object DeviceAccessibilityActions {
                 LauncherApp(activity.packageName, activity.name, label)
             }
             .distinctBy(LauncherApp::packageName)
-        val exact = apps.filter {
-            it.label.equals(query, ignoreCase = true) || it.packageName.equals(query, ignoreCase = true)
-        }
+        fun norm(s: String) = java.text.Normalizer.normalize(s, java.text.Normalizer.Form.NFD)
+            .replace(Regex("\\p{M}+"), "").lowercase().replace(Regex("[^a-z0-9.]+"), "")
+        val q = norm(query)
+        val exact = apps.filter { norm(it.label) == q || it.packageName.equals(query, ignoreCase = true) }
         val candidates = if (exact.isNotEmpty()) exact else apps.filter {
-            it.label.contains(query, ignoreCase = true) || it.packageName.contains(query, ignoreCase = true)
+            norm(it.label).contains(q) || it.packageName.contains(query, ignoreCase = true)
         }
         if (candidates.isEmpty()) error("Não encontrei um app instalado que corresponda a '$query'.")
         if (candidates.size > 1) {

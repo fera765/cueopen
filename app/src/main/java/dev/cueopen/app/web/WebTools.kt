@@ -34,7 +34,8 @@ object WebTools {
             val (code, body) = get(url)
             when {
                 code == 403 || code == 429 || code == 503 -> "ERRO: o site bloqueou a leitura direta (HTTP $code). Abra com browser_navigate."
-                code >= 400 -> "ERRO: HTTP $code em $url. Não repita esta URL; procure outro endereço."
+                code >= 400 -> "ERRO: HTTP $code em $url. Não repita esta URL; procure outro endereço." +
+                    (if (code == 404) " Não adivinhe caminhos (/contato, /sobre…): abra a página inicial do site e siga os links que ela mostra." else "")
                 body.trimStart().startsWith("{") || body.trimStart().startsWith("[") -> body.take(maxChars)
                 body.startsWith("[conteúdo") -> body
                 else -> WebExtract.mainText(body, url, maxChars).let { t ->

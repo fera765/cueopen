@@ -1582,6 +1582,7 @@ class AgentRunner(
         var cleanRounds = 0
         val truncatedOutput = LlmTruncationPolicy(maxFragments = if (tokenBudgetOverride == null) 3 else 1)
         val fileToolFailureGuard = AgentFileToolFailureGuard()
+        val repeatGuard = RepeatedToolFailureGuard()
         val controlTools = setOf("tools_load", "sleep", "set_schedule", "ask_user", "ask_question", "ask_secure", "finish", "complete_step", "notes_write", "notes_read")
         while (scope.isActive) {
             val workerUsed = if (tokenBudgetOverride != null) {
@@ -1866,6 +1867,7 @@ class AgentRunner(
             val resultHashes = HashMap<String, Int>()
             val resultLong = HashSet<String>()
             var repeatedFileFailure: String? = null
+            var repeatedToolFailure: String? = null
             val staleSnapshotRecoveryCache = HashMap<String?, String>()
             // Depois que uma ação pediu confirmação, nada mais desta resposta é executado.
             var awaitingApproval = false
@@ -1998,6 +2000,14 @@ class AgentRunner(
                 val durableToolOutput = ToolOutcomeAdvisor.decorate(
                     call.name, AccessibilityToolHistory.durableResult(call.name, ctxOut), result.output)
                     .let { o -> dev.cueopen.app.browser.BrowserDownloads.drain(sessionId)?.let { "$o\n\n$it" } ?: o }
+                    .let { o ->
+                        // OpenBot 0.71: a mesma chamada falhando igual várias vezes = troque de abordagem; na 5ª, para o turno.
+                        when (repeatGuard.record(call.name, normArgs(call.argsJson), rawResult.output)) {
+                            RepeatedToolFailureGuard.Verdict.WARN -> "$o\n\n${RepeatedToolFailureGuard.WARN_NOTE}"
+                            RepeatedToolFailureGuard.Verdict.STOP -> { repeatedToolFailure = call.name; o }
+                            else -> o
+                        }
+                    }
                 // Como o Manus: página pede login → o app pede ao usuário (o agente nunca digita senha), e a tarefa continua depois.
                 if (call.name.startsWith("browser_") && ToolOutcomeAdvisor.classify(call.name, result.output) == ToolOutcomeAdvisor.Reason.LOGIN_WALL)
                     runCatching { requestUserLogin(sessionId) }
@@ -2012,6 +2022,12 @@ class AgentRunner(
                     val current = sleepReq
                     if (current == null || result.sleepSeconds > current.first) sleepReq = result.sleepSeconds to result.output
                 }
+            }
+            if (repeatedToolFailure != null && repeatedFileFailure == null) {
+                runCatching { dev.cueopen.app.diag.ErrorLog.log("agent", "A mesma chamada de $repeatedToolFailure falhou 5 vezes igual; turno encerrado.", sessionId, repeatedToolFailure) }
+                store.addItemUnique(sessionId, ChatItem.Error(text = "Parei: a ferramenta $repeatedToolFailure falhou 5 vezes do mesmo jeito. Ajuste o pedido ou troque de modelo e envie continuar."))
+                store.editSession(sessionId) { it.copy(status = SessionStatus.WAITING_USER) }
+                return
             }
             if (repeatedFileFailure != null) {
                 runCatching { dev.cueopen.app.diag.ErrorLog.log("agent", "Falhas determinísticas de arquivo repetidas; loop interrompido.", sessionId, "file") }
@@ -2350,6 +2366,7 @@ class AgentRunner(
      * ciclo infinito: ler a saída truncada gerava outra saída truncada em outro arquivo) e diz onde continuar.
      */
     private fun readFileChunk(f: java.io.File, shown: String, offset: Int, limit: Int): String {
+        if (!f.exists() && ContextArchive.isArchivePath(shown)) return ContextArchive.MISSING
         if (!f.exists()) return "ERRO: arquivo não existe neste workspace: $shown. Liste o diretório pai com file_list uma vez; não repita este caminho. Se o arquivo não aparecer, peça ao usuário para enviá-lo ou informe que está ausente."
         if (f.isDirectory) return "ERRO: $shown é um diretório. Use file_list."
         val head = f.inputStream().use { ins -> ByteArray(4096).let { b -> val n = ins.read(b); if (n <= 0) ByteArray(0) else b.copyOf(n) } }
@@ -5052,7 +5069,8 @@ class AgentRunner(
                     val root = sandbox.workspaceFor(sessionId)
                     val p = s("path").trim()
                     val start = if (p.isBlank()) root else AgentFilePathPolicy.readableWorkspace(root, sandbox.connectorsDir, p, allowRoot = true)
-                    if (start == null || !start.exists()) "ERRO: caminho não existe: $p. Omita path para buscar no workspace inteiro."
+                    if ((start == null || !start.exists()) && ContextArchive.isArchivePath(p)) ContextArchive.MISSING
+                    else if (start == null || !start.exists()) "ERRO: caminho não existe: $p. Omita path para buscar no workspace inteiro."
                     else kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) { FileSearch.search(root, start, s("pattern"), b("regex"), (i("max") ?: 50).coerceIn(5, 200)) }
                 }
                 "page_create" -> {
@@ -5391,7 +5409,7 @@ class AgentRunner(
             throw c
         } catch (t: Throwable) {
             val detail = t.message.orEmpty()
-            val accessibilityTool = call.name.startsWith("device_accessibility_")
+            val accessibilityTool = call.name.startsWith("device_accessibility_") && call.name != "device_accessibility_open_app"
             val staleSnapshot = isStaleAccessibilitySnapshotFailure(call.name, detail)
             val freshScreen = if (staleSnapshot) try {
                 dev.cueopen.app.device.DeviceAccessibilityActions.readScreen(sessionId)
@@ -5415,7 +5433,7 @@ class AgentRunner(
         // Marcadores de falha específicos de ferramentas (não começam com ERRO:) também viram log.
         val markerError = Regex("""(MARKET_ERROR|WALLET_RPC_ERROR|GUARDRAIL|No such file|not found|não encontrad|Recusado|Acesso negado)""")
             .containsMatchIn(out.take(400))
-        val accessibilityTool = call.name.startsWith("device_accessibility_")
+        val accessibilityTool = call.name.startsWith("device_accessibility_") && call.name != "device_accessibility_open_app"
         val safeExecutionOutput = if (accessibilityTool)
             "Resultado Android transitório omitido dos diagnósticos; nenhum conteúdo de tela foi salvo."
         else out

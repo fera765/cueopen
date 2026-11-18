@@ -136,6 +136,8 @@ class ContextManager(private val store: Store, private val sandbox: Sandbox, pri
 
     private fun persistArchive(file: File, content: String): Boolean = runCatching {
         if (!file.isFile || runCatching { file.readText() }.getOrNull() != content) file.writeText(content)
+        // Mesmo conteúdo (nome por hash) = acabou de ser citado de novo: renova a data para a limpeza não apagá-lo.
+        else file.setLastModified(System.currentTimeMillis())
         file.isFile && file.readText() == content
     }.getOrDefault(false)
 

@@ -138,6 +138,30 @@ object ActivepiecesHub {
 
 
     /**
+     * O motor instala as pieces com `bun install`, que usa hardlinks. No Android não há hardlink: o proot os imita com
+     * symlinks ".l2s.*" e o Node, ao resolver o caminho real, não acha os arquivos vizinhos (ex.: zod "./ca.cjs" →
+     * INTERNAL_ERROR em toda automação). Aqui o `bun` passa a instalar por cópia (--backend=copyfile) e, uma vez,
+     * o cache já corrompido é limpo para as pieces serem reinstaladas certas.
+     */
+    private val BUN_FIX = """
+        |B="$(command -v bun 2>/dev/null)"
+        |if [ -n "${'$'}B" ] && ! head -c 400 "${'$'}B" 2>/dev/null | grep -q fluwy-bun; then
+        |  mv -f "${'$'}B" "${'$'}B.fluwy-real" && cat > "${'$'}B" <<'EOS'
+        |#!/bin/sh
+        |# fluwy-bun: sem hardlink no Android; instala por cópia
+        |R="${'$'}0.fluwy-real"
+        |case "${'$'}1" in install|i|add|update) c="${'$'}1"; shift; exec "${'$'}R" "${'$'}c" --backend=copyfile "${'$'}@";; esac
+        |exec "${'$'}R" "${'$'}@"
+        |EOS
+        |  chmod 755 "${'$'}B"; echo "[fluwy] bun: instalação por cópia ativada"
+        |fi
+        |if [ ! -f /opt/ap-data/.fluwy-bun-copyfile ]; then
+        |  rm -rf /opt/ap-home/.bun/install/cache /usr/src/app/cache/v*/common 2>/dev/null
+        |  touch /opt/ap-data/.fluwy-bun-copyfile; echo "[fluwy] cache de pieces limpo (reinstala por cópia)"
+        |fi
+        |""".trimMargin()
+
+    /**
      * Início rápido: app e worker direto no Node — sem PM2 e sem `--enable-source-maps` (o parse dos source maps
      * de um bundle grande é o que mais pesava no boot). O token do worker é gerado uma vez e reaproveitado.
      * Se o app cair nos primeiros segundos, marca o modo direto como incompatível e volta ao entrypoint oficial.
@@ -256,6 +280,7 @@ object ActivepiecesHub {
             val synced = File(rootfs(), "opt/ap-data/.fluwy-synced")
             if (synced.exists() && System.currentTimeMillis() - synced.lastModified() > 7L * 24 * 3600_000) synced.delete()
             File(rootfs(), "opt/fluwy-esbuild.sh").writeText(ESBUILD_FIX)
+            File(rootfs(), "opt/fluwy-bun.sh").writeText(BUN_FIX)
             File(rootfs(), "opt/fluwy-start.sh").writeText(START_SCRIPT)
             val t0 = System.currentTimeMillis()
             val cmd = "export PATH=/usr/local/bin:/usr/local/sbin:/usr/bin:/usr/sbin:/bin:/sbin HOME=/opt/ap-home; " +
@@ -263,6 +288,7 @@ object ActivepiecesHub {
                 // Passos de código compilam com o binário esbuild: o script garante uma CÓPIA executável em /usr/bin
                 // (PATH mínimo que qualquer processo filho do motor enxerga) e registra o diagnóstico no hub.log.
                 "sh /opt/fluwy-esbuild.sh; " +
+                "sh /opt/fluwy-bun.sh; " +
                 "export AP_DB_TYPE=PGLITE AP_REDIS_TYPE=STANDALONE AP_REDIS_HOST=127.0.0.1 AP_REDIS_PORT=$REDIS_PORT AP_PORT=$PORT AP_FRONTEND_URL=$BASE AP_CONFIG_PATH=/opt/ap-data " +
                 "AP_EXECUTION_MODE=UNSANDBOXED AP_TELEMETRY_ENABLED=false AP_WORKER_CONCURRENCY=1 NODE_ENV=production " +
                 "NODE_OPTIONS=--max-old-space-size=640 NODE_COMPILE_CACHE=/opt/ap-data/node-compile-cache; " +

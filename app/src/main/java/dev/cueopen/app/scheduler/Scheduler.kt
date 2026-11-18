@@ -62,7 +62,8 @@ class ScheduledWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(
         val task = app.store.state.value.scheduled.firstOrNull { it.id == id } ?: return Result.failure()
         val session = Session(title = "⏰ ${task.title}", agentId = task.agentId, scheduledTaskId = task.id)
         if (!app.store.beginScheduledRun(id, session)) return Result.failure()
-        val job = app.agent.send(session.id, "[Execução agendada · horário local: ${dev.cueopen.app.agent.LocalClock.line()}]\n" + task.prompt)
+        val job = app.agent.send(session.id, "[Execução agendada · horário local: ${dev.cueopen.app.agent.LocalClock.line()}]\n" +
+            "[Se não houver nada novo para relatar nesta execução, termine com ${QuietRun.MARKER} na resposta final: não gera notificação.]\n" + task.prompt)
         try {
             if (isStopped || !app.store.isScheduledRunActive(id, session.id)) {
                 app.agent.stop(session.id)
@@ -84,7 +85,9 @@ class ScheduledWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(
         val failed = app.store.session(session.id)?.status == dev.cueopen.app.data.SessionStatus.ERROR
         app.store.setScheduledResult(id, failed)
         app.store.flush()
-        if (app.store.settings.notifyOnDone) notify(app, session.id, if (failed) "${task.title} (falhou)" else task.title)
+        // OpenBot 0.71: execução sem novidade termina em silêncio (falha sempre avisa).
+        val quiet = !failed && QuietRun.isQuiet(app.store.session(session.id)?.llm?.lastOrNull { it.role == "assistant" }?.content)
+        if (app.store.settings.notifyOnDone && !quiet) notify(app, session.id, if (failed) "${task.title} (falhou)" else task.title)
         return Result.success()
     }
 
@@ -135,4 +138,11 @@ class BootReceiver : android.content.BroadcastReceiver() {
         AutonomyWorker.ensure(context)
         dev.cueopen.app.scheduler.Heartbeat.rescheduleAll(context)
     }
+}
+
+
+/** Marcador que o agente usa numa execução agendada sem novidades (sem notificação). */
+object QuietRun {
+    const val MARKER = "[SEM_NOVIDADES]"
+    fun isQuiet(finalReply: String?): Boolean = finalReply?.contains(MARKER) == true
 }
