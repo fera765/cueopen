@@ -32,7 +32,7 @@ else
 
 
     if [ -e "$PREFIX/libtalloc.so.2" ] || [ -L "$PREFIX/libtalloc.so.2" ]; then
-        rm "$PREFIX/libtalloc.so.2"
+        rm -f "$PREFIX/libtalloc.so.2"
     fi
 
     ln -s "$NATIVE_DIR/libtalloc.so" "$PREFIX/libtalloc.so.2"

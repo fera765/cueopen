@@ -235,11 +235,11 @@ class OpenRouter(private val settings: () -> Settings) {
         val finish = choice0["finish_reason"]?.let { runCatching { it.jsonPrimitive.contentOrNull }.getOrNull() }
         val msg = choice0["message"]!!.jsonObject
         val content = msg["content"]?.let { runCatching { it.jsonPrimitive.contentOrNull }.getOrNull() }
-        val rawCallsElement = msg["tool_calls"]
-        if (rawCallsElement != null && rawCallsElement !is JsonArray) {
-            throw LlmRequestFailure("O provedor retornou tool_calls em formato inválido; nenhuma ferramenta foi executada.", retryable = true)
-        }
-        val tcs = rawCallsElement?.jsonArray
+        // Vários provedores mandam "tool_calls": null (sem ferramentas), um objeto único ou a lista como texto JSON.
+        // Antes isso virava "formato inválido" e o turno era repetido à toa (às vezes 10x seguidas).
+        val rawCallsElement = ToolCallsShape.normalize(msg["tool_calls"])
+            ?: throw LlmRequestFailure("O provedor retornou tool_calls em formato inválido; nenhuma ferramenta foi executada.", retryable = true)
+        val tcs = rawCallsElement.takeIf { it.isNotEmpty() }
         val parsedCalls = tcs.orEmpty().mapNotNull { tc ->
             ToolCallHistoryNormalizer.canonicalizeToolCall(tc)?.let { it to ToolCall(it.id, it.name, it.argsJson) }
         }
