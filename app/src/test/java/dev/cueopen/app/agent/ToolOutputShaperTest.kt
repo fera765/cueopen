@@ -45,11 +45,10 @@ class ToolOutputShaperTest {
 }
 
 class HubRecipeTest {
-    @Test fun recipePointsToRunActionAndForbidsTempFlows() {
-        val lines = ConnectorRouting.promptLines(listOf(Triple("Activepieces Hub", "mcp_activepieces_hub", true)), null,
-            listOf("ap_build_flow", "ap_list_connections", "ap_search_actions", "ap_get_piece_props", "ap_run_action"), emptyList()).joinToString("\n")
-        assertTrue(lines.contains("mcp_activepieces_hub__ap_run_action {pieceName, actionName, input, connectionExternalId}"))
-        assertTrue(lines.contains("NUNCA monte fluxo, webhook ou passo de código temporário"))
+    @Test fun hubPromptUsesGenericConnectorToolsWithoutFlows() {
+        val lines = ConnectorRouting.promptLines(emptyList(), true, null, emptyList()).joinToString("\n")
+        assertTrue(lines.contains("conector_executar {conector, acao, campos, conexao}"))
+        assertTrue(lines.contains("não existem automações"))
     }
 
     @Test fun busyboxOptionErrorsGetSpecificAdvice() {

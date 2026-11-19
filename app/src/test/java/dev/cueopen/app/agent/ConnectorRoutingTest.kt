@@ -83,16 +83,16 @@ class HubBrowserGuardTest {
     private val pfx = "mcp_activepieces_hub"
 
     @Test fun gmailInBrowserIsRefusedBeforeTryingTheConnector() {
-        val r = ConnectorRouting.browserGuard("https://mail.google.com/mail/u/0/#inbox", true, pfx, hubCalls = 0, hubFailures = 0, inventory = "Gmail (lord@x.com)")
+        val r = ConnectorRouting.browserGuard("https://mail.google.com/mail/u/0/#inbox", true, hubCalls = 0, hubFailures = 0, inventory = "Gmail (lord@x.com)")
         assertTrue(r!!.startsWith("RECUSADO"))
-        assertTrue(r.contains("${pfx}__ap_run_action"))
+        assertTrue(r.contains("conector_executar"))
     }
 
     @Test fun browserAllowedWhenConnectorFailedOrAppNotConnectedOrUnrelatedSite() {
-        assertEquals(null, ConnectorRouting.browserGuard("https://mail.google.com", true, pfx, 2, 1, "Gmail"))
-        assertEquals(null, ConnectorRouting.browserGuard("https://mail.google.com", true, pfx, 0, 0, "Slack (time)"))
-        assertEquals(null, ConnectorRouting.browserGuard("https://g1.globo.com", true, pfx, 0, 0, null))
-        assertEquals(null, ConnectorRouting.browserGuard("https://mail.google.com", false, pfx, 0, 0, null))
+        assertEquals(null, ConnectorRouting.browserGuard("https://mail.google.com", true, 2, 1, "Gmail"))
+        assertEquals(null, ConnectorRouting.browserGuard("https://mail.google.com", true, 0, 0, "Slack (time)"))
+        assertEquals(null, ConnectorRouting.browserGuard("https://g1.globo.com", true, 0, 0, null))
+        assertEquals(null, ConnectorRouting.browserGuard("https://mail.google.com", false, 0, 0, null))
     }
 
     @Test fun recognizesHubAppHosts() {
