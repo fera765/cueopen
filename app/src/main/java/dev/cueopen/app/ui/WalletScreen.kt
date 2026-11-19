@@ -190,7 +190,7 @@ fun WalletScreen(nav: NavController) {
         tokenMeta = runCatching { SolanaMarketDataClient().tokenDisplays(mints) }.getOrDefault(emptyMap())
     }
 
-    Scaffold(containerColor = c.bg, topBar = { CueTopBar("Carteira", { nav.popBackStack() }) }) { pad ->
+    Scaffold(containerColor = c.bg, topBar = { CueTopBar("Carteira Solana", { nav.popBackStack() }) }) { pad ->
         Column(
             Modifier.padding(pad).verticalScroll(rememberScrollState()).padding(horizontal = 16.dp, vertical = 14.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp)

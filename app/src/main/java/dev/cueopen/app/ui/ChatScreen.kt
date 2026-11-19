@@ -64,6 +64,8 @@ fun ChatScreen(nav: NavController, sessionId: String, onMenu: () -> Unit = {}) {
     val app = CueApp.instance
     val st by app.store.state.collectAsStateWithLifecycle()
     val session = st.sessions.firstOrNull { it.id == sessionId } ?: run { LaunchedEffect(Unit) { nav.popBackStack() }; return }
+    // Abriu a conversa: os avisos dela contam como vistos e saem da bandeja.
+    LaunchedEffect(sessionId) { dev.cueopen.app.notify.NotificationCenter.markRead(sessionId) }
     // Chat do criador de UI conector: voltar leva direto à página inicial (limpa a pilha).
     val goBack: () -> Unit = {
         if (session.connectorBuilder) nav.navigate("home") { popUpTo(0) { inclusive = true }; launchSingleTop = true }
@@ -453,6 +455,8 @@ fun TimelineItem(item: ChatItem, onOpenComputer: (String) -> Unit, onOpenMedia: 
         }
         is ChatItem.Plan -> {}  // o plano fica no card do computador, acima do composer
         is ChatItem.Media -> MediaCard(item, onOpenMedia)
+        is ChatItem.Cards -> ResultCards(item, sessionId, onSend)
+        is ChatItem.Audio -> AudioMessage(item)
         is ChatItem.Error -> InfoRow(Icons.Rounded.ErrorOutline, item.text, Cue.c.err)
         is ChatItem.ConnectorProposal -> ConnectorProposalCard(item, sessionId, nav)
         is ChatItem.UserScriptProposal -> UserScriptProposalCard(item, sessionId, nav)
@@ -861,6 +865,8 @@ fun sessionMarkdown(s: Session): String = buildString {
             is ChatItem.Question -> { i.questions.forEachIndexed { n, q -> appendLine("❓ ${q.question} → ${i.answers.getOrNull(n)?.joinToString().orEmpty().ifBlank { "—" }}") }; appendLine() }
             is ChatItem.SecureForm -> appendLine("🔒 ${i.title}: ${if (i.state == "submitted") "enviado com segurança (" + i.submitted.joinToString() + ")" else i.state}\n")
             is ChatItem.Media -> appendLine("🖼 ${i.caption} (${java.io.File(i.path).name})\n")
+            is ChatItem.Cards -> { appendLine("🗂 ${i.title.ifBlank { i.kind }}"); i.items.forEachIndexed { n, e -> appendLine("${n + 1}. ${e.title}${if (e.price.isNotBlank()) " — " + e.price else ""}${if (e.url.isNotBlank()) " — " + e.url else ""}${if (n == i.selected) " ✅" else ""}") }; appendLine() }
+            is ChatItem.Audio -> appendLine("🔊 ${i.text.take(300)}\n")
             is ChatItem.Approval -> appendLine("🛡 Confirmação: ${i.summary} — ${i.state}\n")
             is ChatItem.SectionSetup -> appendLine("📁 Seção ${i.sectionName} (${i.agentNames.joinToString()}) — ${i.state}\n")
         }

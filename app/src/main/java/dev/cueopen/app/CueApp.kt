@@ -127,6 +127,7 @@ class CueApp : Application() {
         getSystemService(NotificationManager::class.java).createNotificationChannel(
             NotificationChannel(CH_TASKS, "Tarefas", NotificationManager.IMPORTANCE_DEFAULT)
         )
+        dev.cueopen.app.notify.NotificationCenter.init(this)
     }
 
     private fun isMainAppProcess(): Boolean {

@@ -105,6 +105,9 @@ class ContextManager(private val store: Store, private val sandbox: Sandbox, pri
                         if (sessionId != null) stash(sessionId, full)?.let { markBrowserSnapshot(it) }
                         m.copy(content = full.take(200).trimEnd() + "\n…[snapshot antigo do browser recolhido: a página pode ter mudado desde então. " +
                             "Para o estado atual, use browser_read; o que você precisava guardar dele deve estar nas suas anotações.]")
+                    } else if (full.length <= 1_200) {
+                        // Pequeno: fica inteiro (um ponteiro de releitura custava uma chamada a mais e virava ciclo de leituras).
+                        m
                     } else {
                         val ptr = if (sessionId != null) stash(sessionId, full) else null
                         if (sessionId != null && ptr == null) m else {

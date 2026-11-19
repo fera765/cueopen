@@ -526,6 +526,7 @@ fun ScheduledScreen(nav: NavController) {
                     }
                 }
             }
+            item { TriggersSection(nav) }
             item { Spacer(Modifier.height(80.dp)) }
         }
     }
@@ -924,5 +925,52 @@ fun DevicePermissionsCard(a: dev.cueopen.app.data.AgentProfile, onChange: (dev.c
                 TextButton(onClick = { showAccessibilityDisclosure = false }) { Text("Cancelar") }
             },
         )
+    }
+}
+
+
+/** Gatilhos: acordam uma conversa quando chega algo novo numa fonte (conector do hub ou página web). */
+@Composable
+private fun TriggersSection(nav: NavController) {
+    val ctx = LocalContext.current
+    val c = Cue.c
+    val scope = rememberCoroutineScope()
+    LaunchedEffect(Unit) { dev.cueopen.app.triggers.TriggerStore.load(ctx) }
+    val list by dev.cueopen.app.triggers.TriggerStore.all.collectAsStateWithLifecycle()
+    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        SectionLabel("Gatilhos")
+        if (list.isEmpty()) Text("Nenhum gatilho. Peça a um agente, por exemplo: \"quando chegar e-mail de cliente, resuma e prepare a resposta\".", fontSize = 12.sp, color = c.ink3)
+        list.forEach { t ->
+            var menu by remember(t.id) { mutableStateOf(false) }
+            CueCard(onClick = { nav.navigate("chat/${t.sessionId}") }) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("⚡", fontSize = 18.sp); Spacer(Modifier.width(10.dp))
+                    Column(Modifier.weight(1f)) {
+                        Text(t.name, fontWeight = FontWeight.SemiBold)
+                        Text((if (t.source == "site") t.url else dev.cueopen.app.connectors.HubConnectors.appName(dev.cueopen.app.connectors.HubApi.pieceName(t.piece)) + " · " + t.action) +
+                            " · a cada ${t.intervalMinutes} min", fontSize = 12.sp, color = c.ink2, maxLines = 1)
+                        Text(when {
+                            t.lastError != null -> "Erro: ${t.lastError.take(80)}"
+                            t.lastRunAt == null -> "Aguardando a 1ª verificação"
+                            else -> "Verificado ${dateFmt.format(Date(t.lastRunAt))} · ${t.history.sumOf { it.count }} evento(s)"
+                        }, fontSize = 11.sp, color = if (t.lastError != null) c.err else c.ink3)
+                    }
+                    Switch(t.enabled, { on -> val n = t.copy(enabled = on); dev.cueopen.app.triggers.TriggerStore.upsert(ctx, n); dev.cueopen.app.triggers.TriggerEngine.schedule(ctx, n) },
+                        colors = SwitchDefaults.colors(checkedTrackColor = c.ink, checkedThumbColor = c.bg))
+                    Box {
+                        IconButton({ menu = true }) { Icon(Icons.Rounded.MoreVert, "Opções") }
+                        DropdownMenu(menu, { menu = false }) {
+                            DropdownMenuItem(text = { Text("Verificar agora") }, onClick = { menu = false
+                                scope.launch {
+                                    val r = dev.cueopen.app.triggers.TriggerEngine.check(ctx.applicationContext as CueApp, t.id)
+                                    android.widget.Toast.makeText(ctx, r, android.widget.Toast.LENGTH_LONG).show()
+                                } })
+                            DropdownMenuItem(text = { Text("Remover", color = c.err) }, onClick = { menu = false
+                                dev.cueopen.app.triggers.TriggerEngine.cancel(ctx, t.id); dev.cueopen.app.triggers.TriggerStore.remove(ctx, t.id) })
+                        }
+                    }
+                }
+            }
+        }
     }
 }

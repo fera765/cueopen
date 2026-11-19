@@ -729,7 +729,8 @@ private fun SessionDrawer(nav: NavController, sessions: List<Session>, agents: L
             DrawerShortcut(Icons.Rounded.LibraryBooks, "Knowledge", tint = 0xFF0FA3B1) { go("knowledge") },
             DrawerShortcut(Icons.Rounded.Language, "Browser", tint = 0xFF3B82F6) { go("browserhub") },
             DrawerShortcut(Icons.Rounded.Computer, "Linux", tint = 0xFF64748B) { go("sandbox") },
-            DrawerShortcut(Icons.Rounded.AccountBalanceWallet, "Carteira", tint = 0xFF9945FF) { go("wallet") },
+            DrawerShortcut(Icons.Rounded.AccountBalanceWallet, "Cofre", tint = 0xFF9945FF) { go("vault") },
+            DrawerShortcut(Icons.Rounded.Notifications, "Avisos", tint = 0xFFEF4444) { go("notifications") },
         )
         shortcuts.chunked(5).forEach { row ->
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -989,7 +990,12 @@ private fun SectionRow(
                     if (main?.status == SessionStatus.RUNNING) PulsingDot(c.ok) else StatusDot(main?.status ?: SessionStatus.IDLE)
                 }
             }
-            sec.agentIds.mapNotNull { id -> agents.firstOrNull { it.id == id } }.forEach { a ->
+            val ordered = SidebarOrder.apply(sec.agentIds, sec.memberOrder).mapNotNull { id -> agents.firstOrNull { it.id == id } }
+            ReorderableColumn(ordered.map { it.id }, onMove = { from, to ->
+                // Só a ordem visual muda (memberOrder); a identidade e o papel do agente ficam iguais.
+                app.store.upsertSection(sec.copy(memberOrder = SidebarOrder.move(ordered.map { it.id }, from, to)))
+            }) { id ->
+                val a = ordered.first { it.id == id }
                 val chat = chats.firstOrNull { it.agentId == a.id && it.id != sec.sessionId }
                 Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp)).clickable { if (chat != null) onOpen(chat.id) else onOpenAgent(a.id) }
                     .padding(horizontal = 8.dp, vertical = 7.dp), verticalAlignment = Alignment.CenterVertically) {

@@ -23,10 +23,11 @@ object ToolContextPlanner {
     val GROUPS: Map<String, Set<String>> = linkedMapOf(
         "core" to setOf("update_plan", "shell", "file_write", "file_edit", "file_read", "file_list", "file_search", "web_search", "web_fetch", "complete_step", "show_file",
             "browser_navigate", "browser_read", "browser_snapshot", "browser_click", "browser_type", "browser_scroll", "browser_back", "browser_wait_for",
-            "notes_write", "memory_save", "memory_search", "skill_load", "ask_user", "ask_question", "ask_secure", "finish", "tools_load"),
+            "notes_write", "memory_save", "memory_search", "skill_load", "ask_user", "ask_question", "ask_secure", "finish", "tools_load", "show_cards", "notify",
+            "conectores_listar", "conector_acoes", "conector_executar"),
         "web_dev" to setOf("browser_js", "browser_network", "browser_console"),
         "agents" to setOf("multi_agents"),
-        "schedule" to setOf("sleep", "set_schedule", "cron_add", "cron_list", "cron_remove"),
+        "schedule" to setOf("sleep", "set_schedule", "cron_add", "cron_list", "cron_remove", "trigger_create", "trigger_list", "trigger_delete"),
         "channels" to setOf("send_file"),
         "pages" to setOf("page_create", "page_update", "page_read", "page_list"),
         "live" to setOf("live_server"),
@@ -53,7 +54,7 @@ object ToolContextPlanner {
     private val TRIGGERS: Map<String, List<String>> = mapOf(
         "web_dev" to listOf("javascript", "console", "network", "rede do site", "requisic", "devtools", "api do site", "scrap", "raspar", "depur", "debug", "xhr", "fetch", "cookie", "dom", "userscript", "user script", "tampermonkey"),
         "agents" to listOf("subagente", "sub-agente", "multi agente", "multiagente", "paralel", "em paralelo", "varios agentes", "workers", "pesquisa ampla", "wide research"),
-        "schedule" to listOf("monitor", "acompanh", "a cada", "agend", "todo dia", "toda segunda", "amanhã às", "às ", "toda hora", "de hora em hora", "continu", "periodic", "lembr", "aguard", "espera", "minutos", "vela"),
+        "schedule" to listOf("monitor", "acompanh", "a cada", "agend", "todo dia", "toda segunda", "amanhã às", "às ", "toda hora", "de hora em hora", "continu", "periodic", "lembr", "aguard", "espera", "minutos", "vela", "quando chegar", "quando receber", "sempre que", "gatilho", "trigger", "novo e-mail", "novos e-mails", "avise quando", "me avise"),
         // Só pedidos explícitos de Fluwy Pages; "crie uma página html/site" continua sendo arquivo comum.
         "pages" to listOf("fluwy pages", "pages", "page_", "kanban", "quadro", "painel", "dashboard", "checklist", "tracker", "acompanhamento"),
         // Live Server: só quando o usuário pede para publicar/expor (não em qualquer menção a site).

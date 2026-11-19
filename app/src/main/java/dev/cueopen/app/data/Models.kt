@@ -14,6 +14,22 @@ enum class SessionStatus { IDLE, RUNNING, WAITING_USER, DONE, ERROR, STOPPED, SL
 @Serializable
 enum class StepStatus { RUNNING, OK, ERROR }
 
+/** Um card de resultado (produto, notícia, site…). Campos vazios simplesmente não aparecem. */
+@Serializable
+data class CardEntry(
+    val title: String,
+    val subtitle: String = "",
+    val image: String = "",
+    val price: String = "",
+    val oldPrice: String = "",
+    val source: String = "",
+    val rating: String = "",
+    val badge: String = "",
+    val url: String = "",
+    val date: String = "",
+    val ref: String = "",
+)
+
 /** Um item da linha do tempo de uma tarefa (mensagem, passo de ferramenta, plano...). */
 @Serializable
 sealed class ChatItem {
@@ -55,6 +71,31 @@ sealed class ChatItem {
         override val time: Long = now(),
         val goal: String,
         val phases: List<PlanPhase>,
+    ) : ChatItem()
+
+    /**
+     * Resultados visuais estruturados (produtos, notícias, sites, buscas, serviços) vindos da ferramenta show_cards.
+     * Renderizados pelo app a partir destes campos — nunca de HTML arbitrário. [selected] = índice escolhido (-1 = nenhum).
+     */
+    @Serializable
+    data class Cards(
+        override val id: String = newId(),
+        override val time: Long = now(),
+        val kind: String,
+        val title: String = "",
+        val items: List<CardEntry>,
+        val selected: Int = -1,
+    ) : ChatItem()
+
+    /** Resposta falada do agente (TTS no aparelho), com player no chat. */
+    @Serializable
+    data class Audio(
+        override val id: String = newId(),
+        override val time: Long = now(),
+        val path: String,
+        val text: String = "",
+        val durationMs: Long = 0,
+        val sourceItemId: String = "",
     ) : ChatItem()
 
     /** Arquivo/imagem gerado pelo agente, exibido inline no chat. */
@@ -356,6 +397,8 @@ data class Section(
     val description: String = "",
     val coordinatorAgentId: String,
     val agentIds: List<String> = emptyList(),
+    /** Ordem de exibição dos agentes na barra lateral (arrastar e soltar). Só visual: não muda papel nem configuração. */
+    val memberOrder: List<String> = emptyList(),
     /** Chat principal da seção (com o coordenador). */
     val sessionId: String,
     /** false até o usuário ativar as permissões no card de autorização. */
