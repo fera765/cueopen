@@ -27,24 +27,49 @@ process.env.MINIHUB_RUN_TIMEOUT_MS = '10000'
 const hub = require('../../app/src/main/assets/minihub/minihub.js')
 const REGISTRY = 'https://registry.npmjs.org'
 
-async function listPieces() {
+/** Lista as pieces pelo código-fonte do Activepieces (o índice de busca do npm limita por IP). */
+function listFromGit() {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ap-src-'))
+    const git = (args) => spawnSync('git', args, { cwd: dir, encoding: 'utf8', timeout: 10 * 60 * 1000 })
+    let r = git(['clone', '--depth', '1', '--filter=blob:none', '--no-checkout', 'https://github.com/activepieces/activepieces', '.'])
+    if (r.status !== 0) throw new Error(`git clone: ${r.stderr}`)
+    git(['sparse-checkout', 'init', '--no-cone'])
+    git(['sparse-checkout', 'set', '/packages/pieces/community/*/package.json', '/packages/pieces/core/*/package.json'])
+    r = git(['checkout'])
+    if (r.status !== 0) throw new Error(`git checkout: ${r.stderr}`)
     const names = new Map()
-    for (let from = 0; from < 5000; from += 250) {
-        const r = await fetch(`${REGISTRY}/-/v1/search?text=${encodeURIComponent('@activepieces/piece-')}&size=250&from=${from}`)
-        if (!r.ok) throw new Error(`busca npm HTTP ${r.status}`)
-        const j = await r.json()
-        for (const o of j.objects || []) {
-            const p = o.package
-            if (p && p.name && p.name.startsWith('@activepieces/piece-') && p.version) names.set(p.name, p.version)
+    for (const group of ['community', 'core']) {
+        const base = path.join(dir, 'packages', 'pieces', group)
+        if (!fs.existsSync(base)) continue
+        for (const d of fs.readdirSync(base)) {
+            try {
+                const pj = JSON.parse(fs.readFileSync(path.join(base, d, 'package.json'), 'utf8'))
+                if (pj.name && pj.name.startsWith('@activepieces/piece-') && !pj.private) names.set(pj.name, pj.version)
+            } catch { /* pasta sem package.json */ }
         }
-        if (!j.objects || j.objects.length < 250) break
     }
+    fs.rmSync(dir, { recursive: true, force: true })
     return names
+}
+
+async function fetchRetry(url, tries = 6) {
+    for (let i = 0; ; i++) {
+        const r = await fetch(url)
+        if (r.status !== 429 && r.status < 500) return r
+        if (i >= tries) return r
+        await new Promise((ok) => setTimeout(ok, 1500 * 2 ** i))
+    }
+}
+
+async function listPieces() {
+    const names = listFromGit()
+    if (names.size > 100) return names
+    throw new Error(`código-fonte do Activepieces listou só ${names.size} pieces`)
 }
 
 /** Confirma a "latest" de cada uma (a busca às vezes atrasa) e descarta pacotes deprecados. */
 async function latest(name) {
-    const r = await fetch(`${REGISTRY}/${name.replace('/', '%2f')}/latest`)
+    const r = await fetchRetry(`${REGISTRY}/${name.replace('/', '%2f')}/latest`)
     if (!r.ok) return null
     const j = await r.json()
     if (j.deprecated) return null
@@ -95,8 +120,8 @@ async function main() {
         const must = ['@activepieces/piece-http', '@activepieces/piece-gmail', '@activepieces/piece-google-drive', '@activepieces/piece-slack', '@activepieces/piece-text-helper', '@activepieces/piece-date-helper', '@activepieces/piece-math-helper']
         names = [...new Set([...must.filter((m) => found.has(m)), ...names])].slice(0, LIMIT)
     }
-    console.log(`npm: ${found.size} pieces encontradas; verificando ${names.length}`)
-    const versions = await pool(names, 16, async (n) => [n, await latest(n)])
+    console.log(`Activepieces: ${found.size} pieces encontradas; verificando ${names.length}`)
+    const versions = await pool(names, 6, async (n) => [n, await latest(n)])
     const targets = versions.filter(([, v]) => v)
     const skipped = versions.filter(([, v]) => !v).map(([n]) => ({ name: n, error: 'deprecado ou sem versão latest' }))
 
