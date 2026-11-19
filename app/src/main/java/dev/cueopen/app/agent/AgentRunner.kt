@@ -1894,6 +1894,8 @@ class AgentRunner(
                 }
                 store.editSession(sessionId) { it.copy(status = SessionStatus.DONE) }
                 if (tokenBudgetOverride == null) store.session(sessionId)?.let { done -> scope.launch { ctxMgr.extractMemories(done) } }
+                // Modo voz da conversa: a resposta final também vem falada.
+                if (store.session(sessionId)?.voiceReplies == true) speakLastAnswer(sessionId)
                 return
             }
             intentNoActionTurns = 0
@@ -2647,6 +2649,18 @@ class AgentRunner(
         }
         jobs[sid] = job
         return job
+    }
+
+    /** Gera o áudio da última resposta final e adiciona no chat (sem bloquear o loop). */
+    fun speakLastAnswer(sessionId: String, itemId: String? = null) {
+        val target = store.session(sessionId)?.items?.let { items ->
+            (if (itemId != null) items.firstOrNull { it.id == itemId } else items.lastOrNull { it is ChatItem.Assistant && it.final }) as? ChatItem.Assistant
+        } ?: return
+        scope.launch {
+            val audio = runCatching { dev.cueopen.app.assistant.VoiceReplies.synthesize(ctx, java.io.File(sandbox.workspaceFor(sessionId), "audio"), target.text, target.id) }.getOrNull()
+            if (audio != null) store.addItem(sessionId, audio)
+            else store.addItemUnique(sessionId, ChatItem.Error(text = "Não consegui gerar o áudio: instale uma voz em português em Configurações do Android › Saída de texto para voz."))
+        }
     }
 
     /** Remove marcações Markdown para mostrar em notificação (texto puro). */
@@ -3867,6 +3881,8 @@ class AgentRunner(
         }
         // UI Connectors (ex.: IQ Option): só os que este agente pode usar (toggle por agente / "Agent required?").
         runCatching { dev.cueopen.app.CueApp.instance.uiConnectors.toolDefinitions(agent) }.getOrDefault(emptyList()).forEach { add(it) }
+        add(tool("reply_audio", "Responde por ÁUDIO no chat (voz gerada no aparelho), além do texto. Use quando o usuário pedir resposta falada/em áudio. Passe o texto exato a ser falado (curto e natural, sem markdown).",
+            buildJsonObject { put("text", str("Texto a falar")) }, listOf("text")))
         add(tool("notify", "Avisa o usuário fora do chat. Use com critério: 'silent' só registra no histórico (rotina sem novidade), 'low' aviso discreto, 'normal' conclusão importante ou falha moderada, 'high' precisa da atenção dele, 'critical' falha grave que exige intervenção. Nunca repita o mesmo aviso.",
             buildJsonObject {
                 put("title", str("Título curto")); put("text", str("Mensagem objetiva (o que houve e o que fazer)"))
@@ -5278,6 +5294,11 @@ class AgentRunner(
                 "browser_new_tab" -> browserFor(sessionId).newTab(SecretVault.resolve(sessionId, s("url")))
                 "browser_select_tab" -> browserFor(sessionId).selectTabForAgent(s("tab_id"))
                 "browser_close_tab" -> browserFor(sessionId).closeTabForAgent(s("tab_id"))
+                "reply_audio" -> {
+                    val audio = dev.cueopen.app.assistant.VoiceReplies.synthesize(ctx, java.io.File(sandbox.workspaceFor(sessionId), "audio"), s("text"))
+                    if (audio == null) "ERRO: o motor de voz do aparelho não está disponível (sem voz pt-BR instalada). Responda em texto e avise o usuário."
+                    else { store.addItem(sessionId, audio); "Áudio enviado no chat (${audio.durationMs / 1000}s). Não repita o mesmo conteúdo em texto longo." }
+                }
                 "notify" -> {
                     val p = runCatching { dev.cueopen.app.notify.NotificationCenter.Priority.valueOf(s("priority").uppercase()) }.getOrDefault(dev.cueopen.app.notify.NotificationCenter.Priority.NORMAL)
                     val agentName = store.session(sessionId)?.agentId?.let { store.agent(it)?.name }.orEmpty()

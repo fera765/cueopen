@@ -298,7 +298,7 @@ private fun HubConnectionsSection(nav: NavController, running: Boolean) {
     val c = Cue.c
     val scope = rememberCoroutineScope()
     val ctx = LocalContext.current
-    var conns by remember { mutableStateOf<List<dev.cueopen.app.connectors.HubConnectors.Conn>?>(null) }
+    var conns by remember { mutableStateOf(dev.cueopen.app.connectors.HubConnectors.lastKnown()) }
     var err by remember { mutableStateOf<String?>(null) }
     var reload by remember { mutableStateOf(0) }
     val lifecycle = androidx.lifecycle.compose.LocalLifecycleOwner.current
@@ -308,7 +308,7 @@ private fun HubConnectionsSection(nav: NavController, running: Boolean) {
     }
     LaunchedEffect(running, reload) {
         if (!running) return@LaunchedEffect
-        runCatching { dev.cueopen.app.connectors.HubConnectors.connections(app.store) }.onSuccess { conns = it; err = null }.onFailure { err = it.message }
+        runCatching { dev.cueopen.app.connectors.HubConnectors.connections(app.store, fresh = reload > 0) }.onSuccess { conns = it; err = null }.onFailure { err = it.message }
     }
     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {

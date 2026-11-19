@@ -87,12 +87,11 @@ class ScheduledWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(
         app.store.flush()
         // OpenBot 0.71: execução sem novidade termina em silêncio (falha sempre avisa).
         val quiet = !failed && QuietRun.isQuiet(app.store.session(session.id)?.llm?.lastOrNull { it.role == "assistant" }?.content)
-        val NC = dev.cueopen.app.notify.NotificationCenter
         val final = app.store.session(session.id)?.items?.lastOrNull { it is dev.cueopen.app.data.ChatItem.Assistant } as? dev.cueopen.app.data.ChatItem.Assistant
         when {
-            failed -> NC.post("${task.title} (falhou)", "A tarefa agendada falhou. Toque para ver o que aconteceu.", NC.Priority.HIGH, NC.Category.FAILURE, session.id)
-            quiet -> NC.post(task.title, "Execução sem novidades.", NC.Priority.SILENT, NC.Category.MONITOR, session.id)
-            app.store.settings.notifyOnDone -> NC.post("Tarefa agendada concluída", task.title + (final?.text?.let { ": " + it.take(200) } ?: ""), NC.Priority.NORMAL, NC.Category.DONE, session.id)
+            failed -> dev.cueopen.app.notify.NotificationCenter.post("${task.title} (falhou)", "A tarefa agendada falhou. Toque para ver o que aconteceu.", dev.cueopen.app.notify.NotificationCenter.Priority.HIGH, dev.cueopen.app.notify.NotificationCenter.Category.FAILURE, session.id)
+            quiet -> dev.cueopen.app.notify.NotificationCenter.post(task.title, "Execução sem novidades.", dev.cueopen.app.notify.NotificationCenter.Priority.SILENT, dev.cueopen.app.notify.NotificationCenter.Category.MONITOR, session.id)
+            app.store.settings.notifyOnDone -> dev.cueopen.app.notify.NotificationCenter.post("Tarefa agendada concluída", task.title + (final?.text?.let { ": " + it.take(200) } ?: ""), dev.cueopen.app.notify.NotificationCenter.Priority.NORMAL, dev.cueopen.app.notify.NotificationCenter.Category.DONE, session.id)
         }
         return Result.success()
     }

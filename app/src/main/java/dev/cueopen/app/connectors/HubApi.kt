@@ -140,13 +140,37 @@ object HubApi {
         else -> emptyList()
     }
 
-    suspend fun pieces(search: String = ""): List<PieceSummary> = io {
+    // ---------------- Cache em disco (só dados públicos do catálogo; nunca credenciais) ----------------
+    private fun cacheFile(name: String) = java.io.File(CueApp.instance.cacheDir, "hub/" + name.replace(Regex("[^A-Za-z0-9._-]"), "_")).apply { parentFile?.mkdirs() }
+    private fun cached(name: String, maxAgeMs: Long): String? = cacheFile(name).takeIf { it.isFile && System.currentTimeMillis() - it.lastModified() < maxAgeMs }?.readText()
+    private fun putCache(name: String, body: String) = runCatching { cacheFile(name).writeText(body) }
+
+    /** Catálogo da última vez (para a tela abrir na hora, mesmo antes de o hub subir). */
+    fun cachedPieces(): List<PieceSummary> = runCatching { cached("pieces.json", 30L * 24 * 3600_000)?.let { parsePieces(it) } }.getOrNull().orEmpty()
+
+    private fun parsePieces(body: String) = (json.parseToJsonElement(body) as? JsonArray).orEmpty().mapNotNull { it as? JsonObject }.map { o ->
+        PieceSummary(o.s("name"), o.s("displayName"), o.s("description"), o.s("logoUrl"),
+            (o["actions"] as? JsonPrimitive)?.contentOrNull?.toIntOrNull() ?: 0, authList(o["auth"]).map { it.s("type") })
+    }
+
+    /** Catálogo: sem busca usa o cache de até 24 h; busca filtra o cache localmente quando ele existe. */
+    suspend fun pieces(search: String = ""): List<PieceSummary> {
+        cached("pieces.json", 24 * 3600_000L)?.let { body ->
+            val all = runCatching { parsePieces(body) }.getOrNull()
+            if (all != null) {
+                val q = search.trim().lowercase()
+                return if (q.isBlank()) all else all.filter { (it.displayName + " " + it.name + " " + it.description).lowercase().contains(q) }
+            }
+        }
+        return io {
         val q = buildMap { put("sortBy", "POPULARITY"); put("orderBy", "DESC"); if (search.isNotBlank()) put("searchQuery", search.trim()) }
         val (code, body) = call("GET", "/v1/pieces", query = q)
         if (code !in 200..299) throw HubError(errorText(code, body), code)
+        if (search.isBlank()) putCache("pieces.json", body)
         (json.parseToJsonElement(body) as? JsonArray).orEmpty().mapNotNull { it as? JsonObject }.map { o ->
             PieceSummary(o.s("name"), o.s("displayName"), o.s("description"), o.s("logoUrl"),
                 (o["actions"] as? JsonPrimitive)?.contentOrNull?.toIntOrNull() ?: 0, authList(o["auth"]).map { it.s("type") })
+        }
         }
     }
 
@@ -162,15 +186,24 @@ object HubApi {
         }
     }
 
-    /** Metadados completos de um conector (ações com campos, auth). Cache de 30 min. */
-    suspend fun piece(name: String): JsonObject = io {
+    /** Metadados completos de um conector (ações com campos, auth). Cache em memória (30 min) e em disco (7 dias). */
+    suspend fun piece(name: String): JsonObject {
         val full = pieceName(name)
-        pieceCache[full]?.takeIf { System.currentTimeMillis() - it.first < 30 * 60_000 }?.let { return@io it.second }
+        pieceCache[full]?.takeIf { System.currentTimeMillis() - it.first < 30 * 60_000 }?.let { return it.second }
+        cached("piece_$full.json", 7L * 24 * 3600_000)?.let { body ->
+            runCatching { json.parseToJsonElement(body).jsonObject }.getOrNull()?.let { pieceCache[full] = System.currentTimeMillis() to it; return it }
+        }
+        return io {
         val (code, body) = call("GET", "/v1/pieces/$full")
         if (code == 404) throw HubError("O conector \"$name\" não existe no catálogo do hub.", 404)
         if (code !in 200..299) throw HubError(errorText(code, body), code)
+        putCache("piece_$full.json", body)
         json.parseToJsonElement(body).jsonObject.also { pieceCache[full] = System.currentTimeMillis() to it }
+        }
     }
+
+    /** Força recarregar o catálogo na próxima abertura (ex.: depois de atualizar o hub). */
+    fun invalidateCatalog() { runCatching { java.io.File(CueApp.instance.cacheDir, "hub").deleteRecursively() }; pieceCache.clear() }
 
     // ---------------- OAuth ----------------
     private var cloudApps: Pair<Long, Map<String, String>>? = null
@@ -216,6 +249,7 @@ object HubApi {
             put("externalId", newExternalId()); put("displayName", displayName.ifBlank { pieceName.substringAfterLast("piece-") })
             put("pieceName", pieceName); put("projectId", l.projectId); put("type", type); put("value", value)
         })
+        HubConnectors.invalidate()
         return runCatching { json.parseToJsonElement(text).jsonObject.s("externalId") }.getOrDefault("")
     }
 
@@ -236,5 +270,5 @@ object HubApi {
         return out
     }
 
-    suspend fun deleteConnection(id: String) { authed("DELETE", "/v1/app-connections/$id") }
+    suspend fun deleteConnection(id: String) { authed("DELETE", "/v1/app-connections/$id"); HubConnectors.invalidate() }
 }

@@ -164,6 +164,10 @@ fun ChatScreen(nav: NavController, sessionId: String, onMenu: () -> Unit = {}) {
                     }, leadingIcon = { Icon(Icons.Rounded.Schedule, null) })
                     DropdownMenuItem({ Text("Uso e contexto") }, { menu = false; usage = true }, leadingIcon = { Icon(Icons.Rounded.DataUsage, null) })
                     DropdownMenuItem({ Text("Conectores") }, { menu = false; connectorsDialog = true }, leadingIcon = { Icon(Icons.Rounded.SettingsEthernet, null) })
+                    DropdownMenuItem({ Text(if (session.voiceReplies) "Respostas em áudio: ligado" else "Respostas em áudio") }, {
+                        menu = false; app.store.editSession(sessionId) { it.copy(voiceReplies = !it.voiceReplies) }
+                    }, leadingIcon = { Icon(if (session.voiceReplies) Icons.Rounded.VolumeUp else Icons.Rounded.VolumeOff, null) })
+                    DropdownMenuItem({ Text("Ouvir última resposta") }, { menu = false; app.agent.speakLastAnswer(sessionId) }, leadingIcon = { Icon(Icons.Rounded.RecordVoiceOver, null) })
                     DropdownMenuItem({ Text("Renomear") }, { menu = false; rename = true }, leadingIcon = { Icon(Icons.Rounded.Edit, null) })
                     if (autoAgent != null) DropdownMenuItem({ Text("Pausar agente") }, {
                         menu = false; app.agent.pauseAgent(autoAgent.id)

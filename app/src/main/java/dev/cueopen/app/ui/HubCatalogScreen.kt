@@ -58,14 +58,14 @@ fun HubCatalogScreen(nav: NavController) {
     val ctx = LocalContext.current
     var loggedIn by remember { mutableStateOf(HubApi.hasLogin()) }
     var query by remember { mutableStateOf("") }
-    var pieces by remember { mutableStateOf<List<HubApi.PieceSummary>>(emptyList()) }
-    var loading by remember { mutableStateOf(true) }
+    var pieces by remember { mutableStateOf(HubApi.cachedPieces()) }
+    var loading by remember { mutableStateOf(pieces.isEmpty()) }
     var error by remember { mutableStateOf<String?>(null) }
     var picked by remember { mutableStateOf<HubApi.PieceSummary?>(null) }
 
     LaunchedEffect(query) {
         delay(if (query.isBlank()) 0 else 350)
-        loading = true; error = null
+        loading = pieces.isEmpty(); error = null
         runCatching { HubApi.pieces(query) }.onSuccess { pieces = it }.onFailure { error = it.message }
         loading = false
     }

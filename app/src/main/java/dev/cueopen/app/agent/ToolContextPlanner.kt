@@ -23,7 +23,7 @@ object ToolContextPlanner {
     val GROUPS: Map<String, Set<String>> = linkedMapOf(
         "core" to setOf("update_plan", "shell", "file_write", "file_edit", "file_read", "file_list", "file_search", "web_search", "web_fetch", "complete_step", "show_file",
             "browser_navigate", "browser_read", "browser_snapshot", "browser_click", "browser_type", "browser_scroll", "browser_back", "browser_wait_for",
-            "notes_write", "memory_save", "memory_search", "skill_load", "ask_user", "ask_question", "ask_secure", "finish", "tools_load", "show_cards", "notify",
+            "notes_write", "memory_save", "memory_search", "skill_load", "ask_user", "ask_question", "ask_secure", "finish", "tools_load", "show_cards", "notify", "reply_audio",
             "conectores_listar", "conector_acoes", "conector_executar"),
         "web_dev" to setOf("browser_js", "browser_network", "browser_console"),
         "agents" to setOf("multi_agents"),

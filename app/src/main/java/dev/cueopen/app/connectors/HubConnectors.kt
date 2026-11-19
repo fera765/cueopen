@@ -39,12 +39,23 @@ object HubConnectors {
 
     fun appName(piece: String) = piece.substringAfterLast("piece-").replace('-', ' ').replaceFirstChar { it.uppercase() }
 
-    suspend fun connections(store: Store): List<Conn> = parseConnections(mcp(store, "ap_list_connections", JsonObject(emptyMap())))
+    @Volatile private var connCache: Pair<Long, List<Conn>>? = null
+
+    /** Conexões do hub, com cache de 60 s (a tela e o agente consultam muito; conectar/remover invalida). */
+    suspend fun connections(store: Store, fresh: Boolean = false): List<Conn> {
+        connCache?.takeIf { !fresh && System.currentTimeMillis() - it.first < 60_000 }?.let { return it.second }
+        return parseConnections(mcp(store, "ap_list_connections", JsonObject(emptyMap()))).also { connCache = System.currentTimeMillis() to it }
+    }
+
+    fun invalidate() { connCache = null }
+
+    /** Última lista conhecida (para a tela mostrar na hora). */
+    fun lastKnown(): List<Conn>? = connCache?.second
 
     suspend fun list(store: Store): String {
         val raw = mcp(store, "ap_list_connections", JsonObject(emptyMap()))
         if (raw.startsWith("ERRO")) return raw
-        val conns = parseConnections(raw)
+        val conns = parseConnections(raw).also { connCache = System.currentTimeMillis() to it }
         if (conns.isEmpty()) return "Nenhum conector conectado no hub ainda. Peça ao usuário para conectar o app em Apps › Conectores › Adicionar conector."
         return "Conectores disponíveis (${conns.size}):\n" + conns.joinToString("\n") { c ->
             "- ${appName(c.pieceName)} · \"${c.displayName}\" · conector=${c.pieceName} · conexao=${c.externalId}" + (if (c.status != "ACTIVE") " · status ${c.status} (pode precisar reconectar)" else "")

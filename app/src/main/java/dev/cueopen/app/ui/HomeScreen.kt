@@ -366,7 +366,15 @@ fun Composer(
     var silentRounds by remember { mutableIntStateOf(0) }
     var busyRetries by remember { mutableIntStateOf(0) }
     val voiceScope = rememberCoroutineScope()
+    // VAD do ditado: cada gravação tem um token (callbacks atrasados de uma gravação encerrada são ignorados) e,
+    // depois de um trecho reconhecido, a escuta só continua se a fala recomeçar dentro da tolerância de silêncio.
+    var voiceToken by remember { mutableIntStateOf(0) }
+    var silenceWatch by remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
+    val endSilenceMs = dev.cueopen.app.assistant.DictationVad.END_SILENCE_MS
     fun commitDictation() {
+        silenceWatch?.cancel(); silenceWatch = null
+        voiceToken++  // encerra de vez: nada desta gravação reinicia a escuta
+        runCatching { recognizer?.cancel() }
         val spoken = (if (voiceText.length > dictated.length) voiceText else dictated).trim()
         if (spoken.isNotEmpty()) onChange(listOf(value.trim(), spoken).filter { it.isNotEmpty() }.joinToString(" "))
         dictated = ""; voiceText = ""; pauseRequested = false; recording = false
@@ -379,25 +387,31 @@ fun Composer(
             return
         }
         voiceError = null
-        if (!continuing) { voiceText = ""; dictated = ""; silentRounds = 0; busyRetries = 0; pauseRequested = false }
+        if (!continuing) { voiceToken++; voiceText = ""; dictated = ""; silentRounds = 0; busyRetries = 0; pauseRequested = false }
+        val token = voiceToken
+        fun live() = token == voiceToken
         fun restart(delayMs: Long) = voiceScope.launch {
             kotlinx.coroutines.delay(delayMs)
-            if (!pauseRequested && recording) beginVoiceRecording(continuing = true)
+            if (live() && !pauseRequested && recording) beginVoiceRecording(continuing = true)
         }
         speech.setRecognitionListener(object : RecognitionListener {
             override fun onReadyForSpeech(params: Bundle?) { recording = true }
-            override fun onBeginningOfSpeech() { recording = true; silentRounds = 0 }
+            override fun onBeginningOfSpeech() { if (!live()) return; recording = true; silentRounds = 0; silenceWatch?.cancel(); silenceWatch = null }
             override fun onRmsChanged(rmsdB: Float) {}
             override fun onBufferReceived(buffer: ByteArray?) {}
             override fun onEndOfSpeech() {}
             override fun onError(error: Int) {
+                if (!live()) return
                 if (pauseRequested) { commitDictation(); return }
                 when (error) {
                     SpeechRecognizer.ERROR_NO_MATCH, SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> {
                         silentRounds++
-                        if (silentRounds < 2) restart(150)
-                        else if (dictated.isNotBlank()) commitDictation()
-                        else { recording = false; voiceError = "Não detectei fala. Toque no microfone para tentar novamente." }
+                        // Já há fala: silêncio definitivo = fim do ditado (antes exigia mais uma rodada inteira escutando).
+                        when (dev.cueopen.app.assistant.DictationVad.onSilence(dictated.isNotBlank(), silentRounds)) {
+                            dev.cueopen.app.assistant.DictationVad.Action.COMMIT -> commitDictation()
+                            dev.cueopen.app.assistant.DictationVad.Action.LISTEN_AGAIN -> restart(150)
+                            dev.cueopen.app.assistant.DictationVad.Action.GIVE_UP -> { recording = false; voiceError = "Não detectei fala. Toque no microfone para tentar novamente." }
+                        }
                     }
                     SpeechRecognizer.ERROR_RECOGNIZER_BUSY, SpeechRecognizer.ERROR_CLIENT -> {
                         if (++busyRetries <= 3) { runCatching { speech.cancel() }; restart(400) }
@@ -408,14 +422,23 @@ fun Composer(
                 }
             }
             override fun onResults(results: Bundle?) {
+                if (!live()) return
                 val segment = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull().orEmpty().trim()
                 if (segment.isNotEmpty()) { dictated = listOf(dictated, segment).filter { it.isNotBlank() }.joinToString(" "); silentRounds = 0; busyRetries = 0 }
                 else silentRounds++
                 voiceText = dictated
                 if (pauseRequested) { commitDictation(); return }
-                if (silentRounds >= 2) commitDictation() else restart(120)
+                if (dictated.isBlank() && silentRounds >= 2) { commitDictation(); return }
+                // Pausa natural: escuta de novo, mas se a fala não recomeçar na tolerância, encerra (sem ficar regravando).
+                restart(120)
+                silenceWatch?.cancel()
+                silenceWatch = voiceScope.launch {
+                    kotlinx.coroutines.delay(endSilenceMs + 120)
+                    if (live() && recording && dictated.isNotBlank()) commitDictation()
+                }
             }
             override fun onPartialResults(partialResults: Bundle?) {
+                if (!live()) return
                 partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull()?.let { part ->
                     voiceText = listOf(dictated, part).filter { it.isNotBlank() }.joinToString(" ")
                 }
@@ -906,6 +929,8 @@ fun previewOf(i: dev.cueopen.app.data.ChatItem): String = when (i) {
     is dev.cueopen.app.data.ChatItem.Approval -> "🛡 " + i.summary
     is dev.cueopen.app.data.ChatItem.SectionSetup -> "📁 Seção " + i.sectionName
     is dev.cueopen.app.data.ChatItem.Media -> "🖼 " + (i.caption.ifBlank { java.io.File(i.path).name })
+    is dev.cueopen.app.data.ChatItem.Cards -> "🗂 " + (i.title.ifBlank { "${i.items.size} resultado(s)" })
+    is dev.cueopen.app.data.ChatItem.Audio -> "🔊 " + i.text
 }.lineSequence().firstOrNull().orEmpty()
 
 fun dayGroup(t: Long): String {

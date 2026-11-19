@@ -300,6 +300,8 @@ data class Session(
     val compactions: Int = 0,
     /** Modo contínuo/monitoramento: o agente alterna trabalho e `sleep` até o usuário pausar. */
     val continuous: Boolean = false,
+    /** Respostas do agente também em áudio (TTS no aparelho). */
+    val voiceReplies: Boolean = false,
     val wakeAt: Long? = null,
     val wakeReason: String = "",
     val tokensIn: Long = 0,
