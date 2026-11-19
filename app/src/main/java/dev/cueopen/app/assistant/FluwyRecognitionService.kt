@@ -96,27 +96,11 @@ class FluwyRecognitionService : RecognitionService() {
         super.onDestroy()
     }
 
-    private fun selectedSystemRecognizer(): ComponentName? {
-        val selected = runCatching {
-            Settings.Secure.getString(contentResolver, VOICE_RECOGNITION_SERVICE_SETTING)
-                ?.let(ComponentName::unflattenFromString)
-        }.getOrNull() ?: return null
-
-        // Evita uma chamada recursiva caso Fluwy esteja selecionado como seu próprio reconhecedor.
-        if (selected.packageName == packageName) return null
-
-        val query = Intent(RecognitionService.SERVICE_INTERFACE)
-            .addCategory(Intent.CATEGORY_DEFAULT)
-        val installed = runCatching {
-            packageManager.queryIntentServices(query, PackageManager.MATCH_DEFAULT_ONLY)
-                .any { resolved ->
-                    resolved.serviceInfo?.let { service ->
-                        ComponentName(service.packageName, service.name) == selected
-                    } == true
-                }
-        }.getOrDefault(false)
-        return selected.takeIf { installed }
-    }
+    /** Reconhecedor real para onde o proxy encaminha (nunca ele mesmo: evita recursão). */
+    private fun selectedSystemRecognizer(): ComponentName? = SpeechRecognizers.realRecognizer(this)
+        ?: runCatching {
+            Settings.Secure.getString(contentResolver, VOICE_RECOGNITION_SERVICE_SETTING)?.let(ComponentName::unflattenFromString)
+        }.getOrNull()?.takeIf { it.packageName != packageName }
 
     private fun release(listener: Callback, cancel: Boolean = false) {
         val recognizer = activeRecognizers.remove(listener) ?: return

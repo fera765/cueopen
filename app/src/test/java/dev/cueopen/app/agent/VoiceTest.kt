@@ -7,10 +7,13 @@ import org.junit.Assert.assertFalse
 import org.junit.Test
 
 class VoiceTest {
-    @Test fun silenceAfterSpeechEndsDictationWithoutRelistening() {
-        assertEquals(DictationVad.Action.COMMIT, DictationVad.onSilence(hasDictation = true, silentRounds = 1))
-        assertEquals(DictationVad.Action.LISTEN_AGAIN, DictationVad.onSilence(false, 1))
-        assertEquals(DictationVad.Action.GIVE_UP, DictationVad.onSilence(false, 2))
+    @Test fun pausaDepoisDaFalaEncerraODitado() {
+        val C = DictationVad.Check
+        assertEquals(C.CONTINUE, DictationVad.check(3_000, null))            // ainda não falou
+        assertEquals(C.NO_SPEECH, DictationVad.check(8_000, null))           // nunca falou
+        assertEquals(C.CONTINUE, DictationVad.check(5_000, 1_000))           // pausa curta no meio da frase
+        assertEquals(C.FINISH, DictationVad.check(5_000, 1_800))             // parou de falar → para de gravar
+        assertEquals(C.FINISH, DictationVad.check(60_000, 100))              // limite da gravação
     }
 
     @Test fun speakableStripsMarkdownAndLinks() {

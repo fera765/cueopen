@@ -206,7 +206,7 @@ class FluwyAssistantSession(baseContext: Context) : VoiceInteractionSession(base
             orb?.contentDescription = "Reconhecimento de fala indisponível nas configurações do Android."
             return
         }
-        val recognizer = runCatching { SpeechRecognizer.createSpeechRecognizer(appContext) }.getOrElse {
+        val recognizer = runCatching { SpeechRecognizers.create(appContext) }.getOrElse {
             orb?.contentDescription = "Não foi possível iniciar o microfone. Tentarei novamente com uma pausa curta."
             consecutiveRecognitionErrors += 1
             scheduleRecognitionRestart(nextRecognitionRetryDelay())
@@ -244,8 +244,9 @@ class FluwyAssistantSession(baseContext: Context) : VoiceInteractionSession(base
                 if (!isCurrentAttempt(recognizer, finalResultGate)) return
                 val amplitude = AssistantVoiceActivityGate.normalizedAmplitude(rmsdB)
                 val gatedSpeech = voiceActivityGate.onRmsChanged(rmsdB, SystemClock.elapsedRealtime())
+                // RMS só anima o orbe: ruído ambiente (TV, ventilador) não pode segurar o turno aberto.
+                // Atividade de fala = texto novo da transcrição ao vivo (onPartialResults).
                 orb?.setRms(if (gatedSpeech) amplitude else 0f)
-                if (!providerEndedSpeech && gatedSpeech) noteSpeechActivity()
             }
 
             override fun onBufferReceived(buffer: ByteArray?) = Unit
@@ -275,10 +276,10 @@ class FluwyAssistantSession(baseContext: Context) : VoiceInteractionSession(base
             }
 
             override fun onPartialResults(partialResults: Bundle?) {
-                if (!isCurrentAttempt(recognizer, finalResultGate) || providerEndedSpeech || !voiceActivityGate.acceptsPartial()) return
+                if (!isCurrentAttempt(recognizer, finalResultGate) || providerEndedSpeech) return
                 val partial = partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
                     ?.firstOrNull()?.trim()?.take(MAX_TRANSCRIPT_LENGTH).orEmpty()
-                if (partial.isNotBlank()) {
+                if (partial.isNotBlank() && partial != liveTranscript) {
                     noteSpeechActivity()
                     liveTranscript = partial
                     orb?.contentDescription = "Transcrevendo ao vivo: ${partial.take(120)}. A pausa de 2 segundos envia a mensagem."
@@ -413,7 +414,10 @@ class FluwyAssistantSession(baseContext: Context) : VoiceInteractionSession(base
         val watchdog = Runnable {
             terminalCallbackWatchdog = null
             if (isCurrentAttempt(recognizer, gate)) {
-                handleRecognitionError(recognizer, gate, SpeechRecognizer.ERROR_CLIENT)
+                // O provedor não mandou o texto final: usa a transcrição ao vivo em vez de descartar a fala.
+                val live = liveTranscript
+                if (live.isNotBlank()) handleRecognitionResults(recognizer, gate, live)
+                else handleRecognitionError(recognizer, gate, SpeechRecognizer.ERROR_CLIENT)
             }
         }
         terminalCallbackWatchdog = watchdog
@@ -513,7 +517,7 @@ class FluwyAssistantSession(baseContext: Context) : VoiceInteractionSession(base
         const val STATE_REFRESH_INTERVAL_MS = 450L
         const val SCREENSHOT_DISPATCH_DELAY_MS = 450L
         const val RESTART_AFTER_RESULT_MS = 250L
-        const val TERMINAL_CALLBACK_TIMEOUT_MS = 10_000L
+        const val TERMINAL_CALLBACK_TIMEOUT_MS = 3_000L
         const val MAX_TRANSCRIPT_LENGTH = 4_000
     }
 }

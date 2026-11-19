@@ -350,7 +350,7 @@ fun Composer(
         mutableStateOf(ContextCompat.checkSelfPermission(ctx, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED)
     }
     val recognizer = remember(ctx) {
-        if (SpeechRecognizer.isRecognitionAvailable(ctx)) SpeechRecognizer.createSpeechRecognizer(ctx) else null
+        if (SpeechRecognizer.isRecognitionAvailable(ctx)) dev.cueopen.app.assistant.SpeechRecognizers.create(ctx) else null
     }
     DisposableEffect(recognizer) {
         onDispose { runCatching { recognizer?.destroy() } }
@@ -360,87 +360,93 @@ fun Composer(
         if (granted) pendingVoiceStart = true else voiceError = "Permissão de microfone negada."
     }
 
-    // Ditado contínuo: o reconhecedor do Android para a cada pausa; aqui cada trecho é somado e a escuta reinicia
-    // sozinha. Termina quando o usuário toca em parar ou após ~2 rodadas seguidas sem fala (≈10 s de silêncio).
+    // Ditado: fala → pausa → para sozinho e insere o texto. O fim da fala é decidido pelo app (sem novo texto
+    // da transcrição por [DictationVad.END_SILENCE_MS]), sem depender do provedor, que às vezes não encerra.
+    // Cada gravação tem um token: callbacks atrasados de uma gravação já encerrada são ignorados.
     var dictated by remember { mutableStateOf("") }
-    var silentRounds by remember { mutableIntStateOf(0) }
     var busyRetries by remember { mutableIntStateOf(0) }
     val voiceScope = rememberCoroutineScope()
-    // VAD do ditado: cada gravação tem um token (callbacks atrasados de uma gravação encerrada são ignorados) e,
-    // depois de um trecho reconhecido, a escuta só continua se a fala recomeçar dentro da tolerância de silêncio.
     var voiceToken by remember { mutableIntStateOf(0) }
     var silenceWatch by remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
-    val endSilenceMs = dev.cueopen.app.assistant.DictationVad.END_SILENCE_MS
+    var lastSpeechAt by remember { mutableLongStateOf(0L) }
+    var finishing by remember { mutableStateOf(false) }
     fun commitDictation() {
         silenceWatch?.cancel(); silenceWatch = null
-        voiceToken++  // encerra de vez: nada desta gravação reinicia a escuta
+        voiceToken++  // encerra de vez: nada desta gravação volta a mexer no estado
         runCatching { recognizer?.cancel() }
         val spoken = (if (voiceText.length > dictated.length) voiceText else dictated).trim()
         if (spoken.isNotEmpty()) onChange(listOf(value.trim(), spoken).filter { it.isNotEmpty() }.joinToString(" "))
-        dictated = ""; voiceText = ""; pauseRequested = false; recording = false
+        dictated = ""; voiceText = ""; pauseRequested = false; recording = false; finishing = false
+    }
+    /** Pede o texto final ao reconhecedor; se ele não responder a tempo, insere a transcrição ao vivo. */
+    fun finishDictation() {
+        if (finishing || !recording) return
+        finishing = true
+        val token = voiceToken
+        runCatching { recognizer?.stopListening() }.onFailure { commitDictation(); return }
+        voiceScope.launch { kotlinx.coroutines.delay(dev.cueopen.app.assistant.DictationVad.FINAL_RESULT_WAIT_MS); if (token == voiceToken) commitDictation() }
     }
 
-    fun beginVoiceRecording(continuing: Boolean = false) {
+    fun beginVoiceRecording(retry: Boolean = false) {
         val speech = recognizer
         if (speech == null) {
             voiceError = "O reconhecimento de voz não está disponível neste aparelho."
             return
         }
         voiceError = null
-        if (!continuing) { voiceToken++; voiceText = ""; dictated = ""; silentRounds = 0; busyRetries = 0; pauseRequested = false }
+        if (!retry) { voiceToken++; voiceText = ""; dictated = ""; busyRetries = 0; pauseRequested = false; finishing = false }
         val token = voiceToken
         fun live() = token == voiceToken
-        fun restart(delayMs: Long) = voiceScope.launch {
-            kotlinx.coroutines.delay(delayMs)
-            if (live() && !pauseRequested && recording) beginVoiceRecording(continuing = true)
+        val startedAt = android.os.SystemClock.elapsedRealtime()
+        lastSpeechAt = 0L
+        silenceWatch?.cancel()
+        // Vigia: depois que a fala começou, N ms sem texto novo = fim; sem fala nenhuma, desiste após o limite.
+        silenceWatch = voiceScope.launch {
+            while (live()) {
+                kotlinx.coroutines.delay(200)
+                if (!live() || finishing) break
+                val now = android.os.SystemClock.elapsedRealtime()
+                when (dev.cueopen.app.assistant.DictationVad.check(now - startedAt, if (lastSpeechAt == 0L) null else now - lastSpeechAt)) {
+                    dev.cueopen.app.assistant.DictationVad.Check.FINISH -> { finishDictation(); break }
+                    dev.cueopen.app.assistant.DictationVad.Check.NO_SPEECH -> {
+                        voiceToken++; runCatching { speech.cancel() }; recording = false
+                        voiceError = "Não detectei fala. Toque no microfone para tentar novamente."; break
+                    }
+                    dev.cueopen.app.assistant.DictationVad.Check.CONTINUE -> Unit
+                }
+            }
         }
         speech.setRecognitionListener(object : RecognitionListener {
-            override fun onReadyForSpeech(params: Bundle?) { recording = true }
-            override fun onBeginningOfSpeech() { if (!live()) return; recording = true; silentRounds = 0; silenceWatch?.cancel(); silenceWatch = null }
+            override fun onReadyForSpeech(params: Bundle?) { if (live()) recording = true }
+            override fun onBeginningOfSpeech() {}
             override fun onRmsChanged(rmsdB: Float) {}
             override fun onBufferReceived(buffer: ByteArray?) {}
-            override fun onEndOfSpeech() {}
+            override fun onEndOfSpeech() { if (live()) finishDictation() }
             override fun onError(error: Int) {
                 if (!live()) return
-                if (pauseRequested) { commitDictation(); return }
                 when (error) {
-                    SpeechRecognizer.ERROR_NO_MATCH, SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> {
-                        silentRounds++
-                        // Já há fala: silêncio definitivo = fim do ditado (antes exigia mais uma rodada inteira escutando).
-                        when (dev.cueopen.app.assistant.DictationVad.onSilence(dictated.isNotBlank(), silentRounds)) {
-                            dev.cueopen.app.assistant.DictationVad.Action.COMMIT -> commitDictation()
-                            dev.cueopen.app.assistant.DictationVad.Action.LISTEN_AGAIN -> restart(150)
-                            dev.cueopen.app.assistant.DictationVad.Action.GIVE_UP -> { recording = false; voiceError = "Não detectei fala. Toque no microfone para tentar novamente." }
-                        }
-                    }
-                    SpeechRecognizer.ERROR_RECOGNIZER_BUSY, SpeechRecognizer.ERROR_CLIENT -> {
-                        if (++busyRetries <= 3) { runCatching { speech.cancel() }; restart(400) }
-                        else if (dictated.isNotBlank()) commitDictation() else recording = false
-                    }
-                    SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> { recording = false; voiceError = "Permita o acesso ao microfone nas configurações." }
-                    else -> { if (dictated.isNotBlank()) commitDictation() else { recording = false; voiceError = "Falha no reconhecimento de voz (código $error)." } }
+                    SpeechRecognizer.ERROR_RECOGNIZER_BUSY, SpeechRecognizer.ERROR_CLIENT ->
+                        if (!finishing && voiceText.isBlank() && ++busyRetries <= 2) {
+                            runCatching { speech.cancel() }
+                            voiceScope.launch { kotlinx.coroutines.delay(400); if (live()) beginVoiceRecording(retry = true) }
+                        } else if (voiceText.isNotBlank()) commitDictation() else { commitDictation(); voiceError = "O microfone está ocupado. Tente novamente." }
+                    SpeechRecognizer.ERROR_NO_MATCH, SpeechRecognizer.ERROR_SPEECH_TIMEOUT ->
+                        if (voiceText.isNotBlank()) commitDictation() else { commitDictation(); voiceError = "Não detectei fala. Toque no microfone para tentar novamente." }
+                    SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> { commitDictation(); voiceError = "Permita o acesso ao microfone nas configurações." }
+                    else -> if (voiceText.isNotBlank()) commitDictation() else { commitDictation(); voiceError = "Falha no reconhecimento de voz (código $error)." }
                 }
             }
             override fun onResults(results: Bundle?) {
                 if (!live()) return
                 val segment = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull().orEmpty().trim()
-                if (segment.isNotEmpty()) { dictated = listOf(dictated, segment).filter { it.isNotBlank() }.joinToString(" "); silentRounds = 0; busyRetries = 0 }
-                else silentRounds++
-                voiceText = dictated
-                if (pauseRequested) { commitDictation(); return }
-                if (dictated.isBlank() && silentRounds >= 2) { commitDictation(); return }
-                // Pausa natural: escuta de novo, mas se a fala não recomeçar na tolerância, encerra (sem ficar regravando).
-                restart(120)
-                silenceWatch?.cancel()
-                silenceWatch = voiceScope.launch {
-                    kotlinx.coroutines.delay(endSilenceMs + 120)
-                    if (live() && recording && dictated.isNotBlank()) commitDictation()
-                }
+                if (segment.isNotEmpty()) dictated = segment
+                voiceText = dictated.ifBlank { voiceText }
+                commitDictation()
             }
             override fun onPartialResults(partialResults: Bundle?) {
                 if (!live()) return
-                partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull()?.let { part ->
-                    voiceText = listOf(dictated, part).filter { it.isNotBlank() }.joinToString(" ")
+                partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull()?.trim()?.let { part ->
+                    if (part.isNotEmpty() && part != voiceText) { voiceText = part; lastSpeechAt = android.os.SystemClock.elapsedRealtime() }
                 }
             }
             override fun onEvent(eventType: Int, params: Bundle?) {}
@@ -451,12 +457,11 @@ fun Composer(
             .putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, "pt-BR")
             .putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
             .putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
-            // Pausas longas antes de fechar o trecho (o reconhecedor pode ignorar; o reinício cobre).
-            .putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 4_000L)
-            .putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 3_000L)
-            .putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS, 15_000L)
+            .putExtra(RecognizerIntent.EXTRA_CALLING_PACKAGE, ctx.packageName)
+            .putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, dev.cueopen.app.assistant.DictationVad.END_SILENCE_MS)
+            .putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, dev.cueopen.app.assistant.DictationVad.END_SILENCE_MS)
         runCatching { speech.startListening(intent); recording = true }
-            .onFailure { recording = false; voiceError = "Não foi possível iniciar o microfone: ${it.message ?: "erro desconhecido"}" }
+            .onFailure { voiceToken++; silenceWatch?.cancel(); recording = false; voiceError = "Não foi possível iniciar o microfone: ${it.message ?: "erro desconhecido"}" }
     }
     LaunchedEffect(pendingVoiceStart) {
         if (pendingVoiceStart) {
@@ -554,12 +559,7 @@ fun Composer(
                         fontSize = 12.sp, color = if (voiceError != null) c.err else c.ink, maxLines = 3, overflow = TextOverflow.Ellipsis)
                 }
                 if (recording) {
-                    IconButton(onClick = {
-                        pauseRequested = true
-                        runCatching { recognizer?.stopListening() }.onFailure { commitDictation() }
-                        // Entre dois trechos não há escuta ativa para responder: garante a inserção mesmo assim.
-                        voiceScope.launch { kotlinx.coroutines.delay(1_500); if (pauseRequested) { runCatching { recognizer?.cancel() }; commitDictation() } }
-                    }) { Icon(Icons.Rounded.Pause, "Parar e inserir texto") }
+                    IconButton(onClick = { finishDictation() }) { Icon(Icons.Rounded.Pause, "Parar e inserir texto") }
                 } else if (voiceText.isNotBlank()) {
                     IconButton(onClick = {
                         onChange(listOf(value.trim(), voiceText.trim()).filter { it.isNotEmpty() }.joinToString(" "))
@@ -600,11 +600,7 @@ fun Composer(
             RoundIcon(Icons.Rounded.Add, "Anexar") { pick.launch("*/*") }
             Spacer(Modifier.width(6.dp))
             RoundIcon(if (recording) Icons.Rounded.MicOff else Icons.Rounded.Mic, if (recording) "Gravando voz" else "Gravar voz") {
-                if (recording) {
-                    pauseRequested = true
-                    runCatching { recognizer?.stopListening() }.onFailure { commitDictation() }
-                    voiceScope.launch { kotlinx.coroutines.delay(1_500); if (pauseRequested) { runCatching { recognizer?.cancel() }; commitDictation() } }
-                } else if (hasAudioPermission) beginVoiceRecording() else voicePermission.launch(Manifest.permission.RECORD_AUDIO)
+                if (recording) finishDictation() else if (hasAudioPermission) beginVoiceRecording() else voicePermission.launch(Manifest.permission.RECORD_AUDIO)
             }
             Spacer(Modifier.weight(1f))
             // Com o agente ativo e sem texto digitado → botão PARAR. Ao digitar → botão ENVIAR.
