@@ -2983,37 +2983,8 @@ class AgentRunner(
         ))
         val connIdOf = { n: String -> conns.keys.firstOrNull { n.startsWith("uic_${it}_") } }
         val mcpOf = { n: String -> n.substringBefore("__").takeIf { n.contains("__") } }
-        val hubPfx = "mcp_" + dev.cueopen.app.connectors.ActivepiecesHub.CONNECTOR_ID
-        val automation = HubGuard.automationIntent(ToolContextPlanner.norm(contextQuery(s)))
-        val kept = buildJsonArray { all.forEach { t -> val n = toolName(t); if (plan.keepTool(n, connIdOf, mcpOf) && !HubGuard.hideTool(n, hubPfx, automation)) add(t) } }
+        val kept = buildJsonArray { all.forEach { t -> val n = toolName(t); if (plan.keepTool(n, connIdOf, mcpOf)) add(t) } }
         return plan to kept
-    }
-
-    /** Falhas por (tarefa, ferramenta, argumentos) — a mesma chamada falhando de novo é recusada (HubGuard). */
-    private val hubCallFailures = java.util.concurrent.ConcurrentHashMap<String, Int>()
-
-    /** Chamada MCP com a disciplina do hub: tarefa única → ap_run_action; 1 fluxo por tarefa com nome "Fluwy · …"; sem repetir erro. */
-    private suspend fun hubGuardedCall(sessionId: String, fn: String, args: kotlinx.serialization.json.JsonObject): String {
-        val hubPrefix = "mcp_" + dev.cueopen.app.connectors.ActivepiecesHub.CONNECTOR_ID
-        if (!fn.startsWith(hubPrefix + "__")) return dev.cueopen.app.connectors.Connectors.callTool(store, fn, args)
-        val s = store.session(sessionId)
-        val items = s?.items.orEmpty()
-        val task = items.count { it is ChatItem.User }
-        val sinceUser = items.drop(items.indexOfLast { it is ChatItem.User }.coerceAtLeast(0)).filterIsInstance<ChatItem.Step>()
-        val created = sinceUser.count { st -> HubGuard.shortName(st.tool) in HubGuard.CREATE_FLOW && st.tool.startsWith(hubPrefix) &&
-            st.status != StepStatus.ERROR && (st.result.contains("created") || st.result.startsWith("✅") || st.result.startsWith("⚠")) }
-        val key = "$sessionId|$task|$fn|${args.toString().hashCode()}"
-        val state = HubGuard.TaskState(HubGuard.automationIntent(ToolContextPlanner.norm(s?.let { contextQuery(it) }.orEmpty())), created, hubCallFailures[key] ?: 0)
-        return when (val d = HubGuard.check(fn, args, hubPrefix, state)) {
-            is HubGuard.Decision.Refuse -> d.message
-            is HubGuard.Decision.Allow -> {
-                val out = dev.cueopen.app.connectors.Connectors.callTool(store, fn, d.args)
-                val failed = out.startsWith("ERRO") || out.startsWith("Falha") || out.trimStart().startsWith("❌")
-                if (failed) hubCallFailures.merge(key, 1, Int::plus) else hubCallFailures.remove(key)
-                if (hubCallFailures.size > 500) hubCallFailures.clear()
-                out
-            }
-        }
     }
 
     /** Recusa abrir no browser um app que o hub cobre antes de tentar o conector nesta tarefa (ver ConnectorRouting.browserGuard). */
@@ -3022,12 +2993,11 @@ class AgentRunner(
         val hub = store.state.value.connectors.firstOrNull { it.gatewayRef == hubRef && it.enabled && it.connectedAt != null } ?: return null
         val agent = store.agent(store.session(sessionId)?.agentId)
         if (agent?.useConnectorHub == false) return null
-        val prefix = "mcp_" + hub.id.replace(Regex("[^A-Za-z0-9_]"), "_")
         val items = store.session(sessionId)?.items.orEmpty()
         val sinceUser = items.drop(items.indexOfLast { it is ChatItem.User }.coerceAtLeast(0))
-        val hubSteps = sinceUser.filterIsInstance<ChatItem.Step>().filter { it.tool.startsWith(prefix + "__") }
+        val hubSteps = sinceUser.filterIsInstance<ChatItem.Step>().filter { it.tool in dev.cueopen.app.connectors.HubConnectors.TOOLS }
         val failures = hubSteps.count { it.status == StepStatus.ERROR || it.result.startsWith("ERRO") || it.result.startsWith("Falha") || it.result.contains("❌") }
-        return ConnectorRouting.browserGuard(url, true, prefix, hubSteps.size, failures, hub.inventory)
+        return ConnectorRouting.browserGuard(url, true, hubSteps.size, failures, hub.inventory)
     }
 
     private fun lastUserText(s: Session): String = (s.items.lastOrNull { it is ChatItem.User } as? ChatItem.User)?.text.orEmpty()
@@ -3126,14 +3096,9 @@ class AgentRunner(
                     }
                 }.distinct()
                 ConnectorRouting.promptLines(
-                    connected.map { Triple(it.name, "mcp_" + it.id.replace(Regex("[^A-Za-z0-9_]"), "_"), it.gatewayRef == hubRef) },
-                    hub?.inventory, hub?.let { h -> dev.cueopen.app.connectors.Connectors.toolNames(h).map { it.first } }.orEmpty(), mentioned,
+                    connected.filter { it.gatewayRef != hubRef }.map { it.name to "mcp_" + it.id.replace(Regex("[^A-Za-z0-9_]"), "_") },
+                    hubConnected = hub != null, hubInventory = hub?.inventory, mentioned = mentioned,
                 ).forEach { appendLine(it) }
-                if (hub != null) {
-                    val q = ToolContextPlanner.norm(lastUserText(session))
-                    val cat = HubRecipes.catalog { ctx.assets.open("hub/recipes.json").bufferedReader().use { it.readText() } }
-                    HubRecipes.promptLines(cat, q, HubGuard.automationIntent(q), "mcp_" + hub.id.replace(Regex("[^A-Za-z0-9_]"), "_")).forEach { appendLine(it) }
-                }
             }
             appendLine("6b. Trabalho recorrente: quando o usuário pedir para monitorar, acompanhar ou repetir algo ao longo do tempo (ex.: \"a cada 20 min verifique o mercado\", \"uma vez por dia\"), chame set_schedule com o intervalo em minutos (1440 = diário). Quando o pedido tiver hora marcada (\"todo dia às 8h\", \"amanhã às 15:30\"), use cron_add, que dispara no horário exato numa conversa isolada. Se ele não disser o intervalo e a tarefa for contínua, escolha um intervalo razoável e econômico. Para parar, set_schedule com minutes=0.")
             val requestedCaps = if (allowDeviceTools) agent?.deviceCaps.orEmpty() else emptyList()
@@ -3879,8 +3844,19 @@ class AgentRunner(
         if ("device_accessibility_back" in deviceTools)
             add(tool("device_accessibility_back", "Aciona o Voltar do Android. O snapshot atual deixa de valer.", buildJsonObject {}))
         // Hub de conectores: sempre no chat normal; num Agent, só se ele estiver ativado (padrão: ligado).
-        val hubPrefix = "mcp_" + dev.cueopen.app.connectors.ActivepiecesHub.CONNECTOR_ID + "__"
-        if (allowMultiAgent) connectorTools().filter { agent?.useConnectorHub != false || !toolName(it).startsWith(hubPrefix) }.forEach { add(it) }
+        if (allowMultiAgent) connectorTools().forEach { add(it) }
+        // Conectores do hub: 3 ferramentas genéricas que servem para QUALQUER conexão feita no hub (nada por app).
+        if (allowMultiAgent && agent?.useConnectorHub != false && dev.cueopen.app.connectors.HubConnectors.available(store)) {
+            add(tool("conectores_listar", "Lista os conectores (contas conectadas no hub: Gmail, Notion, GitHub…) disponíveis agora, com o id de cada conexão. Chame quando o pedido envolver um app/serviço externo.", buildJsonObject {}))
+            add(tool("conector_acoes", "Mostra o que um conector sabe fazer. Sem 'acao': lista as ações (nome técnico + descrição). Com 'acao': mostra os campos exatos dessa ação (obrigatórios, tipos, opções).",
+                buildJsonObject { put("conector", str("Nome do app/piece, ex.: gmail ou @activepieces/piece-gmail")); put("acao", str("Nome técnico da ação (opcional)")); put("busca", str("Filtro por palavra, ex.: enviar (opcional)")) }, listOf("conector")))
+            add(tool("conector_executar", "Executa UMA ação de um conector com a conta conectada (sem criar automação). Use os nomes e campos exatos de conector_acoes. Peça poucos itens (limite 5–10) para o resultado vir enxuto.",
+                buildJsonObject {
+                    put("conector", str("Nome do app/piece")); put("acao", str("Nome técnico da ação"))
+                    put("campos", buildJsonObject { put("type", "object"); put("description", "Valores dos campos da ação (chave = nome do campo)") })
+                    put("conexao", str("Id da conexão (de conectores_listar). Obrigatório quando o app exige login."))
+                }, listOf("conector", "acao")))
+        }
         // UI Connectors (ex.: IQ Option): só os que este agente pode usar (toggle por agente / "Agent required?").
         runCatching { dev.cueopen.app.CueApp.instance.uiConnectors.toolDefinitions(agent) }.getOrDefault(emptyList()).forEach { add(it) }
         add(tool("tools_load", "Carrega ferramentas que estão fora do contexto (listadas em 'Ferramentas sob demanda'): grupos (ex.: wallet, device, web_dev, agents, schedule), connector:<id> ou mcp:<servidor>. Elas ficam disponíveis a partir da sua próxima resposta e até o fim da tarefa.",
@@ -5239,6 +5215,10 @@ class AgentRunner(
                 "browser_new_tab" -> browserFor(sessionId).newTab(SecretVault.resolve(sessionId, s("url")))
                 "browser_select_tab" -> browserFor(sessionId).selectTabForAgent(s("tab_id"))
                 "browser_close_tab" -> browserFor(sessionId).closeTabForAgent(s("tab_id"))
+                "conectores_listar" -> dev.cueopen.app.connectors.HubConnectors.list(store)
+                "conector_acoes" -> dev.cueopen.app.connectors.HubConnectors.actions(store, s("conector"), s("acao"), s("busca"))
+                "conector_executar" -> dev.cueopen.app.connectors.HubConnectors.run(store, s("conector"), s("acao"),
+                    resolveArgs(sessionId, a)["campos"], s("conexao"))
                 "browser_read", "browser_snapshot" -> {
                     val host = browserFor(sessionId)
                     val out = host.read((i("max_chars") ?: 9000).coerceIn(1000, 20000))
@@ -5438,7 +5418,7 @@ class AgentRunner(
                     store.upsertSkill(Skill(name = s("name"), description = s("description"), instructions = s("instructions")))
                     "Skill \"${s("name")}\" criada e ativada."
                 }
-                else -> if (call.name.startsWith("mcp_")) hubGuardedCall(sessionId, call.name, resolveArgs(sessionId, a))
+                else -> if (call.name.startsWith("mcp_")) dev.cueopen.app.connectors.Connectors.callTool(store, call.name, resolveArgs(sessionId, a))
                         else if (call.name.startsWith("uic_")) {
                             val ag = store.agent(store.session(sessionId)?.agentId)
                             dev.cueopen.app.CueApp.instance.uiConnectors.callTool(

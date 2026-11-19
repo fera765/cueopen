@@ -52,9 +52,6 @@ fun ConnectorsScreen(nav: NavController) {
     var custom by remember { mutableStateOf(false) }
     var tokenFor by remember { mutableStateOf<Connector?>(null) }
     var policyFor by remember { mutableStateOf<Connector?>(null) }
-    var cleanup by remember { mutableStateOf<List<dev.cueopen.app.agent.HubGuard.FlowLine>>(emptyList()) }
-    var cleanupPick by remember { mutableStateOf(setOf<String>()) }
-    var cleaning by remember { mutableStateOf(false) }
     fun openUrl(url: String) {
         runCatching { CustomTabsIntent.Builder().setShowTitle(true).build().launchUrl(ctx, Uri.parse(url)) }
             .onFailure { ctx.startActivity(android.content.Intent(android.content.Intent.ACTION_VIEW, Uri.parse(url))) }
@@ -159,16 +156,6 @@ fun ConnectorsScreen(nav: NavController) {
                                         connect((hubConn ?: ActivepiecesHub.connector()).copy(enabled = true, accessToken = null, lastError = null))
                                     }
                                     pill("Parar", primary = false) { scope.launch { ActivepiecesHub.stop() } }
-                                    if (hubConn?.connectedAt != null) pill("Limpar automações", primary = false) {
-                                        cleaning = true
-                                        scope.launch {
-                                            runCatching { ActivepiecesHub.cleanupCandidates() }
-                                                .onSuccess { list -> cleanup = list; cleanupPick = list.map { it.id }.toSet()
-                                                    if (list.isEmpty()) android.widget.Toast.makeText(ctx, "Nenhuma automação sem uso ou duplicada.", android.widget.Toast.LENGTH_SHORT).show() }
-                                                .onFailure { android.widget.Toast.makeText(ctx, "Não consegui listar: ${it.message}", android.widget.Toast.LENGTH_LONG).show() }
-                                            cleaning = false
-                                        }
-                                    }
                                 }
                                 else -> CircularProgressIndicator(Modifier.size(22.dp), strokeWidth = 2.dp, color = c.accent)
                             }
@@ -213,7 +200,12 @@ fun ConnectorsScreen(nav: NavController) {
                     }
                 }
             }
-            val shown = st.connectors
+            if (st.connectors.any { it.id == ActivepiecesHub.CONNECTOR_ID && it.connectedAt != null }) item {
+                val hs by ActivepiecesHub.state.collectAsStateWithLifecycle()
+                HubConnectionsSection(nav, hs == ActivepiecesHub.State.RUNNING)
+            }
+            // O hub aparece como os conectores dele (seção acima), não como um conector único.
+            val shown = st.connectors.filter { it.gatewayRef != ActivepiecesHub.REF }
             if (shown.isNotEmpty()) item { SectionLabel("Seus conectores") }
             items(shown, key = { it.id }) { conn ->
                 val connected = conn.connectedAt != null
@@ -268,32 +260,6 @@ fun ConnectorsScreen(nav: NavController) {
             }
         }
     }
-    if (cleanup.isNotEmpty()) AlertDialog(onDismissRequest = { cleanup = emptyList() },
-        title = { Text("Automações sem uso (${cleanup.size})") },
-        text = {
-            Column(Modifier.heightIn(max = 420.dp).verticalScroll(rememberScrollState())) {
-                Text("Rascunhos de teste/temporários e duplicatas. Automações publicadas ou ligadas nunca entram aqui.", fontSize = 12.sp, color = c.ink2)
-                Spacer(Modifier.height(6.dp))
-                cleanup.forEach { f ->
-                    val on = f.id in cleanupPick
-                    Row(Modifier.fillMaxWidth().clickable { cleanupPick = if (on) cleanupPick - f.id else cleanupPick + f.id }, verticalAlignment = Alignment.CenterVertically) {
-                        Checkbox(on, { v -> cleanupPick = if (v) cleanupPick + f.id else cleanupPick - f.id })
-                        Column(Modifier.weight(1f)) {
-                            Text(f.name, fontSize = 14.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                            Text("${f.status.lowercase()} · ${if (f.published) "publicada" else "rascunho"}", fontSize = 11.sp, color = c.ink3)
-                        }
-                    }
-                }
-            }
-        },
-        confirmButton = { TextButton({
-            val picked = cleanup.filter { it.id in cleanupPick }; cleanup = emptyList()
-            scope.launch {
-                val msg = runCatching { ActivepiecesHub.deleteFlows(picked) }.getOrElse { "Falha: ${it.message}" }
-                android.widget.Toast.makeText(ctx, msg, android.widget.Toast.LENGTH_LONG).show()
-            }
-        }, enabled = cleanupPick.isNotEmpty()) { Text("Apagar (${cleanupPick.size})", color = c.err) } },
-        dismissButton = { TextButton({ cleanup = emptyList() }) { Text("Cancelar") } })
     tokenFor?.let { conn ->
         var tk by remember { mutableStateOf("") }
         AlertDialog(onDismissRequest = { tokenFor = null }, title = { Text("Conectar ${conn.name} com token") }, text = {
@@ -321,5 +287,72 @@ fun ConnectorsScreen(nav: NavController) {
             val id = name.lowercase().replace(Regex("[^a-z0-9]+"), "_").trim('_').ifBlank { "custom" }
             connect(Connector(id, name.ifBlank { id }, url.trim(), "Personalizado", auth))
         }) { Text("Conectar") } }, dismissButton = { TextButton({ custom = false }) { Text("Cancelar") } })
+    }
+}
+
+
+/** Conectores conectados no hub, listados como conectores do app; "Adicionar" abre o catálogo nativo. */
+@Composable
+private fun HubConnectionsSection(nav: NavController, running: Boolean) {
+    val app = CueApp.instance
+    val c = Cue.c
+    val scope = rememberCoroutineScope()
+    val ctx = LocalContext.current
+    var conns by remember { mutableStateOf<List<dev.cueopen.app.connectors.HubConnectors.Conn>?>(null) }
+    var err by remember { mutableStateOf<String?>(null) }
+    var reload by remember { mutableStateOf(0) }
+    val lifecycle = androidx.lifecycle.compose.LocalLifecycleOwner.current
+    DisposableEffect(lifecycle) {
+        val obs = androidx.lifecycle.LifecycleEventObserver { _, e -> if (e == androidx.lifecycle.Lifecycle.Event.ON_RESUME) reload++ }
+        lifecycle.lifecycle.addObserver(obs); onDispose { lifecycle.lifecycle.removeObserver(obs) }
+    }
+    LaunchedEffect(running, reload) {
+        if (!running) return@LaunchedEffect
+        runCatching { dev.cueopen.app.connectors.HubConnectors.connections(app.store) }.onSuccess { conns = it; err = null }.onFailure { err = it.message }
+    }
+    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            SectionLabel("Conectores do hub")
+            Spacer(Modifier.weight(1f))
+            Box(Modifier.clip(CircleShape).background(c.ink).clickable { nav.navigate("hubcatalog") }.padding(horizontal = 14.dp, vertical = 7.dp)) {
+                Text("+ Adicionar conector", color = c.bg, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+            }
+        }
+        when {
+            !running -> Text("Inicie o hub para ver seus conectores.", fontSize = 12.sp, color = c.ink3)
+            err != null -> Text(err!!, fontSize = 12.sp, color = c.err)
+            conns == null -> CircularProgressIndicator(Modifier.size(22.dp), strokeWidth = 2.dp, color = c.accent)
+            conns!!.isEmpty() -> Text("Nenhum conector ainda. Toque em Adicionar conector para conectar Gmail, Notion, GitHub e mais de 400 apps.", fontSize = 12.sp, color = c.ink3)
+        }
+        conns.orEmpty().forEach { cn ->
+            var menu by remember(cn.externalId) { mutableStateOf(false) }
+            CueCard {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    coil.compose.AsyncImage("https://cdn.activepieces.com/pieces/" + cn.pieceName.substringAfterLast("piece-") + ".png", null,
+                        Modifier.size(38.dp).clip(RoundedCornerShape(10.dp)).background(c.surface2))
+                    Spacer(Modifier.width(12.dp))
+                    Column(Modifier.weight(1f)) {
+                        Text(dev.cueopen.app.connectors.HubConnectors.appName(cn.pieceName), fontWeight = FontWeight.SemiBold)
+                        Text(cn.displayName, fontSize = 12.sp, color = c.ink2, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Text(if (cn.status == "ACTIVE") "Conectado · o agente usa direto" else "Status ${cn.status} · reconecte", fontSize = 11.sp, color = if (cn.status == "ACTIVE") c.ok else c.err)
+                    }
+                    Box {
+                        IconButton(onClick = { menu = true }) { Icon(Icons.Rounded.MoreVert, "Opções") }
+                        DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                            DropdownMenuItem(text = { Text("Remover conexão", color = c.err) }, leadingIcon = { Icon(Icons.Rounded.DeleteOutline, null, tint = c.err) }, onClick = {
+                                menu = false
+                                scope.launch {
+                                    runCatching {
+                                        val id = dev.cueopen.app.connectors.HubApi.connections().firstOrNull { it.externalId == cn.externalId }?.id ?: error("Conexão não encontrada no hub.")
+                                        dev.cueopen.app.connectors.HubApi.deleteConnection(id)
+                                    }.onSuccess { reload++; android.widget.Toast.makeText(ctx, "Conexão removida.", android.widget.Toast.LENGTH_SHORT).show() }
+                                        .onFailure { android.widget.Toast.makeText(ctx, it.message ?: "Falha ao remover", android.widget.Toast.LENGTH_LONG).show() }
+                                }
+                            })
+                        }
+                    }
+                }
+            }
+        }
     }
 }

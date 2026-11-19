@@ -41,14 +41,14 @@ class ConnectorRoutingTest {
     }
 
     @Test fun promptTellsTheAgentExactlyWhatToCall() {
-        val lines = ConnectorRouting.promptLines(listOf(Triple("Activepieces Hub", hubPfx, true)), "Gmail (lord@exemplo.com)",
-            listOf("ap_list_connections", "ap_list_pieces", "ap_run_action"), listOf("conector Activepieces Hub"))
+        val lines = ConnectorRouting.promptLines(emptyList(), hubConnected = true, hubInventory = "Gmail (lord@exemplo.com)", mentioned = listOf("conector Gmail"))
         val all = lines.joinToString("\n")
         assertTrue(all.contains("NUNCA procure conectores no sistema de arquivos"))
-        assertTrue(all.contains("${hubPfx}__ap_run_action"))
+        assertTrue(all.contains("conector_executar"))
         assertTrue(all.contains("Gmail"))
         assertTrue(all.contains("marcou com @"))
-        assertEquals(emptyList<String>(), ConnectorRouting.promptLines(emptyList(), null, emptyList(), emptyList()))
+        assertEquals(emptyList<String>(), ConnectorRouting.promptLines(emptyList(), false, null, emptyList()))
+        assertTrue(ConnectorRouting.browserGuard("https://mail.google.com/", true, 0, 0, null)!!.contains("conector_executar"))
     }
 }
 

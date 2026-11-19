@@ -241,6 +241,7 @@ fun CueNav(nav: NavHostController, startOnboarding: Boolean) {
         composable("browserlogin/{id}?session={session}", arguments = listOf(androidx.navigation.navArgument("session") { nullable = true; defaultValue = null })) { e ->
             BrowserLoginScreen(nav, e.arguments!!.getString("id")!!, e.arguments?.getString("session")) }
         composable("connectors") { ConnectorsScreen(nav) }
+        composable("hubcatalog") { HubCatalogScreen(nav) }
         composable("mcpconnector/{id}") { e -> McpConnectorSettingsScreen(nav, e.arguments!!.getString("id")!!) }
         composable("uiconnector/edit/{id}") { e -> UiConnectorEditorScreen(nav, e.arguments!!.getString("id")!!) }
         composable("uiconnector/{id}") { e -> UiConnectorScreen(nav, e.arguments!!.getString("id")!!) }

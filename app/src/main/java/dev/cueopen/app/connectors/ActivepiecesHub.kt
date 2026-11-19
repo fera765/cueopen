@@ -375,57 +375,9 @@ object ActivepiecesHub {
 
     fun lastLog(): String = runCatching { File(hostDir(), "hub.log").readText().takeLast(20_000) }.getOrDefault("")
 
-    // ---------------- Limpeza de automações ----------------
     private fun fn(tool: String) = "mcp_" + CONNECTOR_ID + "__" + tool
-
-    /** Automações sem uso (rascunhos de teste/temporários e duplicatas) — nunca inclui as publicadas/ligadas. */
-    suspend fun cleanupCandidates(): List<dev.cueopen.app.agent.HubGuard.FlowLine> {
-        val store = CueApp.instance.store
-        if (!ensureRunning()) error("O hub não está no ar.")
-        var out = Connectors.callTool(store, fn("ap_list_flows"), kotlinx.serialization.json.buildJsonObject { put("limit", kotlinx.serialization.json.JsonPrimitive(100)) })
-        if (out.startsWith("ERRO") || out.startsWith("Falha") || out.contains("❌")) out = Connectors.callTool(store, fn("ap_list_flows"), kotlinx.serialization.json.JsonObject(emptyMap()))
-        if (out.startsWith("ERRO") || out.startsWith("Falha")) error(out.take(300))
-        return dev.cueopen.app.agent.HubGuard.cleanupCandidates(dev.cueopen.app.agent.HubGuard.parseFlows(out))
-    }
-
-    /**
-     * Apaga as automações escolhidas pelo usuário e devolve o resumo para mostrar na tela. Versões do hub sem a
-     * ferramenta `ap_delete_flow` (o MCP do Activepieces só a ganhou recentemente) não permitem apagar: nesse caso a
-     * automação vai para a "lixeira" (renomeada com 🗑, fora das próximas limpezas) em vez de falhar em silêncio.
-     */
-    suspend fun deleteFlows(flows: Collection<dev.cueopen.app.agent.HubGuard.FlowLine>): String {
-        val store = CueApp.instance.store
-        val hub = store.state.value.connectors.firstOrNull { it.gatewayRef == REF }
-        var names = hub?.let { h -> Connectors.toolNames(h).map { it.first } }.orEmpty()
-        if ("ap_delete_flow" !in names && hub != null) names = Connectors.toolNames(Connectors.refreshTools(store, hub)).map { it.first }
-        val canDelete = "ap_delete_flow" in names
-        val canRename = "ap_rename_flow" in names
-        val okRes = { r: String -> !r.startsWith("ERRO") && !r.startsWith("Falha") && !r.contains("❌") }
-        var deleted = 0; var archived = 0; var failed = 0
-        flows.forEach { f ->
-            val id = kotlinx.serialization.json.JsonPrimitive(f.id)
-            when {
-                canDelete -> {
-                    val r = Connectors.callTool(store, fn("ap_delete_flow"), kotlinx.serialization.json.buildJsonObject { put("flowId", id) })
-                    if (okRes(r)) deleted++ else { failed++; dev.cueopen.app.diag.ErrorLog.log("hub", "Falha ao apagar automação ${f.id}: ${r.take(300)}") }
-                }
-                canRename -> {
-                    val r = Connectors.callTool(store, fn("ap_rename_flow"), kotlinx.serialization.json.buildJsonObject {
-                        put("flowId", id); put("displayName", kotlinx.serialization.json.JsonPrimitive(dev.cueopen.app.agent.HubGuard.archivedName(f.name)))
-                    })
-                    if (okRes(r)) archived++ else { failed++; dev.cueopen.app.diag.ErrorLog.log("hub", "Falha ao arquivar automação ${f.id}: ${r.take(300)}") }
-                }
-                else -> failed++
-            }
-        }
-        val msg = buildList {
-            if (deleted > 0) add("$deleted apagada(s)")
-            if (archived > 0) add("$archived movida(s) para a lixeira 🗑 (esta versão do hub não permite apagar)")
-            if (failed > 0) add("$failed não saíram${if (!canDelete && !canRename) " (esta versão do hub não permite apagar nem renomear)" else ""}")
-        }.joinToString(" · ").ifBlank { "Nada para limpar." }
-        logLine("🧹 $msg\n")
-        return msg
-    }
+    /** Nome de função de uma ferramenta MCP do hub (uso interno do app, nunca exposta ao agente). */
+    fun hubTool(tool: String) = fn(tool)
 
     fun connector() = dev.cueopen.app.data.Connector(
         CONNECTOR_ID, "Activepieces Hub", MCP_URL,

@@ -300,7 +300,8 @@ object Connectors {
     /** Definições de função (OpenAI tools) para todas as ferramentas dos conectores ativos. */
     fun toolDefinitions(store: Store): List<JsonObject> {
         val out = mutableListOf<JsonObject>()
-        store.state.value.connectors.filter { it.enabled && it.connectedAt != null && it.toolsJson != null }.forEach { c ->
+        // O hub não expõe as ferramentas MCP dele ao agente: os conectores do hub entram pelas 3 ferramentas genéricas (HubConnectors).
+        store.state.value.connectors.filter { it.enabled && it.connectedAt != null && it.toolsJson != null && it.gatewayRef != ActivepiecesHub.REF }.forEach { c ->
             val arr = runCatching { JSONArray(c.toolsJson) }.getOrNull() ?: return@forEach
             val all = (0 until arr.length()).map { arr.getJSONObject(it) }
             // Hub: as ferramentas de execução direta vêm primeiro (ap_run_action ficava fora do corte de 40).
