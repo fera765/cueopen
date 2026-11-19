@@ -62,6 +62,25 @@ object WebTools {
             YouTubeTranscript.format(lines, maxChars)
     }.getOrNull()
 
+    private val OG = listOf(
+        Regex("""<meta[^>]+(?:property|name)=["'](?:og:image(?::secure_url)?|twitter:image(?::src)?)["'][^>]*content=["']([^"']+)["']""", RegexOption.IGNORE_CASE),
+        Regex("""<meta[^>]+content=["']([^"']+)["'][^>]*(?:property|name)=["'](?:og:image(?::secure_url)?|twitter:image(?::src)?)["']""", RegexOption.IGNORE_CASE),
+        Regex("""<link[^>]+rel=["']image_src["'][^>]*href=["']([^"']+)["']""", RegexOption.IGNORE_CASE),
+        Regex("""itemprop=["']image["'][^>]*(?:content|src)=["']([^"']+)["']""", RegexOption.IGNORE_CASE),
+    )
+
+    /** Imagem principal de uma página (og:image / twitter:image / itemprop=image), já em URL absoluta. */
+    fun imageFromHtml(html: String, pageUrl: String): String? {
+        val raw = OG.firstNotNullOfOrNull { it.find(html)?.groupValues?.get(1) }?.replace("&amp;", "&")?.trim() ?: return null
+        return runCatching { java.net.URI(pageUrl).resolve(raw).toString() }.getOrNull()?.takeIf { it.startsWith("http") }
+    }
+
+    /** Busca a imagem de capa de uma URL (para cards sem foto). Leitura curta: só o começo do HTML. */
+    suspend fun pageImage(url: String): String? = withContext(Dispatchers.IO) {
+        if (!url.startsWith("http")) return@withContext null
+        runCatching { val (code, body) = get(url); if (code in 200..299) imageFromHtml(body.take(400_000), url) else null }.getOrNull()
+    }
+
     suspend fun search(query: String, max: Int): String = withContext(Dispatchers.IO) {
         if (query.isBlank()) return@withContext "ERRO: informe query."
         runCatching {

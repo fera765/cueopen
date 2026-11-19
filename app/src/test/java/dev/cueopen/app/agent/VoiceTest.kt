@@ -18,3 +18,16 @@ class VoiceTest {
         assertFalse(s.contains("**") || s.contains("https") || s.contains("val x"))
     }
 }
+
+class BestVoiceTest {
+    private val v = listOf(
+        dev.cueopen.app.assistant.VoiceReplies.VoiceInfo("pt-br-x-afs-local", "pt-BR", 400, false, false),
+        dev.cueopen.app.assistant.VoiceReplies.VoiceInfo("pt-br-x-afs-network", "pt-BR", 500, true, false),
+        dev.cueopen.app.assistant.VoiceReplies.VoiceInfo("en-us-x", "en-US", 500, false, false),
+        dev.cueopen.app.assistant.VoiceReplies.VoiceInfo("pt-br-x-missing", "pt-BR", 500, false, true),
+    )
+    @org.junit.Test fun picksBestPortugueseVoice() {
+        org.junit.Assert.assertEquals("pt-br-x-afs-network", dev.cueopen.app.assistant.VoiceReplies.bestVoice(v, online = true))
+        org.junit.Assert.assertEquals("pt-br-x-afs-local", dev.cueopen.app.assistant.VoiceReplies.bestVoice(v, online = false))
+    }
+}

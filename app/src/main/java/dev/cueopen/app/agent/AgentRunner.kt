@@ -76,6 +76,7 @@ class AgentRunner(
     private val terminals: dev.cueopen.app.sandbox.TerminalManager,
     private val ctx: android.content.Context,
 ) {
+    init { ExecutionLedger.dirResolver = { id -> sandbox.workspaceFor(id) } }
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     /** Registro explícito do ciclo de vida de cada chamada de ferramenta. */
     val executions = ToolExecutionManager()
@@ -312,7 +313,13 @@ class AgentRunner(
                     if (out == null) return@launch  // só instalar (ou falhou): o feedback já está no chat, sem chamar o modelo
                     store.editSession(sessionId) { it.copy(llm = it.llm + LlmMessage("user", out)) }
                 }
-                loop(sessionId)
+                // Orquestrador: cada rodada é uma execução registrada (tarefa, objetivo, operações, estado final).
+                ExecutionLedger.begin(sessionId, store.session(sessionId)?.items?.lastOrNull { it is ChatItem.User }?.id ?: "auto", text.take(500))
+                try { loop(sessionId) } finally {
+                    val st = store.session(sessionId)
+                    ExecutionLedger.end(sessionId, st?.status?.name ?: "STOPPED",
+                        (st?.items?.lastOrNull { it is ChatItem.Assistant } as? ChatItem.Assistant)?.text.orEmpty())
+                }
             } catch (c: kotlinx.coroutines.CancellationException) {
                 throw c
             } catch (t: Throwable) {
@@ -1650,6 +1657,7 @@ class AgentRunner(
             val stepTools = if (sessionId in finalDelivery) kotlinx.serialization.json.JsonArray(allTools.filter { toolName(it) in FINAL_DELIVERY_TOOLS }) else stepToolsPlanned
             // O schema enviado ao provider também é uma allowlist de execução para esta volta.
             val exposedToolNames = stepTools.mapNotNull(::toolName).toSet()
+            ExecutionLedger.setAllowed(sessionId, exposedToolNames)
             val sys = LlmMessage("system", systemPrompt(sessionId, agent, s, contextPlan, allowDeviceTools = tokenBudgetOverride == null))
             val activeHistory = s.llm.map { AccessibilityToolHistory.forActiveModel(it, transientAccessibilityOutputs) }
             var history = ctxMgr.microCompact(activeHistory, sessionId)
@@ -1947,11 +1955,11 @@ class AgentRunner(
                 } else if (blockedSnapshotReuse) {
                     ToolResult("ERRO: Snapshot ausente ou invalidado; nenhuma ação foi executada com o ID já recusado. Use somente IDs da releitura atual:\n${blockedSnapshotRead.orEmpty()}")
                 } else try {
-                    cachedTradeResult ?: cachedConnectorResult ?: runTool(
+                    cachedTradeResult ?: cachedConnectorResult ?: ledgerRun(sessionId, call) { runTool(
                         sessionId, call, allowDeviceTools = tokenBudgetOverride == null,
                         model = modelId, visualInspectionUsed = visualInspectionUsed,
                         accessibilityReadScreenCompleted = accessibilityReadScreenCompleted,
-                    )
+                    ) }
                 } catch (c: kotlinx.coroutines.CancellationException) {
                     throw c
                 } catch (t: Throwable) {
@@ -2652,6 +2660,24 @@ class AgentRunner(
     }
 
 
+    /**
+     * Execução de ferramenta sob o orquestrador: reaproveita resultado idêntico de leitura na mesma execução,
+     * aplica prazo máximo (15 min) e registra a operação (duração, sucesso, resumo) no ExecutionLedger.
+     */
+    private suspend fun ledgerRun(sessionId: String, call: ToolCall, block: suspend () -> ToolResult): ToolResult {
+        val h = ExecutionLedger.hash(call.name + "|" + normArgs(call.argsJson))
+        ExecutionLedger.cached(sessionId, call.name, h)?.let { prev ->
+            ExecutionLedger.record(sessionId, call.name, h, true, 0, prev, reused = true)
+            return ToolResult("[Resultado reaproveitado: você já fez esta mesma chamada nesta execução e nada mudou]\n$prev")
+        }
+        val t0 = System.currentTimeMillis()
+        val res = kotlinx.coroutines.withTimeoutOrNull(15 * 60_000L) { block() }
+            ?: ToolResult("ERRO: ${call.name} passou de 15 min e foi interrompida pelo orquestrador. Verifique o estado (arquivo, página, saída) antes de tentar de novo.")
+        val ok = !res.output.trimStart().let { it.startsWith("ERRO") || it.startsWith("ERROR") || it.startsWith("RECUSADO") || it.startsWith("❌") }
+        ExecutionLedger.record(sessionId, call.name, h, ok, System.currentTimeMillis() - t0, res.output)
+        return res
+    }
+
     // ───────── Ferramentas novas fora do runTool (o método já está perto do limite de 64 KB da JVM) ─────────
     private suspend fun extraOutputTool(sessionId: String, name: String, a: JsonObject): String {
         fun s(k: String) = a[k]?.jsonPrimitive?.contentOrNull.orEmpty()
@@ -2670,9 +2696,10 @@ class AgentRunner(
             "show_cards" -> {
                 val parsed = ResultCardsParser.parse(s("kind"), s("title"), a["items"])
                 if (parsed.isFailure) "ERRO: ${parsed.exceptionOrNull()?.message}" else {
-                    val item = parsed.getOrThrow()
+                    // Card sem foto: o app busca a imagem principal da página do item (og:image) antes de mostrar.
+                    val item = CardImages.fill(parsed.getOrThrow()) { url -> dev.cueopen.app.web.WebTools.pageImage(url) }
                     store.addItem(sessionId, item)
-                    "Mostrei ${item.items.size} card(s) no chat. Não repita a lista em texto: escreva no máximo 2 frases (sua recomendação e o próximo passo)." +
+                    "Mostrei ${item.items.size} card(s) no chat" + (item.items.count { it.image.isBlank() }.takeIf { it > 0 }?.let { " ($it sem imagem: na próxima, mande 'image' com a URL da foto que aparece no resultado)" } ?: "") + ". Não repita a lista em texto: escreva no máximo 2 frases (sua recomendação e o próximo passo)." +
                         (if (item.kind == "product") " Se o usuário tocar num card, a escolha chega como [Seleção]." else "")
                 }
             }
@@ -3965,7 +3992,7 @@ class AgentRunner(
                 put("title", str("Título curto")); put("text", str("Mensagem objetiva (o que houve e o que fazer)"))
                 put("priority", buildJsonObject { put("type", "string"); put("enum", buildJsonArray { listOf("silent", "low", "normal", "high", "critical").forEach { add(kotlinx.serialization.json.JsonPrimitive(it)) } }) })
             }, listOf("title", "text", "priority")))
-        add(tool("show_cards", "Mostra resultados como cards visuais no chat (produtos, notícias, sites, resultados de busca, serviços). Use depois de coletar os dados de verdade (browser, web, conector): cada campo precisa ter vindo da fonte — nunca invente preço, nota, imagem ou link. 'badge' (ex.: Menor preço, Melhor avaliação) só quando comprovado entre os itens mostrados. Em produtos, o usuário pode tocar num card para escolher; a escolha chega como mensagem [Seleção].",
+        add(tool("show_cards", "Mostra resultados como cards visuais no chat (produtos, notícias, sites, resultados de busca, serviços). Use depois de coletar os dados de verdade (browser, web, conector): cada campo precisa ter vindo da fonte — nunca invente preço, nota, imagem ou link. SEMPRE mande 'image' (URL da foto do item como aparece na página/resultado; no browser use browser_js para ler o src das imagens se precisar) e 'url' do item — sem image, o app tenta buscar a foto pela url. 'badge' (ex.: Menor preço, Melhor avaliação) só quando comprovado entre os itens mostrados. Em produtos, o usuário pode tocar num card para escolher; a escolha chega como mensagem [Seleção].",
             buildJsonObject {
                 put("kind", buildJsonObject { put("type", "string"); put("enum", buildJsonArray { listOf("product", "news", "website", "search", "service").forEach { add(kotlinx.serialization.json.JsonPrimitive(it)) } }); put("description", "Tipo dos cards") })
                 put("title", str("Título curto acima dos cards (opcional)"))

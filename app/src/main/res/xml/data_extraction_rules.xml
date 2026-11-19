@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Android 12+: sincroniza com a conta Google só quando o backup é criptografado de ponta a ponta.
+     Cofre (cartões, Pix), credenciais, carteira e login do hub nunca entram. Transferência entre aparelhos idem. -->
+<data-extraction-rules>
+    <cloud-backup disableIfNoEncryptionCapabilities="true">
+        <include domain="file" path="cueopen_state.json" />
+        <include domain="sharedpref" path="fluwy_triggers.xml" />
+        <include domain="sharedpref" path="fluwy_notifications.xml" />
+        <include domain="sharedpref" path="usage_ledger.xml" />
+        <include domain="sharedpref" path="browser_site_permissions.xml" />
+    </cloud-backup>
+    <device-transfer>
+        <include domain="file" path="cueopen_state.json" />
+        <include domain="sharedpref" path="fluwy_triggers.xml" />
+        <include domain="sharedpref" path="fluwy_notifications.xml" />
+    </device-transfer>
+</data-extraction-rules>

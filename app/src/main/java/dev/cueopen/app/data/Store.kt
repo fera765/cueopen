@@ -25,6 +25,7 @@ val AppJson = Json { ignoreUnknownKeys = true; encodeDefaults = true; prettyPrin
 class Store(context: Context) {
     private data class VersionedState(val revision: Long, val state: AppState)
     private val file = File(context.filesDir, "cueopen_state.json")
+    private val backup = runCatching { android.app.backup.BackupManager(context.applicationContext) }.getOrNull()
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val stateLock = Any()
     private var revision = 1L
@@ -79,6 +80,8 @@ class Store(context: Context) {
     @Synchronized
     private fun save(snapshot: VersionedState) {
         if (snapshot.revision <= persistedRevision) return
+        // Avisa o backup do Android (conta Google, criptografado de ponta a ponta) que o estado mudou.
+        runCatching { backup?.dataChanged() }
         val tmp = File(file.parentFile, file.name + ".tmp")
         // Grava em fluxo direto no arquivo: montar o JSON inteiro numa String duplicava a memória e derrubava o app
         // (OutOfMemoryError) quando o estado passava de ~30 MB.

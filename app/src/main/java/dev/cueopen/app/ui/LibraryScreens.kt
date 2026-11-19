@@ -937,8 +937,13 @@ private fun TriggersSection(nav: NavController) {
     val scope = rememberCoroutineScope()
     LaunchedEffect(Unit) { dev.cueopen.app.triggers.TriggerStore.load(ctx) }
     val list by dev.cueopen.app.triggers.TriggerStore.all.collectAsStateWithLifecycle()
+    var creating by remember { mutableStateOf(false) }
+    if (creating) NewTriggerDialog { creating = false }
     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-        SectionLabel("Gatilhos")
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            SectionLabel("Gatilhos"); Spacer(Modifier.weight(1f))
+            TextButton({ creating = true }) { Text("+ Novo gatilho", color = c.accent) }
+        }
         if (list.isEmpty()) Text("Nenhum gatilho. Peça a um agente, por exemplo: \"quando chegar e-mail de cliente, resuma e prepare a resposta\".", fontSize = 12.sp, color = c.ink3)
         list.forEach { t ->
             var menu by remember(t.id) { mutableStateOf(false) }
@@ -973,4 +978,94 @@ private fun TriggersSection(nav: NavController) {
             }
         }
     }
+}
+
+
+/** Criação manual de gatilho: conversa alvo, fonte (conector do hub ou site), filtro, instrução e intervalo. */
+@Composable
+private fun NewTriggerDialog(onDismiss: () -> Unit) {
+    val app = CueApp.instance
+    val ctx = LocalContext.current
+    val c = Cue.c
+    val scope = rememberCoroutineScope()
+    val st by app.store.state.collectAsStateWithLifecycle()
+    var name by remember { mutableStateOf("") }
+    var source by remember { mutableStateOf("connector") }
+    var sessionId by remember { mutableStateOf(st.sessions.maxByOrNull { it.updatedAt }?.id.orEmpty()) }
+    var conns by remember { mutableStateOf<List<dev.cueopen.app.connectors.HubConnectors.Conn>>(emptyList()) }
+    var conn by remember { mutableStateOf<dev.cueopen.app.connectors.HubConnectors.Conn?>(null) }
+    var actions by remember { mutableStateOf<List<Pair<String, String>>>(emptyList()) }
+    var action by remember { mutableStateOf("") }
+    var fields by remember { mutableStateOf("{}") }
+    var url by remember { mutableStateOf("") }
+    var filter by remember { mutableStateOf("") }
+    var instruction by remember { mutableStateOf("") }
+    var interval by remember { mutableStateOf("15") }
+    var err by remember { mutableStateOf<String?>(null) }
+    var busy by remember { mutableStateOf(false) }
+    LaunchedEffect(source) { if (source == "connector") runCatching { dev.cueopen.app.connectors.HubConnectors.connections(app.store) }.onSuccess { conns = it }.onFailure { err = it.message } }
+    LaunchedEffect(conn) {
+        val cn = conn ?: return@LaunchedEffect
+        runCatching { dev.cueopen.app.connectors.HubApi.piece(cn.pieceName) }.onSuccess { meta ->
+            actions = (meta["actions"] as? kotlinx.serialization.json.JsonObject).orEmpty().values.mapNotNull { it as? kotlinx.serialization.json.JsonObject }
+                .map { (it["name"] as? kotlinx.serialization.json.JsonPrimitive)?.content.orEmpty() to (it["displayName"] as? kotlinx.serialization.json.JsonPrimitive)?.content.orEmpty() }
+        }.onFailure { err = it.message }
+    }
+    AlertDialog(onDismissRequest = onDismiss, title = { Text("Novo gatilho") }, text = {
+        Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            CueField(name, { name = it.take(60) }, "Nome (ex.: E-mails de clientes)")
+            Text("Conversa que será acordada", fontSize = 12.sp, color = c.ink2)
+            Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                st.sessions.sortedByDescending { it.updatedAt }.take(12).forEach { ss -> FilterChip(sessionId == ss.id, { sessionId = ss.id }, { Text(ss.title.take(24), fontSize = 11.sp) }) }
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                FilterChip(source == "connector", { source = "connector" }, { Text("Conector do hub") })
+                FilterChip(source == "site", { source = "site" }, { Text("Página web") })
+            }
+            if (source == "connector") {
+                if (conns.isEmpty()) Text("Nenhum conector conectado no hub.", fontSize = 12.sp, color = c.ink3)
+                Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    conns.forEach { cn -> FilterChip(conn == cn, { conn = cn; action = "" }, { Text(dev.cueopen.app.connectors.HubConnectors.appName(cn.pieceName) + " · " + cn.displayName.take(16), fontSize = 11.sp) }) }
+                }
+                if (actions.isNotEmpty()) {
+                    Text("Ação de leitura", fontSize = 12.sp, color = c.ink2)
+                    Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        actions.forEach { (n, d) -> FilterChip(action == n, { action = n }, { Text(d.ifBlank { n }.take(28), fontSize = 11.sp) }) }
+                    }
+                }
+                CueField(fields, { fields = it }, "Campos da ação em JSON (ex.: {\"limit\":10})")
+            } else CueField(url, { url = it.trim() }, "Endereço da página (https://…)")
+            CueField(filter, { filter = it.take(200) }, "Só quando contiver (palavras, opcional)")
+            CueField(instruction, { instruction = it.take(800) }, "O que o agente deve fazer", minLines = 2)
+            CueField(interval, { interval = it.filter { ch -> ch.isDigit() }.take(4) }, "Verificar a cada (min, mínimo 15)")
+            err?.let { Text(it, color = c.err, fontSize = 12.sp) }
+        }
+    }, confirmButton = {
+        if (busy) CircularProgressIndicator(Modifier.size(22.dp), strokeWidth = 2.dp, color = c.accent)
+        else TextButton({
+            err = null
+            val input = runCatching { kotlinx.serialization.json.Json.parseToJsonElement(fields.ifBlank { "{}" }) as kotlinx.serialization.json.JsonObject }.getOrNull()
+            err = when {
+                name.isBlank() -> "Dê um nome ao gatilho."
+                sessionId.isBlank() -> "Escolha a conversa."
+                instruction.isBlank() -> "Diga o que o agente deve fazer."
+                source == "connector" && (conn == null || action.isBlank()) -> "Escolha o conector e a ação de leitura."
+                source == "connector" && input == null -> "Campos precisam ser um objeto JSON."
+                source == "site" && !url.startsWith("http") -> "Informe um endereço http(s)."
+                else -> null
+            }
+            if (err != null) return@TextButton
+            val t = dev.cueopen.app.triggers.Trigger(name = name.trim(), sessionId = sessionId, agentId = app.store.session(sessionId)?.agentId, source = source,
+                piece = conn?.pieceName.orEmpty(), action = action, input = (input ?: kotlinx.serialization.json.JsonObject(emptyMap())).toString(), connection = conn?.externalId.orEmpty(),
+                url = url, filter = filter.trim(), instruction = instruction.trim(), intervalMinutes = (interval.toIntOrNull() ?: 15).coerceIn(15, 1440))
+            dev.cueopen.app.triggers.TriggerStore.upsert(ctx, t); dev.cueopen.app.triggers.TriggerEngine.schedule(ctx, t)
+            busy = true
+            scope.launch {
+                val r = dev.cueopen.app.triggers.TriggerEngine.check(ctx.applicationContext as CueApp, t.id)
+                busy = false
+                android.widget.Toast.makeText(ctx, "Gatilho criado · $r", android.widget.Toast.LENGTH_LONG).show()
+                onDismiss()
+            }
+        }) { Text("Criar") }
+    }, dismissButton = { TextButton(onDismiss) { Text("Cancelar") } })
 }

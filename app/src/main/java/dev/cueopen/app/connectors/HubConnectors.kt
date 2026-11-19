@@ -120,10 +120,24 @@ object HubConnectors {
             else if (mine.size > 1) return "ERRO: há ${mine.size} contas de ${appName(piece)} conectadas: " +
                 mine.joinToString { "\"${it.displayName}\" (conexao=${it.externalId})" } + ". Escolha uma e repita com conexao."
         }
+        // Hub antigo (sem ap_run_action): não adianta tentar — diz exatamente o que resolver.
+        if (ActivepiecesHub.supportsDirectActions(store) == false) {
+            dev.cueopen.app.notify.NotificationCenter.post("Atualize o hub de conectores", "A versão instalada não executa ações de conector direto. Toque em Atualizar hub em Apps › Conectores.",
+                dev.cueopen.app.notify.NotificationCenter.Priority.NORMAL, dev.cueopen.app.notify.NotificationCenter.Category.FAILURE, dedupeKey = "hub-outdated")
+            return OUTDATED
+        }
         val out = mcp(store, "ap_run_action", buildJsonObject {
             put("pieceName", piece); put("actionName", acao.trim()); put("input", input)
             if (conn.isNotBlank()) put("connectionExternalId", conn)
         })
+        if (out.contains("ap_run_action not found")) {
+            // A lista de ferramentas guardada estava velha: atualiza para as próximas chamadas pularem direto para o aviso.
+            hub(store)?.let { runCatching { Connectors.refreshTools(store, it) } }
+            return OUTDATED
+        }
         return out.take(12_000)
     }
+
+    const val OUTDATED = "ERRO: o hub de conectores instalado é uma versão antiga do Activepieces e não executa ações direto (falta a ferramenta ap_run_action). " +
+        "Não tente de novo nem por outro caminho: diga ao usuário para tocar em \"Atualizar hub\" em Apps › Conectores (as conexões são mantidas) e repetir o pedido depois."
 }

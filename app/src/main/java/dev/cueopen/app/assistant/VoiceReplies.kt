@@ -21,15 +21,42 @@ object VoiceReplies {
     private var ready: CompletableDeferred<Boolean>? = null
     private val mutex = Mutex()
 
+    /** Motor de voz do Google (vem no Android, gratuito, sem baixar modelo pelo app); outro motor só se não houver. */
+    const val GOOGLE_TTS = "com.google.android.tts"
+
+    private suspend fun open(ctx: Context, enginePkg: String?): TextToSpeech? {
+        val d = CompletableDeferred<Boolean>()
+        val t = if (enginePkg != null) TextToSpeech(ctx.applicationContext, { status -> d.complete(status == TextToSpeech.SUCCESS) }, enginePkg)
+            else TextToSpeech(ctx.applicationContext) { status -> d.complete(status == TextToSpeech.SUCCESS) }
+        if (withTimeoutOrNull(8_000) { d.await() } != true) { runCatching { t.shutdown() }; return null }
+        return t
+    }
+
     private suspend fun engine(ctx: Context): TextToSpeech? {
         tts?.let { if (ready?.await() == true) return it }
         val d = CompletableDeferred<Boolean>(); ready = d
-        val t = TextToSpeech(ctx.applicationContext) { status -> d.complete(status == TextToSpeech.SUCCESS) }
-        tts = t
-        if (withTimeoutOrNull(8_000) { d.await() } != true) return null
+        val t = open(ctx, GOOGLE_TTS) ?: open(ctx, null)
+        if (t == null) { d.complete(false); ready = null; return null }
+        tts = t; d.complete(true)
         t.language = Locale("pt", "BR")
+        bestVoice(t.voices?.toList().orEmpty().map { VoiceInfo(it.name, it.locale.toLanguageTag(), it.quality, it.isNetworkConnectionRequired,
+            it.features?.contains(TextToSpeech.Engine.KEY_FEATURE_NOT_INSTALLED) == true) }, online(ctx))
+            ?.let { name -> t.voices?.firstOrNull { it.name == name }?.let { v -> t.voice = v } }
         return t
     }
+
+    data class VoiceInfo(val name: String, val tag: String, val quality: Int, val network: Boolean, val notInstalled: Boolean)
+
+    /** Melhor voz pt-BR: instalada, maior qualidade; com internet aceita as vozes de rede do Google (mais naturais). */
+    fun bestVoice(voices: List<VoiceInfo>, online: Boolean): String? = voices
+        .filter { it.tag.lowercase().startsWith("pt-br") && !it.notInstalled && (online || !it.network) }
+        .sortedWith(compareByDescending<VoiceInfo> { it.quality }.thenBy { if (online) (if (it.network) 0 else 1) else 0 })
+        .firstOrNull()?.name
+
+    private fun online(ctx: Context): Boolean = runCatching {
+        val cm = ctx.getSystemService(android.net.ConnectivityManager::class.java)
+        cm.getNetworkCapabilities(cm.activeNetwork)?.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_VALIDATED) == true
+    }.getOrDefault(false)
 
     /** Texto limpo para fala: sem markdown, links e blocos de código; tamanho limitado. */
     fun speakable(md: String): String = md

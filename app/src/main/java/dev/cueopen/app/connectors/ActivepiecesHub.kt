@@ -268,6 +268,64 @@ object ActivepiecesHub {
         }
     } }
 
+    /** O hub instalado executa ações de conector direto (ap_run_action)? Versões antigas do Activepieces não. */
+    fun supportsDirectActions(store: dev.cueopen.app.data.Store): Boolean? {
+        val hub = store.state.value.connectors.firstOrNull { it.gatewayRef == REF } ?: return null
+        val names = Connectors.toolNames(hub).map { it.first }
+        return if (names.isEmpty()) null else "ap_run_action" in names
+    }
+
+    /**
+     * Atualiza o hub para a versão mais nova do Activepieces mantendo os dados: baixa a imagem nova num diretório à
+     * parte, copia o banco, as conexões e os segredos (/opt/ap-data, /opt/ap-secrets) e só então troca. Se algo
+     * falhar no meio, a versão atual continua intacta.
+     */
+    suspend fun update(): Boolean = installMutex.withLock { withContext(Dispatchers.IO) {
+        if (!installed()) return@withContext false
+        _state.value = State.INSTALLING
+        val ctx = CueApp.instance
+        runCatching { SandboxService.start(ctx, "Atualizando o hub de conectores…") }
+        val wake = runCatching {
+            (ctx.getSystemService(android.content.Context.POWER_SERVICE) as android.os.PowerManager)
+                .newWakeLock(android.os.PowerManager.PARTIAL_WAKE_LOCK, "cueopen:hub-update").apply { acquire(3 * 60 * 60 * 1000L) }
+        }.getOrNull()
+        try {
+            logLine("== Atualização do hub (dados e conexões são mantidos) ==\n")
+            proc?.let { p -> runCatching { p.destroy(); if (!p.waitFor(5, TimeUnit.SECONDS)) p.destroyForcibly() } }; proc = null
+            val script = File(hostDir(), "pull_image.py")
+            CueApp.instance.assets.open("hub/pull_image.py").use { i -> script.outputStream().use { i.copyTo(it) } }
+            val prep = sandbox.exec("apk add --no-cache python3 tar gzip 2>&1 | tail -n 2", cwd = "/tmp", timeoutSec = 600, onOutput = { logLine(it) }, idleTimeoutSec = 300)
+            if (prep.exitCode != 0) error("não consegui preparar o python3/tar (código ${prep.exitCode})")
+            logLine("Baixando a versão nova do Activepieces. Se cair, toque em Atualizar de novo: continua de onde parou.\n")
+            val r = sandbox.exec("python3 -u $HOST_DIR/pull_image.py $IMAGE $TAG $HOST_DIR/rootfs.new $HOST_DIR/cache",
+                cwd = "/tmp", timeoutSec = 4 * 3600, onOutput = { logLine(it) }, idleTimeoutSec = 900)
+            val fresh = File(hostDir(), "rootfs.new")
+            if (r.exitCode != 0 || !File(fresh, "usr/src/app/docker-entrypoint.sh").exists()) error(
+                r.output.lineSequence().lastOrNull { it.startsWith("ERRO:") }?.removePrefix("ERRO:")?.trim() ?: "download da versão nova falhou (código ${r.exitCode})")
+            logLine("Copiando banco, conexões e segredos para a versão nova…\n")
+            val keep = sandbox.exec("cp -a $HOST_DIR/rootfs/opt/ap-data $HOST_DIR/rootfs.new/opt/ 2>&1; cp -a $HOST_DIR/rootfs/opt/ap-secrets $HOST_DIR/rootfs.new/opt/ 2>&1; " +
+                "rm -f $HOST_DIR/rootfs.new/opt/ap-data/.fluwy-direct-failed $HOST_DIR/rootfs.new/opt/ap-data/.fluwy-bun-copyfile; echo FLUWY_COPY_OK",
+                cwd = "/tmp", timeoutSec = 1800, onOutput = { logLine(it) }, idleTimeoutSec = 600)
+            if (!keep.output.contains("FLUWY_COPY_OK")) error("não consegui copiar os dados para a versão nova")
+            File(fresh, "etc/resolv.conf").apply { parentFile?.mkdirs(); delete() }.writeText("nameserver 8.8.8.8\nnameserver 1.1.1.1\n")
+            val old = File(hostDir(), "rootfs.old")
+            sandbox.exec("rm -rf $HOST_DIR/rootfs.old; mv $HOST_DIR/rootfs $HOST_DIR/rootfs.old && mv $HOST_DIR/rootfs.new $HOST_DIR/rootfs && rm -rf $HOST_DIR/rootfs.old; echo FLUWY_SWAP_OK",
+                cwd = "/tmp", timeoutSec = 1800, onOutput = { logLine(it) }, idleTimeoutSec = 600).also { if (!it.output.contains("FLUWY_SWAP_OK")) error("falha ao trocar de versão") }
+            if (old.exists()) logLine("(limpando a versão antiga em segundo plano)\n")
+            dev.cueopen.app.connectors.HubApi.invalidateCatalog()
+            logLine("✅ Hub atualizado. Iniciando…\n")
+            _state.value = State.STOPPED
+            true
+        } catch (t: Throwable) {
+            logLine("❌ Falha ao atualizar o hub: ${t.message}. A versão atual continua funcionando.\n")
+            dev.cueopen.app.diag.ErrorLog.log("hub", "Atualização do hub falhou: ${t.message}")
+            _state.value = State.STOPPED
+            false
+        } finally {
+            runCatching { if (wake?.isHeld == true) wake.release() }
+        }
+    } }.also { ok -> if (ok) { start(); CueApp.instance.store.state.value.connectors.firstOrNull { it.gatewayRef == REF }?.let { runCatching { Connectors.refreshTools(CueApp.instance.store, it) } } } }
+
     /** Sobe o hub (app + worker) e espera o /api/v1/health responder. A primeira partida demora alguns minutos. */
     suspend fun start(): Boolean = mutex.withLock {
         withContext(Dispatchers.IO) {

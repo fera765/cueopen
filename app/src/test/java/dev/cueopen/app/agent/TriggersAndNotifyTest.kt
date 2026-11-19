@@ -32,3 +32,17 @@ class TriggersAndNotifyTest {
         assertEquals(true to false, NotificationCenter.decide(Priority.NORMAL, false, null, now - 5_000, now)) // limite de frequência
     }
 }
+
+class TriggerLogicMoreTest {
+    @org.junit.Test fun siteChangeAndArrayShapes() {
+        val a = listOf(kotlinx.serialization.json.JsonPrimitive("página v1"))
+        val base = TriggerLogic.diff(a, emptyList(), "")
+        org.junit.Assert.assertTrue(TriggerLogic.diff(a, base.seen, "").fresh.isEmpty())
+        org.junit.Assert.assertEquals(1, TriggerLogic.diff(listOf(kotlinx.serialization.json.JsonPrimitive("página v2")), base.seen, "").fresh.size)
+        org.junit.Assert.assertEquals(3, TriggerLogic.items(TriggerLogic.payload("✅ ok (run 1).\n\n[{\"a\":1},{\"a\":2},{\"a\":3}]")).size)
+        org.junit.Assert.assertEquals(2, TriggerLogic.items(TriggerLogic.payload("{\"data\":{\"rows\":[1,2]}}")).size)
+        org.junit.Assert.assertTrue(TriggerLogic.items(TriggerLogic.payload("sem json")).isEmpty())
+        val seen = (1..600).map { "id:$it" }
+        org.junit.Assert.assertEquals(500, TriggerLogic.diff(emptyList(), seen, "").seen.size)
+    }
+}

@@ -23,7 +23,7 @@ class CardRulesTest {
     @Test fun agentLayerNeverTouchesCardVault() {
         val root = listOf(File("src/main/java/dev/cueopen/app"), File("app/src/main/java/dev/cueopen/app")).first { it.exists() }
         val offenders = listOf("agent", "llm", "connectors", "scheduler").flatMap { dir ->
-            File(root, dir).walkTopDown().filter { it.isFile && it.extension == "kt" && it.readText().contains("CardVault") }.map { it.name }.toList()
+            File(root, dir).walkTopDown().filter { it.isFile && it.extension == "kt" && it.readText().let { t -> t.contains("CardVault") || t.contains("PixVault") } }.map { it.name }.toList()
         }
         assertTrue("Camada de IA referencia o Cofre: $offenders", offenders.isEmpty())
     }

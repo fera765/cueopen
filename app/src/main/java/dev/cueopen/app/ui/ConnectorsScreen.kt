@@ -156,10 +156,14 @@ fun ConnectorsScreen(nav: NavController) {
                                         connect((hubConn ?: ActivepiecesHub.connector()).copy(enabled = true, accessToken = null, lastError = null))
                                     }
                                     pill("Parar", primary = false) { scope.launch { ActivepiecesHub.stop() } }
+                                    pill("Atualizar hub", primary = ActivepiecesHub.supportsDirectActions(app.store) == false) { scope.launch { ActivepiecesHub.update() } }
                                 }
                                 else -> CircularProgressIndicator(Modifier.size(22.dp), strokeWidth = 2.dp, color = c.accent)
                             }
                         }
+                        if (hubConn?.connectedAt != null && ActivepiecesHub.supportsDirectActions(app.store) == false) Text(
+                            "⚠ Esta versão do hub não executa ações de conector direto. Toque em Atualizar hub: baixa a versão nova (~1 GB, prefira Wi-Fi) e mantém suas conexões.",
+                            fontSize = 12.sp, color = c.err)
                         if (hubState == ActivepiecesHub.State.RUNNING && hubConn?.connectedAt == null) Text(
                             "1) Abra o painel e crie sua conta local. 2) Em Conexões, conecte seus apps (login OAuth). " +
                                 "3) Em MCP Server, ative o servidor e escolha as ferramentas. 4) Toque em Conectar ao agente.",

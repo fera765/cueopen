@@ -26,3 +26,18 @@ class ResultCardsParserTest {
         assertTrue(ResultCardsParser.parse("news", "", JsonPrimitive("[]")).isFailure)
     }
 }
+
+class CardImagesTest {
+    @org.junit.Test fun fillsMissingImagesFromPage() = kotlinx.coroutines.runBlocking {
+        val cards = ResultCardsParser.parse("product", "", kotlinx.serialization.json.Json.parseToJsonElement(
+            """[{"title":"A","url":"https://loja/a"},{"title":"B","image":"https://img/b.jpg","url":"https://loja/b"},{"title":"C"}]""")).getOrThrow()
+        val out = CardImages.fill(cards) { url -> if (url.endsWith("/a")) "https://img/a.jpg" else null }
+        org.junit.Assert.assertEquals(listOf("https://img/a.jpg", "https://img/b.jpg", ""), out.items.map { it.image })
+    }
+
+    @org.junit.Test fun readsOgImage() {
+        val html = """<html><head><meta property="og:image" content="/fotos/p1.jpg?x=1&amp;y=2"></head></html>"""
+        org.junit.Assert.assertEquals("https://loja.com/fotos/p1.jpg?x=1&y=2", dev.cueopen.app.web.WebTools.imageFromHtml(html, "https://loja.com/produto/1"))
+        org.junit.Assert.assertEquals("https://cdn/x.png", dev.cueopen.app.web.WebTools.imageFromHtml("""<meta content="https://cdn/x.png" name="twitter:image">""", "https://a.b"))
+    }
+}

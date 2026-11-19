@@ -89,6 +89,7 @@ fun ChatScreen(nav: NavController, sessionId: String, onMenu: () -> Unit = {}) {
     var menu by remember { mutableStateOf(false) }
     var rename by remember { mutableStateOf(false) }
     var usage by remember { mutableStateOf(false) }
+    var runsOpen by remember { mutableStateOf(false) }
     var connectorsDialog by remember { mutableStateOf(false) }
     var mediaOpen by remember { mutableStateOf<String?>(null) }
     val cmdScope = rememberCoroutineScope()
@@ -163,6 +164,7 @@ fun ChatScreen(nav: NavController, sessionId: String, onMenu: () -> Unit = {}) {
                         app.store.upsertScheduled(t); nav.navigate("scheduled/${t.id}")
                     }, leadingIcon = { Icon(Icons.Rounded.Schedule, null) })
                     DropdownMenuItem({ Text("Uso e contexto") }, { menu = false; usage = true }, leadingIcon = { Icon(Icons.Rounded.DataUsage, null) })
+                    DropdownMenuItem({ Text("Execuções") }, { menu = false; runsOpen = true }, leadingIcon = { Icon(Icons.Rounded.Timeline, null) })
                     DropdownMenuItem({ Text("Conectores") }, { menu = false; connectorsDialog = true }, leadingIcon = { Icon(Icons.Rounded.SettingsEthernet, null) })
                     DropdownMenuItem({ Text(if (session.voiceReplies) "Respostas em áudio: ligado" else "Respostas em áudio") }, {
                         menu = false; app.store.editSession(sessionId) { it.copy(voiceReplies = !it.voiceReplies) }
@@ -437,6 +439,7 @@ fun ChatScreen(nav: NavController, sessionId: String, onMenu: () -> Unit = {}) {
             }
         }, confirmButton = { TextButton({ usage = false }) { Text("Fechar") } })
     }
+    if (runsOpen) ExecutionsDialog(sessionId) { runsOpen = false }
     if (rename) {
         var t by remember { mutableStateOf(session.title) }
         AlertDialog(onDismissRequest = { rename = false }, title = { Text("Renomear tarefa") }, text = { CueField(t, { t = it }, "Título") },
@@ -1363,4 +1366,35 @@ private fun LoginNeededCard(s: ChatItem.Step, sessionId: String?, nav: androidx.
         if (!done) Button({ nav?.navigate("browserlogin/$loginId" + (sessionId?.let { "?session=$it" } ?: "")) },
             colors = ButtonDefaults.buttonColors(containerColor = c.ink, contentColor = c.bg)) { Text("Entrar e salvar") }
     }
+}
+
+
+/** Execuções do orquestrador nesta conversa: tarefa, estado, ferramentas usadas e duração. */
+@Composable
+private fun ExecutionsDialog(sessionId: String, onDismiss: () -> Unit) {
+    val c = Cue.c
+    val runs = remember { dev.cueopen.app.agent.ExecutionLedger.history(sessionId).reversed() }
+    val fmt = remember { java.text.SimpleDateFormat("dd/MM HH:mm", java.util.Locale.getDefault()) }
+    AlertDialog(onDismissRequest = onDismiss, title = { Text("Execuções") }, text = {
+        androidx.compose.foundation.lazy.LazyColumn(Modifier.heightIn(max = 480.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            if (runs.isEmpty()) item { Text("Nenhuma execução registrada ainda.", color = c.ink3, fontSize = 13.sp) }
+            items(runs.size) { i ->
+                val r = runs[i]
+                val color = when (r.state) { "DONE" -> c.ok; "ERROR" -> c.err; "RUNNING" -> c.accent; else -> c.ink3 }
+                Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(c.surface).padding(10.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(r.state, color = color, fontSize = 11.sp, fontWeight = FontWeight.Bold); Spacer(Modifier.width(8.dp))
+                        Text(fmt.format(java.util.Date(r.startedAt)) + (r.endedAt?.let { " · ${(it - r.startedAt) / 1000}s" } ?: ""), fontSize = 11.sp, color = c.ink3)
+                        Spacer(Modifier.weight(1f)); Text(r.runId.takeLast(6), fontSize = 10.sp, color = c.ink3)
+                    }
+                    Text(r.goal.take(160), fontSize = 13.sp, maxLines = 3)
+                    val reused = r.ops.count { it.reused }; val failed = r.ops.count { !it.ok }
+                    Text("${r.ops.size} operação(ões)" + (if (failed > 0) " · $failed com erro" else "") + (if (reused > 0) " · $reused reaproveitada(s)" else "") +
+                        " · ${r.allowedTools.size} ferramentas autorizadas", fontSize = 11.sp, color = c.ink2)
+                    r.ops.takeLast(6).forEach { op -> Text((if (op.ok) "✓ " else "✗ ") + op.tool + (if (op.reused) " (reaproveitada)" else " · ${op.ms} ms"), fontSize = 11.sp, color = if (op.ok) c.ink3 else c.err) }
+                    if (r.result.isNotBlank()) Text("Resultado: " + r.result.take(160), fontSize = 11.sp, color = c.ink2)
+                }
+            }
+        }
+    }, confirmButton = { TextButton(onDismiss) { Text("Fechar") } })
 }

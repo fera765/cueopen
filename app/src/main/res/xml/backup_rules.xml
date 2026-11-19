@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Android até 11: backup na conta Google só com criptografia de ponta a ponta (bloqueio de tela ativo).
+     Entra só o estado do app; cofres, chaves e logins ficam de fora (as chaves do Keystore não saem do aparelho). -->
+<full-backup-content>
+    <include domain="file" path="cueopen_state.json" requireFlags="clientSideEncryption" />
+    <include domain="sharedpref" path="fluwy_triggers.xml" requireFlags="clientSideEncryption" />
+    <include domain="sharedpref" path="fluwy_notifications.xml" requireFlags="clientSideEncryption" />
+    <include domain="sharedpref" path="usage_ledger.xml" requireFlags="clientSideEncryption" />
+    <include domain="sharedpref" path="browser_site_permissions.xml" requireFlags="clientSideEncryption" />
+</full-backup-content>
