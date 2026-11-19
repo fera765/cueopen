@@ -8,12 +8,11 @@ import org.junit.Test
 
 class VoiceTest {
     @Test fun pausaDepoisDaFalaEncerraODitado() {
-        val C = DictationVad.Check
-        assertEquals(C.CONTINUE, DictationVad.check(3_000, null))            // ainda não falou
-        assertEquals(C.NO_SPEECH, DictationVad.check(8_000, null))           // nunca falou
-        assertEquals(C.CONTINUE, DictationVad.check(5_000, 1_000))           // pausa curta no meio da frase
-        assertEquals(C.FINISH, DictationVad.check(5_000, 1_800))             // parou de falar → para de gravar
-        assertEquals(C.FINISH, DictationVad.check(60_000, 100))              // limite da gravação
+        assertEquals(DictationVad.Check.CONTINUE, DictationVad.check(3_000, null))            // ainda não falou
+        assertEquals(DictationVad.Check.NO_SPEECH, DictationVad.check(8_000, null))           // nunca falou
+        assertEquals(DictationVad.Check.CONTINUE, DictationVad.check(5_000, 1_000))           // pausa curta no meio da frase
+        assertEquals(DictationVad.Check.FINISH, DictationVad.check(5_000, 1_800))             // parou de falar → para de gravar
+        assertEquals(DictationVad.Check.FINISH, DictationVad.check(60_000, 100))              // limite da gravação
     }
 
     @Test fun speakableStripsMarkdownAndLinks() {
