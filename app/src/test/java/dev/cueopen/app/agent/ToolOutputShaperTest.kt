@@ -55,8 +55,4 @@ class HubRecipeTest {
         val out = "ls: unrecognized option: time-style=+%H:%M:%S\nBusyBox v1.37.0 (2024-11-19 21:09:16 UTC) multi-call binary."
         assertEquals(ToolOutcomeAdvisor.Reason.BUSYBOX_OPTION, ToolOutcomeAdvisor.classify("shell", out))
     }
-
-    @Test fun hubPriorityPutsRunActionFirst() {
-        assertEquals("ap_run_action", dev.cueopen.app.connectors.Connectors.HUB_PRIORITY.first())
-    }
 }

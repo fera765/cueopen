@@ -1,7 +1,6 @@
 package dev.cueopen.app.connectors
 
 import dev.cueopen.app.CueApp
-import dev.cueopen.app.sandbox.Sandbox
 import dev.cueopen.app.sandbox.SandboxService
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -11,32 +10,40 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonObject
+import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
 import java.io.File
 import java.security.SecureRandom
 import java.util.concurrent.TimeUnit
 
 /**
- * Hub de conectores 100% local: Activepieces Community Edition (github.com/activepieces/activepieces, MIT).
+ * Mini-hub de conectores: roda os 600+ conectores ("pieces") do Activepieces (MIT) sem o servidor completo.
  *
- * - 700+ apps (Gmail, Google Sheets, Instagram, Facebook Pages, GitHub, Supabase, Slack, Notion, SEO…).
- * - Login OAuth com um clique pelos apps OAuth gerenciados do Activepieces (ligados por padrão também no self-hosted);
- *   apps sem app gerenciado pedem a chave/credencial do próprio serviço.
- * - Um único servidor MCP por projeto em http://127.0.0.1:8791/mcp, com as ferramentas escolhidas no painel.
+ * Um único processo Node (assets/minihub/minihub.js) dentro do Alpine que o app já usa: sem segunda distribuição
+ * Linux, sem banco, sem Redis, sem painel. Instalar = `apk add nodejs npm` (~50 MB). Cada conector é um pacote npm
+ * baixado só quando é usado; a versão é a verificada pelo CI (catálogo do app) e atualizar troca só a piece, com
+ * teste de carga e volta automática para a versão anterior se a nova não funcionar.
  *
- * A imagem oficial (Debian) é baixada do Docker Hub pelo Alpine (pull_image.py, sem Docker) e roda como um segundo
- * rootfs no mesmo proot do app, com banco embutido (PGLite) e fila em memória. Nada fica em servidores de terceiros.
+ * As contas conectadas ficam no app (criptografadas, HubApi); o mini-hub recebe a conexão a cada pedido e devolve
+ * tokens renovados. Escuta só em 127.0.0.1 e exige um token aleatório do app.
  */
 object ActivepiecesHub {
     const val PORT = 8791
     const val BASE = "http://127.0.0.1:$PORT"
-    const val MCP_URL = "$BASE/mcp"
+    const val MCP_URL = "$BASE/"
     const val CONNECTOR_ID = "activepieces_hub"
     const val REF = "hub:activepieces"
-    private const val IMAGE = "activepieces/activepieces"
-    private const val TAG = "latest"
-    private const val HOST_DIR = "/opt/fluwy-hub"
+    private const val DIR = "/opt/fluwy-minihub"
+    private const val OLD_HUB_DIR = "opt/fluwy-hub"
+    /** Sem uso por este tempo, o processo Node é parado (volta em ~1 s no próximo uso). */
+    private const val IDLE_STOP_MS = 30 * 60_000L
 
     enum class State { NOT_INSTALLED, INSTALLING, STOPPED, STARTING, RUNNING, ERROR }
 
@@ -44,156 +51,64 @@ object ActivepiecesHub {
     val state: StateFlow<State> = _state
     private val _log = MutableStateFlow("")
     val log: StateFlow<String> = _log
-    /** Registro em tempo real: vai para a tela e para um arquivo (sobrevive a reinícios e entra no diagnóstico). */
+
+    private val json = Json { ignoreUnknownKeys = true; isLenient = true }
+    private val jsonType = "application/json".toMediaType()
+    private val quick = OkHttpClient.Builder().connectTimeout(1, TimeUnit.SECONDS).readTimeout(3, TimeUnit.SECONDS).build()
+    private val mutex = Mutex()
+    private val installMutex = Mutex()
+    @Volatile private var proc: Process? = null
+    @Volatile private var lastUse = 0L
+    @Volatile private var watchdogStarted = false
+
+    private val sandbox get() = CueApp.instance.sandbox
+    private fun hostDir() = File(sandbox.alpineDir, DIR.trimStart('/')).apply { mkdirs() }
+    private fun logFile() = File(hostDir(), "minihub.log")
+    fun installLogFile(): File = File(hostDir(), "install.log")
+
     private fun logLine(s: String) {
         _log.value = (_log.value + s).takeLast(30_000)
-        runCatching { File(hostDir(), "install.log").appendText(s) }
+        runCatching { installLogFile().appendText(s) }
     }
-    fun installLogFile(): File = File(hostDir(), "install.log")
-    fun fullLog(): String = runCatching { installLogFile().readText().takeLast(200_000) }.getOrDefault(_log.value) +
-        "\n\n===== hub.log (execução) =====\n" + lastLog() +
-        "\n\n===== redis.log =====\n" + runCatching { File(hostDir(), "redis.log").readText().takeLast(5000) }.getOrDefault("")
 
-    /** Wi-Fi/rede sem limite de dados: só então o hub (~1 GB) instala sozinho. */
+    fun fullLog(): String = runCatching { installLogFile().readText().takeLast(100_000) }.getOrDefault(_log.value) +
+        "\n\n===== minihub.log (execução) =====\n" + lastLog()
+
+    fun lastLog(): String = runCatching { logFile().readText().takeLast(20_000) }.getOrDefault("")
+
     fun onUnmeteredNetwork(): Boolean = runCatching {
         val cm = CueApp.instance.getSystemService(android.net.ConnectivityManager::class.java)
         val caps = cm.getNetworkCapabilities(cm.activeNetwork) ?: return false
         caps.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_NOT_METERED)
     }.getOrDefault(false)
 
-    private val mutex = Mutex()
-    private val installMutex = Mutex()
-    @Volatile private var proc: Process? = null
-    @Volatile private var redisProc: Process? = null
-    private const val REDIS_PORT = 6380
+    fun sandboxReady(): Boolean = runCatching { sandbox.isInstalled() }.getOrDefault(false)
 
-    private fun portOpen(port: Int): Boolean = runCatching {
-        java.net.Socket().use { it.connect(java.net.InetSocketAddress("127.0.0.1", port), 500); true }
+    private fun nodeInstalled(): Boolean = runCatching {
+        File(sandbox.alpineDir, "usr/bin/node").exists() && (File(sandbox.alpineDir, "usr/bin/npm").exists() || File(sandbox.alpineDir, "usr/lib/node_modules/npm/bin/npm-cli.js").exists())
     }.getOrDefault(false)
 
-    /**
-     * Redis próprio no Alpine (o redis-memory-server embutido do Activepieces morre com código 1 no Android:
-     * o Redis 7 recusa iniciar em kernels arm64 com o aviso ARM64-COW-BUG). Sem persistência, só no loopback.
-     */
-    private suspend fun ensureRedis(): Boolean {
-        if (portOpen(REDIS_PORT)) return true
-        val has = if (File(sandbox.alpineDir, "usr/bin/redis-server").exists()) Sandbox.ExecResult(0, "", false) else sandbox.exec("command -v redis-server >/dev/null || apk add --no-cache redis 2>&1 | tail -n 2; command -v redis-server",
-            cwd = "/tmp", timeoutSec = 600, onOutput = { logLine(it) }, idleTimeoutSec = 300)
-        if (has.exitCode != 0) { logLine("❌ Não consegui instalar o Redis no Linux do app.\n"); return false }
-        redisProc?.destroy()
-        redisProc = sandbox.spawn(
-            "exec redis-server --bind 127.0.0.1 --port $REDIS_PORT --protected-mode yes --save '' --appendonly no " +
-                "--daemonize no --io-threads 1 --ignore-warnings ARM64-COW-BUG",
-            File(hostDir(), "redis.log"),
-        )
-        repeat(40) {
-            if (portOpen(REDIS_PORT)) { logLine("Redis no ar (porta $REDIS_PORT).\n"); return true }
-            if (redisProc?.isAlive != true) return@repeat
-            delay(500)
-        }
-        val tail = runCatching { File(hostDir(), "redis.log").readText().takeLast(1500) }.getOrDefault("")
-        logLine("❌ Redis não iniciou.\n$tail\n")
-        dev.cueopen.app.diag.ErrorLog.log("hub", "Redis não iniciou.\n$tail")
-        return false
+    fun installed(): Boolean = sandboxReady() && nodeInstalled()
+
+    /** Token do app ↔ mini-hub (arquivo 600 dentro do Alpine; o processo Node lê de lá). */
+    private fun token(): String {
+        val f = File(hostDir(), "token")
+        f.takeIf { it.exists() }?.readText()?.trim()?.takeIf { it.length >= 32 }?.let { return it }
+        val v = ByteArray(32).also { SecureRandom().nextBytes(it) }.joinToString("") { "%02x".format(it) }
+        f.writeText(v); f.setReadable(false, false); f.setReadable(true, true)
+        return v
     }
-    private val http = OkHttpClient.Builder().connectTimeout(2, TimeUnit.SECONDS).readTimeout(5, TimeUnit.SECONDS).build()
-    private val sandbox get() = CueApp.instance.sandbox
-    private fun hostDir() = File(sandbox.alpineDir, HOST_DIR.trimStart('/')).apply { mkdirs() }
-    private fun rootfs() = File(hostDir(), "rootfs")
 
-    private object LocalSandbox { fun ready() = runCatching { CueApp.instance.sandbox.isInstalled() }.getOrDefault(false) }
+    private fun copyScript() {
+        val target = File(hostDir(), "minihub.js")
+        val bytes = CueApp.instance.assets.open("minihub/minihub.js").use { it.readBytes() }
+        if (!target.exists() || !target.readBytes().contentEquals(bytes)) {
+            target.writeBytes(bytes)
+            // Script novo (APK atualizado): o processo antigo precisa reiniciar para usar o código novo.
+            proc?.let { p -> runCatching { p.destroy() } }; proc = null
+        }
+    }
 
-    fun sandboxReady(): Boolean = LocalSandbox.ready()
-
-    /**
-     * O motor do Activepieces chama `spawn("esbuild")`. Um esbuild instalado via npm -g pode não executar dentro do
-     * proot (link de binário nativo) ou não estar no PATH do processo filho. Aqui: testa candidatos (binário nativo
-     * do pacote @esbuild/linux-*, depois o do pacote esbuild), copia o primeiro que roda para /usr/bin e
-     * /usr/local/bin; se o binário nativo (Go) não executa neste aparelho, usa o esbuild-wasm (mesma CLI, roda no
-     * próprio Node) com um atalho em /usr/bin que funciona mesmo sem PATH. Por fim simula o spawn do motor e loga.
-     */
-    private val ESBUILD_FIX = """
-        |ok() { env -i /usr/bin/esbuild --version >/dev/null 2>&1; }
-        |[ -f /opt/.fluwy-esbuild-ok ] && [ -x /usr/bin/esbuild ] && exit 0
-        |if ok; then echo "[fluwy] esbuild ok: $(env -i /usr/bin/esbuild --version)"; else
-        |  for c in $(find /usr/local/lib/node_modules /usr/src/app/node_modules -maxdepth 6 -type f -path '*@esbuild/linux-*/bin/esbuild' 2>/dev/null); do
-        |    if "${'$'}c" --version >/dev/null 2>&1; then cp -fL "${'$'}c" /usr/bin/esbuild && chmod 755 /usr/bin/esbuild; ok && break
-        |    else echo "[fluwy] binário nativo não roda (${'$'}c): $("${'$'}c" --version 2>&1 | head -c 160)"; fi
-        |  done
-        |  if ! ok; then
-        |    # O binário nativo (Go) não executa neste aparelho: usa o esbuild-wasm (mesma CLI, roda no Node).
-        |    # Pasta própria (--prefix): o npm -g deste ambiente aponta para uma pasta que já tem um "bin/esbuild"
-        |    # e falha com EEXIST; instalar localmente em /opt/esbuild-wasm evita esse conflito.
-        |    W=/opt/esbuild-wasm/node_modules/esbuild-wasm/bin/esbuild
-        |    if [ ! -f "${'$'}W" ]; then echo "[fluwy] instalando esbuild-wasm…"; mkdir -p /opt/esbuild-wasm
-        |      env -u PREFIX -u npm_config_prefix npm install --prefix /opt/esbuild-wasm --no-save --no-fund --no-audit --no-package-lock esbuild-wasm@0.25.0 >/tmp/esbw.log 2>&1 || tail -n 5 /tmp/esbw.log; fi
-        |    NODE="$(command -v node)"
-        |    printf '#!/bin/sh\nexec %s %s "${'$'}@"\n' "${'$'}NODE" "${'$'}W" > /usr/bin/esbuild && chmod 755 /usr/bin/esbuild
-        |  fi
-        |  if ok; then cp -f /usr/bin/esbuild /usr/local/bin/esbuild 2>/dev/null; echo "[fluwy] esbuild pronto: $(env -i /usr/bin/esbuild --version)"
-        |  else echo "[fluwy] ERRO: esbuild indisponível: $(env -i /usr/bin/esbuild --version 2>&1 | head -c 200)"; fi
-        |fi
-        |node -e "try{console.log('[fluwy] spawn esbuild (como o motor):',require('child_process').execFileSync('esbuild',['--version'],{env:{}}).toString().trim())}catch(e){console.log('[fluwy] spawn esbuild falhou:',e.code||e.message);process.exit(1)}" 2>&1 && touch /opt/.fluwy-esbuild-ok
-        |""".trimMargin()
-
-
-    /**
-     * O motor instala as pieces com `bun install`, que usa hardlinks. No Android não há hardlink: o proot os imita com
-     * symlinks ".l2s.*" e o Node, ao resolver o caminho real, não acha os arquivos vizinhos (ex.: zod "./ca.cjs" →
-     * INTERNAL_ERROR em toda automação). Aqui o `bun` passa a instalar por cópia (--backend=copyfile) e, uma vez,
-     * o cache já corrompido é limpo para as pieces serem reinstaladas certas.
-     */
-    private val BUN_FIX = """
-        |B="$(command -v bun 2>/dev/null)"
-        |if [ -n "${'$'}B" ] && ! head -c 400 "${'$'}B" 2>/dev/null | grep -q fluwy-bun; then
-        |  mv -f "${'$'}B" "${'$'}B.fluwy-real" && cat > "${'$'}B" <<'EOS'
-        |#!/bin/sh
-        |# fluwy-bun: sem hardlink no Android; instala por cópia
-        |R="${'$'}0.fluwy-real"
-        |case "${'$'}1" in install|i|add|update) c="${'$'}1"; shift; exec "${'$'}R" "${'$'}c" --backend=copyfile "${'$'}@";; esac
-        |exec "${'$'}R" "${'$'}@"
-        |EOS
-        |  chmod 755 "${'$'}B"; echo "[fluwy] bun: instalação por cópia ativada"
-        |fi
-        |if [ ! -f /opt/ap-data/.fluwy-bun-copyfile ]; then
-        |  rm -rf /opt/ap-home/.bun/install/cache /usr/src/app/cache/v*/common 2>/dev/null
-        |  touch /opt/ap-data/.fluwy-bun-copyfile; echo "[fluwy] cache de pieces limpo (reinstala por cópia)"
-        |fi
-        |""".trimMargin()
-
-    /**
-     * Início rápido: app e worker direto no Node — sem PM2 e sem `--enable-source-maps` (o parse dos source maps
-     * de um bundle grande é o que mais pesava no boot). O token do worker é gerado uma vez e reaproveitado.
-     * Se o app cair nos primeiros segundos, marca o modo direto como incompatível e volta ao entrypoint oficial.
-     */
-    private val START_SCRIPT = """
-        |APP=packages/server/api/dist/src/bootstrap.js
-        |WORKER=packages/server/worker/dist/src/bootstrap.js
-        |export AP_CONTAINER_TYPE=WORKER_AN${'$'}APP
-        |if [ -f "${'$'}APP" ] && [ -f "${'$'}WORKER" ] && [ ! -f /opt/ap-data/.fluwy-direct-failed ]; then
-        |  if [ ! -s /opt/ap-secrets/worker-token ]; then
-        |    node -e "const j=require('jsonwebtoken');const c=require('crypto');process.stdout.write(j.sign({id:c.randomUUID(),type:'WORKER'},process.env.AP_JWT_SECRET,{expiresIn:'100y',keyid:'1',algorithm:'HS256',issuer:'activepieces'}))" > /opt/ap-secrets/worker-token.tmp && mv -f /opt/ap-secrets/worker-token.tmp /opt/ap-secrets/worker-token
-        |  fi
-        |  export AP_WORKER_TOKEN="$(cat /opt/ap-secrets/worker-token 2>/dev/null)"
-        |  echo "[fluwy] início direto (sem PM2 e sem source maps)"
-        |  AP_CONTAINER_TYPE=APP node "${'$'}APP" & A=${'$'}!
-        |  node "${'$'}WORKER" & W=${'$'}!
-        |  trap 'kill ${'$'}A ${'$'}W 2>/dev/null' TERM INT HUP
-        |  i=0; while [ ${'$'}i -lt 25 ]; do kill -0 ${'$'}A 2>/dev/null || break; sleep 1; i=${'$'}((i+1)); done
-        |  if ! kill -0 ${'$'}A 2>/dev/null; then
-        |    echo "[fluwy] modo direto falhou; voltando ao entrypoint oficial"; kill ${'$'}W 2>/dev/null
-        |    touch /opt/ap-data/.fluwy-direct-failed; exec sh ./docker-entrypoint.sh
-        |  fi
-        |  while kill -0 ${'$'}A 2>/dev/null && kill -0 ${'$'}W 2>/dev/null; do sleep 2; done
-        |  kill ${'$'}A ${'$'}W 2>/dev/null; exit 1
-        |else
-        |  exec sh ./docker-entrypoint.sh
-        |fi
-        |""".trimMargin()
-
-    fun installed(): Boolean = runCatching { File(rootfs(), "usr/src/app/docker-entrypoint.sh").exists() }.getOrDefault(false)
-
-    /** Atualiza o estado olhando o disco e a porta. */
     suspend fun refresh(): State = withContext(Dispatchers.IO) {
         if (_state.value == State.INSTALLING || _state.value == State.STARTING) return@withContext _state.value
         _state.value = when {
@@ -204,270 +119,227 @@ object ActivepiecesHub {
         _state.value
     }
 
-    fun healthy(): Boolean = runCatching {
-        http.newCall(Request.Builder().url("$BASE/api/v1/health").build()).execute().use { it.isSuccessful }
-    }.getOrDefault(false)
+    private fun health(): JsonObject? = runCatching {
+        quick.newCall(Request.Builder().url("$BASE/health").build()).execute().use { r ->
+            if (!r.isSuccessful) null else json.parseToJsonElement(r.body?.string().orEmpty()).jsonObject
+        }
+    }.getOrNull()
 
-    private fun secret(name: String, bytes: Int): String {
-        val dir = File(rootfs(), "opt/ap-secrets").apply { mkdirs() }
-        val f = File(dir, name)
-        f.takeIf { it.exists() }?.readText()?.trim()?.takeIf { it.isNotEmpty() }?.let { return it }
-        val b = ByteArray(bytes).also { SecureRandom().nextBytes(it) }
-        val v = b.joinToString("") { "%02x".format(it) }
-        f.writeText(v); f.setReadable(false, false); f.setReadable(true, true)
-        return v
+    fun healthy(): Boolean = (health()?.get("ok") as? JsonPrimitive)?.contentOrNull == "true"
+
+    private fun assetSha(): String = runCatching {
+        val bytes = CueApp.instance.assets.open("minihub/minihub.js").use { it.readBytes() }
+        java.security.MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }.take(16)
+    }.getOrDefault("")
+
+    /** No ar e com o script deste APK (um processo de versão anterior que sobrou é encerrado). */
+    private suspend fun healthyCurrent(): Boolean {
+        val h = health() ?: return false
+        if ((h["ok"] as? JsonPrimitive)?.contentOrNull != "true") return false
+        val running = (h["script"] as? JsonPrimitive)?.contentOrNull
+        if (running == null || running == assetSha()) return true
+        logLine("Reiniciando o mini-hub (versão nova do app).\n")
+        proc?.let { p -> runCatching { p.destroy() } }; proc = null
+        runCatching { sandbox.exec("pkill -f '$DIR/minihub.js' 2>/dev/null; sleep 1", cwd = "/tmp", timeoutSec = 20) }
+        return false
     }
 
-    /**
-     * Baixa a imagem oficial e monta o rootfs do hub (~1 GB). Roda em primeiro plano (serviço + wake lock) para o
-     * Android não congelar o processo, com watchdog de inatividade e retomada: camadas ficam em cache verificado.
-     */
+    /** Instala o Node no Alpine (~50 MB) e apaga o hub antigo de ~1 GB, se existir. */
     suspend fun install(): Boolean = installMutex.withLock { withContext(Dispatchers.IO) {
-        if (installed()) { if (_state.value == State.NOT_INSTALLED) _state.value = State.STOPPED; return@withContext true }
-        if (!LocalSandbox.ready()) { logLine("Instale o Linux (Alpine) primeiro.\n"); return@withContext false }
+        if (!sandboxReady()) { logLine("Instale o Linux (Alpine) do app primeiro.\n"); _state.value = State.NOT_INSTALLED; return@withContext false }
+        if (nodeInstalled()) { removeOldHub(); copyScript(); if (_state.value == State.NOT_INSTALLED) _state.value = State.STOPPED; return@withContext true }
         _state.value = State.INSTALLING
         _log.value = ""
         runCatching { installLogFile().writeText("") }
-        val ctx = CueApp.instance
-        runCatching { SandboxService.start(ctx, "Instalando o hub de conectores…") }
-        val wake = runCatching {
-            (ctx.getSystemService(android.content.Context.POWER_SERVICE) as android.os.PowerManager)
-                .newWakeLock(android.os.PowerManager.PARTIAL_WAKE_LOCK, "cueopen:hub-install").apply { acquire(3 * 60 * 60 * 1000L) }
-        }.getOrNull()
+        runCatching { SandboxService.start(CueApp.instance, "Instalando os conectores…") }
         try {
             val stamp = java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss", java.util.Locale.US).format(java.util.Date())
-            logLine("== Instalação do hub · $stamp · ${android.os.Build.MODEL} · Android ${android.os.Build.VERSION.RELEASE} · ${android.os.Build.SUPPORTED_ABIS.firstOrNull()} ==\n")
-            logLine("Rede: ${if (onUnmeteredNetwork()) "Wi-Fi/sem limite" else "dados móveis"}\n")
-            val script = File(hostDir(), "pull_image.py")
-            CueApp.instance.assets.open("hub/pull_image.py").use { i -> script.outputStream().use { i.copyTo(it) } }
-            logLine("Preparando ferramentas (python3, GNU tar)…\n")
-            val prep = sandbox.exec("apk add --no-cache python3 tar gzip redis 2>&1 | tail -n 3", cwd = "/tmp", timeoutSec = 600, onOutput = { logLine(it) }, idleTimeoutSec = 300)
-            if (prep.exitCode != 0) error("não consegui instalar python3/tar no Linux (código ${prep.exitCode})")
-            logLine("Baixando o Activepieces (imagem oficial, ~1 GB). Se cair, toque em Instalar de novo: o download continua de onde parou.\n")
-            val r = sandbox.exec(
-                "python3 -u $HOST_DIR/pull_image.py $IMAGE $TAG $HOST_DIR/rootfs $HOST_DIR/cache",
-                cwd = "/tmp", timeoutSec = 4 * 3600, onOutput = { logLine(it) }, idleTimeoutSec = 900,
-            )
-            if (r.exitCode != 0 || !installed()) error(when {
-                r.timedOut -> "tempo total esgotado"
-                r.output.contains("[watchdog]") -> "instalação travou (15 min sem progresso)"
-                else -> r.output.lineSequence().lastOrNull { it.startsWith("ERRO:") }?.removePrefix("ERRO:")?.trim() ?: "código ${r.exitCode}"
-            })
-            File(rootfs(), "etc/resolv.conf").apply { parentFile?.mkdirs(); delete() }.writeText("nameserver 8.8.8.8\nnameserver 1.1.1.1\n")
-            secret("jwt", 32); secret("enc", 16)
-            logLine("✅ Hub instalado.\n")
+            logLine("== Mini-hub de conectores · $stamp · ${android.os.Build.MODEL} · Android ${android.os.Build.VERSION.RELEASE} ==\n")
+            logLine("Instalando o Node.js no Linux do app (~50 MB, uma vez só)…\n")
+            val r = sandbox.exec("apk add --no-cache nodejs npm 2>&1 | tail -n 4; node --version && npm --version",
+                cwd = "/tmp", timeoutSec = 1200, onOutput = { logLine(it) }, idleTimeoutSec = 600)
+            if (r.exitCode != 0 || !nodeInstalled()) error(if (r.timedOut) "tempo esgotado" else "apk add nodejs npm falhou (código ${r.exitCode})")
+            removeOldHub()
+            copyScript()
+            logLine("✅ Pronto. Cada conector é baixado só na primeira vez que for usado.\n")
             _state.value = State.STOPPED
             true
         } catch (t: Throwable) {
-            logLine("❌ Falha ao instalar o hub: ${t.message}\n")
-            dev.cueopen.app.diag.ErrorLog.log("hub", "Instalação do hub falhou: ${t.message}\n--- últimas linhas ---\n${_log.value.takeLast(3000)}")
+            logLine("❌ Falha ao instalar: ${t.message}\n")
+            dev.cueopen.app.diag.ErrorLog.log("hub", "Instalação do mini-hub falhou: ${t.message}\n${_log.value.takeLast(2000)}")
             _state.value = State.ERROR
             false
-        } finally {
-            runCatching { if (wake?.isHeld == true) wake.release() }
         }
     } }
 
-    internal fun freshImageReady(dir: File): Boolean = HubImage.ready(dir)
+    /** O hub antigo (imagem completa do Activepieces, ~1 GB) não é mais usado: libera o espaço. */
+    private fun removeOldHub() {
+        val old = File(sandbox.alpineDir, OLD_HUB_DIR)
+        if (!old.exists()) return
+        logLine("Removendo o hub antigo (imagem completa do Activepieces) para liberar espaço…\n")
+        runCatching { sandbox.exec("rm -rf /$OLD_HUB_DIR", cwd = "/tmp", timeoutSec = 1800, idleTimeoutSec = 900) }
+        if (old.exists()) runCatching { old.deleteRecursively() }
+        runCatching { dev.cueopen.app.uiconnector.CredentialVault(CueApp.instance).clear("activepieces_hub_login") }
+    }
 
-    /**
-     * Instalar/atualizar rodam no escopo do app, não no da tela: sair da tela (ou girar o celular) não cancela
-     * mais o download ("The coroutine scope left the composition"). NonCancellable protege a troca de versão.
-     */
     fun installInBackground(): kotlinx.coroutines.Job = CueApp.instance.applicationScope.launch(Dispatchers.IO + kotlinx.coroutines.NonCancellable) {
-        if (installed() || install()) start()
+        if (install()) start()
     }
 
     fun updateInBackground(): kotlinx.coroutines.Job = CueApp.instance.applicationScope.launch(Dispatchers.IO + kotlinx.coroutines.NonCancellable) {
         update()
     }
 
-    /** O hub instalado executa ações de conector direto (ap_run_action)? Versões antigas do Activepieces não. */
-    fun supportsDirectActions(store: dev.cueopen.app.data.Store): Boolean? {
-        val hub = store.state.value.connectors.firstOrNull { it.gatewayRef == REF } ?: return null
-        val names = Connectors.toolNames(hub).map { it.first }
-        return if (names.isEmpty()) null else "ap_run_action" in names
-    }
+    /** O mini-hub sempre executa ações direto (não depende da versão do Activepieces). */
+    @Suppress("UNUSED_PARAMETER")
+    fun supportsDirectActions(store: dev.cueopen.app.data.Store): Boolean? = if (installed()) true else null
 
     /**
-     * Atualiza o hub para a versão mais nova do Activepieces mantendo os dados: baixa a imagem nova num diretório à
-     * parte, copia o banco, as conexões e os segredos (/opt/ap-data, /opt/ap-secrets) e só então troca. Se algo
-     * falhar no meio, a versão atual continua intacta.
+     * Atualiza cada conector instalado para a versão mais nova do Activepieces. O mini-hub testa a versão nova
+     * (carrega, mesmas ações) e, se algo falhar, volta sozinho para a anterior — o app nunca fica sem o conector.
      */
     suspend fun update(): Boolean = installMutex.withLock { withContext(Dispatchers.IO) {
         if (!installed()) return@withContext false
+        val prev = _state.value
         _state.value = State.INSTALLING
-        val ctx = CueApp.instance
-        runCatching { SandboxService.start(ctx, "Atualizando o hub de conectores…") }
-        val wake = runCatching {
-            (ctx.getSystemService(android.content.Context.POWER_SERVICE) as android.os.PowerManager)
-                .newWakeLock(android.os.PowerManager.PARTIAL_WAKE_LOCK, "cueopen:hub-update").apply { acquire(3 * 60 * 60 * 1000L) }
-        }.getOrNull()
+        runCatching { SandboxService.start(CueApp.instance, "Atualizando os conectores…") }
         try {
-            logLine("== Atualização do hub (dados e conexões são mantidos) ==\n")
-            proc?.let { p -> runCatching { p.destroy(); if (!p.waitFor(5, TimeUnit.SECONDS)) p.destroyForcibly() } }; proc = null
-            val script = File(hostDir(), "pull_image.py")
-            CueApp.instance.assets.open("hub/pull_image.py").use { i -> script.outputStream().use { i.copyTo(it) } }
-            val prep = sandbox.exec("apk add --no-cache python3 tar gzip 2>&1 | tail -n 2", cwd = "/tmp", timeoutSec = 600, onOutput = { logLine(it) }, idleTimeoutSec = 300)
-            if (prep.exitCode != 0) error("não consegui preparar o python3/tar (código ${prep.exitCode})")
-            val fresh = File(hostDir(), "rootfs.new")
-            if (freshImageReady(fresh)) {
-                // Uma tentativa anterior já baixou e montou a imagem (ex.: foi interrompida na cópia): reaproveita.
-                logLine("Versão nova já baixada numa tentativa anterior — reaproveitando (sem baixar de novo).\n")
-            } else {
-                logLine("Baixando a versão nova do Activepieces. Se cair, toque em Atualizar de novo: continua de onde parou.\n")
-                val r = sandbox.exec("python3 -u $HOST_DIR/pull_image.py $IMAGE $TAG $HOST_DIR/rootfs.new $HOST_DIR/cache",
-                    cwd = "/tmp", timeoutSec = 4 * 3600, onOutput = { logLine(it) }, idleTimeoutSec = 900)
-                if (r.exitCode != 0 || !freshImageReady(fresh)) error(
-                    r.output.lineSequence().lastOrNull { it.startsWith("ERRO:") }?.removePrefix("ERRO:")?.trim() ?: "download da versão nova falhou (código ${r.exitCode})")
-            }
-            logLine("Copiando banco, conexões e segredos para a versão nova…\n")
-            val keep = sandbox.exec("cp -a $HOST_DIR/rootfs/opt/ap-data $HOST_DIR/rootfs.new/opt/ 2>&1; cp -a $HOST_DIR/rootfs/opt/ap-secrets $HOST_DIR/rootfs.new/opt/ 2>&1; " +
-                "rm -f $HOST_DIR/rootfs.new/opt/ap-data/.fluwy-direct-failed $HOST_DIR/rootfs.new/opt/ap-data/.fluwy-bun-copyfile; echo FLUWY_COPY_OK",
-                cwd = "/tmp", timeoutSec = 1800, onOutput = { logLine(it) }, idleTimeoutSec = 600)
-            if (!keep.output.contains("FLUWY_COPY_OK")) error("não consegui copiar os dados para a versão nova")
-            File(fresh, "etc/resolv.conf").apply { parentFile?.mkdirs(); delete() }.writeText("nameserver 8.8.8.8\nnameserver 1.1.1.1\n")
-            val old = File(hostDir(), "rootfs.old")
-            sandbox.exec("rm -rf $HOST_DIR/rootfs.old; mv $HOST_DIR/rootfs $HOST_DIR/rootfs.old && mv $HOST_DIR/rootfs.new $HOST_DIR/rootfs && rm -rf $HOST_DIR/rootfs.old; echo FLUWY_SWAP_OK",
-                cwd = "/tmp", timeoutSec = 1800, onOutput = { logLine(it) }, idleTimeoutSec = 600).also { if (!it.output.contains("FLUWY_SWAP_OK")) error("falha ao trocar de versão") }
-            if (old.exists()) logLine("(limpando a versão antiga em segundo plano)\n")
-            dev.cueopen.app.connectors.HubApi.invalidateCatalog()
-            logLine("✅ Hub atualizado. Iniciando…\n")
+            logLine("== Atualização dos conectores ==\n")
+            sandbox.exec("apk upgrade --no-cache nodejs npm 2>&1 | tail -n 2", cwd = "/tmp", timeoutSec = 900, onOutput = { logLine(it) }, idleTimeoutSec = 600)
+            copyScript()
             _state.value = State.STOPPED
+            if (!startLocked()) error("o mini-hub não iniciou")
+            val installedPieces = call("/installed", JsonObject(emptyMap()), 30)["pieces"] as? JsonObject
+            val names = installedPieces?.keys.orEmpty()
+            if (names.isEmpty()) logLine("Nenhum conector instalado ainda.\n")
+            var updated = 0; var failed = 0
+            for (n in names) {
+                _state.value = State.INSTALLING
+                logLine("• ${n.removePrefix("@activepieces/piece-")}: ")
+                val r = runCatching { call("/update", JsonObject(mapOf("name" to JsonPrimitive(n))), 1500) }
+                r.onSuccess { o ->
+                    val err = (o["error"] as? JsonPrimitive)?.contentOrNull
+                    val v = (o["version"] as? JsonPrimitive)?.contentOrNull.orEmpty()
+                    when {
+                        err != null -> { failed++; logLine("mantida a $v ($err)\n") }
+                        (o["updated"] as? JsonPrimitive)?.contentOrNull == "true" -> { updated++; logLine("atualizado para $v\n") }
+                        else -> logLine("já na mais nova ($v)\n")
+                    }
+                }.onFailure { failed++; logLine("erro: ${it.message}\n") }
+            }
+            HubApi.invalidateCatalog()
+            logLine("✅ $updated atualizado(s)" + (if (failed > 0) ", $failed mantido(s) na versão anterior" else "") + ".\n")
+            _state.value = if (healthy()) State.RUNNING else State.STOPPED
             true
         } catch (t: Throwable) {
-            logLine("❌ Falha ao atualizar o hub: ${t.message}. A versão atual continua funcionando.\n")
-            dev.cueopen.app.diag.ErrorLog.log("hub", "Atualização do hub falhou: ${t.message}")
-            _state.value = State.STOPPED
+            logLine("❌ Falha ao atualizar: ${t.message}. Os conectores continuam na versão atual.\n")
+            dev.cueopen.app.diag.ErrorLog.log("hub", "Atualização do mini-hub falhou: ${t.message}")
+            _state.value = if (healthy()) State.RUNNING else if (prev == State.ERROR) State.ERROR else State.STOPPED
             false
-        } finally {
-            runCatching { if (wake?.isHeld == true) wake.release() }
         }
-    } }.also { ok ->
-        // Sucesso: sobe a versão nova e relê as ferramentas. Falha: religa a versão atual (foi parada para baixar).
-        if (installed()) start()
-        if (ok) CueApp.instance.store.state.value.connectors.firstOrNull { it.gatewayRef == REF }?.let { runCatching { Connectors.refreshTools(CueApp.instance.store, it) } }
-    }
+    } }
 
-    /** Sobe o hub (app + worker) e espera o /api/v1/health responder. A primeira partida demora alguns minutos. */
-    suspend fun start(): Boolean = mutex.withLock {
-        withContext(Dispatchers.IO) {
-            if (healthy()) { _state.value = State.RUNNING; return@withContext true }
-            if (!installed()) { _state.value = State.NOT_INSTALLED; return@withContext false }
-            _state.value = State.STARTING
-            proc?.destroy(); proc = null
-            secret("jwt", 32); secret("enc", 16)
-            File(rootfs(), "opt/ap-data").mkdirs()
-            val synced = File(rootfs(), "opt/ap-data/.fluwy-synced")
-            if (synced.exists() && System.currentTimeMillis() - synced.lastModified() > 7L * 24 * 3600_000) synced.delete()
-            File(rootfs(), "opt/fluwy-esbuild.sh").writeText(ESBUILD_FIX)
-            File(rootfs(), "opt/fluwy-bun.sh").writeText(BUN_FIX)
-            File(rootfs(), "opt/fluwy-start.sh").writeText(START_SCRIPT)
-            val t0 = System.currentTimeMillis()
-            val cmd = "export PATH=/usr/local/bin:/usr/local/sbin:/usr/bin:/usr/sbin:/bin:/sbin HOME=/opt/ap-home; " +
-                "mkdir -p /opt/ap-home /opt/ap-data; cd /usr/src/app; " +
-                // Passos de código compilam com o binário esbuild: o script garante uma CÓPIA executável em /usr/bin
-                // (PATH mínimo que qualquer processo filho do motor enxerga) e registra o diagnóstico no hub.log.
-                "sh /opt/fluwy-esbuild.sh; " +
-                "sh /opt/fluwy-bun.sh; " +
-                "export AP_DB_TYPE=PGLITE AP_REDIS_TYPE=STANDALONE AP_REDIS_HOST=127.0.0.1 AP_REDIS_PORT=$REDIS_PORT AP_PORT=$PORT AP_FRONTEND_URL=$BASE AP_CONFIG_PATH=/opt/ap-data " +
-                "AP_EXECUTION_MODE=UNSANDBOXED AP_TELEMETRY_ENABLED=false AP_WORKER_CONCURRENCY=1 NODE_ENV=production " +
-                "NODE_OPTIONS=--max-old-space-size=640 NODE_COMPILE_CACHE=/opt/ap-data/node-compile-cache; " +
-                // Boot rápido: o cache de compilação do Node evita recompilar o JS a cada início, e a sincronização
-                // do catálogo (13 mil pieces) só roda na 1ª vez e depois 1x por semana.
-                "if [ -f /opt/ap-data/.fluwy-synced ]; then export AP_PIECES_SYNC_MODE=NONE; else export AP_PIECES_SYNC_MODE=OFFICIAL_AUTO; fi; " +
-                "export AP_JWT_SECRET=\"\$(cat /opt/ap-secrets/jwt)\" AP_ENCRYPTION_KEY=\"\$(cat /opt/ap-secrets/enc)\"; " +
-                // O PM2 avisa a cada 2 s que não lê /proc/uptime (restrição do Android): ruído que só enche o log.
-                "sh /opt/fluwy-start.sh 2>&1 | grep --line-buffered -v -e 'pidusage' -e 'Socket.IO connection error'"
-            logLine("🚀 Iniciando o hub (a primeira vez pode levar alguns minutos)…\n")
-            if (!ensureRedis()) { _state.value = State.ERROR; return@withContext false }
-            proc = sandbox.spawn(cmd, File(hostDir(), "hub.log"), mapOf("ALPINE_ROOT" to rootfs().absolutePath))
-            runCatching { SandboxService.start(CueApp.instance, "Hub de conectores ativo") }
-            val deadline = System.currentTimeMillis() + 10 * 60_000
-            while (System.currentTimeMillis() < deadline) {
-                if (healthy()) {
-                    _state.value = State.RUNNING
-                    runCatching { if (!synced.exists()) synced.writeText(System.currentTimeMillis().toString()) }
-                    logLine("✅ Hub no ar em $BASE (${(System.currentTimeMillis() - t0) / 1000}s)\n")
-                    return@withContext true
-                }
-                if (proc?.isAlive != true) break
-                delay(700)
+    suspend fun start(): Boolean = mutex.withLock { withContext(Dispatchers.IO) { startLocked() } }
+
+    private suspend fun startLocked(): Boolean {
+        copyScript()
+        if (healthyCurrent()) { _state.value = State.RUNNING; startIdleWatchdog(); return true }
+        if (!installed()) { _state.value = State.NOT_INSTALLED; return false }
+        _state.value = State.STARTING
+        proc?.let { p -> runCatching { p.destroy(); p.waitFor(2, TimeUnit.SECONDS) } }; proc = null
+        token()
+        val cmd = "export HOME=$DIR/home PATH=/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin MINIHUB_ROOT=$DIR MINIHUB_PORT=$PORT " +
+            "MINIHUB_TOKEN_FILE=$DIR/token NODE_OPTIONS=--max-old-space-size=384 NODE_COMPILE_CACHE=$DIR/node-cache; " +
+            "mkdir -p $DIR/home; cd $DIR && exec node $DIR/minihub.js"
+        val t0 = System.currentTimeMillis()
+        proc = runCatching { sandbox.spawn(cmd, logFile()) }.getOrElse { logLine("❌ Não consegui iniciar o Node: ${it.message}\n"); _state.value = State.ERROR; return false }
+        val deadline = t0 + 60_000
+        while (System.currentTimeMillis() < deadline) {
+            if (healthy()) {
+                _state.value = State.RUNNING
+                logLine("✅ Mini-hub no ar (${(System.currentTimeMillis() - t0) / 100 / 10.0}s)\n")
+                startIdleWatchdog()
+                return true
             }
-            logLine("❌ O hub não iniciou.\n${lastLog().takeLast(3000)}\n")
-            dev.cueopen.app.diag.ErrorLog.log("hub", "O hub não iniciou.\n${lastLog().takeLast(3000)}")
-            _state.value = State.ERROR
-            false
+            if (proc?.isAlive != true) break
+            delay(250)
         }
+        val tail = lastLog().takeLast(2500)
+        logLine("❌ O mini-hub não iniciou.\n$tail\n")
+        dev.cueopen.app.diag.ErrorLog.log("hub", "O mini-hub não iniciou.\n$tail")
+        _state.value = State.ERROR
+        return false
     }
 
     suspend fun stop() = mutex.withLock {
         withContext(Dispatchers.IO) {
-            proc?.let { p -> runCatching { p.destroy(); if (!p.waitFor(5, TimeUnit.SECONDS)) p.destroyForcibly() } }
+            proc?.let { p -> runCatching { p.destroy(); if (!p.waitFor(3, TimeUnit.SECONDS)) p.destroyForcibly() } }
             proc = null
-            redisProc?.let { p -> runCatching { p.destroy(); if (!p.waitFor(3, TimeUnit.SECONDS)) p.destroyForcibly() } }
-            redisProc = null
             _state.value = if (installed()) State.STOPPED else State.NOT_INSTALLED
         }
     }
 
-    /** Usado pelo agente: garante o hub no ar antes de chamar ferramentas. */
-    suspend fun ensureRunning(): Boolean { touch(); return healthy() || start() }
-
-    // ---------------- Ciclo de vida automático (sem o usuário iniciar à mão) ----------------
-    @Volatile private var lastUse = 0L
-    private const val IDLE_STOP_MS = 2 * 60 * 60_000L
-    @Volatile private var watchdogStarted = false
+    /** Garante o mini-hub no ar (instala o Node na primeira vez, se o Linux do app já existe). */
+    suspend fun ensureRunning(): Boolean {
+        touch()
+        if (healthy() && proc?.isAlive == true) return true
+        if (!installed() && !(sandboxReady() && install())) return false
+        return start()
+    }
 
     fun touch() { lastUse = System.currentTimeMillis() }
 
-    /**
-     * Chamado quando o app abre/volta ao primeiro plano: sobe o hub em segundo plano se ele está instalado e o
-     * conector não foi desligado pelo usuário. Só um início por vez (mutex); se já está no ar, não faz nada.
-     */
+    /** Ao abrir o app: copia o script novo (se o APK mudou). Não sobe o Node: ele sobe sozinho no primeiro uso. */
     fun onAppForeground() {
         touch()
-        val app = CueApp.instance
-        app.applicationScope.launch(Dispatchers.IO) {
-            if (!installed() || !LocalSandbox.ready()) return@launch
-            if (app.store.connector(CONNECTOR_ID)?.enabled == false) return@launch
-            if (_state.value == State.INSTALLING || _state.value == State.STARTING) return@launch
-            val ok = if (!healthy()) runCatching { start() }.getOrDefault(false) else { _state.value = State.RUNNING; true }
-            // Atualiza ferramentas + contas conectadas do hub (o usuário pode ter ligado um app novo no painel).
-            if (ok) app.store.connector(CONNECTOR_ID)?.takeIf { it.connectedAt != null && it.enabled }?.let { runCatching { Connectors.refreshTools(app.store, it) } }
+        CueApp.instance.applicationScope.launch(Dispatchers.IO) {
+            if (!sandboxReady()) return@launch
+            runCatching { if (installed()) { removeOldHub(); copyScript() } }
+            refresh()
+            HubConnectors.syncConnector(CueApp.instance.store)
         }
-        startIdleWatchdog()
     }
 
-    /** Economia de bateria/RAM: desliga o hub após 2 h sem uso; ele volta sozinho ao abrir o app ou no próximo uso. */
     private fun startIdleWatchdog() {
         if (watchdogStarted) return
         watchdogStarted = true
         CueApp.instance.applicationScope.launch(Dispatchers.IO) {
             while (true) {
                 delay(5 * 60_000L)
-                if (proc != null && System.currentTimeMillis() - lastUse > IDLE_STOP_MS && _state.value == State.RUNNING) {
-                    logLine("💤 Hub parado após 2 h sem uso (economia de bateria). Volta sozinho ao abrir o app ou no próximo uso.\n")
-                    stop()
-                }
+                if (proc != null && System.currentTimeMillis() - lastUse > IDLE_STOP_MS && _state.value == State.RUNNING) stop()
             }
         }
     }
 
-    fun lastLog(): String = runCatching { File(hostDir(), "hub.log").readText().takeLast(20_000) }.getOrDefault("")
+    class MiniHubError(message: String, val code: Int = 0) : Exception(message)
 
-    private fun fn(tool: String) = "mcp_" + CONNECTOR_ID + "__" + tool
-    /** Nome de função de uma ferramenta MCP do hub (uso interno do app, nunca exposta ao agente). */
-    fun hubTool(tool: String) = fn(tool)
+    private val clients = java.util.concurrent.ConcurrentHashMap<Long, OkHttpClient>()
+    private fun client(timeoutSec: Long) = clients.getOrPut(timeoutSec) {
+        OkHttpClient.Builder().connectTimeout(3, TimeUnit.SECONDS).readTimeout(timeoutSec, TimeUnit.SECONDS).callTimeout(timeoutSec + 5, TimeUnit.SECONDS).build()
+    }
+
+    /** POST JSON no mini-hub (sobe o processo se preciso). Erros HTTP viram [MiniHubError] com a mensagem do mini-hub. */
+    suspend fun call(path: String, body: JsonObject, timeoutSec: Long = 240): JsonObject = withContext(Dispatchers.IO) {
+        if (!ensureRunning()) throw MiniHubError(if (!sandboxReady()) "O Linux do app ainda não foi instalado (Apps › Terminal)." else "O mini-hub de conectores não iniciou. Veja o registro em Apps › Conectores.")
+        touch()
+        fun once(): Pair<Int, String> {
+            val req = Request.Builder().url(BASE + path).header("x-minihub-token", token()).post(body.toString().toRequestBody(jsonType)).build()
+            return client(timeoutSec).newCall(req).execute().use { r -> r.code to r.body?.string().orEmpty() }
+        }
+        val (code, text) = try { once() } catch (e: java.io.IOException) {
+            // Processo reiniciando (ex.: script novo): sobe de novo e tenta uma vez.
+            if (e is java.net.SocketTimeoutException || !start()) throw MiniHubError("Mini-hub sem resposta: ${e.message}")
+            once()
+        }
+        touch()
+        val o = runCatching { json.parseToJsonElement(text).jsonObject }.getOrNull()
+        if (code !in 200..299) throw MiniHubError((o?.get("error") as? JsonPrimitive)?.contentOrNull ?: "HTTP $code", code)
+        o ?: throw MiniHubError("Resposta inválida do mini-hub")
+    }
 
     fun connector() = dev.cueopen.app.data.Connector(
-        CONNECTOR_ID, "Activepieces Hub", MCP_URL,
-        "Hub local com 700+ apps (Gmail, Instagram, Facebook, GitHub, Supabase…)",
-        needsAuth = true, enabled = true, gatewayRef = REF,
+        CONNECTOR_ID, "Conectores (Activepieces)", MCP_URL,
+        "600+ apps (Gmail, Google Drive, Sheets, Slack, Notion, GitHub…) executados no próprio aparelho",
+        needsAuth = false, enabled = true, gatewayRef = REF,
     )
-}
-
-/** rootfs.new completo: o pull_image só grava .fluwy-image depois de aplicar todas as camadas. */
-object HubImage {
-    fun ready(dir: File): Boolean = File(dir, ".fluwy-image").exists() && File(dir, "usr/src/app/docker-entrypoint.sh").exists()
 }

@@ -107,16 +107,17 @@ fun ConnectorsScreen(nav: NavController) {
                 UiConnectorsSection(nav)
             }
             item {
-                SectionLabel("Hub de apps")
-                Text("Gmail, Planilhas, Instagram, Facebook, GitHub, Supabase e centenas de outros apps, com login do próprio serviço. Tudo roda no Linux do app.",
+                SectionLabel("Apps (Activepieces)")
+                Text("Gmail, Drive, Planilhas, Slack, Notion, GitHub e mais de 600 apps, com login do próprio serviço. Roda no próprio aparelho, leve: cada conector é baixado só quando usado.",
                     fontSize = 13.sp, color = c.ink2)
             }
             item {
                 val hubState by ActivepiecesHub.state.collectAsStateWithLifecycle()
                 val hubLog by ActivepiecesHub.log.collectAsStateWithLifecycle()
                 var hubLogOpen by remember { mutableStateOf(false) }
-                LaunchedEffect(Unit) { ActivepiecesHub.refresh() }
+                LaunchedEffect(Unit) { ActivepiecesHub.refresh(); dev.cueopen.app.connectors.HubConnectors.syncConnector(app.store) }
                 val hubConn = st.connectors.firstOrNull { it.id == ActivepiecesHub.CONNECTOR_ID }
+                val busyState = hubState == ActivepiecesHub.State.INSTALLING || hubState == ActivepiecesHub.State.STARTING
                 CueCard {
                     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -125,63 +126,44 @@ fun ConnectorsScreen(nav: NavController) {
                             }
                             Spacer(Modifier.width(12.dp))
                             Column(Modifier.weight(1f)) {
-                                Text("Hub de apps · Activepieces", fontWeight = FontWeight.SemiBold)
-                                Text("700+ apps com login: Gmail, Planilhas, Instagram, Facebook, GitHub, Supabase, Slack, Notion, SEO e mais. Roda no Linux do app.",
-                                    fontSize = 12.sp, color = c.ink2)
+                                Text("Conectores · Activepieces", fontWeight = FontWeight.SemiBold)
+                                Text(when (hubState) {
+                                    ActivepiecesHub.State.NOT_INSTALLED -> if (ActivepiecesHub.sandboxReady()) "Não instalado · ~50 MB (uma vez)" else "Instale o Linux (Alpine) em Configurações › Sandbox"
+                                    ActivepiecesHub.State.INSTALLING -> "Instalando/atualizando…"
+                                    ActivepiecesHub.State.STOPPED -> "Pronto · liga sozinho quando o agente usa"
+                                    ActivepiecesHub.State.STARTING -> "Iniciando…"
+                                    ActivepiecesHub.State.RUNNING -> "Ativo"
+                                    ActivepiecesHub.State.ERROR -> "Erro · veja o registro"
+                                }, fontSize = 12.sp, color = if (hubState == ActivepiecesHub.State.ERROR) c.err else c.ink2)
                             }
+                            if (hubConn != null && ActivepiecesHub.installed()) Switch(hubConn.enabled, { v -> app.store.upsertConnector(hubConn.copy(enabled = v)) },
+                                colors = SwitchDefaults.colors(checkedTrackColor = c.ink, checkedThumbColor = c.bg))
                         }
-                        Text(when (hubState) {
-                            ActivepiecesHub.State.NOT_INSTALLED -> if (ActivepiecesHub.sandboxReady()) "Não instalado · download de ~1 GB (use Wi-Fi)" else "Instale o Linux (Alpine) em Configurações › Sandbox"
-                            ActivepiecesHub.State.INSTALLING -> "Baixando e montando o hub…"
-                            ActivepiecesHub.State.STOPPED -> "Instalado · parado"
-                            ActivepiecesHub.State.STARTING -> "Iniciando… (a 1ª vez leva alguns minutos)"
-                            ActivepiecesHub.State.RUNNING -> if (hubConn?.connectedAt != null) "No ar · conectado ao agente" else "No ar · falta conectar ao agente"
-                            ActivepiecesHub.State.ERROR -> "Erro · veja o registro"
-                        }, fontSize = 12.sp, color = if (hubState == ActivepiecesHub.State.ERROR) c.err else c.ink2)
                         Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             @Composable fun pill(label: String, primary: Boolean = true, onClick: () -> Unit) =
                                 Box(Modifier.clip(CircleShape).background(if (primary) c.ink else c.surface2).clickable(onClick = onClick).padding(horizontal = 14.dp, vertical = 8.dp)) {
                                     Text(label, color = if (primary) c.bg else c.ink, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
                                 }
-                            when (hubState) {
-                                ActivepiecesHub.State.NOT_INSTALLED, ActivepiecesHub.State.ERROR -> if (ActivepiecesHub.sandboxReady()) {
-                                    pill(if (ActivepiecesHub.installed()) "Iniciar" else "Instalar hub") {
-                                        ActivepiecesHub.installInBackground()
-                                    }
+                            when {
+                                busyState -> CircularProgressIndicator(Modifier.size(22.dp), strokeWidth = 2.dp, color = c.accent)
+                                !ActivepiecesHub.installed() -> if (ActivepiecesHub.sandboxReady()) pill("Instalar") { ActivepiecesHub.installInBackground() }
+                                else -> {
+                                    pill("Atualizar conectores", primary = false) { ActivepiecesHub.updateInBackground() }
+                                    if (hubState == ActivepiecesHub.State.RUNNING) pill("Parar", primary = false) { scope.launch { ActivepiecesHub.stop() } }
+                                    if (hubState == ActivepiecesHub.State.ERROR) pill("Tentar de novo") { scope.launch { ActivepiecesHub.start() } }
                                 }
-                                ActivepiecesHub.State.STOPPED -> {
-                                    pill("Iniciar") { scope.launch { ActivepiecesHub.start() } }
-                                    if (ActivepiecesHub.installed()) pill("Atualizar hub", primary = ActivepiecesHub.supportsDirectActions(app.store) == false) { ActivepiecesHub.updateInBackground() }
-                                }
-                                ActivepiecesHub.State.RUNNING -> {
-                                    pill("Abrir painel") { openUrl(ActivepiecesHub.BASE) }
-                                    pill(if (hubConn?.connectedAt != null) "Reconectar" else "Conectar ao agente", primary = hubConn?.connectedAt == null) {
-                                        connect((hubConn ?: ActivepiecesHub.connector()).copy(enabled = true, accessToken = null, lastError = null))
-                                    }
-                                    pill("Parar", primary = false) { scope.launch { ActivepiecesHub.stop() } }
-                                    pill("Atualizar hub", primary = ActivepiecesHub.supportsDirectActions(app.store) == false) { ActivepiecesHub.updateInBackground() }
-                                }
-                                else -> CircularProgressIndicator(Modifier.size(22.dp), strokeWidth = 2.dp, color = c.accent)
                             }
                         }
-                        if (hubConn?.connectedAt != null && ActivepiecesHub.supportsDirectActions(app.store) == false) Text(
-                            "⚠ Esta versão do hub não executa ações de conector direto. Toque em Atualizar hub: baixa a versão nova (~1 GB, prefira Wi-Fi) e mantém suas conexões.",
-                            fontSize = 12.sp, color = c.err)
-                        if (hubState == ActivepiecesHub.State.RUNNING && hubConn?.connectedAt == null) Text(
-                            "1) Abra o painel e crie sua conta local. 2) Em Conexões, conecte seus apps (login OAuth). " +
-                                "3) Em MCP Server, ative o servidor e escolha as ferramentas. 4) Toque em Conectar ao agente.",
-                            fontSize = 11.sp, color = c.ink3)
-                        // Última linha de progresso sempre visível; registro completo, ao vivo, sob demanda.
                         val lastLine = hubLog.lineSequence().map { it.trim() }.lastOrNull { it.isNotEmpty() }
-                        if (lastLine != null && (hubState == ActivepiecesHub.State.INSTALLING || hubState == ActivepiecesHub.State.STARTING || hubState == ActivepiecesHub.State.ERROR))
+                        if (lastLine != null && (busyState || hubState == ActivepiecesHub.State.ERROR))
                             Text(lastLine, fontSize = 12.sp, color = if (hubState == ActivepiecesHub.State.ERROR) c.err else c.accent, maxLines = 2, overflow = TextOverflow.Ellipsis)
                         Row(horizontalArrangement = Arrangement.spacedBy(14.dp), verticalAlignment = Alignment.CenterVertically) {
-                            Text(if (hubLogOpen) "Ocultar registro" else "Ver registro completo", fontSize = 12.sp, color = c.accent, modifier = Modifier.clickable { hubLogOpen = !hubLogOpen })
+                            Text(if (hubLogOpen) "Ocultar registro" else "Ver registro", fontSize = 12.sp, color = c.accent, modifier = Modifier.clickable { hubLogOpen = !hubLogOpen })
                             Text("Copiar", fontSize = 12.sp, color = c.accent, modifier = Modifier.clickable {
                                 scope.launch {
                                     val text = withContext(Dispatchers.IO) { ActivepiecesHub.fullLog() }
                                     (ctx.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager)
-                                        .setPrimaryClip(android.content.ClipData.newPlainText("Registro do hub", text))
+                                        .setPrimaryClip(android.content.ClipData.newPlainText("Registro dos conectores", text))
                                     android.widget.Toast.makeText(ctx, "Registro copiado", android.widget.Toast.LENGTH_SHORT).show()
                                 }
                             })
@@ -189,9 +171,9 @@ fun ConnectorsScreen(nav: NavController) {
                                 scope.launch {
                                     val text = withContext(Dispatchers.IO) { ActivepiecesHub.fullLog() }
                                     val send = android.content.Intent(android.content.Intent.ACTION_SEND).apply {
-                                        type = "text/plain"; putExtra(android.content.Intent.EXTRA_SUBJECT, "Fluwy Bot — registro do hub"); putExtra(android.content.Intent.EXTRA_TEXT, text.takeLast(90_000))
+                                        type = "text/plain"; putExtra(android.content.Intent.EXTRA_SUBJECT, "Fluwy Bot — registro dos conectores"); putExtra(android.content.Intent.EXTRA_TEXT, text.takeLast(90_000))
                                     }
-                                    ctx.startActivity(android.content.Intent.createChooser(send, "Enviar registro do hub"))
+                                    ctx.startActivity(android.content.Intent.createChooser(send, "Enviar registro"))
                                 }
                             })
                         }
@@ -207,9 +189,8 @@ fun ConnectorsScreen(nav: NavController) {
                     }
                 }
             }
-            if (st.connectors.any { it.id == ActivepiecesHub.CONNECTOR_ID && it.connectedAt != null }) item {
-                val hs by ActivepiecesHub.state.collectAsStateWithLifecycle()
-                HubConnectionsSection(nav, hs == ActivepiecesHub.State.RUNNING)
+            if (ActivepiecesHub.sandboxReady()) item {
+                HubConnectionsSection(nav, ActivepiecesHub.installed())
             }
             // O hub aparece como os conectores dele (seção acima), não como um conector único.
             val shown = st.connectors.filter { it.gatewayRef != ActivepiecesHub.REF }
@@ -314,28 +295,27 @@ private fun HubConnectionsSection(nav: NavController, running: Boolean) {
         lifecycle.lifecycle.addObserver(obs); onDispose { lifecycle.lifecycle.removeObserver(obs) }
     }
     LaunchedEffect(running, reload) {
-        if (!running) return@LaunchedEffect
         runCatching { dev.cueopen.app.connectors.HubConnectors.connections(app.store, fresh = reload > 0) }.onSuccess { conns = it; err = null }.onFailure { err = it.message }
     }
     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            SectionLabel("Conectores do hub")
+            SectionLabel("Seus apps conectados")
             Spacer(Modifier.weight(1f))
             Box(Modifier.clip(CircleShape).background(c.ink).clickable { nav.navigate("hubcatalog") }.padding(horizontal = 14.dp, vertical = 7.dp)) {
                 Text("+ Adicionar conector", color = c.bg, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
             }
         }
         when {
-            !running -> Text("Inicie o hub para ver seus conectores.", fontSize = 12.sp, color = c.ink3)
+            !running -> Text("Instale os conectores (acima) para conectar seus apps.", fontSize = 12.sp, color = c.ink3)
             err != null -> Text(err!!, fontSize = 12.sp, color = c.err)
             conns == null -> CircularProgressIndicator(Modifier.size(22.dp), strokeWidth = 2.dp, color = c.accent)
-            conns!!.isEmpty() -> Text("Nenhum conector ainda. Toque em Adicionar conector para conectar Gmail, Notion, GitHub e mais de 400 apps.", fontSize = 12.sp, color = c.ink3)
+            conns!!.isEmpty() -> Text("Nenhum app ainda. Toque em Adicionar conector para conectar Gmail, Notion, GitHub e mais de 600 apps.", fontSize = 12.sp, color = c.ink3)
         }
         conns.orEmpty().forEach { cn ->
             var menu by remember(cn.externalId) { mutableStateOf(false) }
             CueCard {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    coil.compose.AsyncImage("https://cdn.activepieces.com/pieces/" + cn.pieceName.substringAfterLast("piece-") + ".png", null,
+                    coil.compose.AsyncImage(dev.cueopen.app.connectors.HubApi.catalogPiece(cn.pieceName)?.logoUrl?.ifBlank { null } ?: ("https://cdn.activepieces.com/pieces/" + cn.pieceName.substringAfterLast("piece-") + ".png"), null,
                         Modifier.size(38.dp).clip(RoundedCornerShape(10.dp)).background(c.surface2))
                     Spacer(Modifier.width(12.dp))
                     Column(Modifier.weight(1f)) {
@@ -350,8 +330,7 @@ private fun HubConnectionsSection(nav: NavController, running: Boolean) {
                                 menu = false
                                 scope.launch {
                                     runCatching {
-                                        val id = dev.cueopen.app.connectors.HubApi.connections().firstOrNull { it.externalId == cn.externalId }?.id ?: error("Conexão não encontrada no hub.")
-                                        dev.cueopen.app.connectors.HubApi.deleteConnection(id)
+                                        dev.cueopen.app.connectors.HubApi.deleteConnection(cn.externalId)
                                     }.onSuccess { reload++; android.widget.Toast.makeText(ctx, "Conexão removida.", android.widget.Toast.LENGTH_SHORT).show() }
                                         .onFailure { android.widget.Toast.makeText(ctx, it.message ?: "Falha ao remover", android.widget.Toast.LENGTH_LONG).show() }
                                 }

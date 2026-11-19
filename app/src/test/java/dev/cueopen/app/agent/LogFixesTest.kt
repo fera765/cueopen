@@ -41,10 +41,6 @@ class LogFixesTest {
         assertTrue(missing.contains("Enviar proposta"))
     }
 
-    @Test fun flowNotFoundPointsToListFlows() {
-        assertEquals(ToolOutcomeAdvisor.Reason.HUB_FLOW, ToolOutcomeAdvisor.classify("mcp_activepieces_hub__ap_test_flow", "❌ Flow not found"))
-    }
-
     @Test fun repeatedIdenticalFailureWarnsThenStops() {
         val g = RepeatedToolFailureGuard()
         val v = (1..5).map { g.record("web_fetch", "{url:x}", "ERRO: HTTP 404 em x") }

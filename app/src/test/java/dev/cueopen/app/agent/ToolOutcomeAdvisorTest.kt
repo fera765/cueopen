@@ -62,9 +62,10 @@ class LlmTransientErrorTest {
 
 class HubPieceAdviceTest {
     @Test fun inventedPieceNameGetsListPiecesAdvice() {
-        val out = "❌ Piece \"@activepieces/piece-schedule\" not found. Use ap_list_pieces to get valid piece names."
-        assertEquals(ToolOutcomeAdvisor.Reason.HUB_PIECE, ToolOutcomeAdvisor.classify("mcp_activepieces_hub__ap_get_piece_props", out))
-        assertTrue(ToolOutcomeAdvisor.adviceLine(ToolOutcomeAdvisor.Reason.HUB_PIECE).contains("ap_list_pieces"))
+        val out = "ERRO: ação \"send_mail\" não existe em @activepieces/piece-gmail. Ações: send_email, reply"
+        assertEquals(ToolOutcomeAdvisor.Reason.HUB_PIECE, ToolOutcomeAdvisor.classify("conector_executar", out))
+        assertEquals(ToolOutcomeAdvisor.Reason.HUB_PIECE, ToolOutcomeAdvisor.classify("conector_acoes", "ERRO: O conector \"x\" não existe no catálogo do Activepieces."))
+        assertTrue(ToolOutcomeAdvisor.adviceLine(ToolOutcomeAdvisor.Reason.HUB_PIECE).contains("conector_acoes"))
     }
 
     @Test fun normalNotFoundStaysNotFound() {

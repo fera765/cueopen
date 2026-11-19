@@ -89,6 +89,7 @@ object ConnectorRouting {
             lines += "6a. Conectores do hub, sempre nesta ordem: 1) conectores_listar (se a conta já não estiver listada abaixo) para pegar o id da conexão; " +
                 "2) conector_acoes {conector} para ver as ações e conector_acoes {conector, acao} para os campos exatos; " +
                 "3) conector_executar {conector, acao, campos, conexao} UMA vez. Use só nomes que vieram dessas ferramentas (nunca invente ação ou campo). " +
+                "Conectores sem login (http, date-helper, text-helper…) funcionam sem conexao. Na 1ª vez um conector é baixado (até ~1 min): espere, não repita a chamada. " +
                 "Se o app pedido não estiver conectado, diga ao usuário para conectá-lo em Apps › Conectores. " +
                 "Tarefa repetida (\"todo dia…\", \"a cada hora…\") é agendada pelo app (set_schedule/cron_add) e cada execução chama o conector — não existem automações."
             hubInventory?.takeIf { it.isNotBlank() }?.let { lines += "6a. Contas já conectadas no hub: " + it.replace(Regex("\\s+"), " ").take(700) }

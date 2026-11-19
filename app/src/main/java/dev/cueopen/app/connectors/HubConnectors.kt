@@ -1,6 +1,7 @@
 package dev.cueopen.app.connectors
 
 import dev.cueopen.app.data.Store
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
@@ -12,53 +13,66 @@ import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.put
 
 /**
- * Conectores do hub para o agente — 3 ferramentas genéricas que servem para QUALQUER conexão feita no hub
- * (nada é predefinido por app): listar as conexões, ver o que um conector faz (ações e campos, lidos do próprio
- * conector) e executar uma ação com a conta conectada (ap_run_action, sem criar automação).
+ * Conectores para o agente — 3 ferramentas genéricas que servem para QUALQUER conector do catálogo (nada é
+ * predefinido por app): listar as contas conectadas, ver o que um conector faz (ações e campos, lidos do próprio
+ * conector) e executar uma ação com a conta (no mini-hub, sem automação).
+ *
+ * A conta (tokens/chaves) sai do cofre do app só para o mini-hub, no pedido que a usa; o agente vê apenas o id.
  */
 object HubConnectors {
     val TOOLS = setOf("conectores_listar", "conector_acoes", "conector_executar")
 
     private fun hub(store: Store) = store.state.value.connectors.firstOrNull { it.gatewayRef == ActivepiecesHub.REF }
 
-    /** O hub está ligado e conectado ao agente. */
+    /** Conectores ligados para o agente (o mini-hub sobe sozinho no primeiro uso). */
     fun available(store: Store): Boolean = hub(store)?.let { it.enabled && it.connectedAt != null } == true
-
-    private suspend fun mcp(store: Store, tool: String, args: JsonObject): String {
-        if (!ActivepiecesHub.ensureRunning()) return "ERRO: o hub de conectores não está no ar. Peça ao usuário para iniciá-lo em Apps › Conectores."
-        return Connectors.callTool(store, ActivepiecesHub.hubTool(tool), args)
-    }
 
     data class Conn(val externalId: String, val displayName: String, val pieceName: String, val status: String)
 
-    private val LINE = Regex("""externalId:\s*(\S+)\s*\|\s*displayName:\s*"?(.*?)"?\s*\|\s*piece:\s*(\S+)\s*\|\s*status:\s*(\w+)""")
-
-    /** Linhas do ap_list_connections ("- externalId: X | displayName: "Y" | piece: P | status: ACTIVE …"). */
-    fun parseConnections(text: String): List<Conn> =
-        LINE.findAll(text).map { m -> Conn(m.groupValues[1], m.groupValues[2], m.groupValues[3], m.groupValues[4]) }.toList()
-
-    fun appName(piece: String) = piece.substringAfterLast("piece-").replace('-', ' ').replaceFirstChar { it.uppercase() }
+    fun appName(piece: String): String = HubApi.catalogPiece(piece)?.displayName
+        ?: piece.substringAfterLast("piece-").replace('-', ' ').replaceFirstChar { it.uppercase() }
 
     @Volatile private var connCache: Pair<Long, List<Conn>>? = null
 
-    /** Conexões do hub, com cache de 60 s (a tela e o agente consultam muito; conectar/remover invalida). */
+    @Suppress("UNUSED_PARAMETER")
     suspend fun connections(store: Store, fresh: Boolean = false): List<Conn> {
         connCache?.takeIf { !fresh && System.currentTimeMillis() - it.first < 60_000 }?.let { return it.second }
-        return parseConnections(mcp(store, "ap_list_connections", JsonObject(emptyMap()))).also { connCache = System.currentTimeMillis() to it }
+        return HubApi.connections().map { Conn(it.externalId, it.displayName, it.pieceName, it.status) }.also { connCache = System.currentTimeMillis() to it }
     }
 
     fun invalidate() { connCache = null }
 
-    /** Última lista conhecida (para a tela mostrar na hora). */
     fun lastKnown(): List<Conn>? = connCache?.second
 
+    /** Resumo curto das contas (vai para o prompt: o agente sabe o que existe sem listar). Sem segredos. */
+    internal fun inventoryOf(conns: List<Conn>): String? =
+        conns.joinToString(" | ") { "${appName(it.pieceName)} \"${it.displayName}\" ${it.pieceName.substringAfter("piece-")}" + if (it.status != "ACTIVE") " (reconectar)" else "" }
+            .take(1200).ifBlank { null }
+
+    /**
+     * Mantém a entrada "Conectores" na lista do app: conectada quando o Linux do app existe (o mini-hub instala o
+     * Node sozinho) e com o inventário das contas. Preserva o liga/desliga do usuário.
+     */
+    suspend fun syncConnector(store: Store) {
+        val conns = runCatching { connections(store, fresh = true) }.getOrDefault(emptyList())
+        val cur = store.connector(ActivepiecesHub.CONNECTOR_ID)
+        val ready = ActivepiecesHub.sandboxReady()
+        if (cur == null && !ready && conns.isEmpty()) return
+        val base = cur ?: ActivepiecesHub.connector()
+        store.upsertConnector(base.copy(
+            name = ActivepiecesHub.connector().name, url = ActivepiecesHub.MCP_URL, description = ActivepiecesHub.connector().description,
+            needsAuth = false, toolsJson = "[]", lastError = null, gatewayRef = ActivepiecesHub.REF,
+            connectedAt = base.connectedAt ?: if (ready || conns.isNotEmpty()) System.currentTimeMillis() else null,
+            inventory = inventoryOf(conns),
+        ))
+    }
+
     suspend fun list(store: Store): String {
-        val raw = mcp(store, "ap_list_connections", JsonObject(emptyMap()))
-        if (raw.startsWith("ERRO")) return raw
-        val conns = parseConnections(raw).also { connCache = System.currentTimeMillis() to it }
-        if (conns.isEmpty()) return "Nenhum conector conectado no hub ainda. Peça ao usuário para conectar o app em Apps › Conectores › Adicionar conector."
+        val conns = runCatching { connections(store, fresh = true) }.getOrElse { return "ERRO: ${it.message}" }
+        if (conns.isEmpty()) return "Nenhuma conta conectada ainda. Conectores sem login (ex.: http, date-helper) já funcionam: veja com conector_acoes. " +
+            "Para apps com login, peça ao usuário para conectar em Apps › Conectores › Adicionar conector."
         return "Conectores disponíveis (${conns.size}):\n" + conns.joinToString("\n") { c ->
-            "- ${appName(c.pieceName)} · \"${c.displayName}\" · conector=${c.pieceName} · conexao=${c.externalId}" + (if (c.status != "ACTIVE") " · status ${c.status} (pode precisar reconectar)" else "")
+            "- ${appName(c.pieceName)} · \"${c.displayName}\" · conector=${c.pieceName} · conexao=${c.externalId}" + (if (c.status != "ACTIVE") " · status ${c.status} (o usuário precisa reconectar)" else "")
         } + "\nPróximo passo: conector_acoes {conector} para ver o que ele faz."
     }
 
@@ -67,36 +81,69 @@ object HubConnectors {
     suspend fun actions(store: Store, conector: String, acao: String, busca: String): String {
         if (conector.isBlank()) return "ERRO: informe conector (ex.: gmail)."
         val piece = HubApi.pieceName(conector)
-        if (acao.isNotBlank()) {
-            // Campos exatos, com dicas do próprio hub (obrigatórios, opções a resolver, exemplo de entrada).
-            val out = mcp(store, "ap_get_piece_props", buildJsonObject { put("pieceName", piece); put("actionOrTriggerName", acao.trim()); put("type", "action") })
-            if (!out.startsWith("ERRO") && !out.trimStart().startsWith("❌")) return out.take(7_000) + "\n\nPróximo passo: conector_executar {conector:\"$piece\", acao:\"${acao.trim()}\", campos:{…}, conexao}."
-            return runCatching { fieldsFromMetadata(piece, acao.trim()) }.getOrElse { "ERRO: ${it.message}" }
-        }
-        val meta = runCatching { HubApi.piece(piece) }.getOrElse { return "ERRO: ${it.message}" }
-        val acts = (meta["actions"] as? JsonObject).orEmpty().values.mapNotNull { it as? JsonObject }
+        if (acao.isNotBlank()) return runCatching { fields(store, piece, acao.trim()) }.getOrElse { "ERRO: ${it.message}" }
         val q = busca.trim().lowercase()
-        val shown = acts.filter { q.isBlank() || (it.s("name") + " " + it.s("displayName") + " " + it.s("description")).lowercase().contains(q) }
-        if (shown.isEmpty()) return "O conector ${meta.s("displayName")} não tem ações" + (if (q.isNotBlank()) " com \"$busca\". Tente outra palavra ou omita busca." else ".")
-        val needsAuth = HubApi.authList(meta["auth"]).isNotEmpty()
-        return "Ações de ${meta.s("displayName")} ($piece)" + (if (needsAuth) " — precisa da conexao (conectores_listar)" else " — não precisa de conta") + ":\n" +
-            shown.take(60).joinToString("\n") { a -> "- ${a.s("name")}: ${a.s("displayName")}" + a.s("description").takeIf { it.isNotBlank() }?.let { " — " + it.take(140) }.orEmpty() } +
+        // Lista de ações vem do catálogo (instantâneo, sem instalar); se o conector não está no catálogo, do mini-hub.
+        val cat = HubApi.catalogPiece(piece)
+        data class A(val name: String, val title: String, val desc: String)
+        val (title, acts, needsAuth) = if (cat != null) Triple(cat.displayName, cat.actions.map { A(it.name, it.displayName, it.description) }, cat.authTypes.isNotEmpty() && !cat.authOptional)
+        else {
+            val meta = runCatching { HubApi.piece(piece) }.getOrElse { return "ERRO: ${it.message}" }
+            Triple(meta.s("displayName"), (meta["actions"] as? JsonObject).orEmpty().values.mapNotNull { it as? JsonObject }.map { A(it.s("name"), it.s("displayName"), it.s("description")) },
+                HubApi.authList(meta["auth"]).isNotEmpty())
+        }
+        val shown = acts.filter { q.isBlank() || (it.name + " " + it.title + " " + it.desc).lowercase().contains(q) }
+        if (shown.isEmpty()) return "O conector $title não tem ações" + (if (q.isNotBlank()) " com \"$busca\". Tente outra palavra ou omita busca." else ".")
+        return "Ações de $title ($piece)" + (if (needsAuth) " — precisa da conexao (conectores_listar)" else " — não precisa de conta") + ":\n" +
+            shown.take(60).joinToString("\n") { a -> "- ${a.name}: ${a.title}" + a.desc.takeIf { it.isNotBlank() }?.let { " — " + it.take(140) }.orEmpty() } +
             (if (shown.size > 60) "\n… e mais ${shown.size - 60}; use busca para filtrar." else "") +
             "\nPróximo passo: conector_acoes {conector:\"$piece\", acao:\"<nome>\"} para os campos."
     }
 
-    private suspend fun fieldsFromMetadata(piece: String, acao: String): String {
+    /** Campos exatos da ação, com as opções de listas dinâmicas (pastas, planilhas, canais…) já resolvidas. */
+    private suspend fun fields(store: Store, piece: String, acao: String): String {
         val meta = HubApi.piece(piece)
-        val a = (meta["actions"] as? JsonObject)?.get(acao) as? JsonObject
+        val actions = (meta["actions"] as? JsonObject).orEmpty()
+        val a = (actions[acao] ?: actions.values.firstOrNull { (it as? JsonObject)?.s("displayName").equals(acao, true) }) as? JsonObject
             ?: return "ERRO: a ação \"$acao\" não existe em $piece. Veja os nomes com conector_acoes {conector:\"$piece\"}."
+        val name = a.s("name").ifBlank { acao }
         val props = (a["props"] as? JsonObject).orEmpty()
-        return "Campos de ${a.s("displayName")} ($piece / $acao):\n" + props.entries.joinToString("\n") { (k, v) ->
-            val o = v as? JsonObject ?: return@joinToString "- $k"
-            val opts = ((o["options"] as? JsonObject)?.get("options") as? JsonArray)?.mapNotNull { (it as? JsonObject)?.s("value") }?.take(15)
-            "- $k (${o.s("type").lowercase()}${if (o.s("required") == "true") ", obrigatório" else ""}): ${o.s("displayName")}" +
+        val conn = runCatching { connections(store).filter { it.pieceName == piece } }.getOrDefault(emptyList()).singleOrNull()
+        var resolved = 0
+        val lines = props.entries.map { (k, v) ->
+            val o = v as? JsonObject ?: return@map "- $k"
+            val type = o.s("type")
+            if (type == "MARKDOWN") return@map "- (nota) " + o.s("description").ifBlank { o.s("displayName") }.take(200)
+            val staticOpts = ((o["options"] as? JsonObject)?.get("options") as? JsonArray)?.mapNotNull { (it as? JsonObject)?.let { op -> op.s("label").ifBlank { op.s("value") } + "=" + op["value"].toString() } }
+            val refreshers = (o["refreshers"] as? JsonArray).orEmpty().mapNotNull { (it as? JsonPrimitive)?.contentOrNull }.filter { it != "auth" }
+            var dyn: String? = null
+            if (o.s("optionsDynamic") == "true" && refreshers.isEmpty() && resolved < 4) {
+                resolved++
+                dyn = withTimeoutOrNull(25_000) { runCatching { options(piece, name, k, conn?.externalId) }.getOrNull() }
+            }
+            "- $k (${type.lowercase()}${if (o.s("required") == "true") ", obrigatório" else ""}): ${o.s("displayName")}" +
                 o.s("description").takeIf { it.isNotBlank() }?.let { " — " + it.take(160) }.orEmpty() +
-                (if (!opts.isNullOrEmpty()) " · opções: ${opts.joinToString()}" else "")
-        }.ifBlank { "(sem campos)" }
+                (o["defaultValue"]?.takeIf { it !is JsonNull }?.let { " · padrão: $it" }.orEmpty()) +
+                (if (!staticOpts.isNullOrEmpty()) " · opções: ${staticOpts.take(20).joinToString()}" else "") +
+                (dyn?.let { " · opções: $it" } ?: if (o.s("optionsDynamic") == "true") " · opções dinâmicas" + (if (refreshers.isNotEmpty()) " (dependem de ${refreshers.joinToString()})" else "") else "")
+        }
+        return ("Campos de ${a.s("displayName")} ($piece / $name):\n" + lines.joinToString("\n").ifBlank { "(sem campos)" }).take(7_000) +
+            "\n\nPróximo passo: conector_executar {conector:\"$piece\", acao:\"$name\", campos:{…}, conexao}."
+    }
+
+    /** Opções de um campo dinâmico ("rótulo=valor"), com a conta quando houver. */
+    private suspend fun options(piece: String, action: String, prop: String, conexao: String?): String? {
+        val connValue = conexao?.let { HubApi.connectionValue(it) }
+        val r = ActivepiecesHub.call("/options", buildJsonObject {
+            put("name", piece); HubApi.catalogVersion(piece)?.let { put("version", it) }
+            put("action", action); put("prop", prop); put("input", JsonObject(emptyMap()))
+            connValue?.let { put("connection", it) }
+        }, 60)
+        (r["connection"] as? JsonObject)?.let { if (conexao != null) HubApi.updateConnection(conexao, it) }
+        if (r.s("ok") != "true") return null
+        val opts = ((r["options"] as? JsonObject)?.get("options") as? JsonArray).orEmpty().mapNotNull { it as? JsonObject }
+        if (opts.isEmpty()) return null
+        return opts.take(25).joinToString { it.s("label").ifBlank { it.s("value") }.take(60) + "=" + it["value"].toString().take(80) } + if (opts.size > 25) " … (+${opts.size - 25})" else ""
     }
 
     /** "campos" pode vir como objeto ou como texto JSON (alguns modelos mandam string). */
@@ -108,36 +155,44 @@ object HubConnectors {
         else -> null
     }
 
+    /** Formato da saída (o Triggers lê o JSON depois do cabeçalho): "✅ … concluída (…).\n\n<JSON>". */
+    internal fun formatRun(piece: String, r: JsonObject): String {
+        if (r.s("ok") != "true") return "ERRO do conector ${appName(piece)} (${r.s("action")}): ${r.s("error").take(3_000)}"
+        val out = r["output"] ?: JsonNull
+        return "✅ ${appName(piece)} · ${r.s("action")} concluída (${r.s("durationMs")} ms, v${r.s("version")}).\n\n" + out.toString().take(12_000)
+    }
+
     suspend fun run(store: Store, conector: String, acao: String, campos: JsonElement?, conexao: String): String {
         if (conector.isBlank() || acao.isBlank()) return "ERRO: informe conector e acao (veja conector_acoes)."
         val input = fields(campos) ?: return "ERRO: campos precisa ser um objeto JSON (ex.: {\"to\":\"a@b.com\"})."
         val piece = HubApi.pieceName(conector)
         var conn = conexao.trim()
+        val mine = runCatching { connections(store) }.getOrDefault(emptyList()).filter { it.pieceName == piece }
         if (conn.isBlank()) {
-            // Uma única conta conectada para esse app: usa ela (evita uma volta só para pegar o id).
-            val mine = runCatching { connections(store) }.getOrDefault(emptyList()).filter { it.pieceName == piece }
+            // Uma única conta para esse app: usa ela (evita uma volta só para pegar o id).
             if (mine.size == 1) conn = mine.single().externalId
             else if (mine.size > 1) return "ERRO: há ${mine.size} contas de ${appName(piece)} conectadas: " +
                 mine.joinToString { "\"${it.displayName}\" (conexao=${it.externalId})" } + ". Escolha uma e repita com conexao."
         }
-        // Hub antigo (sem ap_run_action): não adianta tentar — diz exatamente o que resolver.
-        if (ActivepiecesHub.supportsDirectActions(store) == false) {
-            dev.cueopen.app.notify.NotificationCenter.post("Atualize o hub de conectores", "A versão instalada não executa ações de conector direto. Toque em Atualizar hub em Apps › Conectores.",
-                dev.cueopen.app.notify.NotificationCenter.Priority.NORMAL, dev.cueopen.app.notify.NotificationCenter.Category.FAILURE, dedupeKey = "hub-outdated")
-            return OUTDATED
+        val value = if (conn.isNotBlank()) HubApi.connectionValue(conn)
+            ?: return "ERRO: a conexao \"$conn\" não existe. Chame conectores_listar e use o id exato." else null
+        val connValue = value?.takeIf { it.s("type") != "NO_AUTH" }
+        val r = try {
+            ActivepiecesHub.call("/run", buildJsonObject {
+                put("name", piece); HubApi.catalogVersion(piece)?.let { put("version", it) }
+                put("action", acao.trim()); put("input", input)
+                connValue?.let { put("connection", it) }
+            }, 900)
+        } catch (e: ActivepiecesHub.MiniHubError) {
+            val msg = e.message.orEmpty()
+            if (conn.isNotBlank() && (msg.contains("invalid_grant") || msg.contains("HTTP 401"))) {
+                HubApi.updateConnection(conn, null, "ERROR")
+                return "ERRO: a conta \"$conn\" de ${appName(piece)} perdeu o acesso (token revogado ou vencido). Peça ao usuário para reconectar em Apps › Conectores."
+            }
+            if (msg.contains("conta conectada")) return "ERRO: ${appName(piece)} precisa de uma conta conectada e não há nenhuma. Peça ao usuário para conectar em Apps › Conectores › Adicionar conector."
+            return "ERRO: $msg"
         }
-        val out = mcp(store, "ap_run_action", buildJsonObject {
-            put("pieceName", piece); put("actionName", acao.trim()); put("input", input)
-            if (conn.isNotBlank()) put("connectionExternalId", conn)
-        })
-        if (out.contains("ap_run_action not found")) {
-            // A lista de ferramentas guardada estava velha: atualiza para as próximas chamadas pularem direto para o aviso.
-            hub(store)?.let { runCatching { Connectors.refreshTools(store, it) } }
-            return OUTDATED
-        }
-        return out.take(12_000)
+        (r["connection"] as? JsonObject)?.let { if (conn.isNotBlank()) HubApi.updateConnection(conn, it) }
+        return formatRun(piece, r)
     }
-
-    const val OUTDATED = "ERRO: o hub de conectores instalado é uma versão antiga do Activepieces e não executa ações direto (falta a ferramenta ap_run_action). " +
-        "Não tente de novo nem por outro caminho: diga ao usuário para tocar em \"Atualizar hub\" em Apps › Conectores (as conexões são mantidas) e repetir o pedido depois."
 }

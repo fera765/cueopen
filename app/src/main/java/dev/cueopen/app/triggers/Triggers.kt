@@ -96,7 +96,7 @@ object TriggerLogic {
 
     fun sha(s: String): String = MessageDigest.getInstance("SHA-256").digest(s.toByteArray()).joinToString("") { "%02x".format(it) }.take(16)
 
-    /** JSON que vem depois do cabeçalho do ap_run_action ("✅ … completed (run x).\n\n<JSON>"). */
+    /** JSON que vem depois do cabeçalho de conector_executar ("✅ … concluída (…).\n\n<JSON>"). */
     fun payload(output: String): JsonElement? {
         val start = output.indexOfFirst { it == '{' || it == '[' }.takeIf { it >= 0 } ?: return null
         return runCatching { json.parseToJsonElement(output.substring(start).trim()) }.getOrNull()

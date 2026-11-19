@@ -224,9 +224,10 @@ class Sandbox(private val ctx: Context) {
             if (!isInstalled()) error("Sistema de arquivos incompleto (busybox ausente)")
             appendLog("✅  Sandbox pronto")
             _state.value = State.READY
-            // O hub de conectores vem junto com o Linux: instala sozinho em Wi-Fi (são ~1 GB); no 4G o usuário inicia em Conectores.
+            // Os conectores vêm junto com o Linux: o Node (~50 MB) instala sozinho em Wi-Fi; no 4G, no primeiro uso.
             CueApp.instance.applicationScope.launch(Dispatchers.IO) {
                 runCatching { if (dev.cueopen.app.connectors.ActivepiecesHub.onUnmeteredNetwork()) dev.cueopen.app.connectors.ActivepiecesHub.install() }
+                runCatching { dev.cueopen.app.connectors.HubConnectors.syncConnector(CueApp.instance.store) }
             }
             true
         } catch (t: Throwable) {

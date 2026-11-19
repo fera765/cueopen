@@ -33,7 +33,6 @@ import androidx.navigation.NavController
 import coil.compose.AsyncImage
 import dev.cueopen.app.CueApp
 import dev.cueopen.app.connectors.ActivepiecesHub
-import dev.cueopen.app.connectors.Connectors
 import dev.cueopen.app.connectors.HubApi
 import dev.cueopen.app.ui.theme.Cue
 import kotlinx.coroutines.delay
@@ -48,15 +47,14 @@ import kotlinx.serialization.json.put
 private fun JsonObject.s(k: String) = (this[k] as? JsonPrimitive)?.contentOrNull.orEmpty()
 
 /**
- * Catálogo nativo do hub: os mais de 400 conectores do Activepieces, com login feito aqui no app
- * (OAuth, chave de API, usuário/senha ou campos próprios) — o mesmo que o painel do hub faz.
+ * Catálogo de conectores do Activepieces (verificados no CI), com login feito aqui no app
+ * (OAuth, chave de API, usuário/senha ou campos próprios).
  */
 @Composable
 fun HubCatalogScreen(nav: NavController) {
     val c = Cue.c
     val scope = rememberCoroutineScope()
     val ctx = LocalContext.current
-    var loggedIn by remember { mutableStateOf(HubApi.hasLogin()) }
     var query by remember { mutableStateOf("") }
     var pieces by remember { mutableStateOf(HubApi.cachedPieces()) }
     var loading by remember { mutableStateOf(pieces.isEmpty()) }
@@ -72,7 +70,10 @@ fun HubCatalogScreen(nav: NavController) {
 
     Scaffold(containerColor = c.bg, topBar = { CueTopBar("Adicionar conector", { nav.popBackStack() }) }) { pad ->
         LazyColumn(Modifier.padding(pad), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            if (!loggedIn) item { HubLoginCard { loggedIn = true } }
+            if (!ActivepiecesHub.installed()) item {
+                Text(if (ActivepiecesHub.sandboxReady()) "Os conectores ainda não foram instalados: ao conectar o primeiro app, o app instala sozinho (~50 MB)." else "Instale o Linux (Alpine) do app em Configurações › Sandbox para usar os conectores.",
+                    fontSize = 12.sp, color = c.ink3)
+            }
             item {
                 CueField(query, { query = it }, "Buscar entre ${if (pieces.size > 50 && query.isBlank()) "${pieces.size}+" else "os"} conectores")
             }
@@ -94,11 +95,11 @@ fun HubCatalogScreen(nav: NavController) {
         }
     }
     picked?.let { p ->
-        ConnectPieceDialog(p, loggedIn, onDone = { msg ->
+        ConnectPieceDialog(p, onDone = { msg ->
             picked = null
             android.widget.Toast.makeText(ctx, msg, android.widget.Toast.LENGTH_LONG).show()
-            // O agente passa a ver a conta nova na hora (inventário do hub atualizado).
-            scope.launch { CueApp.instance.store.state.value.connectors.firstOrNull { it.gatewayRef == ActivepiecesHub.REF }?.let { runCatching { Connectors.refreshTools(CueApp.instance.store, it) } } }
+            // O agente passa a ver a conta nova na hora (inventário atualizado).
+            scope.launch { runCatching { dev.cueopen.app.connectors.HubConnectors.syncConnector(CueApp.instance.store) } }
         }, onDismiss = { picked = null })
     }
 }
@@ -111,48 +112,9 @@ private fun authLabel(types: List<String>) = when {
     else -> "dados de acesso"
 }
 
-/** Login local do hub (uma vez): o app guarda criptografado e renova o acesso sozinho. */
-@Composable
-fun HubLoginCard(onLogged: () -> Unit) {
-    val c = Cue.c
-    val scope = rememberCoroutineScope()
-    var email by remember { mutableStateOf("") }
-    var pass by remember { mutableStateOf("") }
-    var create by remember { mutableStateOf(false) }
-    var first by remember { mutableStateOf("") }
-    var busy by remember { mutableStateOf(false) }
-    var err by remember { mutableStateOf<String?>(null) }
-    CueCard {
-        Text("Entrar no hub", fontWeight = FontWeight.SemiBold)
-        Text(if (create) "Crie a conta local do hub (fica só neste aparelho)." else
-            "Use o e-mail e a senha da conta local que você criou no painel do hub. É pedido uma vez; o app renova o acesso sozinho.",
-            fontSize = 12.sp, color = c.ink2)
-        Spacer(Modifier.height(8.dp))
-        if (create) CueField(first, { first = it }, "Seu nome")
-        CueField(email, { email = it }, "E-mail")
-        CueField(pass, { pass = it }, "Senha", password = true)
-        err?.let { Text(it, color = c.err, fontSize = 12.sp) }
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text(if (create) "Já tenho conta" else "Ainda não tenho conta", color = c.accent, fontSize = 12.sp, modifier = Modifier.clickable { create = !create; err = null })
-            Spacer(Modifier.weight(1f))
-            if (busy) CircularProgressIndicator(Modifier.size(22.dp), strokeWidth = 2.dp, color = c.accent)
-            else Box(Modifier.clip(CircleShape).background(c.ink).clickable(enabled = email.isNotBlank() && pass.length >= 8 || (!create && pass.isNotBlank() && email.isNotBlank())) {
-                busy = true; err = null
-                scope.launch {
-                    runCatching {
-                        if (create) HubApi.signUp(email, pass, first.substringBefore(' '), first.substringAfter(' ', "")) else HubApi.signIn(email, pass)
-                    }.onSuccess { onLogged() }.onFailure { err = it.message }
-                    busy = false
-                }
-            }.padding(horizontal = 16.dp, vertical = 8.dp)) { Text(if (create) "Criar conta" else "Entrar", color = c.bg, fontSize = 13.sp, fontWeight = FontWeight.SemiBold) }
-        }
-        if (create) Text("Senha com pelo menos 8 caracteres.", fontSize = 11.sp, color = c.ink3)
-    }
-}
-
 /** Formulário de conexão gerado a partir do "auth" do próprio conector (nada predefinido no app). */
 @Composable
-private fun ConnectPieceDialog(p: HubApi.PieceSummary, loggedIn: Boolean, onDone: (String) -> Unit, onDismiss: () -> Unit) {
+private fun ConnectPieceDialog(p: HubApi.PieceSummary, onDone: (String) -> Unit, onDismiss: () -> Unit) {
     val c = Cue.c
     val scope = rememberCoroutineScope()
     var meta by remember { mutableStateOf<JsonObject?>(null) }
@@ -227,9 +189,11 @@ private fun ConnectPieceDialog(p: HubApi.PieceSummary, loggedIn: Boolean, onDone
     }, text = {
         Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             when {
-                meta == null && err == null -> CircularProgressIndicator(color = c.accent)
-                meta != null && auths.isEmpty() -> Text("Este conector não precisa de login: o agente já pode usar as ${p.actions} ações dele.", fontSize = 13.sp, color = c.ink2)
-                meta != null && !loggedIn -> Text("Entre no hub (no topo desta tela) para conectar sua conta.", fontSize = 13.sp, color = c.ink2)
+                meta == null && err == null -> {
+                    CircularProgressIndicator(color = c.accent)
+                    Text("Preparando o conector (na primeira vez ele é baixado, leva alguns segundos)…", fontSize = 12.sp, color = c.ink3)
+                }
+                meta != null && auths.isEmpty() -> Text("Este conector não precisa de login: toque em Ativar e o agente já pode usar as ${p.actions} ações dele.", fontSize = 13.sp, color = c.ink2)
                 meta != null -> {
                     if (auths.size > 1) Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                         auths.forEachIndexed { i, a -> FilterChip(i == authIdx, { authIdx = i; values.clear() }, { Text(a.s("displayName").ifBlank { a.s("type") }, fontSize = 11.sp) }) }
@@ -276,7 +240,8 @@ private fun ConnectPieceDialog(p: HubApi.PieceSummary, loggedIn: Boolean, onDone
         }
     }, confirmButton = {
         if (busy) CircularProgressIndicator(Modifier.size(22.dp), strokeWidth = 2.dp, color = c.accent)
-        else if (meta != null && auths.isNotEmpty() && loggedIn) TextButton({
+        else if (meta != null && auths.isEmpty()) TextButton({ finish("NO_AUTH", buildJsonObject { put("type", "NO_AUTH") }) }) { Text("Ativar") }
+        else if (meta != null && auths.isNotEmpty()) TextButton({
             err = null
             val missing = props().entries.filter { (k, v) -> (v as? JsonObject)?.s("required") == "true" && (v as? JsonObject)?.s("type") !in setOf("MARKDOWN", "CHECKBOX") && values["p:$k"].isNullOrBlank() && (v as JsonObject).s("defaultValue").isBlank() }
             if (missing.isNotEmpty()) { err = "Preencha: " + missing.joinToString { (k, v) -> (v as JsonObject).s("displayName").ifBlank { k } }; return@TextButton }
@@ -296,11 +261,11 @@ private fun ConnectPieceDialog(p: HubApi.PieceSummary, loggedIn: Boolean, onDone
                         busy = false
                     }
                 }
-                else -> err = "Tipo de login \"$type\" ainda não é suportado no app. Use o painel do hub para este conector."
+                else -> err = "Tipo de login \"$type\" ainda não é suportado no app."
             }
         }) { Text(if (type == "OAUTH2") "Entrar com ${p.displayName}" else "Conectar") }
         else TextButton(onDismiss) { Text("Fechar") }
-    }, dismissButton = { if (meta != null && auths.isNotEmpty() && loggedIn) TextButton(onDismiss) { Text("Cancelar") } })
+    }, dismissButton = { if (meta != null) TextButton(onDismiss) { Text("Cancelar") } })
 
     oauth?.let { (url, redirect) -> OAuthWebDialog(url, redirect, onCode = { onCode(it) }, onError = { e -> oauth = null; err = e }, onDismiss = { oauth = null }) }
 }

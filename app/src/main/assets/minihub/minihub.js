@@ -23,7 +23,7 @@ const { Readable } = require('node:stream')
 
 const ROOT = process.env.MINIHUB_ROOT || '/opt/fluwy-minihub'
 const PORT = Number(process.env.MINIHUB_PORT || 8791)
-const TOKEN = process.env.MINIHUB_TOKEN || ''
+const TOKEN = process.env.MINIHUB_TOKEN || (() => { try { return fs.readFileSync(process.env.MINIHUB_TOKEN_FILE || '/nonexistent', 'utf8').trim() } catch { return '' } })()
 const NPM = process.env.MINIHUB_NPM || 'npm'
 const REGISTRY = (process.env.MINIHUB_REGISTRY || 'https://registry.npmjs.org').replace(/\/+$/, '')
 const SECRETS = (process.env.MINIHUB_SECRETS_URL || 'https://secrets.activepieces.com').replace(/\/+$/, '')
@@ -35,6 +35,8 @@ const STATE = path.join(ROOT, 'state.json')
 const PUBLIC_URL = `http://127.0.0.1:${PORT}/`
 
 const PIECE_PREFIX = '@activepieces/piece-'
+/** Hash do próprio script: o app compara com o do APK e reinicia um processo antigo que tenha sobrado. */
+const SCRIPT_SHA = (() => { try { return crypto.createHash('sha256').update(fs.readFileSync(__filename)).digest('hex').slice(0, 16) } catch { return 'unknown' } })()
 
 // ---------------------------------------------------------------- utilidades
 const isNil = (v) => v === null || v === undefined
@@ -134,17 +136,21 @@ async function npmInstall(name, version) {
     forget(name)
 }
 
-/** Garante a piece instalada. Sem versão: a versão boa já instalada, senão a mais nova do npm. */
-function ensureInstalled(name, version) {
+/**
+ * Garante a piece instalada. [preferred] (a versão verificada do catálogo do app) só é usada quando a piece
+ * ainda não está instalada: uma versão já instalada (talvez atualizada e testada por /update) é mantida.
+ * Com [exact], instala exatamente [preferred].
+ */
+function ensureInstalled(name, preferred, exact = false) {
     return serialized(async () => {
         if (!validName(name)) throw new UserError(`nome de conector inválido: ${name}`)
-        if (version && !validVersion(version)) throw new UserError(`versão inválida: ${version}`)
+        if (preferred && !validVersion(preferred)) throw new UserError(`versão inválida: ${preferred}`)
         const current = installedVersion(name)
-        const want = version || state()[name]?.version || current || await latestVersion(name)
-        if (current === want) {
-            if (!state()[name]) setState(name, { version: want })
-            return want
+        if (current && (!exact || !preferred || current === preferred)) {
+            if (!state()[name]) setState(name, { version: current })
+            return current
         }
+        const want = preferred || await latestVersion(name)
         await npmInstall(name, want)
         try {
             selfTest(name)
@@ -901,7 +907,7 @@ function readBody(req, limit = 40 * 1024 * 1024) {
 }
 
 const ROUTES = {
-    '/install': async (b) => { const n = pieceName(b.name); return { name: n, version: await ensureInstalled(n, b.version) } },
+    '/install': async (b) => { const n = pieceName(b.name); return { name: n, version: await ensureInstalled(n, b.version, b.exact === true) } },
     '/metadata': opMetadata,
     '/options': opOptions,
     '/run': opRun,
@@ -923,7 +929,7 @@ function createServer() {
     return http.createServer(async (req, res) => {
         try {
             const url = new URL(req.url, PUBLIC_URL)
-            if (req.method === 'GET' && url.pathname === '/health') return send(res, 200, { ok: true, node: process.version, pid: process.pid })
+            if (req.method === 'GET' && url.pathname === '/health') return send(res, 200, { ok: true, node: process.version, pid: process.pid, script: SCRIPT_SHA })
             if (req.method === 'GET' && url.pathname.startsWith('/files/')) {
                 // Sem token: a URL é aleatória e só existe no 127.0.0.1 (pieces leem os próprios arquivos).
                 const f = localFile(url.pathname.slice('/files/'.length))

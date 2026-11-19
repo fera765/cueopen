@@ -271,7 +271,8 @@ object Connectors {
     }
 
     suspend fun refreshTools(store: Store, c: Connector): Connector = withContext(Dispatchers.IO) {
-        if (c.gatewayRef == ActivepiecesHub.REF) ActivepiecesHub.ensureRunning()
+        // Mini-hub: não é MCP; só atualiza o inventário das contas (as ações entram pelas ferramentas conector_*).
+        if (c.gatewayRef == ActivepiecesHub.REF) { HubConnectors.syncConnector(store); return@withContext store.connector(c.id) ?: c }
         try {
             val tools = JSONArray()
             withSession(store, c) { cc ->
@@ -282,10 +283,7 @@ object Connectors {
                     cursor = res.optString("nextCursor").ifBlank { null }
                 } while (cursor != null)
             }
-            // Hub: guarda o resumo das contas conectadas para o agente ir direto à ação certa.
-            val inventory = if (c.gatewayRef == ActivepiecesHub.REF) runCatching { hubInventory(store, c, tools) }.getOrNull() else null
-            val updated = (store.connector(c.id) ?: c).copy(toolsJson = tools.toString(), lastError = null, connectedAt = c.connectedAt ?: System.currentTimeMillis(),
-                inventory = inventory ?: (store.connector(c.id) ?: c).inventory)
+            val updated = (store.connector(c.id) ?: c).copy(toolsJson = tools.toString(), lastError = null, connectedAt = c.connectedAt ?: System.currentTimeMillis())
             store.upsertConnector(updated); updated
         } catch (t: Throwable) {
             if (t !is kotlinx.coroutines.CancellationException)
@@ -304,9 +302,7 @@ object Connectors {
         store.state.value.connectors.filter { it.enabled && it.connectedAt != null && it.toolsJson != null && it.gatewayRef != ActivepiecesHub.REF }.forEach { c ->
             val arr = runCatching { JSONArray(c.toolsJson) }.getOrNull() ?: return@forEach
             val all = (0 until arr.length()).map { arr.getJSONObject(it) }
-            // Hub: as ferramentas de execução direta vêm primeiro (ap_run_action ficava fora do corte de 40).
-            val ordered = if (c.gatewayRef == ActivepiecesHub.REF) all.sortedBy { HUB_PRIORITY.indexOf(it.optString("name")).let { p -> if (p < 0) 1000 else p } } else all
-            for (t in ordered.take(if (c.gatewayRef == ActivepiecesHub.REF) 48 else 40)) {
+            for (t in all.take(40)) {
                 if (c.toolPolicy[t.getString("name")] == POLICY_BLOCK) continue  // bloqueada: o modelo nem vê a ferramenta
                 val name = toolFunctionName(c.id, t.getString("name"))
                 val schema = t.optJSONObject("inputSchema")?.toString() ?: "{\"type\":\"object\",\"properties\":{}}"
@@ -315,9 +311,7 @@ object Connectors {
                     put("type", "function")
                     put("function", buildJsonObject {
                         put("name", name)
-                        val hubHint = if (c.gatewayRef == ActivepiecesHub.REF)
-                            " (Hub local: use só nomes de piece/ação devolvidos por ap_list_pieces/ap_research_pieces; nunca invente.)" else ""
-                        put("description", "[${c.name}] " + t.optString("description").take(560) + hubHint)
+                        put("description", "[${c.name}] " + t.optString("description").take(560))
                         put("parameters", schemaEl ?: buildJsonObject { put("type", "object") })
                     })
                 }
@@ -325,13 +319,6 @@ object Connectors {
         }
         return out
     }
-
-    /** Ordem das ferramentas do hub no contexto: execução direta e descoberta primeiro, construção de fluxos depois. */
-    val HUB_PRIORITY = listOf(
-        "ap_run_action", "ap_list_connections", "ap_search_actions", "ap_get_piece_props", "ap_research_pieces",
-        "ap_resolve_property_options", "ap_resolve_property_chain", "ap_setup_guide", "ap_list_flows", "ap_test_flow", "ap_get_run", "ap_list_runs",
-        "ap_find_records", "ap_insert_records", "ap_list_tables",
-    )
 
     const val POLICY_ALLOW = "allow"
     const val POLICY_ASK = "ask"
@@ -359,22 +346,13 @@ object Connectors {
         if (policyFor(store, fnName) == POLICY_BLOCK) return@withContext "RECUSADO: esta ferramenta está bloqueada pelo usuário em Conectores › Permissões das ferramentas."
         val c = store.state.value.connectors.firstOrNull { fnName.startsWith("mcp_${safe(it.id)}__") }
             ?: return@withContext "Conector não encontrado para $fnName"
-        if (c.gatewayRef == ActivepiecesHub.REF && !ActivepiecesHub.ensureRunning())
-            return@withContext "ERRO: o hub de conectores (Activepieces) não iniciou. Abra Conectores › Hub para ver o registro."
+        if (c.gatewayRef == ActivepiecesHub.REF)
+            return@withContext "ERRO: os conectores do Activepieces são usados pelas ferramentas conectores_listar, conector_acoes e conector_executar."
         val arr = runCatching { JSONArray(c.toolsJson) }.getOrNull() ?: JSONArray()
         val toolName = (0 until arr.length()).map { arr.getJSONObject(it).getString("name") }
             .firstOrNull { ("mcp_${safe(c.id)}__${safe(it)}").take(64) == fnName } ?: fnName.substringAfter("__")
-        val isHub = c.gatewayRef == ActivepiecesHub.REF
-        if (isHub) ActivepiecesHub.touch()
         try {
-            fun call() = withSession(store, c) { cc -> rpc(cc, "tools/call", JSONObject().put("name", toolName).put("arguments", JSONObject(args.toString()))) }
-            // Hub reiniciando (rede local recusada/fechada): garante o hub no ar e tenta uma única vez de novo.
-            val res = try { call() } catch (e: java.io.IOException) {
-                if (!isHub) throw e
-                sessions.remove(c.id); statelessReady -= c.id
-                if (!ActivepiecesHub.ensureRunning()) throw e
-                call()
-            }
+            val res = withSession(store, c) { cc -> rpc(cc, "tools/call", JSONObject().put("name", toolName).put("arguments", JSONObject(args.toString()))) }
             val content = res.optJSONArray("content") ?: JSONArray()
             val text = (0 until content.length()).joinToString("\n") { i ->
                 val p = content.getJSONObject(i)
@@ -391,16 +369,6 @@ object Connectors {
             debugLog()?.recordFailure(c.id, "tool-call", t, c.url, "POST")
             "Falha no conector ${c.name}: ${t.message}"
         }
-    }
-
-    /** Chama a ferramenta de listar conexões do hub e devolve um resumo curto (nome do app + conta). */
-    private fun hubInventory(store: Store, c: Connector, tools: JSONArray): String? {
-        val name = (0 until tools.length()).map { tools.getJSONObject(it).optString("name") }.firstOrNull { it.contains("list_connections") } ?: return null
-        val res = withSession(store, c) { cc -> rpc(cc, "tools/call", JSONObject().put("name", name).put("arguments", JSONObject())) }
-        if (res.optBoolean("isError")) return null
-        val content = res.optJSONArray("content") ?: return null
-        val text = (0 until content.length()).joinToString("\n") { content.getJSONObject(it).optString("text") }
-        return text.lines().map { it.trim() }.filter { it.isNotEmpty() }.joinToString(" | ").take(1200).ifBlank { null }
     }
 
     @Suppress("unused") private fun JsonElement.str() = toString()

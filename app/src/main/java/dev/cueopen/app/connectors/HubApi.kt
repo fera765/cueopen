@@ -2,6 +2,8 @@ package dev.cueopen.app.connectors
 
 import dev.cueopen.app.CueApp
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
@@ -12,125 +14,27 @@ import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.put
-import okhttp3.HttpUrl.Companion.toHttpUrl
-import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
-import okhttp3.RequestBody.Companion.toRequestBody
 import java.util.concurrent.TimeUnit
 
 /**
- * Cliente REST do hub local (Activepieces CE em 127.0.0.1): catálogo de conectores, login local e criação de
- * conexões — a mesma API que o painel usa, para o app fazer tudo nativamente. O catálogo é público (sem login);
- * criar/apagar conexão exige o login local do hub (guardado criptografado no aparelho; o token vale 7 dias e é
- * renovado sozinho com as credenciais salvas).
+ * Catálogo, login e contas dos conectores do mini-hub.
+ *
+ * - Catálogo: assets/minihub/catalog.json, gerado no CI instalando e carregando cada piece de verdade
+ *   (tools/minihub/build-catalog.js). Cada entrada traz a versão verificada, usada na primeira instalação.
+ * - Contas: guardadas no aparelho, criptografadas (CredentialVault/Keystore). Nunca vão para a IA, logs ou
+ *   diagnóstico; o mini-hub recebe a conta só no pedido que a usa.
+ * - OAuth: igual ao Activepieces CE — com o app OAuth gerenciado do Activepieces (secrets.activepieces.com)
+ *   quando ele existe para o conector, ou com o client próprio do usuário.
  */
 object HubApi {
-    private val API = ActivepiecesHub.BASE + "/api"
     const val CLOUD_REDIRECT = "https://secrets.activepieces.com/redirect"
-    private const val VAULT_ID = "activepieces_hub_login"
+    private const val VAULT_ID = "minihub_connections"
     private val json = Json { ignoreUnknownKeys = true; isLenient = true }
-    private val jsonType = "application/json".toMediaType()
-    private val http = OkHttpClient.Builder().connectTimeout(10, TimeUnit.SECONDS).readTimeout(120, TimeUnit.SECONDS).build()
     private val web = OkHttpClient.Builder().connectTimeout(15, TimeUnit.SECONDS).readTimeout(30, TimeUnit.SECONDS).build()
 
     class HubError(message: String, val code: Int = 0) : Exception(message)
-
-    data class Login(val email: String, val password: String, val token: String, val projectId: String, val at: Long)
-
-    private fun vault() = dev.cueopen.app.uiconnector.CredentialVault(CueApp.instance)
-
-    fun savedLogin(): Login? = runCatching {
-        val m = vault().load(VAULT_ID) ?: return null
-        Login(m["email"].orEmpty(), m["password"].orEmpty(), m["token"].orEmpty(), m["projectId"].orEmpty(), m["at"]?.toLongOrNull() ?: 0L)
-            .takeIf { it.email.isNotBlank() && it.password.isNotBlank() }
-    }.getOrNull()
-
-    fun hasLogin(): Boolean = savedLogin() != null
-
-    fun forgetLogin() = runCatching { vault().save(VAULT_ID, emptyMap()) }
-
-    private fun store(l: Login) = vault().save(VAULT_ID, mapOf("email" to l.email, "password" to l.password, "token" to l.token, "projectId" to l.projectId, "at" to l.at.toString()))
-
-    // ---------------- HTTP ----------------
-    private fun call(method: String, path: String, body: JsonElement? = null, token: String? = null, query: Map<String, String> = emptyMap()): Pair<Int, String> {
-        val url = (API + path).toHttpUrl().newBuilder().apply { query.forEach { (k, v) -> addQueryParameter(k, v) } }.build()
-        val rb = Request.Builder().url(url)
-        token?.let { rb.header("Authorization", "Bearer $it") }
-        when (method) {
-            "GET" -> rb.get()
-            "DELETE" -> rb.delete()
-            else -> rb.method(method, (body?.toString() ?: "{}").toRequestBody(jsonType))
-        }
-        http.newCall(rb.build()).execute().use { r -> return r.code to (r.body?.string().orEmpty()) }
-    }
-
-    /** Mensagem legível de um erro da API ({"code":"...","params":{"message"|"error":...}}). */
-    fun errorText(code: Int, body: String): String {
-        val o = runCatching { json.parseToJsonElement(body).jsonObject }.getOrNull()
-        val apCode = (o?.get("code") as? JsonPrimitive)?.contentOrNull
-        val params = o?.get("params") as? JsonObject
-        val detail = listOf("message", "error").firstNotNullOfOrNull { k -> (params?.get(k) as? JsonPrimitive)?.contentOrNull }
-            ?: (o?.get("message") as? JsonPrimitive)?.contentOrNull
-        return when (apCode) {
-            "INVALID_CREDENTIALS", "INVALID_BEARER_TOKEN" -> "E-mail ou senha do hub incorretos."
-            "INVALID_APP_CONNECTION" -> "O serviço recusou os dados da conexão" + (detail?.let { ": $it" } ?: ".")
-            "EXISTING_USER" -> "Já existe uma conta no hub. Entre com o e-mail e a senha dela."
-            "AUTHENTICATION", "SESSION_EXPIRED" -> "Sessão do hub expirada."
-            else -> listOfNotNull(apCode, detail).joinToString(": ").ifBlank { "HTTP $code" }
-        }
-    }
-
-    private suspend fun <T> io(block: () -> T): T = withContext(Dispatchers.IO) {
-        if (!ActivepiecesHub.ensureRunning()) throw HubError("O hub de conectores não está no ar. Inicie-o em Apps › Conectores.")
-        block()
-    }
-
-    // ---------------- Login local ----------------
-    private fun parseLogin(email: String, password: String, body: String): Login {
-        val o = json.parseToJsonElement(body).jsonObject
-        val token = (o["token"] as? JsonPrimitive)?.contentOrNull ?: throw HubError("O hub não devolveu o token de acesso.")
-        val project = (o["projectId"] as? JsonPrimitive)?.contentOrNull ?: throw HubError("A conta do hub não tem projeto.")
-        return Login(email, password, token, project, System.currentTimeMillis())
-    }
-
-    suspend fun signIn(email: String, password: String): Login = io {
-        val (code, body) = call("POST", "/v1/authentication/sign-in", buildJsonObject { put("email", email.trim()); put("password", password) })
-        if (code !in 200..299) throw HubError(errorText(code, body), code)
-        parseLogin(email.trim(), password, body).also { store(it) }
-    }
-
-    /** Cria a conta local (só funciona quando o hub ainda não tem nenhuma). */
-    suspend fun signUp(email: String, password: String, firstName: String, lastName: String): Login = io {
-        val (code, body) = call("POST", "/v1/authentication/sign-up", buildJsonObject {
-            put("email", email.trim()); put("password", password); put("firstName", firstName.trim().ifBlank { "Fluwy" })
-            put("lastName", lastName.trim().ifBlank { "Bot" }); put("trackEvents", false); put("newsLetter", false)
-        })
-        if (code !in 200..299) throw HubError(errorText(code, body), code)
-        parseLogin(email.trim(), password, body).also { store(it) }
-    }
-
-    /** Sessão válida: reaproveita o token (vale 7 dias) e entra de novo sozinho antes de vencer. */
-    private suspend fun session(): Login {
-        val l = savedLogin() ?: throw HubError("Entre no hub uma vez (e-mail e senha da conta local) para conectar apps pelo app.")
-        if (l.token.isNotBlank() && System.currentTimeMillis() - l.at < 6L * 24 * 3600_000) return l
-        return signIn(l.email, l.password)
-    }
-
-    /** Chamada autenticada; em 401/403 entra de novo uma vez e repete. */
-    private suspend fun authed(method: String, path: String, body: JsonElement? = null, query: Map<String, String> = emptyMap()): String {
-        var l = session()
-        var (code, text) = io { call(method, path, body, l.token, query) }
-        if (code == 401 || code == 403) {
-            l = signIn(l.email, l.password)
-            val again = io { call(method, path, body, l.token, query) }; code = again.first; text = again.second
-        }
-        if (code !in 200..299) throw HubError(errorText(code, text), code)
-        return text
-    }
-
-    // ---------------- Catálogo (público) ----------------
-    data class PieceSummary(val name: String, val displayName: String, val description: String, val logoUrl: String, val actions: Int, val authTypes: List<String>)
 
     private fun JsonObject.s(k: String) = (this[k] as? JsonPrimitive)?.contentOrNull.orEmpty()
 
@@ -139,42 +43,6 @@ object HubApi {
         is JsonArray -> el.mapNotNull { it as? JsonObject }
         else -> emptyList()
     }
-
-    // ---------------- Cache em disco (só dados públicos do catálogo; nunca credenciais) ----------------
-    private fun cacheFile(name: String) = java.io.File(CueApp.instance.cacheDir, "hub/" + name.replace(Regex("[^A-Za-z0-9._-]"), "_")).apply { parentFile?.mkdirs() }
-    private fun cached(name: String, maxAgeMs: Long): String? = cacheFile(name).takeIf { it.isFile && System.currentTimeMillis() - it.lastModified() < maxAgeMs }?.readText()
-    private fun putCache(name: String, body: String) = runCatching { cacheFile(name).writeText(body) }
-
-    /** Catálogo da última vez (para a tela abrir na hora, mesmo antes de o hub subir). */
-    fun cachedPieces(): List<PieceSummary> = runCatching { cached("pieces.json", 30L * 24 * 3600_000)?.let { parsePieces(it) } }.getOrNull().orEmpty()
-
-    private fun parsePieces(body: String) = (json.parseToJsonElement(body) as? JsonArray).orEmpty().mapNotNull { it as? JsonObject }.map { o ->
-        PieceSummary(o.s("name"), o.s("displayName"), o.s("description"), o.s("logoUrl"),
-            (o["actions"] as? JsonPrimitive)?.contentOrNull?.toIntOrNull() ?: 0, authList(o["auth"]).map { it.s("type") })
-    }
-
-    /** Catálogo: sem busca usa o cache de até 24 h; busca filtra o cache localmente quando ele existe. */
-    suspend fun pieces(search: String = ""): List<PieceSummary> {
-        cached("pieces.json", 24 * 3600_000L)?.let { body ->
-            val all = runCatching { parsePieces(body) }.getOrNull()
-            if (all != null) {
-                val q = search.trim().lowercase()
-                return if (q.isBlank()) all else all.filter { (it.displayName + " " + it.name + " " + it.description).lowercase().contains(q) }
-            }
-        }
-        return io {
-        val q = buildMap { put("sortBy", "POPULARITY"); put("orderBy", "DESC"); if (search.isNotBlank()) put("searchQuery", search.trim()) }
-        val (code, body) = call("GET", "/v1/pieces", query = q)
-        if (code !in 200..299) throw HubError(errorText(code, body), code)
-        if (search.isBlank()) putCache("pieces.json", body)
-        (json.parseToJsonElement(body) as? JsonArray).orEmpty().mapNotNull { it as? JsonObject }.map { o ->
-            PieceSummary(o.s("name"), o.s("displayName"), o.s("description"), o.s("logoUrl"),
-                (o["actions"] as? JsonPrimitive)?.contentOrNull?.toIntOrNull() ?: 0, authList(o["auth"]).map { it.s("type") })
-        }
-        }
-    }
-
-    private val pieceCache = java.util.concurrent.ConcurrentHashMap<String, Pair<Long, JsonObject>>()
 
     /** "gmail" → "@activepieces/piece-gmail"; nomes completos passam como estão. */
     fun pieceName(raw: String): String {
@@ -186,29 +54,95 @@ object HubApi {
         }
     }
 
-    /** Metadados completos de um conector (ações com campos, auth). Cache em memória (30 min) e em disco (7 dias). */
-    suspend fun piece(name: String): JsonObject {
-        val full = pieceName(name)
-        pieceCache[full]?.takeIf { System.currentTimeMillis() - it.first < 30 * 60_000 }?.let { return it.second }
-        cached("piece_$full.json", 7L * 24 * 3600_000)?.let { body ->
-            runCatching { json.parseToJsonElement(body).jsonObject }.getOrNull()?.let { pieceCache[full] = System.currentTimeMillis() to it; return it }
-        }
-        return io {
-        val (code, body) = call("GET", "/v1/pieces/$full")
-        if (code == 404) throw HubError("O conector \"$name\" não existe no catálogo do hub.", 404)
-        if (code !in 200..299) throw HubError(errorText(code, body), code)
-        putCache("piece_$full.json", body)
-        json.parseToJsonElement(body).jsonObject.also { pieceCache[full] = System.currentTimeMillis() to it }
+    // ---------------- Catálogo ----------------
+    data class PieceSummary(val name: String, val displayName: String, val description: String, val logoUrl: String, val actions: Int, val authTypes: List<String>)
+
+    /** Ação no catálogo: nome técnico, nome de exibição, descrição e campos obrigatórios. */
+    data class CatalogAction(val name: String, val displayName: String, val description: String, val required: List<String>)
+    data class CatalogPiece(val name: String, val version: String, val displayName: String, val description: String, val logoUrl: String,
+                            val authTypes: List<String>, val authOptional: Boolean, val actions: List<CatalogAction>, val triggers: Int) {
+        fun summary() = PieceSummary(name, displayName, description, logoUrl, actions.size, authTypes)
+    }
+
+    @Volatile private var catalogCache: List<CatalogPiece>? = null
+
+    internal fun parseCatalog(text: String): List<CatalogPiece> {
+        val root = json.parseToJsonElement(text).jsonObject
+        return (root["pieces"] as? JsonArray).orEmpty().mapNotNull { it as? JsonObject }.mapNotNull { o ->
+            val name = o.s("name").ifBlank { return@mapNotNull null }
+            val actions = (o["actions"] as? JsonArray).orEmpty().mapNotNull { a ->
+                val arr = a as? JsonArray ?: return@mapNotNull null
+                fun at(i: Int) = (arr.getOrNull(i) as? JsonPrimitive)?.contentOrNull.orEmpty()
+                CatalogAction(at(0), at(1).ifBlank { at(0) }, at(2), (arr.getOrNull(3) as? JsonArray).orEmpty().mapNotNull { (it as? JsonPrimitive)?.contentOrNull })
+            }
+            CatalogPiece(name, o.s("version"), o.s("displayName").ifBlank { name.substringAfter("piece-") }, o.s("description"), o.s("logoUrl"),
+                (o["auth"] as? JsonArray).orEmpty().mapNotNull { (it as? JsonPrimitive)?.contentOrNull }, o.s("authOptional") == "true",
+                actions, (o["triggers"] as? JsonPrimitive)?.contentOrNull?.toIntOrNull() ?: 0)
         }
     }
 
-    /** Força recarregar o catálogo na próxima abertura (ex.: depois de atualizar o hub). */
-    fun invalidateCatalog() { runCatching { java.io.File(CueApp.instance.cacheDir, "hub").deleteRecursively() }; pieceCache.clear() }
+    fun catalog(): List<CatalogPiece> = catalogCache ?: runCatching {
+        CueApp.instance.assets.open("minihub/catalog.json").use { it.readBytes().toString(Charsets.UTF_8) }.let { parseCatalog(it) }
+    }.getOrDefault(emptyList()).also { if (it.isNotEmpty()) catalogCache = it }
+
+    fun catalogPiece(name: String): CatalogPiece? = pieceName(name).let { n -> catalog().firstOrNull { it.name == n } }
+
+    /** Versão verificada pelo CI (usada só na 1ª instalação; depois vale a instalada/atualizada). */
+    fun catalogVersion(name: String): String? = catalogPiece(name)?.version?.ifBlank { null }
+
+    internal fun search(all: List<CatalogPiece>, query: String): List<CatalogPiece> {
+        val q = query.trim().lowercase()
+        if (q.isBlank()) return all
+        val words = q.split(Regex("\\s+")).filter { it.isNotBlank() }
+        return all.map { p ->
+            val title = p.displayName.lowercase(); val slug = p.name.substringAfter("piece-")
+            val hay = "$title $slug ${p.description.lowercase()} " + p.actions.joinToString(" ") { (it.displayName + " " + it.name).lowercase() }
+            val score = when {
+                title == q || slug == q -> 0
+                title.startsWith(q) || slug.startsWith(q) -> 1
+                title.contains(q) || slug.contains(q) -> 2
+                words.all { hay.contains(it) } -> 3
+                else -> 99
+            }
+            p to score
+        }.filter { it.second < 99 }.sortedWith(compareBy({ it.second }, { it.first.displayName })).map { it.first }
+    }
+
+    fun cachedPieces(): List<PieceSummary> = catalog().map { it.summary() }
+
+    suspend fun pieces(search: String = ""): List<PieceSummary> = withContext(Dispatchers.Default) {
+        val all = catalog()
+        if (all.isEmpty()) throw HubError("Catálogo de conectores ausente neste APK.")
+        search(all, search).map { it.summary() }
+    }
+
+    // ---------------- Metadados completos (do mini-hub, com os campos de cada ação) ----------------
+    private val pieceCache = java.util.concurrent.ConcurrentHashMap<String, Pair<Long, JsonObject>>()
+    private fun cacheFile(name: String) = java.io.File(CueApp.instance.cacheDir, "minihub/" + name.replace(Regex("[^A-Za-z0-9._-]"), "_")).apply { parentFile?.mkdirs() }
+
+    /** Metadados completos (ações com campos, auth) da versão instalada. Na 1ª vez instala o conector (~10–60 s). */
+    suspend fun piece(name: String): JsonObject {
+        val full = pieceName(name)
+        pieceCache[full]?.takeIf { System.currentTimeMillis() - it.first < 30 * 60_000 }?.let { return it.second }
+        withContext(Dispatchers.IO) {
+            cacheFile("piece_$full.json").takeIf { it.isFile && System.currentTimeMillis() - it.lastModified() < 7L * 24 * 3600_000 }?.readText()
+        }?.let { body -> runCatching { json.parseToJsonElement(body).jsonObject }.getOrNull()?.let { pieceCache[full] = System.currentTimeMillis() to it; return it } }
+        val meta = try {
+            ActivepiecesHub.call("/metadata", buildJsonObject { put("name", full); catalogVersion(full)?.let { put("version", it) } }, 900)
+        } catch (e: ActivepiecesHub.MiniHubError) {
+            throw HubError(if (e.code == 404) "O conector \"$name\" não existe no catálogo do Activepieces." else e.message.orEmpty(), e.code)
+        }
+        withContext(Dispatchers.IO) { runCatching { cacheFile("piece_$full.json").writeText(meta.toString()) } }
+        pieceCache[full] = System.currentTimeMillis() to meta
+        return meta
+    }
+
+    fun invalidateCatalog() { runCatching { java.io.File(CueApp.instance.cacheDir, "minihub").deleteRecursively() }; pieceCache.clear() }
 
     // ---------------- OAuth ----------------
     private var cloudApps: Pair<Long, Map<String, String>>? = null
 
-    /** Apps OAuth oficiais do Activepieces (client_id por conector) usados no login sem configurar nada. */
+    /** Apps OAuth gerenciados do Activepieces (client_id por conector): login com um toque, como no Activepieces CE. */
     suspend fun cloudClientId(pieceName: String): String? = withContext(Dispatchers.IO) {
         val cached = cloudApps?.takeIf { System.currentTimeMillis() - it.first < 6 * 3600_000L }?.second
         val map = cached ?: runCatching {
@@ -220,55 +154,98 @@ object HubApi {
         map[pieceName]
     }
 
-    /** Endereço de retorno do OAuth com client próprio (o que o painel mostra). */
-    suspend fun ownRedirectUrl(): String = io {
-        val (code, body) = call("GET", "/v1/flags")
-        val o = if (code in 200..299) runCatching { json.parseToJsonElement(body).jsonObject }.getOrNull() else null
-        (o?.get("THIRD_PARTY_AUTH_PROVIDER_REDIRECT_URL") as? JsonPrimitive)?.contentOrNull ?: (ActivepiecesHub.BASE + "/redirect")
-    }
+    /** Endereço de retorno para app OAuth próprio (o mesmo do hub antigo: quem já cadastrou não precisa mudar). */
+    fun ownRedirectUrl(): String = ActivepiecesHub.BASE + "/redirect"
 
     data class AuthUrl(val url: String, val codeVerifier: String?)
 
     suspend fun authorizationUrl(pieceName: String, clientId: String, redirectUrl: String, props: Map<String, String>): AuthUrl {
-        val l = session()
-        val text = authed("POST", "/v1/app-connections/oauth2/authorization-url", buildJsonObject {
-            put("pieceName", pieceName); put("projectId", l.projectId); put("clientId", clientId); put("redirectUrl", redirectUrl)
-            if (props.isNotEmpty()) put("props", JsonObject(props.mapValues { JsonPrimitive(it.value) }))
-        })
-        val o = json.parseToJsonElement(text).jsonObject
-        return AuthUrl(o.s("authorizationUrl").ifBlank { throw HubError("O hub não gerou o link de login.") }, o.s("codeVerifier").ifBlank { null })
+        val o = try {
+            ActivepiecesHub.call("/oauth/url", buildJsonObject {
+                put("name", pieceName(pieceName)); catalogVersion(pieceName)?.let { put("version", it) }
+                put("clientId", clientId); put("redirectUrl", redirectUrl)
+                if (props.isNotEmpty()) put("props", JsonObject(props.mapValues { JsonPrimitive(it.value) }))
+            }, 900)
+        } catch (e: ActivepiecesHub.MiniHubError) { throw HubError(e.message.orEmpty(), e.code) }
+        return AuthUrl(o.s("authorizationUrl").ifBlank { throw HubError("Não consegui gerar o link de login.") }, o.s("codeVerifier").ifBlank { null })
     }
 
-    // ---------------- Conexões ----------------
-    private fun newExternalId() = java.util.UUID.randomUUID().toString().replace("-", "").take(21)
-
-    /** Cria a conexão; [value] é o objeto "value" da API (com "type"). O hub valida a credencial no serviço antes de salvar. */
-    suspend fun createConnection(pieceName: String, displayName: String, type: String, value: JsonObject): String {
-        val l = session()
-        val text = authed("POST", "/v1/app-connections", buildJsonObject {
-            put("externalId", newExternalId()); put("displayName", displayName.ifBlank { pieceName.substringAfterLast("piece-") })
-            put("pieceName", pieceName); put("projectId", l.projectId); put("type", type); put("value", value)
-        })
-        HubConnectors.invalidate()
-        return runCatching { json.parseToJsonElement(text).jsonObject.s("externalId") }.getOrDefault("")
-    }
-
+    // ---------------- Contas conectadas (no aparelho, criptografadas) ----------------
     data class HubConnection(val id: String, val externalId: String, val displayName: String, val pieceName: String, val status: String)
 
-    suspend fun connections(): List<HubConnection> {
-        val l = session()
-        val out = ArrayList<HubConnection>()
-        var cursor: String? = null
-        do {
-            val text = authed("GET", "/v1/app-connections", query = buildMap { put("projectId", l.projectId); put("limit", "100"); cursor?.let { put("cursor", it) } })
-            val o = json.parseToJsonElement(text).jsonObject
-            (o["data"] as? JsonArray).orEmpty().mapNotNull { it as? JsonObject }.forEach { c ->
-                out += HubConnection(c.s("id"), c.s("externalId"), c.s("displayName"), c.s("pieceName"), c.s("status"))
-            }
-            cursor = o.s("next").ifBlank { null }
-        } while (cursor != null && out.size < 1000)
-        return out
+    private val connMutex = Mutex()
+    private fun vault() = dev.cueopen.app.uiconnector.CredentialVault(CueApp.instance)
+    private fun loadAll(): MutableMap<String, JsonObject> = (vault().load(VAULT_ID) ?: emptyMap())
+        .mapNotNull { (k, v) -> runCatching { k to json.parseToJsonElement(v).jsonObject }.getOrNull() }.toMap().toMutableMap()
+    private fun saveAll(m: Map<String, JsonObject>) = vault().save(VAULT_ID, m.mapValues { it.value.toString() })
+
+    private fun newExternalId() = java.util.UUID.randomUUID().toString().replace("-", "").take(21)
+
+    /**
+     * Cria a conta: troca o code OAuth por tokens (no mini-hub), valida a credencial no próprio serviço (validate
+     * da piece) e só então guarda. [value] segue o formato do Activepieces ({"type": ..., ...}).
+     */
+    suspend fun createConnection(pieceName: String, displayName: String, type: String, value: JsonObject): String {
+        val name = pieceName(pieceName)
+        val version = catalogVersion(name)
+        val conn: JsonObject = try {
+            if ((type == "CLOUD_OAUTH2" || type == "OAUTH2") && value.s("code").isNotBlank()) {
+                val r = ActivepiecesHub.call("/oauth/claim", buildJsonObject {
+                    put("name", name); version?.let { put("version", it) }
+                    put("mode", if (type == "CLOUD_OAUTH2") "cloud" else "own")
+                    put("code", value.s("code")); value.s("code_challenge").ifBlank { null }?.let { put("codeVerifier", it) }
+                    put("clientId", value.s("client_id")); value.s("client_secret").ifBlank { null }?.let { put("clientSecret", it) }
+                    put("redirectUrl", value.s("redirect_url").ifBlank { if (type == "CLOUD_OAUTH2") CLOUD_REDIRECT else ownRedirectUrl() })
+                    (value["props"] as? JsonObject)?.let { put("props", it) }
+                }, 900)
+                r["connection"] as? JsonObject ?: throw HubError("O serviço não devolveu os tokens.")
+            } else if (type == "NO_AUTH") {
+                buildJsonObject { put("type", "NO_AUTH") }
+            } else value
+        } catch (e: ActivepiecesHub.MiniHubError) { throw HubError("O serviço recusou o login: ${e.message}", e.code) }
+        if (type != "NO_AUTH") {
+            val v = try { ActivepiecesHub.call("/validate", buildJsonObject { put("name", name); version?.let { put("version", it) }; put("connection", conn) }, 900) }
+                catch (e: ActivepiecesHub.MiniHubError) { throw HubError(e.message.orEmpty(), e.code) }
+            if (v.s("valid") == "false") throw HubError("O serviço recusou os dados da conexão" + v.s("error").ifBlank { null }?.let { ": $it" }.orEmpty())
+        } else {
+            // Sem login: só garante o conector instalado para o agente usar na hora.
+            piece(name)
+        }
+        val id = newExternalId()
+        val entry = buildJsonObject {
+            put("externalId", id); put("displayName", displayName.ifBlank { catalogPiece(name)?.displayName ?: name.substringAfter("piece-") })
+            put("pieceName", name); put("status", "ACTIVE"); put("createdAt", System.currentTimeMillis()); put("value", conn)
+        }
+        withContext(Dispatchers.IO) { connMutex.withLock { saveAll(loadAll().apply { put(id, entry) }) } }
+        HubConnectors.invalidate()
+        runCatching { HubConnectors.syncConnector(CueApp.instance.store) }
+        return id
     }
 
-    suspend fun deleteConnection(id: String) { authed("DELETE", "/v1/app-connections/$id"); HubConnectors.invalidate() }
+    suspend fun connections(): List<HubConnection> = withContext(Dispatchers.IO) {
+        loadAll().values.map { o -> HubConnection(o.s("externalId"), o.s("externalId"), o.s("displayName"), o.s("pieceName"), o.s("status").ifBlank { "ACTIVE" }) }
+            .sortedBy { it.displayName.lowercase() }
+    }
+
+    suspend fun deleteConnection(id: String) {
+        withContext(Dispatchers.IO) { connMutex.withLock { saveAll(loadAll().apply { remove(id) }) } }
+        HubConnectors.invalidate()
+        runCatching { HubConnectors.syncConnector(CueApp.instance.store) }
+    }
+
+    /** Valor da conta (segredo): só para mandar ao mini-hub no pedido que a usa. */
+    internal suspend fun connectionValue(externalId: String): JsonObject? = withContext(Dispatchers.IO) {
+        loadAll()[externalId]?.get("value") as? JsonObject
+    }
+
+    /** Guarda tokens renovados pelo mini-hub; [status] ERROR quando o serviço revogou o acesso. */
+    internal suspend fun updateConnection(externalId: String, value: JsonObject?, status: String? = null) = withContext(Dispatchers.IO) {
+        connMutex.withLock {
+            val all = loadAll()
+            val cur = all[externalId] ?: return@withLock
+            all[externalId] = JsonObject(cur.toMutableMap().apply { value?.let { put("value", it) }; status?.let { put("status", JsonPrimitive(it)) } })
+            saveAll(all)
+        }
+        if (status != null) HubConnectors.invalidate()
+    }
 }

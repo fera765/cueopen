@@ -9,7 +9,7 @@ permissions:
 jobs:
   build-debug-apk:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 100
     steps:
       - name: Checkout source
         uses: actions/checkout@v4
@@ -33,6 +33,21 @@ jobs:
         with:
           gradle-version: '8.9'
 
+      - name: Node 22 (mini-hub de conectores)
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Mini-hub - testes locais
+        run: node tools/minihub/test-local.js
+
+      - name: Mini-hub - verificar conectores reais e gerar catálogo do APK
+        run: |
+          set -euo pipefail
+          mkdir -p out-minihub
+          node tools/minihub/build-catalog.js app/src/main/assets/minihub/catalog.json out-minihub/report.json
+          ls -lh app/src/main/assets/minihub/
+
       - name: Run JVM unit tests and assemble debug APK
         run: gradle testDebugUnitTest assembleDebug --stacktrace
 
@@ -50,6 +65,7 @@ jobs:
           printf '%s\n' "$badging" | grep -F "application-label:'Fluwy Bot'"
           mkdir -p out
           cp "$apk" out/Fluwy-Bot-debug.apk
+          cp out-minihub/report.json out/minihub-report.json || true
           unzip -t out/Fluwy-Bot-debug.apk >/dev/null
           "$tools/apksigner" verify --print-certs out/Fluwy-Bot-debug.apk | tee out/SIGNING-CERTIFICATE.txt
           sha256sum out/Fluwy-Bot-debug.apk > out/SHA256SUMS.txt
