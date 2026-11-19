@@ -87,6 +87,22 @@ sealed class ChatItem {
         val selected: Int = -1,
     ) : ChatItem()
 
+    /**
+     * Cobrança Pix gerada pelo agente. NÃO guarda a chave nem o código: só o id da chave no Cofre e o valor. O QR e o
+     * "copia e cola" são remontados na hora, no aparelho, a partir do Cofre criptografado (nunca passam pela IA,
+     * pelo estado salvo nem pelo backup). [cents] = 0 → valor livre.
+     */
+    @Serializable
+    data class PixQr(
+        override val id: String = newId(),
+        override val time: Long = now(),
+        val keyId: String,
+        val keyLabel: String = "",
+        val cents: Long = 0,
+        val description: String = "",
+        val txid: String = "",
+    ) : ChatItem()
+
     /** Resposta falada do agente (TTS no aparelho), com player no chat. */
     @Serializable
     data class Audio(

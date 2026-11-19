@@ -268,6 +268,20 @@ object ActivepiecesHub {
         }
     } }
 
+    internal fun freshImageReady(dir: File): Boolean = HubImage.ready(dir)
+
+    /**
+     * Instalar/atualizar rodam no escopo do app, não no da tela: sair da tela (ou girar o celular) não cancela
+     * mais o download ("The coroutine scope left the composition"). NonCancellable protege a troca de versão.
+     */
+    fun installInBackground(): kotlinx.coroutines.Job = CueApp.instance.applicationScope.launch(Dispatchers.IO + kotlinx.coroutines.NonCancellable) {
+        if (installed() || install()) start()
+    }
+
+    fun updateInBackground(): kotlinx.coroutines.Job = CueApp.instance.applicationScope.launch(Dispatchers.IO + kotlinx.coroutines.NonCancellable) {
+        update()
+    }
+
     /** O hub instalado executa ações de conector direto (ap_run_action)? Versões antigas do Activepieces não. */
     fun supportsDirectActions(store: dev.cueopen.app.data.Store): Boolean? {
         val hub = store.state.value.connectors.firstOrNull { it.gatewayRef == REF } ?: return null
@@ -296,12 +310,17 @@ object ActivepiecesHub {
             CueApp.instance.assets.open("hub/pull_image.py").use { i -> script.outputStream().use { i.copyTo(it) } }
             val prep = sandbox.exec("apk add --no-cache python3 tar gzip 2>&1 | tail -n 2", cwd = "/tmp", timeoutSec = 600, onOutput = { logLine(it) }, idleTimeoutSec = 300)
             if (prep.exitCode != 0) error("não consegui preparar o python3/tar (código ${prep.exitCode})")
-            logLine("Baixando a versão nova do Activepieces. Se cair, toque em Atualizar de novo: continua de onde parou.\n")
-            val r = sandbox.exec("python3 -u $HOST_DIR/pull_image.py $IMAGE $TAG $HOST_DIR/rootfs.new $HOST_DIR/cache",
-                cwd = "/tmp", timeoutSec = 4 * 3600, onOutput = { logLine(it) }, idleTimeoutSec = 900)
             val fresh = File(hostDir(), "rootfs.new")
-            if (r.exitCode != 0 || !File(fresh, "usr/src/app/docker-entrypoint.sh").exists()) error(
-                r.output.lineSequence().lastOrNull { it.startsWith("ERRO:") }?.removePrefix("ERRO:")?.trim() ?: "download da versão nova falhou (código ${r.exitCode})")
+            if (freshImageReady(fresh)) {
+                // Uma tentativa anterior já baixou e montou a imagem (ex.: foi interrompida na cópia): reaproveita.
+                logLine("Versão nova já baixada numa tentativa anterior — reaproveitando (sem baixar de novo).\n")
+            } else {
+                logLine("Baixando a versão nova do Activepieces. Se cair, toque em Atualizar de novo: continua de onde parou.\n")
+                val r = sandbox.exec("python3 -u $HOST_DIR/pull_image.py $IMAGE $TAG $HOST_DIR/rootfs.new $HOST_DIR/cache",
+                    cwd = "/tmp", timeoutSec = 4 * 3600, onOutput = { logLine(it) }, idleTimeoutSec = 900)
+                if (r.exitCode != 0 || !freshImageReady(fresh)) error(
+                    r.output.lineSequence().lastOrNull { it.startsWith("ERRO:") }?.removePrefix("ERRO:")?.trim() ?: "download da versão nova falhou (código ${r.exitCode})")
+            }
             logLine("Copiando banco, conexões e segredos para a versão nova…\n")
             val keep = sandbox.exec("cp -a $HOST_DIR/rootfs/opt/ap-data $HOST_DIR/rootfs.new/opt/ 2>&1; cp -a $HOST_DIR/rootfs/opt/ap-secrets $HOST_DIR/rootfs.new/opt/ 2>&1; " +
                 "rm -f $HOST_DIR/rootfs.new/opt/ap-data/.fluwy-direct-failed $HOST_DIR/rootfs.new/opt/ap-data/.fluwy-bun-copyfile; echo FLUWY_COPY_OK",
@@ -324,7 +343,11 @@ object ActivepiecesHub {
         } finally {
             runCatching { if (wake?.isHeld == true) wake.release() }
         }
-    } }.also { ok -> if (ok) { start(); CueApp.instance.store.state.value.connectors.firstOrNull { it.gatewayRef == REF }?.let { runCatching { Connectors.refreshTools(CueApp.instance.store, it) } } } }
+    } }.also { ok ->
+        // Sucesso: sobe a versão nova e relê as ferramentas. Falha: religa a versão atual (foi parada para baixar).
+        if (installed()) start()
+        if (ok) CueApp.instance.store.state.value.connectors.firstOrNull { it.gatewayRef == REF }?.let { runCatching { Connectors.refreshTools(CueApp.instance.store, it) } }
+    }
 
     /** Sobe o hub (app + worker) e espera o /api/v1/health responder. A primeira partida demora alguns minutos. */
     suspend fun start(): Boolean = mutex.withLock {
@@ -442,4 +465,9 @@ object ActivepiecesHub {
         "Hub local com 700+ apps (Gmail, Instagram, Facebook, GitHub, Supabase…)",
         needsAuth = true, enabled = true, gatewayRef = REF,
     )
+}
+
+/** rootfs.new completo: o pull_image só grava .fluwy-image depois de aplicar todas as camadas. */
+object HubImage {
+    fun ready(dir: File): Boolean = File(dir, ".fluwy-image").exists() && File(dir, "usr/src/app/docker-entrypoint.sh").exists()
 }

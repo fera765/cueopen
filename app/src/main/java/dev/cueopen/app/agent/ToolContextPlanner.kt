@@ -29,6 +29,7 @@ object ToolContextPlanner {
         "agents" to setOf("multi_agents"),
         "schedule" to setOf("sleep", "set_schedule", "cron_add", "cron_list", "cron_remove", "trigger_create", "trigger_list", "trigger_delete"),
         "channels" to setOf("send_file"),
+        "cofre" to setOf("cofre_listar", "pix_qr"),
         "pages" to setOf("page_create", "page_update", "page_read", "page_list"),
         "live" to setOf("live_server"),
         "skills_admin" to setOf("skill_install", "create_skill", "skill_list", "skill_revise"),
@@ -52,6 +53,7 @@ object ToolContextPlanner {
 
     /** Palavras do pedido que ativam cada grupo (sem acento, minúsculas). */
     private val TRIGGERS: Map<String, List<String>> = mapOf(
+        "cofre" to listOf("pix", "qr code", "qrcode", "qr", "cobranc", "cobrar", "cofre", "copia e cola", "receber pagamento", "chave pix", "cartao", "cartão"),
         "web_dev" to listOf("javascript", "console", "network", "rede do site", "requisic", "devtools", "api do site", "scrap", "raspar", "depur", "debug", "xhr", "fetch", "cookie", "dom", "userscript", "user script", "tampermonkey"),
         "agents" to listOf("subagente", "sub-agente", "multi agente", "multiagente", "paralel", "em paralelo", "varios agentes", "workers", "pesquisa ampla", "wide research"),
         "schedule" to listOf("monitor", "acompanh", "a cada", "agend", "todo dia", "toda segunda", "amanhã às", "às ", "toda hora", "de hora em hora", "continu", "periodic", "lembr", "aguard", "espera", "minutos", "vela", "quando chegar", "quando receber", "sempre que", "gatilho", "trigger", "novo e-mail", "novos e-mails", "avise quando", "me avise"),

@@ -139,7 +139,11 @@ fun VaultScreen(nav: NavController) {
         }
     }
     if (adding) AddCardDialog(vault, onDone = { adding = false; cards = vault.list() }, onDismiss = { adding = false })
-    if (addingPix) AddPixDialog(pix, onDone = { addingPix = false; keys = pix.list() }, onDismiss = { addingPix = false })
+    if (addingPix) AddPixDialog(pix, onDone = {
+        // Chave nova: já abre o QR dela (valor livre), com a opção de definir um valor fixo.
+        val before = keys.map { it.id }.toSet()
+        addingPix = false; keys = pix.list(); charge = keys.firstOrNull { it.id !in before }
+    }, onDismiss = { addingPix = false })
     charge?.let { PixChargeDialog(it) { charge = null } }
     removing?.let { (what, action) ->
         AlertDialog(onDismissRequest = { removing = null }, title = { Text("Remover $what?") }, text = { Text("Sai do Cofre deste aparelho.") },
@@ -292,50 +296,49 @@ private fun AddPixDialog(pix: PixVault, onDone: () -> Unit, onDismiss: () -> Uni
     }
 }
 
-private fun qrBitmap(text: String, size: Int = 720): Bitmap {
+internal fun qrBitmap(text: String, size: Int = 720): Bitmap {
     val m = QRCodeWriter().encode(text, BarcodeFormat.QR_CODE, size, size)
     val px = IntArray(size * size) { i -> if (m.get(i % size, i / size)) 0xff000000.toInt() else 0xffffffff.toInt() }
     return Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888).apply { setPixels(px, 0, size, 0, 0, size, size) }
 }
 
-/** Gera a cobrança Pix com valor fixo: QR + copia e cola. O código é conferido (releitura + CRC) antes de aparecer. */
+/**
+ * Cobrança Pix: abre já com o QR de VALOR LIVRE (quem paga digita) e permite gerar um QR de VALOR FIXO.
+ * O código é conferido (releitura + CRC) antes de aparecer.
+ */
 @Composable
 private fun PixChargeDialog(k: PixVault.PixKey, onDismiss: () -> Unit) {
     val c = Cue.c
     val ctx = LocalContext.current
     var amount by remember { mutableStateOf("") }
     var desc by remember { mutableStateOf("") }
-    var code by remember { mutableStateOf<String?>(null) }
     var err by remember { mutableStateOf<String?>(null) }
+    fun build(cv: Long) = runCatching { PixRules.checkedPayload(k.key, k.name, k.city, cv, PixRules.newTxid(), desc) }
+    var shownCents by remember { mutableStateOf(0L) }
+    var code by remember { mutableStateOf(build(0L).getOrNull()) }
+    var editing by remember { mutableStateOf(false) }
     val cents = amount.filter { it.isDigit() }.toLongOrNull() ?: 0L
-    fun money(cv: Long) = "R$ " + "%,d".format(java.util.Locale.US, cv / 100).replace(',', '.') + "," + "%02d".format(cv % 100)
+    fun money(cv: Long) = PixRules.money(cv)
     Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
         Surface(Modifier.fillMaxWidth(0.94f), shape = RoundedCornerShape(24.dp), color = c.bg) {
             Column(Modifier.verticalScroll(rememberScrollState()).padding(20.dp), verticalArrangement = Arrangement.spacedBy(10.dp), horizontalAlignment = Alignment.CenterHorizontally) {
                 Text("Cobrar com Pix", fontWeight = FontWeight.Bold, fontSize = 20.sp)
                 Text("${k.masked} · ${k.name}", fontSize = 12.sp, color = c.ink2)
-                if (code == null) {
-                    OutlinedTextField(if (cents > 0) money(cents) else "", { amount = it.filter { ch -> ch.isDigit() }.take(10) }, label = { Text("Valor") }, singleLine = true,
+                if (code == null || editing) {
+                    OutlinedTextField(if (cents > 0) money(cents) else "", { amount = it.filter { ch -> ch.isDigit() }.take(10) }, label = { Text("Valor fixo") }, singleLine = true,
                         modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(14.dp), keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number))
                     VaultField(desc, { desc = it.take(40) }, "Descrição (opcional)", Icons.Rounded.Notes, false)
                     err?.let { Text(it, color = c.err, fontSize = 12.sp) }
                     Button({
                         err = null
-                        runCatching {
-                            if (cents < 1) error("Informe um valor maior que zero.")
-                            val txid = "FLW" + java.util.UUID.randomUUID().toString().replace("-", "").take(20).uppercase()
-                            val p = PixRules.payload(k.key, k.name, k.city, cents, txid, desc)
-                            // Conferência antes de mostrar: a releitura tem que bater em chave, valor e CRC.
-                            val back = PixRules.parse(p) ?: error("Falha ao montar o código.")
-                            check(back.crcOk && back.key == k.key && back.amount == PixRules.amountText(cents)) { "O código gerado não passou na conferência." }
-                            p
-                        }.onSuccess { code = it }.onFailure { err = it.message }
-                    }, Modifier.fillMaxWidth(), shape = RoundedCornerShape(14.dp), colors = ButtonDefaults.buttonColors(containerColor = c.ink, contentColor = c.bg)) { Text("Gerar QR Code") }
+                        if (cents < 1) err = "Informe um valor maior que zero." else build(cents).onSuccess { code = it; shownCents = cents; editing = false }.onFailure { err = it.message }
+                    }, Modifier.fillMaxWidth(), shape = RoundedCornerShape(14.dp), colors = ButtonDefaults.buttonColors(containerColor = c.ink, contentColor = c.bg)) { Text("Gerar QR com valor fixo") }
+                    TextButton({ err = null; build(0L).onSuccess { code = it; shownCents = 0; editing = false }.onFailure { err = it.message } }) { Text("Usar valor livre") }
                 } else {
                     val bmp = remember(code) { qrBitmap(code!!) }
-                    Text(money(cents), fontWeight = FontWeight.Bold, fontSize = 26.sp)
+                    Text(if (shownCents > 0) money(shownCents) else "Valor livre", fontWeight = FontWeight.Bold, fontSize = 26.sp)
                     Image(bmp.asImageBitmap(), "QR Code Pix", Modifier.size(240.dp).clip(RoundedCornerShape(12.dp)).background(Color.White).padding(8.dp))
-                    Text("Valor fixo no código. Qualquer alteração invalida o QR.", fontSize = 11.sp, color = c.ink3)
+                    Text(if (shownCents > 0) "Valor fixo no código. Qualquer alteração invalida o QR." else "Valor livre: quem paga digita o valor no banco.", fontSize = 11.sp, color = c.ink3)
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         OutlinedButton({
                             (ctx.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager).setPrimaryClip(ClipData.newPlainText("Pix", code))
@@ -346,7 +349,7 @@ private fun PixChargeDialog(k: PixVault.PixKey, onDismiss: () -> Unit) {
                             ctx.startActivity(android.content.Intent.createChooser(send, "Enviar Pix"))
                         }, shape = RoundedCornerShape(14.dp)) { Icon(Icons.Rounded.Share, null); Spacer(Modifier.width(6.dp)); Text("Enviar") }
                     }
-                    TextButton({ code = null }) { Text("Novo valor") }
+                    TextButton({ editing = true }) { Text(if (shownCents > 0) "Outro valor" else "Definir valor fixo") }
                 }
                 TextButton(onDismiss) { Text("Fechar") }
             }

@@ -931,6 +931,7 @@ fun previewOf(i: dev.cueopen.app.data.ChatItem): String = when (i) {
     is dev.cueopen.app.data.ChatItem.Media -> "🖼 " + (i.caption.ifBlank { java.io.File(i.path).name })
     is dev.cueopen.app.data.ChatItem.Cards -> "🗂 " + (i.title.ifBlank { "${i.items.size} resultado(s)" })
     is dev.cueopen.app.data.ChatItem.Audio -> "🔊 " + i.text
+    is dev.cueopen.app.data.ChatItem.PixQr -> "💠 Pix " + (if (i.cents > 0) dev.cueopen.app.vault.PixRules.money(i.cents) else "valor livre")
 }.lineSequence().firstOrNull().orEmpty()
 
 fun dayGroup(t: Long): String {

@@ -464,6 +464,7 @@ fun TimelineItem(item: ChatItem, onOpenComputer: (String) -> Unit, onOpenMedia: 
         is ChatItem.Media -> MediaCard(item, onOpenMedia)
         is ChatItem.Cards -> ResultCards(item, sessionId, onSend)
         is ChatItem.Audio -> AudioMessage(item)
+        is ChatItem.PixQr -> PixQrMessage(item)
         is ChatItem.Error -> InfoRow(Icons.Rounded.ErrorOutline, item.text, Cue.c.err)
         is ChatItem.ConnectorProposal -> ConnectorProposalCard(item, sessionId, nav)
         is ChatItem.UserScriptProposal -> UserScriptProposalCard(item, sessionId, nav)
@@ -874,6 +875,8 @@ fun sessionMarkdown(s: Session): String = buildString {
             is ChatItem.Media -> appendLine("🖼 ${i.caption} (${java.io.File(i.path).name})\n")
             is ChatItem.Cards -> { appendLine("🗂 ${i.title.ifBlank { i.kind }}"); i.items.forEachIndexed { n, e -> appendLine("${n + 1}. ${e.title}${if (e.price.isNotBlank()) " — " + e.price else ""}${if (e.url.isNotBlank()) " — " + e.url else ""}${if (n == i.selected) " ✅" else ""}") }; appendLine() }
             is ChatItem.Audio -> appendLine("🔊 ${i.text.take(300)}\n")
+            // Exportação nunca leva o código Pix (contém a chave): só o resumo.
+            is ChatItem.PixQr -> appendLine("💠 Pix · ${i.keyLabel} · ${if (i.cents > 0) dev.cueopen.app.vault.PixRules.money(i.cents) else "valor livre"}\n")
             is ChatItem.Approval -> appendLine("🛡 Confirmação: ${i.summary} — ${i.state}\n")
             is ChatItem.SectionSetup -> appendLine("📁 Seção ${i.sectionName} (${i.agentNames.joinToString()}) — ${i.state}\n")
         }

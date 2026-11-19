@@ -2703,6 +2703,12 @@ class AgentRunner(
                         (if (item.kind == "product") " Se o usuário tocar num card, a escolha chega como [Seleção]." else "")
                 }
             }
+            "cofre_listar" -> dev.cueopen.app.vault.VaultTools.list(ctx)
+            "pix_qr" -> {
+                val (item, msg) = dev.cueopen.app.vault.VaultTools.pixQr(ctx, s("chave"), s("valor"), s("descricao"))
+                if (item != null) store.addItem(sessionId, item)
+                msg
+            }
             else -> "ERRO: ferramenta desconhecida."
         }
     }
@@ -3192,6 +3198,7 @@ class AgentRunner(
             appendLine("6c. Antes de pedir ao usuário para conectar um app/serviço, tente com o que você já tem (conectores ligados, web, shell, browser_*). Só peça a conexão quando não houver outro caminho; depois de pedir, termine o que der por outro caminho.")
             appendLine("6e. ${MultiRequest.PROMPT_LINE}")
             appendLine("6f. Resultados para o usuário escolher ou consultar (produtos de lojas, notícias, sites, serviços): depois de coletar os dados reais, mostre com show_cards (imagem, preço, loja, link…) em vez de listar em texto. Nunca invente campos. Compra, pagamento ou pedido só depois da seleção e da confirmação explícita do usuário.")
+            appendLine("6g. Cobrança Pix / QR Code: use pix_qr (chave do Cofre + valor, ou valor livre). O app desenha o QR e o copia e cola no chat; você nunca vê nem escreve chave, código ou dados de cartão. Para ver o que há no Cofre, cofre_listar. Pagamentos e compras só o usuário faz.")
             appendLine("6d. Downloads feitos no navegador vão para /root/workspace/downloads; o resultado chega numa linha [Download] junto da próxima saída de ferramenta.")
             run {
                 val hubRef = dev.cueopen.app.connectors.ActivepiecesHub.REF
@@ -4009,6 +4016,15 @@ class AgentRunner(
                     })
                 })
             }, listOf("kind", "items")))
+        // Cofre: o agente vê só apelidos e gera QR Pix que o APP desenha no chat — chave, código e cartões nunca chegam à IA.
+        add(tool("cofre_listar", "Lista o Cofre do usuário: chaves Pix (id e apelido) e cartões (só apelido e bandeira). Nenhum dado sensível é mostrado a você.", buildJsonObject {}))
+        add(tool("pix_qr", "Gera uma cobrança Pix (QR Code + código copia e cola) com uma chave do Cofre e mostra no chat com botões de copiar e enviar. " +
+            "Valor fixo (o banco não deixa trocar) ou vazio para valor livre. Você não vê a chave nem o código: não tente escrevê-los.",
+            buildJsonObject {
+                put("chave", str("Id ou apelido da chave (de cofre_listar). Opcional se houver só uma."))
+                put("valor", str("Valor em reais, ex.: 25,90. Vazio = valor livre (quem paga digita)."))
+                put("descricao", str("Descrição curta (opcional, até 40 caracteres)"))
+            }))
         add(tool("tools_load", "Carrega ferramentas que estão fora do contexto (listadas em 'Ferramentas sob demanda'): grupos (ex.: wallet, device, web_dev, agents, schedule), connector:<id> ou mcp:<servidor>. Elas ficam disponíveis a partir da sua próxima resposta e até o fim da tarefa.",
             buildJsonObject { put("names", strArray("Nomes a carregar, ex.: [\"wallet\", \"connector:iqoption\"]")) }, listOf("names")))
         if (allowMultiAgent) add(tool("ask_user", "Faz uma pergunta aberta ao usuário e pausa a tarefa até ele responder. Quando a resposta for uma escolha entre opções, prefira ask_question.", buildJsonObject { put("question", str("Pergunta clara e completa")) }, listOf("question")))
@@ -5373,7 +5389,7 @@ class AgentRunner(
                 "browser_new_tab" -> browserFor(sessionId).newTab(SecretVault.resolve(sessionId, s("url")))
                 "browser_select_tab" -> browserFor(sessionId).selectTabForAgent(s("tab_id"))
                 "browser_close_tab" -> browserFor(sessionId).closeTabForAgent(s("tab_id"))
-                "reply_audio", "notify", "show_cards" -> extraOutputTool(sessionId, call.name, a)
+                "reply_audio", "notify", "show_cards", "cofre_listar", "pix_qr" -> extraOutputTool(sessionId, call.name, a)
                 "conectores_listar" -> dev.cueopen.app.connectors.HubConnectors.list(store)
                 "conector_acoes" -> dev.cueopen.app.connectors.HubConnectors.actions(store, s("conector"), s("acao"), s("busca"))
                 "conector_executar" -> dev.cueopen.app.connectors.HubConnectors.run(store, s("conector"), s("acao"),

@@ -125,15 +125,46 @@ object PixRules {
      * (valor, chave, recebedor) invalida o CRC e o banco recusa o QR.
      */
     fun payload(key: String, name: String, city: String, cents: Long, txid: String = "***", description: String = ""): String {
-        require(cents in 1..99_999_999_99L) { "Valor inválido." }
+        // cents = 0 → QR de VALOR LIVRE (sem o campo 54): quem paga digita o valor no banco.
+        require(cents in 0..99_999_999_99L) { "Valor inválido." }
         val desc = cleanText(description, 40)
         val account = tlv("00", "br.gov.bcb.pix") + tlv("01", key) + (if (desc.isNotBlank()) tlv("02", desc) else "")
         val tx = txid.filter { it.isLetterOrDigit() }.take(25).ifBlank { "***" }
         val body = tlv("00", "01") + tlv("01", "12") + tlv("26", account) + tlv("52", "0000") + tlv("53", "986") +
-            tlv("54", amountText(cents)) + tlv("58", "BR") + tlv("59", cleanText(name, 25)) + tlv("60", cleanText(city, 15)) +
+            (if (cents > 0) tlv("54", amountText(cents)) else "") + tlv("58", "BR") + tlv("59", cleanText(name, 25)) + tlv("60", cleanText(city, 15)) +
             tlv("62", tlv("05", tx)) + "6304"
         return body + crc16(body)
     }
+
+    /**
+     * Monta e CONFERE o código antes de mostrar: a releitura tem que bater em chave, valor (ou ausência dele) e CRC.
+     * Usado pela tela do Cofre e pela ferramenta do agente — um só caminho para gerar Pix.
+     */
+    fun checkedPayload(key: String, name: String, city: String, cents: Long, txid: String, description: String = ""): String {
+        val p = payload(key, name, city, cents, txid, description)
+        val back = parse(p) ?: error("Falha ao montar o código Pix.")
+        check(back.crcOk && back.key == key && back.amount == (if (cents > 0) amountText(cents) else null)) { "O código gerado não passou na conferência." }
+        return p
+    }
+
+    fun newTxid(): String = "FLW" + java.util.UUID.randomUUID().toString().replace("-", "").take(20).uppercase()
+
+    /** "10", "10,5", "R$ 1.234,56", "1234.56" → centavos; vazio/0 → 0 (valor livre); inválido → null. */
+    fun parseCents(raw: String?): Long? {
+        val t = raw.orEmpty().replace("R$", "").replace(" ", "").trim()
+        if (t.isEmpty()) return 0L
+        val norm = when {
+            t.contains(',') -> t.replace(".", "").replace(',', '.')
+            t.count { it == '.' } > 1 -> t.replace(".", "")
+            else -> t
+        }
+        val v = norm.toBigDecimalOrNull() ?: return null
+        if (v.signum() < 0) return null
+        val c = runCatching { v.movePointRight(2).setScale(0, java.math.RoundingMode.UNNECESSARY).toLong() }.getOrNull() ?: return null
+        return if (c > 99_999_999_99L) null else c
+    }
+
+    fun money(cents: Long): String = "R$ " + "%,d".format(java.util.Locale.US, cents / 100).replace(',', '.') + "," + "%02d".format(cents % 100)
 
     data class Parsed(val key: String, val name: String, val city: String, val amount: String?, val crcOk: Boolean)
 

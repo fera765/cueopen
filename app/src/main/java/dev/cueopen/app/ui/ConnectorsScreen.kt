@@ -146,17 +146,20 @@ fun ConnectorsScreen(nav: NavController) {
                             when (hubState) {
                                 ActivepiecesHub.State.NOT_INSTALLED, ActivepiecesHub.State.ERROR -> if (ActivepiecesHub.sandboxReady()) {
                                     pill(if (ActivepiecesHub.installed()) "Iniciar" else "Instalar hub") {
-                                        scope.launch { if (ActivepiecesHub.installed() || ActivepiecesHub.install()) ActivepiecesHub.start() }
+                                        ActivepiecesHub.installInBackground()
                                     }
                                 }
-                                ActivepiecesHub.State.STOPPED -> pill("Iniciar") { scope.launch { ActivepiecesHub.start() } }
+                                ActivepiecesHub.State.STOPPED -> {
+                                    pill("Iniciar") { scope.launch { ActivepiecesHub.start() } }
+                                    if (ActivepiecesHub.installed()) pill("Atualizar hub", primary = ActivepiecesHub.supportsDirectActions(app.store) == false) { ActivepiecesHub.updateInBackground() }
+                                }
                                 ActivepiecesHub.State.RUNNING -> {
                                     pill("Abrir painel") { openUrl(ActivepiecesHub.BASE) }
                                     pill(if (hubConn?.connectedAt != null) "Reconectar" else "Conectar ao agente", primary = hubConn?.connectedAt == null) {
                                         connect((hubConn ?: ActivepiecesHub.connector()).copy(enabled = true, accessToken = null, lastError = null))
                                     }
                                     pill("Parar", primary = false) { scope.launch { ActivepiecesHub.stop() } }
-                                    pill("Atualizar hub", primary = ActivepiecesHub.supportsDirectActions(app.store) == false) { scope.launch { ActivepiecesHub.update() } }
+                                    pill("Atualizar hub", primary = ActivepiecesHub.supportsDirectActions(app.store) == false) { ActivepiecesHub.updateInBackground() }
                                 }
                                 else -> CircularProgressIndicator(Modifier.size(22.dp), strokeWidth = 2.dp, color = c.accent)
                             }
