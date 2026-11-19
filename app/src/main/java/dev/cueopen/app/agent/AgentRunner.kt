@@ -2651,6 +2651,83 @@ class AgentRunner(
         return job
     }
 
+
+    // ───────── Ferramentas novas fora do runTool (o método já está perto do limite de 64 KB da JVM) ─────────
+    private suspend fun extraOutputTool(sessionId: String, name: String, a: JsonObject): String {
+        fun s(k: String) = a[k]?.jsonPrimitive?.contentOrNull.orEmpty()
+        return when (name) {
+            "reply_audio" -> {
+                val audio = dev.cueopen.app.assistant.VoiceReplies.synthesize(ctx, java.io.File(sandbox.workspaceFor(sessionId), "audio"), s("text"))
+                if (audio == null) "ERRO: o motor de voz do aparelho não está disponível (sem voz pt-BR instalada). Responda em texto e avise o usuário."
+                else { store.addItem(sessionId, audio); "Áudio enviado no chat (${audio.durationMs / 1000}s). Não repita o mesmo conteúdo em texto longo." }
+            }
+            "notify" -> {
+                val p = runCatching { dev.cueopen.app.notify.NotificationCenter.Priority.valueOf(s("priority").uppercase()) }.getOrDefault(dev.cueopen.app.notify.NotificationCenter.Priority.NORMAL)
+                val agentName = store.session(sessionId)?.agentId?.let { store.agent(it)?.name }.orEmpty()
+                dev.cueopen.app.notify.NotificationCenter.post(s("title").ifBlank { agentName.ifBlank { "Fluwy Bot" } }, s("text"), p, dev.cueopen.app.notify.NotificationCenter.Category.MONITOR, sessionId, agentName)
+                if (p == dev.cueopen.app.notify.NotificationCenter.Priority.SILENT) "Registrado no histórico de avisos (sem interromper o usuário)." else "Aviso enviado (${p.name.lowercase()})."
+            }
+            "show_cards" -> {
+                val parsed = ResultCardsParser.parse(s("kind"), s("title"), a["items"])
+                if (parsed.isFailure) "ERRO: ${parsed.exceptionOrNull()?.message}" else {
+                    val item = parsed.getOrThrow()
+                    store.addItem(sessionId, item)
+                    "Mostrei ${item.items.size} card(s) no chat. Não repita a lista em texto: escreva no máximo 2 frases (sua recomendação e o próximo passo)." +
+                        (if (item.kind == "product") " Se o usuário tocar num card, a escolha chega como [Seleção]." else "")
+                }
+            }
+            else -> "ERRO: ferramenta desconhecida."
+        }
+    }
+
+    private suspend fun browserReadTool(sessionId: String, maxChars: Int, model: String): String {
+        val host = browserFor(sessionId)
+        val out = host.read(maxChars)
+        // OpenBot 0.70: página que abriu sem texto nem controles (canvas/JS) → print automático descrito pelo modelo.
+        return if (!out.contains(dev.cueopen.app.browser.BrowserHost.EMPTY_PAGE_MARK)) out else {
+            val jpeg = runCatching { host.captureJpeg() }.getOrNull()
+            val seen = if (jpeg == null) null else try {
+                runCatching { llm.inspectImage("Esta página do navegador carregou sem texto legível para leitura. Descreva em português o que aparece na tela (textos visíveis, botões, imagens, mensagens de erro ou de carregamento). Seja objetivo.", jpeg, model = model, conversationId = sessionId) }.getOrNull()
+            } finally { jpeg.fill(0) }
+            out + "\n\n--- Print automático (a página não tem texto legível) ---\n" +
+                (seen?.takeIf { it.isNotBlank() } ?: "Não foi possível descrever o print (modelo sem visão ou captura vazia). Espere alguns segundos e leia de novo, ou role a página.")
+        }
+    }
+
+    private suspend fun triggerTool(sessionId: String, name: String, a: JsonObject): String {
+        fun s(k: String) = a[k]?.jsonPrimitive?.contentOrNull.orEmpty()
+        fun i(k: String) = a[k]?.jsonPrimitive?.intOrNull
+        when (name) {
+            "trigger_create" -> {
+                val fonte = s("fonte").ifBlank { "connector" }
+                if (fonte == "connector" && (s("conector").isBlank() || s("acao").isBlank())) return ("ERRO: fonte connector precisa de conector e acao (de leitura).")
+                if (fonte == "site" && !s("url").startsWith("http")) return ("ERRO: fonte site precisa de url http(s).")
+                val campos = dev.cueopen.app.connectors.HubConnectors.fields(a["campos"]) ?: return ("ERRO: campos precisa ser objeto JSON.")
+                val t = dev.cueopen.app.triggers.Trigger(name = s("nome").take(60), sessionId = sessionId, agentId = store.session(sessionId)?.agentId,
+                    source = fonte, piece = s("conector"), action = s("acao"), input = campos.toString(), connection = s("conexao"), url = s("url"),
+                    filter = s("filtro").take(200), instruction = s("instrucao").take(800), intervalMinutes = (i("intervalo_min") ?: 15).coerceIn(15, 1440))
+                dev.cueopen.app.triggers.TriggerStore.upsert(ctx, t)
+                dev.cueopen.app.triggers.TriggerEngine.schedule(ctx, t)
+                val first = dev.cueopen.app.triggers.TriggerEngine.check(ctx.applicationContext as dev.cueopen.app.CueApp, t.id)
+                return ("Gatilho \"${t.name}\" criado (id ${t.id}), verifica a cada ${t.intervalMinutes} min e acorda esta conversa com os eventos novos. 1ª verificação: $first. O usuário gerencia em Agenda › Gatilhos.")
+            }
+            "trigger_list" -> {
+                val mine = dev.cueopen.app.triggers.TriggerStore.load(ctx).filter { it.sessionId == sessionId }
+                return (if (mine.isEmpty()) "Nenhum gatilho nesta conversa." else mine.joinToString("\n") { t ->
+                    "- ${t.id} · ${t.name} · ${if (t.enabled) "ativo" else "pausado"} · a cada ${t.intervalMinutes} min · " +
+                        (if (t.source == "site") t.url else "${t.piece}/${t.action}") + (t.lastError?.let { " · último erro: ${it.take(100)}" } ?: "") +
+                        " · eventos: ${t.history.sumOf { it.count }}"
+                })
+            }
+            "trigger_delete" -> {
+                val t = dev.cueopen.app.triggers.TriggerStore.get(ctx, s("id")) ?: return ("ERRO: gatilho não encontrado (veja trigger_list).")
+                dev.cueopen.app.triggers.TriggerEngine.cancel(ctx, t.id); dev.cueopen.app.triggers.TriggerStore.remove(ctx, t.id)
+                return ("Gatilho ${t.name} removido.")
+            }
+        }
+        return "ERRO: ferramenta desconhecida."
+    }
+
     /** Gera o áudio da última resposta final e adiciona no chat (sem bloquear o loop). */
     fun speakLastAnswer(sessionId: String, itemId: String? = null) {
         val target = store.session(sessionId)?.items?.let { items ->
@@ -4348,32 +4425,7 @@ class AgentRunner(
                 if (existing != null) store.replaceItem(sessionId, plan.copy(id = existing.id)) else store.addItem(sessionId, plan)
                 return ToolResult("Plano atualizado.")
             }
-            "trigger_create" -> {
-                val fonte = s("fonte").ifBlank { "connector" }
-                if (fonte == "connector" && (s("conector").isBlank() || s("acao").isBlank())) return ToolResult("ERRO: fonte connector precisa de conector e acao (de leitura).")
-                if (fonte == "site" && !s("url").startsWith("http")) return ToolResult("ERRO: fonte site precisa de url http(s).")
-                val campos = dev.cueopen.app.connectors.HubConnectors.fields(a["campos"]) ?: return ToolResult("ERRO: campos precisa ser objeto JSON.")
-                val t = dev.cueopen.app.triggers.Trigger(name = s("nome").take(60), sessionId = sessionId, agentId = store.session(sessionId)?.agentId,
-                    source = fonte, piece = s("conector"), action = s("acao"), input = campos.toString(), connection = s("conexao"), url = s("url"),
-                    filter = s("filtro").take(200), instruction = s("instrucao").take(800), intervalMinutes = (i("intervalo_min") ?: 15).coerceIn(15, 1440))
-                dev.cueopen.app.triggers.TriggerStore.upsert(ctx, t)
-                dev.cueopen.app.triggers.TriggerEngine.schedule(ctx, t)
-                val first = dev.cueopen.app.triggers.TriggerEngine.check(ctx.applicationContext as dev.cueopen.app.CueApp, t.id)
-                return ToolResult("Gatilho \"${t.name}\" criado (id ${t.id}), verifica a cada ${t.intervalMinutes} min e acorda esta conversa com os eventos novos. 1ª verificação: $first. O usuário gerencia em Agenda › Gatilhos.")
-            }
-            "trigger_list" -> {
-                val mine = dev.cueopen.app.triggers.TriggerStore.load(ctx).filter { it.sessionId == sessionId }
-                return ToolResult(if (mine.isEmpty()) "Nenhum gatilho nesta conversa." else mine.joinToString("\n") { t ->
-                    "- ${t.id} · ${t.name} · ${if (t.enabled) "ativo" else "pausado"} · a cada ${t.intervalMinutes} min · " +
-                        (if (t.source == "site") t.url else "${t.piece}/${t.action}") + (t.lastError?.let { " · último erro: ${it.take(100)}" } ?: "") +
-                        " · eventos: ${t.history.sumOf { it.count }}"
-                })
-            }
-            "trigger_delete" -> {
-                val t = dev.cueopen.app.triggers.TriggerStore.get(ctx, s("id")) ?: return ToolResult("ERRO: gatilho não encontrado (veja trigger_list).")
-                dev.cueopen.app.triggers.TriggerEngine.cancel(ctx, t.id); dev.cueopen.app.triggers.TriggerStore.remove(ctx, t.id)
-                return ToolResult("Gatilho ${t.name} removido.")
-            }
+            "trigger_create", "trigger_list", "trigger_delete" -> return ToolResult(triggerTool(sessionId, call.name, a))
             "cron_add" -> {
                 val title = s("title").trim().take(60); val prompt = s("prompt").trim()
                 if (title.isBlank() || prompt.isBlank()) return ToolResult("ERRO: informe title e prompt.")
@@ -5294,43 +5346,12 @@ class AgentRunner(
                 "browser_new_tab" -> browserFor(sessionId).newTab(SecretVault.resolve(sessionId, s("url")))
                 "browser_select_tab" -> browserFor(sessionId).selectTabForAgent(s("tab_id"))
                 "browser_close_tab" -> browserFor(sessionId).closeTabForAgent(s("tab_id"))
-                "reply_audio" -> {
-                    val audio = dev.cueopen.app.assistant.VoiceReplies.synthesize(ctx, java.io.File(sandbox.workspaceFor(sessionId), "audio"), s("text"))
-                    if (audio == null) "ERRO: o motor de voz do aparelho não está disponível (sem voz pt-BR instalada). Responda em texto e avise o usuário."
-                    else { store.addItem(sessionId, audio); "Áudio enviado no chat (${audio.durationMs / 1000}s). Não repita o mesmo conteúdo em texto longo." }
-                }
-                "notify" -> {
-                    val p = runCatching { dev.cueopen.app.notify.NotificationCenter.Priority.valueOf(s("priority").uppercase()) }.getOrDefault(dev.cueopen.app.notify.NotificationCenter.Priority.NORMAL)
-                    val agentName = store.session(sessionId)?.agentId?.let { store.agent(it)?.name }.orEmpty()
-                    dev.cueopen.app.notify.NotificationCenter.post(s("title").ifBlank { agentName.ifBlank { "Fluwy Bot" } }, s("text"), p, dev.cueopen.app.notify.NotificationCenter.Category.MONITOR, sessionId, agentName)
-                    if (p == dev.cueopen.app.notify.NotificationCenter.Priority.SILENT) "Registrado no histórico de avisos (sem interromper o usuário)." else "Aviso enviado (${p.name.lowercase()})."
-                }
-                "show_cards" -> {
-                    val parsed = ResultCardsParser.parse(s("kind"), s("title"), a["items"])
-                    if (parsed.isFailure) "ERRO: ${parsed.exceptionOrNull()?.message}" else {
-                        val item = parsed.getOrThrow()
-                        store.addItem(sessionId, item)
-                        "Mostrei ${item.items.size} card(s) no chat. Não repita a lista em texto: escreva no máximo 2 frases (sua recomendação e o próximo passo)." +
-                            (if (item.kind == "product") " Se o usuário tocar num card, a escolha chega como [Seleção]." else "")
-                    }
-                }
+                "reply_audio", "notify", "show_cards" -> extraOutputTool(sessionId, call.name, a)
                 "conectores_listar" -> dev.cueopen.app.connectors.HubConnectors.list(store)
                 "conector_acoes" -> dev.cueopen.app.connectors.HubConnectors.actions(store, s("conector"), s("acao"), s("busca"))
                 "conector_executar" -> dev.cueopen.app.connectors.HubConnectors.run(store, s("conector"), s("acao"),
                     resolveArgs(sessionId, a)["campos"], s("conexao"))
-                "browser_read", "browser_snapshot" -> {
-                    val host = browserFor(sessionId)
-                    val out = host.read((i("max_chars") ?: 9000).coerceIn(1000, 20000))
-                    // OpenBot 0.70: página que abriu sem texto nem controles (canvas/JS) → print automático descrito pelo modelo.
-                    if (!out.contains(dev.cueopen.app.browser.BrowserHost.EMPTY_PAGE_MARK)) out else {
-                        val jpeg = runCatching { host.captureJpeg() }.getOrNull()
-                        val seen = if (jpeg == null) null else try {
-                            runCatching { llm.inspectImage("Esta página do navegador carregou sem texto legível para leitura. Descreva em português o que aparece na tela (textos visíveis, botões, imagens, mensagens de erro ou de carregamento). Seja objetivo.", jpeg, model = model, conversationId = sessionId) }.getOrNull()
-                        } finally { jpeg.fill(0) }
-                        out + "\n\n--- Print automático (a página não tem texto legível) ---\n" +
-                            (seen?.takeIf { it.isNotBlank() } ?: "Não foi possível descrever o print (modelo sem visão ou captura vazia). Espere alguns segundos e leia de novo, ou role a página.")
-                    }
-                }
+                "browser_read", "browser_snapshot" -> browserReadTool(sessionId, (i("max_chars") ?: 9000).coerceIn(1000, 20000), model)
                 "browser_wait_for" -> {
                     val br = browserFor(sessionId)
                     val waited = br.waitFor(s("text"), s("text_gone"), i("seconds") ?: 10)
