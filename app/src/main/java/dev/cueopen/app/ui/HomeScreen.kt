@@ -753,7 +753,6 @@ private fun SessionDrawer(nav: NavController, sessions: List<Session>, agents: L
             DrawerShortcut(Icons.Rounded.Language, "Browser", tint = 0xFF3B82F6) { go("browserhub") },
             DrawerShortcut(Icons.Rounded.Computer, "Linux", tint = 0xFF64748B) { go("sandbox") },
             DrawerShortcut(Icons.Rounded.AccountBalanceWallet, "Cofre", tint = 0xFF9945FF) { go("vault") },
-            DrawerShortcut(Icons.Rounded.Notifications, "Avisos", tint = 0xFFEF4444) { go("notifications") },
         )
         shortcuts.chunked(5).forEach { row ->
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {

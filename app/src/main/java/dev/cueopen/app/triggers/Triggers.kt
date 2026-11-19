@@ -99,7 +99,11 @@ object TriggerLogic {
     /** JSON que vem depois do cabeçalho de conector_executar ("✅ … concluída (…).\n\n<JSON>"). */
     fun payload(output: String): JsonElement? {
         val start = output.indexOfFirst { it == '{' || it == '[' }.takeIf { it >= 0 } ?: return null
-        return runCatching { json.parseToJsonElement(output.substring(start).trim()) }.getOrNull()
+        val el = runCatching { json.parseToJsonElement(output.substring(start).trim()) }.getOrNull()
+        // Saída de conector_executar ({status, summary, data}): os itens estão em "data".
+        val o = el as? JsonObject
+        if (o != null && "status" in o && "data" in o) return o["data"]
+        return el
     }
 
     /** Lista de itens: o maior array do resultado (messages, items, data…) ou o próprio objeto. */
@@ -167,7 +171,8 @@ object TriggerEngine {
                 }
                 else -> {
                     val input = runCatching { Json.parseToJsonElement(t.input) as? JsonObject }.getOrNull() ?: JsonObject(emptyMap())
-                    val out = HubConnectors.run(app.store, t.piece, t.action, input, t.connection)
+                    // Gatilho precisa da lista inteira (ids) para achar o que é novo: payload completo.
+                    val out = HubConnectors.run(app.store, t.piece, t.action, input, t.connection, full = true)
                     if (out.startsWith("ERRO") || out.trimStart().startsWith("❌") || out.trimStart().startsWith("⏳")) error(out.take(300))
                     TriggerLogic.items(TriggerLogic.payload(out))
                 }

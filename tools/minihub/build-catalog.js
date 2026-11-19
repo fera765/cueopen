@@ -192,10 +192,15 @@ async function main() {
         const action = Object.values(meta.actions).find((a) => a.props && a.props.url && a.props.method)
         if (action) {
             const input = { url: 'https://registry.npmjs.org/@activepieces%2fpieces-framework/latest', method: 'GET', headers: {}, queryParams: {} }
-            const r = await hub.opRun({ name: '@activepieces/piece-http', action: action.name, input })
+            const r = await hub.opRun({ name: '@activepieces/piece-http', action: action.name, input, raw: true })
             const body = r.output && (r.output.body || r.output)
             http.ok = r.ok && JSON.stringify(body).includes('pieces-framework')
             http.detail = r.ok ? `${action.name}: status ${r.output && r.output.status}` : String(r.error).slice(0, 500)
+            // Mesma chamada no formato para agentes: JSON enxuto com status/summary/data.
+            const shaped = await hub.opRun({ name: '@activepieces/piece-http', action: action.name, input })
+            const size = shaped.result ? JSON.stringify(shaped.result).length : -1
+            http.shaped = { ok: shaped.ok && shaped.result && shaped.result.status === 'ok' && size > 0 && size <= 4096, size }
+            if (!http.shaped.ok) { http.ok = false; http.detail += ` · resumo para agentes inválido (${size} bytes)` }
         } else http.detail = 'ação de requisição não encontrada'
     } catch (e) { http.detail = String(e.message || e).slice(0, 500) }
 

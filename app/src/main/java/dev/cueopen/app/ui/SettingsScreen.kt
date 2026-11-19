@@ -179,6 +179,7 @@ fun SettingsScreen(nav: NavController) {
                 Text("Limpar logs e último erro", color = c.err)
             }
             SectionLabel("Dados")
+            DataTransferSection(nav)
             SettingsLink(Icons.Rounded.DeleteSweep, "Apagar todas as tarefas", "Agents, skills e knowledge são mantidos", tint = c.err) { confirmClear = true }
             Spacer(Modifier.height(12.dp))
             val exitCtx = androidx.compose.ui.platform.LocalContext.current

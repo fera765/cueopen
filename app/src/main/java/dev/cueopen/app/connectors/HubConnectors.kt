@@ -155,14 +155,30 @@ object HubConnectors {
         else -> null
     }
 
-    /** Formato da saída (o Triggers lê o JSON depois do cabeçalho): "✅ … concluída (…).\n\n<JSON>". */
+    private val pretty = Json { prettyPrint = true; prettyPrintIndent = "  " }
+
+    /**
+     * Saída de conector_executar: só JSON, identado, já resumido pelo mini-hub (status, duration_ms, summary,
+     * data, note). Erro de execução: "ERRO: " + JSON com status "error" (o app marca o passo como falha pelo prefixo).
+     */
     internal fun formatRun(piece: String, r: JsonObject): String {
-        if (r.s("ok") != "true") return "ERRO do conector ${appName(piece)} (${r.s("action")}): ${r.s("error").take(3_000)}"
-        val out = r["output"] ?: JsonNull
-        return "✅ ${appName(piece)} · ${r.s("action")} concluída (${r.s("durationMs")} ms, v${r.s("version")}).\n\n" + out.toString().take(12_000)
+        if (r.s("ok") != "true") {
+            val err = buildJsonObject {
+                put("status", "error"); put("connector", appName(piece)); put("action", r.s("action"))
+                put("error", r.s("error").take(3_000))
+            }
+            return "ERRO: " + pretty.encodeToString(JsonObject.serializer(), err)
+        }
+        val result = r["result"] as? JsonObject ?: buildJsonObject {
+            put("status", "ok"); put("connector", appName(piece)); put("action", r.s("action")); r["output"]?.let { put("data", it) }
+        }
+        val text = pretty.encodeToString(JsonObject.serializer(), result)
+        return if (text.length <= MAX_OUT) text else text.take(MAX_OUT) + "\n…[cortado em ${MAX_OUT / 1000} KB]"
     }
 
-    suspend fun run(store: Store, conector: String, acao: String, campos: JsonElement?, conexao: String): String {
+    private const val MAX_OUT = 30_000
+
+    suspend fun run(store: Store, conector: String, acao: String, campos: JsonElement?, conexao: String, full: Boolean = false): String {
         if (conector.isBlank() || acao.isBlank()) return "ERRO: informe conector e acao (veja conector_acoes)."
         val input = fields(campos) ?: return "ERRO: campos precisa ser um objeto JSON (ex.: {\"to\":\"a@b.com\"})."
         val piece = HubApi.pieceName(conector)
@@ -170,18 +186,23 @@ object HubConnectors {
         val mine = runCatching { connections(store) }.getOrDefault(emptyList()).filter { it.pieceName == piece }
         if (conn.isBlank()) {
             // Uma única conta para esse app: usa ela (evita uma volta só para pegar o id).
-            if (mine.size == 1) conn = mine.single().externalId
-            else if (mine.size > 1) return "ERRO: há ${mine.size} contas de ${appName(piece)} conectadas: " +
+            val active = mine.filter { it.status == "ACTIVE" }
+            if (active.size == 1) conn = active.single().externalId
+            else if (mine.size == 1) conn = mine.single().externalId
+            else if (mine.size > 1 && active.size != 1) return "ERRO: há ${mine.size} contas de ${appName(piece)} conectadas: " +
                 mine.joinToString { "\"${it.displayName}\" (conexao=${it.externalId})" } + ". Escolha uma e repita com conexao."
         }
         val value = if (conn.isNotBlank()) HubApi.connectionValue(conn)
             ?: return "ERRO: a conexao \"$conn\" não existe. Chame conectores_listar e use o id exato." else null
+        if (value != null && value.s("type").isBlank())
+            return "ERRO: a conta \"$conn\" de ${appName(piece)} veio de um backup e precisa de login de novo. Peça ao usuário para conectar o app em Apps › Conectores › Adicionar conector."
         val connValue = value?.takeIf { it.s("type") != "NO_AUTH" }
         val r = try {
             ActivepiecesHub.call("/run", buildJsonObject {
                 put("name", piece); HubApi.catalogVersion(piece)?.let { put("version", it) }
                 put("action", acao.trim()); put("input", input)
                 connValue?.let { put("connection", it) }
+                if (full) put("full", true)
             }, 900)
         } catch (e: ActivepiecesHub.MiniHubError) {
             val msg = e.message.orEmpty()

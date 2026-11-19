@@ -87,7 +87,11 @@ class CueApp : Application() {
 
     override fun onCreate() {
         super.onCreate()
+        // Processo ":restart" (só reabre o app depois de importar dados): nada do app sobe nele.
+        if (dev.cueopen.app.backup.RestartActivity.isRestartProcess(this)) return
         instance = this
+        // Backup importado: troca o perfil do browser antes de qualquer WebView existir.
+        dev.cueopen.app.backup.DataTransfer.applyStagedBrowserData(this)
         dev.cueopen.app.diag.ErrorLog.init(this)
         // Chave Demo opcional da CoinGecko (gratuita) para o mercado, se o usuário tiver configurado.
         runCatching {

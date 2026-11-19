@@ -710,6 +710,319 @@ function outputJson(v, depth = 0) {
     return v
 }
 
+
+// ---------------------------------------------------------------- saída para agentes (todas as pieces)
+/*
+ * A saída crua das pieces é feita para fluxos, não para um agente ler: e-mails com cabeçalhos MIME codificados,
+ * HTML cru, base64, campos vazios e listas enormes numa linha só. Aqui ela vira um JSON enxuto e legível, igual
+ * para QUALQUER conector:
+ *   - texto MIME (=?utf-8?b?…?=) decodificado; HTML vira texto; base64 vira texto (se for texto) ou some;
+ *   - cabeçalhos [{name,value}] / "Chave: valor" viram objeto, sem duplicar headers/headerLines;
+ *   - from/to/subject/date levantados para o topo do item; campos vazios saem;
+ *   - textos longos cortados (com <campo>_truncated: true); listas com resumo no topo e "preview" por item;
+ *   - orçamento de tamanho (~2 KB para buscas simples); o payload completo só com full=true.
+ */
+const ENCODED_WORD = /=\?([^?\s]+)\?([bBqQ])\?([^?]*)\?=/g
+
+function decodeCharset(buf, charset) {
+    const cs = String(charset || 'utf-8').toLowerCase().split('*')[0]
+    try { return new TextDecoder(cs).decode(buf) } catch { /* charset sem suporte */ }
+    return cs.includes('8859') || cs.includes('1252') || cs === 'latin1' ? buf.toString('latin1') : buf.toString('utf8')
+}
+
+/** RFC 2047: "=?utf-8?B?T2zDoQ==?= =?utf-8?Q?mundo?=" → "Olá mundo". */
+function decodeMimeWords(str) {
+    if (typeof str !== 'string' || !str.includes('=?')) return str
+    return str.replace(/(=\?[^?\s]+\?[bBqQ]\?[^?]*\?=)\s+(?==\?)/g, '$1').replace(ENCODED_WORD, (all, cs, enc, text) => {
+        try {
+            const buf = enc.toUpperCase() === 'B'
+                ? Buffer.from(text, 'base64')
+                : Buffer.from(text.replace(/_/g, ' ').replace(/=([0-9A-Fa-f]{2})/g, (_, h) => String.fromCharCode(parseInt(h, 16))), 'latin1')
+            return decodeCharset(buf, cs)
+        } catch { return all }
+    })
+}
+
+const ENTITIES = { nbsp: ' ', amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", '#39': "'", hellip: '…', mdash: '—', ndash: '–', copy: '©', reg: '®', laquo: '«', raquo: '»', rsquo: '’', lsquo: '‘', rdquo: '”', ldquo: '“', bull: '•', middot: '·' }
+
+function looksHtml(s) {
+    if (typeof s !== 'string' || s.length < 20) return false
+    if (/<(html|body|div|table|p|br|span|td|tr|a|img|style|head|meta|font|center|ul|li|h[1-6])\b[^>]*>/i.test(s)) {
+        return (s.match(/<\/?[a-z][^>]*>/gi) || []).length >= 2
+    }
+    return false
+}
+
+function htmlToText(html) {
+    let s = String(html)
+    s = s.replace(/<!--[\s\S]*?-->/g, ' ')
+        .replace(/<(script|style|head|title|noscript|svg)\b[\s\S]*?<\/\1>/gi, ' ')
+        .replace(/<a\b[^>]*href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi, (m, href, txt) => {
+            const t = txt.replace(/<[^>]+>/g, '').trim()
+            return /^https?:/i.test(href) && t && !href.includes(t) && href.length < 120 ? `${t} (${href})` : (t || '')
+        })
+        .replace(/<(br|hr)\b[^>]*>/gi, '\n')
+        .replace(/<\/(p|div|tr|li|h[1-6]|table|section|article|blockquote)>/gi, '\n')
+        .replace(/<li\b[^>]*>/gi, '\n• ')
+        .replace(/<[^>]+>/g, ' ')
+        .replace(/&(#x[0-9a-f]+|#\d+|[a-z]+\d*);/gi, (m, e) => {
+            const k = e.toLowerCase()
+            if (k.startsWith('#x')) return String.fromCodePoint(parseInt(k.slice(2), 16) || 32)
+            if (k.startsWith('#') && k !== '#39') return String.fromCodePoint(parseInt(k.slice(1), 10) || 32)
+            return ENTITIES[k] ?? m
+        })
+    return s.replace(/[ \t ​‌‍﻿]+/g, ' ').replace(/ *\n */g, '\n').replace(/\n{3,}/g, '\n\n').trim()
+}
+
+/** base64/base64url que decodifica para texto legível → texto; senão null. */
+function base64Text(s) {
+    if (typeof s !== 'string' || s.length < 24 || /\s/.test(s) || !/^[A-Za-z0-9+/_-]+={0,2}$/.test(s)) return null
+    if (/^[0-9a-f]+$/i.test(s) || /^[A-Za-z]+$/.test(s)) return null // ids/hashes/palavras
+    try {
+        const buf = Buffer.from(s.replace(/-/g, '+').replace(/_/g, '/'), 'base64')
+        if (buf.length < 12) return null
+        const txt = buf.toString('utf8')
+        if (txt.includes('�')) return null
+        const printable = txt.replace(/[^\x09\x0a\x0d\x20-\x7e -￿]/g, '').length
+        return printable / txt.length > 0.95 ? txt : null
+    } catch { return null }
+}
+
+const isBigBlob = (s) => typeof s === 'string' && s.length > 200 && !/\s/.test(s.slice(0, 200)) && /^[A-Za-z0-9+/_=-]+$/.test(s.slice(0, 400))
+
+const HTML_KEYS = /^(html|texthtml|textashtml|bodyhtml|htmlbody|body_html|html_body|contenthtml)$/i
+const TEXT_KEYS = /^(text|textplain|plaintext|bodytext|body_text|text_body|textbody|snippet|plain)$/i
+const NOISE_KEYS = /^(raw|headerlines|textashtml|x-[a-z-]+|dkim-signature|arc-.*|received|authentication-results|received-spf|return-path|x-google-smtp-source|x-gm-.*|x-received|list-unsubscribe.*|feedback-id)$/i
+
+/** [{name,value}] → {name: value}; ["Chave: valor"] → {chave: valor}. Senão null. */
+function headersObject(v) {
+    if (Array.isArray(v) && v.length && v.every((x) => isObject(x) && ('name' in x || 'key' in x) && 'value' in x && Object.keys(x).length <= 3)) {
+        const o = {}
+        for (const x of v) { const k = String(x.name ?? x.key); if (!(k in o)) o[k] = x.value }
+        return o
+    }
+    if (Array.isArray(v) && v.length && v.filter((x) => typeof x === 'string' && /^[A-Za-z0-9-]{2,60}:\s/.test(x)).length >= v.length * 0.8) {
+        const o = {}
+        for (const x of v) { const m = /^([A-Za-z0-9-]{2,60}):\s*([\s\S]*)$/.exec(String(x)); if (m && !(m[1] in o)) o[m[1]] = m[2] }
+        return o
+    }
+    if (Array.isArray(v) && v.length && v.every((x) => isObject(x) && 'key' in x && 'line' in x)) { // mailparser headerLines
+        const o = {}
+        for (const x of v) { const m = /^[^:]+:\s*([\s\S]*)$/.exec(String(x.line)); if (!(x.key in o)) o[x.key] = m ? m[1] : x.line }
+        return o
+    }
+    return null
+}
+
+/** Valor "humano" de um campo (from/to em vários formatos: string, {text}, {value:[{name,address}]}, [{email}]). */
+function human(v, depth = 0) {
+    if (isNil(v) || depth > 3) return undefined
+    if (typeof v === 'string') return decodeMimeWords(v).trim() || undefined
+    if (typeof v === 'number' || typeof v === 'boolean') return String(v)
+    if (Array.isArray(v)) { const parts = v.slice(0, 5).map((x) => human(x, depth + 1)).filter(Boolean); return parts.length ? parts.join(', ') : undefined }
+    if (isObject(v)) {
+        if (typeof v.text === 'string' && v.text.trim()) return decodeMimeWords(v.text).trim()
+        if (v.name && (v.address || v.email)) return `${decodeMimeWords(String(v.name))} <${v.address || v.email}>`
+        for (const k of ['address', 'email', 'emailAddress', 'name', 'displayName', 'title', 'value', 'label']) if (v[k] !== undefined) { const h = human(v[k], depth + 1); if (h) return h }
+    }
+    return undefined
+}
+
+const FIELD_ALIASES = {
+    subject: ['subject', 'Subject', 'title', 'name', 'summary', 'filename', 'fileName'],
+    from: ['from', 'From', 'sender', 'author', 'owner', 'createdBy', 'user', 'organizer'],
+    to: ['to', 'To', 'recipient', 'recipients', 'attendees'],
+    date: ['date', 'Date', 'internalDate', 'receivedAt', 'sentAt', 'createdAt', 'created_at', 'created', 'createdTime', 'modifiedTime', 'updatedAt', 'updated_at', 'updated', 'timestamp', 'time', 'start'],
+}
+
+function pick(o, keys) {
+    for (const k of keys) if (o[k] !== undefined && o[k] !== null && o[k] !== '') { const h = human(o[k]); if (h) return h }
+    return undefined
+}
+
+function fmtDate(v) {
+    if (v === undefined) return undefined
+    const n = Number(v)
+    const d = /^\d{12,13}$/.test(String(v)) ? new Date(n) : /^\d{10}$/.test(String(v)) ? new Date(n * 1000) : new Date(String(v))
+    return Number.isNaN(d.getTime()) ? String(v) : d.toISOString().replace('.000Z', 'Z')
+}
+
+/** Normaliza um valor (recursivo). [ctx] acumula flags; [opts.maxStr] corta textos longos (0 = sem corte). */
+function normalize(value, opts, depth = 0, key = '') {
+    if (isNil(value)) return undefined
+    if (depth > opts.maxDepth) return typeof value === 'object' ? '[…]' : value
+    if (typeof value === 'string') {
+        let s = value
+        if (isBigBlob(s)) {
+            const t = base64Text(s)
+            if (t === null) return opts.full ? s : `[dados binários omitidos: ~${Math.round(s.length * 0.75 / 1024)} KB]`
+            s = t
+        } else if (/^(data|body|content|raw|bodydata|encoded)$/i.test(key)) {
+            // Corpo curto em base64/base64url (ex.: Gmail API body.data): vira texto se for texto.
+            const t = base64Text(s); if (t !== null) s = t
+        }
+        s = decodeMimeWords(s)
+        if (looksHtml(s)) s = htmlToText(s)
+        if (!opts.full && opts.maxStr > 0 && s.length > opts.maxStr) { if (opts.flags) opts.flags.truncated = true; return { __trunc: s.slice(0, opts.maxStr).trimEnd() + '…' } }
+        return s === '' ? undefined : s
+    }
+    if (typeof value !== 'object') return value
+    if (Array.isArray(value)) {
+        const hdr = headersObject(value)
+        if (hdr) return normalize(hdr, opts, depth, key)
+        const limit = opts.full ? value.length : opts.maxItems
+        const out = value.slice(0, limit).map((x) => normalize(x, opts, depth + 1, key)).filter((x) => x !== undefined)
+        if (!opts.full && value.length > limit) { if (opts.flags) opts.flags.truncated = true; out.push(`… mais ${value.length - limit}`) }
+        return out.length ? out : undefined
+    }
+    if (value.type === 'buffer' && 'size' in value) {
+        const t = value.base64 ? base64Text(value.base64) : null
+        return t !== null ? normalize(t, opts, depth, key) : `[arquivo/binário de ${value.size} bytes]`
+    }
+    // headers vazio + headerLines cheio (mailparser): os cabeçalhos reais vêm das linhas.
+    if (value.headerLines !== undefined) {
+        const hl = headersObject(value.headerLines)
+        const hv = isObject(value.headers) ? value.headers : (value.headers instanceof Map ? Object.fromEntries(value.headers) : null)
+        if (hl && (!hv || Object.keys(hv).length === 0)) value = { ...value, headers: hl }
+    }
+    const o = {}
+    const keys = Object.keys(value)
+    const hasText = keys.some((k) => TEXT_KEYS.test(k) && typeof value[k] === 'string' && value[k].trim())
+    for (const k of keys) {
+        if (!opts.full && NOISE_KEYS.test(k)) continue
+        if (!opts.full && HTML_KEYS.test(k) && hasText) continue // HTML duplicado do texto
+        let v = value[k]
+        const hdr = headersObject(v)
+        if (hdr) v = hdr
+        const n = normalize(v, opts, depth + 1, k)
+        if (n === undefined) continue
+        if (isObject(n) && '__trunc' in n) { o[k] = n.__trunc; o[`${k}_truncated`] = true; continue }
+        if (!opts.full && isObject(n) && Object.keys(n).length === 0) continue
+        o[k] = n
+    }
+    // headers / headerLines: um só objeto, já decodificado
+    if (o.headerLines !== undefined && isObject(o.headers) && Object.keys(o.headers).length) delete o.headerLines
+    else if (isObject(o.headerLines) && !o.headers) { o.headers = o.headerLines; delete o.headerLines }
+    // Levanta from/to/subject/date (e-mail e afins) para o topo do item
+    const h = isObject(o.headers) ? o.headers : (isObject(o.payload) && isObject(o.payload.headers) ? o.payload.headers : null)
+    if (h) {
+        const lower = Object.fromEntries(Object.entries(h).map(([k, v]) => [k.toLowerCase(), v]))
+        for (const f of ['subject', 'from', 'to', 'cc', 'date']) if (o[f] === undefined && lower[f] !== undefined) o[f] = human(lower[f])
+        if (!opts.full) {
+            // os cabeçalhos úteis já subiram; o resto é ruído de servidor de e-mail
+            const keep = Object.fromEntries(Object.entries(h).filter(([k]) => /^(reply-to|message-id|in-reply-to|list-id)$/i.test(k)))
+            if (o.headers === h) { if (Object.keys(keep).length) o.headers = keep; else delete o.headers }
+        }
+    }
+    // Campos-chave que ficaram num invólucro (payload/fields/properties…) sobem para o item, sem duplicar.
+    for (const wrap of ['payload', 'fields', 'properties', 'attributes', 'message']) {
+        const w = o[wrap]
+        if (!isObject(w)) continue
+        for (const f of ['subject', 'from', 'to', 'cc', 'date', 'title', 'name']) {
+            if (o[f] === undefined && w[f] !== undefined && (typeof w[f] === 'string' || typeof w[f] === 'number')) { o[f] = w[f]; delete w[f] }
+        }
+        if (Object.keys(w).length === 0) delete o[wrap]
+    }
+    for (const f of ['from', 'to', 'cc', 'bcc', 'replyTo', 'sender']) if (o[f] !== undefined && typeof o[f] !== 'string') { const hv = human(o[f]); if (hv) o[f] = hv }
+    return o
+}
+
+function previewOf(item) {
+    if (!isObject(item)) return typeof item === 'string' ? item.slice(0, 160) : undefined
+    const subject = pick(item, FIELD_ALIASES.subject) ?? pick(item, ['snippet', 'text', 'message', 'description', 'content', 'body'])
+    const from = pick(item, FIELD_ALIASES.from)
+    const date = fmtDate(pick(item, FIELD_ALIASES.date))
+    const parts = [subject && subject.replace(/\s+/g, ' ').slice(0, 110), from && `de ${from.slice(0, 60)}`, date].filter(Boolean)
+    return parts.length ? parts.join(' · ').slice(0, 200) : undefined
+}
+
+function quickFields(item) {
+    if (!isObject(item)) return { preview: previewOf(item) }
+    const out = {}
+    const subject = pick(item, FIELD_ALIASES.subject); if (subject) out.subject = subject.slice(0, 140)
+    const from = pick(item, FIELD_ALIASES.from); if (from) out.from = from.slice(0, 100)
+    const date = fmtDate(pick(item, FIELD_ALIASES.date)); if (date) out.date = date
+    if (!Object.keys(out).length) out.preview = previewOf(item)
+    return out
+}
+
+/** Campos que respondem perguntas simples primeiro (preview, id, assunto, de, para, data), depois o resto. */
+const FIRST_KEYS = ['preview', 'id', 'subject', 'title', 'name', 'from', 'to', 'cc', 'date', 'snippet']
+function orderKeys(o) {
+    const out = {}
+    for (const k of FIRST_KEYS) if (k in o) out[k] = o[k]
+    for (const [k, v] of Object.entries(o)) if (!(k in out)) out[k] = v
+    return out
+}
+
+/** Lista principal da saída: o próprio array, ou o maior array dentro do objeto (até 2 níveis). */
+function mainList(v) {
+    if (Array.isArray(v)) return { path: [], list: v }
+    if (!isObject(v)) return null
+    let best = null
+    const visit = (o, path, depth) => {
+        for (const [k, x] of Object.entries(o)) {
+            if (Array.isArray(x) && x.length && x.some((e) => isObject(e)) && (!best || x.length > best.list.length)) best = { path: [...path, k], list: x }
+            else if (isObject(x) && depth < 2) visit(x, [...path, k], depth + 1)
+        }
+    }
+    visit(v, [], 0)
+    return best
+}
+
+const LEVELS = [
+    { maxStr: 500, maxItems: 10, maxDepth: 6 },
+    { maxStr: 300, maxItems: 5, maxDepth: 5 },
+    { maxStr: 200, maxItems: 3, maxDepth: 4 },
+    { maxStr: 120, maxItems: 3, maxDepth: 3 },
+    { maxStr: 80, maxItems: 2, maxDepth: 2 },
+]
+
+/**
+ * Resultado de uma ação no formato para agentes: {status, duration_ms, connector, action, version, summary, data, note}.
+ * [budget] em bytes do JSON compacto (~2 KB por padrão); full=true devolve tudo (ainda decodificado).
+ */
+function shapeResult(output, meta, { full = false, budget = 2048 } = {}) {
+    const base = { status: 'ok', connector: meta.connector, action: meta.action, duration_ms: meta.durationMs, version: meta.version }
+    if (full) {
+        const opts = { full: true, maxStr: 0, maxItems: Infinity, maxDepth: 40 }
+        const found = mainList(output)
+        return { ...base, summary: found ? { count: found.list.length } : undefined, data: normalize(output, opts) ?? null }
+    }
+    const found = mainList(output)
+    let result
+    for (const lv of LEVELS) {
+        const opts = { full: false, ...lv, flags: { truncated: false } }
+        let data
+        let summary
+        if (found) {
+            const items = found.list
+            const shownItems = items.slice(0, lv.maxItems).map((it) => {
+                const n = normalize(it, { ...opts, maxDepth: lv.maxDepth - 1 })
+                if (isObject(n)) { const p = previewOf(n); return orderKeys(p ? { preview: p, ...n } : n) }
+                return n
+            }).filter((x) => x !== undefined)
+            summary = { count: items.length, shown: shownItems.length }
+            if (items.length) summary.first_item_preview = quickFields(normalize(items[0], { ...opts, maxStr: 300, maxDepth: 4 }))
+            if (found.path.length === 0) data = shownItems
+            else {
+                // Mantém os campos irmãos da lista (ex.: nextPageToken, total) e põe a lista resumida no lugar.
+                const rest = normalize(Object.fromEntries(Object.entries(output).filter(([k]) => k !== found.path[0])), { ...opts, maxItems: 3, maxDepth: 2 }) || {}
+                data = { ...rest, [found.path.join('.')]: shownItems }
+            }
+            if (items.length > shownItems.length) opts.flags.truncated = true
+        } else {
+            data = normalize(output, opts)
+            if (isObject(data)) { const p = previewOf(data); summary = { type: 'object', ...(p ? { preview: p } : {}) } }
+            else summary = { type: Array.isArray(data) ? 'list' : typeof data }
+        }
+        result = { ...base, summary, data: data ?? null }
+        if (opts.flags.truncated) result.note = 'Resumo enxuto: textos longos cortados (campo_truncated) e lista limitada. Para tudo, repita com completo=true.'
+        if (JSON.stringify(result).length <= budget) break
+    }
+    return result
+}
+
 // ---------------------------------------------------------------- operações
 async function opMetadata({ name, version }) {
     const n = pieceName(name)
@@ -729,7 +1042,7 @@ async function prepareAuth(n, piece, connection, requireAuth) {
     return { auth: connectionForContext(conn, contextVersion(piece)), connection: conn, changed }
 }
 
-async function opRun({ name, version, action: actionName, input, connection }) {
+async function opRun({ name, version, action: actionName, input, connection, full = false, budget, raw: wantRaw = false }) {
     const n = pieceName(name)
     await ensureInstalled(n, version)
     const piece = loadPiece(n)
@@ -749,12 +1062,22 @@ async function opRun({ name, version, action: actionName, input, connection }) {
     const started = Date.now()
     try {
         const out = await withTimeout(Promise.resolve().then(() => action.run(ctx)), RUN_TIMEOUT_MS, `a ação ${action.name}`)
+        const output = outputJson(out)
+        const durationMs = Date.now() - started
+        const version = installedVersion(n)
+        let result
+        try {
+            result = shapeResult(output, { connector: piece.displayName || n, action: action.name, durationMs, version }, { full: full === true, budget: Number(budget) || 2048 })
+        } catch (e) {
+            result = { status: 'ok', connector: piece.displayName || n, action: action.name, duration_ms: durationMs, version, data: output, note: `(sem resumo: ${errorText(e)})` }
+        }
         return {
             ok: true,
-            output: outputJson(out),
-            durationMs: Date.now() - started,
+            result,
+            output: wantRaw === true ? output : undefined,
+            durationMs,
             action: action.name,
-            version: installedVersion(n),
+            version,
             connection: prepared.changed ? prepared.connection : undefined,
         }
     } catch (e) {
@@ -962,7 +1285,7 @@ function main() {
 
 module.exports = {
     pieceName, processProps, processValue, connectionForContext, authPropertyFor, oauthExpired, formatOAuth2Response,
-    extractPiece, metadataOf, jsonSafe, outputJson, resolveTemplate, opRun, opMetadata, opOptions, opValidate, opOAuthUrl, opOAuthClaim,
+    extractPiece, metadataOf, jsonSafe, outputJson, shapeResult, decodeMimeWords, htmlToText, base64Text, headersObject, resolveTemplate, opRun, opMetadata, opOptions, opValidate, opOAuthUrl, opOAuthClaim,
     ensureInstalled, updatePiece, installedVersion, createServer, buildActionContext, refreshConnection, PKG, ROOT,
 }
 

@@ -228,7 +228,12 @@ fun CueNav(nav: NavHostController, startOnboarding: Boolean) {
         )) { e -> ComputerScreen(nav, e.arguments!!.getString("id")!!, e.arguments?.getString("tab")) }
         composable("replay/{id}") { e -> ReplayScreen(nav, e.arguments!!.getString("id")!!) }
         composable("agents") { AgentsScreen(nav) }
-        composable("agent/{id}") { e -> AgentEditScreen(nav, e.arguments!!.getString("id")!!) }
+        composable("agentbots") { AgentBotsScreen(nav) }
+        composable("importdata") { ImportDataScreen(nav) }
+        composable("agent/{id}?bot={bot}", arguments = listOf(
+            navArgument("id") { type = NavType.StringType },
+            navArgument("bot") { type = NavType.StringType; nullable = true; defaultValue = null },
+        )) { e -> AgentEditScreen(nav, e.arguments!!.getString("id")!!, e.arguments?.getString("bot")) }
         composable("skills") { SkillsScreen(nav) }
         composable("skill/{id}") { e -> SkillEditScreen(nav, e.arguments!!.getString("id")!!) }
         composable("scheduled") { ScheduledScreen(nav) }
@@ -254,7 +259,6 @@ fun CueNav(nav: NavHostController, startOnboarding: Boolean) {
         composable("page/{id}") { e -> PageScreen(nav, e.arguments!!.getString("id")!!) }
         composable("wallet") { WalletScreen(nav) }
         composable("vault") { VaultScreen(nav) }
-        composable("notifications") { NotificationsScreen(nav) }
         composable("wallet/send") { WalletSendScreen(nav) }
         composable("wallet/receive") { WalletReceiveScreen(nav) }
         composable("wallet/swap") { WalletSwapScreen(nav) }

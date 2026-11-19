@@ -3983,11 +3983,14 @@ class AgentRunner(
             add(tool("conectores_listar", "Lista os conectores (contas conectadas no hub: Gmail, Notion, GitHub…) disponíveis agora, com o id de cada conexão. Chame quando o pedido envolver um app/serviço externo.", buildJsonObject {}))
             add(tool("conector_acoes", "Mostra o que um conector sabe fazer. Sem 'acao': lista as ações (nome técnico + descrição). Com 'acao': mostra os campos exatos dessa ação (obrigatórios, tipos, opções).",
                 buildJsonObject { put("conector", str("Nome do app/piece, ex.: gmail ou @activepieces/piece-gmail")); put("acao", str("Nome técnico da ação (opcional)")); put("busca", str("Filtro por palavra, ex.: enviar (opcional)")) }, listOf("conector")))
-            add(tool("conector_executar", "Executa UMA ação de um conector com a conta conectada (sem criar automação). Use os nomes e campos exatos de conector_acoes. Peça poucos itens (limite 5–10) para o resultado vir enxuto.",
+            add(tool("conector_executar", "Executa UMA ação de um conector com a conta conectada (sem criar automação). Use os nomes e campos exatos de conector_acoes. " +
+                "Devolve JSON pronto para ler: status, summary (count e first_item_preview), data (itens com \"preview\", textos decodificados e cortados com <campo>_truncated). " +
+                "Responda direto a partir dele, sem grep/python/file_read. Só use completo=true se precisar de um campo que veio cortado.",
                 buildJsonObject {
                     put("conector", str("Nome do app/piece")); put("acao", str("Nome técnico da ação"))
                     put("campos", buildJsonObject { put("type", "object"); put("description", "Valores dos campos da ação (chave = nome do campo)") })
                     put("conexao", str("Id da conexão (de conectores_listar). Obrigatório quando o app exige login."))
+                    put("completo", buildJsonObject { put("type", "boolean"); put("description", "true = payload completo, sem cortes (maior). Padrão: resumo enxuto (~2 KB).") })
                 }, listOf("conector", "acao")))
         }
         // UI Connectors (ex.: IQ Option): só os que este agente pode usar (toggle por agente / "Agent required?").
@@ -5393,7 +5396,8 @@ class AgentRunner(
                 "conectores_listar" -> dev.cueopen.app.connectors.HubConnectors.list(store)
                 "conector_acoes" -> dev.cueopen.app.connectors.HubConnectors.actions(store, s("conector"), s("acao"), s("busca"))
                 "conector_executar" -> dev.cueopen.app.connectors.HubConnectors.run(store, s("conector"), s("acao"),
-                    resolveArgs(sessionId, a)["campos"], s("conexao"))
+                    resolveArgs(sessionId, a)["campos"], s("conexao"),
+                    full = runCatching { a["completo"]?.jsonPrimitive?.contentOrNull?.trim()?.lowercase() == "true" }.getOrDefault(false))
                 "browser_read", "browser_snapshot" -> browserReadTool(sessionId, (i("max_chars") ?: 9000).coerceIn(1000, 20000), model)
                 "browser_wait_for" -> {
                     val br = browserFor(sessionId)

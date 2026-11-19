@@ -321,7 +321,7 @@ private fun HubConnectionsSection(nav: NavController, running: Boolean) {
                     Column(Modifier.weight(1f)) {
                         Text(dev.cueopen.app.connectors.HubConnectors.appName(cn.pieceName), fontWeight = FontWeight.SemiBold)
                         Text(cn.displayName, fontSize = 12.sp, color = c.ink2, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        Text(if (cn.status == "ACTIVE") "Conectado · o agente usa direto" else "Status ${cn.status} · reconecte", fontSize = 11.sp, color = if (cn.status == "ACTIVE") c.ok else c.err)
+                        Text(when (cn.status) { "ACTIVE" -> "Conectado · o agente usa direto"; dev.cueopen.app.connectors.HubApi.PENDING -> "Do backup · conecte de novo em Adicionar conector"; else -> "Acesso perdido · conecte de novo" }, fontSize = 11.sp, color = if (cn.status == "ACTIVE") c.ok else c.err)
                     }
                     Box {
                         IconButton(onClick = { menu = true }) { Icon(Icons.Rounded.MoreVert, "Opções") }

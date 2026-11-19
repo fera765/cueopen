@@ -105,7 +105,8 @@ class ContextManager(private val store: Store, private val sandbox: Sandbox, pri
                         if (sessionId != null) stash(sessionId, full)?.let { markBrowserSnapshot(it) }
                         m.copy(content = full.take(200).trimEnd() + "\n…[snapshot antigo do browser recolhido: a página pode ter mudado desde então. " +
                             "Para o estado atual, use browser_read; o que você precisava guardar dele deve estar nas suas anotações.]")
-                    } else if (full.length <= 1_200) {
+                    } else if (full.length <= 1_200 || (m.name == "conector_executar" && full.length <= 4_000)) {
+                        // Resultado de conector já vem resumido (~2 KB): recolher obrigaria o agente a reler o arquivo.
                         // Pequeno: fica inteiro (um ponteiro de releitura custava uma chamada a mais e virava ciclo de leituras).
                         m
                     } else {

@@ -93,7 +93,7 @@ async function main() {
 
     // run com processadores
     const conn = { type: 'SECRET_TEXT', secret_text: 'boa' }
-    const r = await hub.opRun({ name: 'fake', action: 'eco', connection: conn, input: { texto: 5, n: '7', flag: 'TRUE', obj: '{"a":1}', tags: 'x', quando: '2024-01-02 10:00', itens: { a: ['1', '2'] } } })
+    const r = await hub.opRun({ name: 'fake', action: 'eco', raw: true, connection: conn, input: { texto: 5, n: '7', flag: 'TRUE', obj: '{"a":1}', tags: 'x', quando: '2024-01-02 10:00', itens: { a: ['1', '2'] } } })
     assert.equal(r.ok, true, r.error)
     assert.deepEqual(r.output.auth, conn) // V2 recebe o valor completo
     assert.equal(r.output.props.texto, '5')
@@ -137,7 +137,7 @@ async function main() {
     assert.equal(wrong.valid, false)
 
     // piece antiga (sem contextInfo) recebe o formato V0 e serverUrl
-    const v = await hub.opRun({ name: 'velha', action: 'quem', connection: { type: 'CUSTOM_AUTH', props: { key: 'k', port: '8080' } } })
+    const v = await hub.opRun({ name: 'velha', action: 'quem', raw: true, connection: { type: 'CUSTOM_AUTH', props: { key: 'k', port: '8080' } } })
     assert.equal(v.ok, true, v.error)
     assert.deepEqual(v.output.auth, { key: 'k', port: 8080 })
     assert.match(v.output.serverUrl, /^http:\/\/127\.0\.0\.1:/)
@@ -159,7 +159,7 @@ async function main() {
     assert.equal(hub.oauthExpired(fresh), false)
     assert.equal(hub.oauthExpired({ ...fresh, claimed_at: 1 }), true)
     assert.equal(hub.oauthExpired({ type: 'OAUTH2', access_token: 't', claimed_at: 1 }), false)
-    const ro = await hub.opRun({ name: 'oauth', action: 'eu', connection: fresh })
+    const ro = await hub.opRun({ name: 'oauth', action: 'eu', raw: true, connection: fresh })
     assert.equal(ro.output.token, 't')
 
     // renovação OAUTH2 própria contra um servidor de token local
@@ -172,7 +172,7 @@ async function main() {
     })
     await new Promise((ok) => tokenSrv.listen(0, '127.0.0.1', ok))
     const expired = { type: 'OAUTH2', access_token: 'velho', refresh_token: 'r', expires_in: 3600, claimed_at: 1, client_id: 'cid', client_secret: 'sec', token_url: `http://127.0.0.1:${tokenSrv.address().port}/t` }
-    const rr = await hub.opRun({ name: 'oauth', action: 'eu', connection: expired })
+    const rr = await hub.opRun({ name: 'oauth', action: 'eu', raw: true, connection: expired })
     assert.equal(rr.ok, true, rr.error)
     assert.equal(rr.output.token, 'novo')
     assert.equal(rr.connection.access_token, 'novo')
@@ -185,6 +185,83 @@ async function main() {
     // nome/versão inválidos
     await assert.rejects(hub.ensureInstalled('lodash', '1.0.0'), /inválido/)
     await assert.rejects(hub.ensureInstalled('@activepieces/piece-fake', '1.0;rm'), /inválida/)
+
+    // ---------------- saída para agentes (vale para qualquer piece)
+    {
+        const bigHtml = '<html><head><style>.x{color:red}</style></head><body><div><p>Olá João,</p><p>Seu pedido <b>#123</b> foi enviado &amp; chega amanhã.</p>' + '<p>Linha de rodapé repetida para encher.</p>'.repeat(200) + '</div></body></html>'
+        const gmailMailparser = { found: true, results: [{
+            id: '18c9a', threadId: '18c9a', snippet: 'Seu pedido #123 foi enviado',
+            headers: {},
+            headerLines: [
+                { key: 'from', line: 'From: =?utf-8?b?Sm/Do28gU2lsdmE=?= <joao@exemplo.com>' },
+                { key: 'subject', line: 'Subject: =?UTF-8?Q?Pedido_enviado_=E2=9C=85?=' },
+                { key: 'date', line: 'Date: Wed, 19 Nov 2026 10:00:00 +0000' },
+                { key: 'received', line: 'Received: from mx.google.com by ...' },
+                { key: 'dkim-signature', line: 'DKIM-Signature: v=1; a=rsa-sha256; ' + 'A'.repeat(300) },
+            ],
+            html: bigHtml, textAsHtml: bigHtml, text: 'Olá João,\n\nSeu pedido #123 foi enviado & chega amanhã.\n' + 'Linha de rodapé repetida para encher. '.repeat(200),
+            attachments: [{ filename: 'nota.pdf', contentType: 'application/pdf', size: 51234, content: { type: 'buffer', size: 51234 } }],
+            labelIds: [], cc: null, bcc: '',
+        }] }
+        const r1 = hub.shapeResult(gmailMailparser, { connector: 'Gmail', action: 'gmail_search_mail', durationMs: 3846, version: '0.19.0' })
+        const s1 = JSON.stringify(r1)
+        assert.ok(s1.length <= 2048, `busca simples deve caber em 2 KB (veio ${s1.length})`)
+        assert.equal(r1.status, 'ok')
+        assert.equal(r1.duration_ms, 3846)
+        assert.equal(r1.summary.count, 1)
+        assert.equal(r1.summary.first_item_preview.subject, 'Pedido enviado ✅')
+        assert.match(r1.summary.first_item_preview.from, /João Silva/)
+        const it = r1.data.results[0]
+        assert.equal(it.subject, 'Pedido enviado ✅')
+        assert.match(it.from, /^João Silva/)
+        assert.ok(it.preview.includes('Pedido enviado ✅'))
+        assert.equal(it.html, undefined, 'HTML duplicado do texto sai')
+        assert.equal(it.headerLines, undefined, 'sem duplicar headers/headerLines')
+        assert.equal(it.labelIds, undefined, 'campos vazios saem')
+        assert.ok(!s1.includes('DKIM') && !s1.includes('<p>') && !s1.includes('=?utf-8?'), 'sem ruído, HTML ou MIME codificado')
+        assert.equal(it.text_truncated, true)
+        assert.ok(r1.note.includes('completo=true'))
+
+        // Gmail API cru: payload.headers [{name,value}] + corpo base64url em HTML
+        const html64 = Buffer.from('<div><p>Reunião confirmada para <b>sexta</b> às 10h.</p></div>').toString('base64url')
+        const api = { messages: [
+            { id: 'a1', payload: { headers: [{ name: 'Subject', value: '=?utf-8?B?UmV1bmnDo28=?=' }, { name: 'From', value: 'Ana <ana@x.com>' }, { name: 'Date', value: 'Tue, 18 Nov 2026 09:00:00 -0300' }],
+                parts: [{ mimeType: 'text/html', body: { size: 60, data: html64 } }] } },
+            { id: 'a2', payload: { headers: [{ name: 'Subject', value: 'Outro' }, { name: 'From', value: 'b@x.com' }] } },
+        ], resultSizeEstimate: 2, nextPageToken: 'tok' }
+        const r2 = hub.shapeResult(api, { connector: 'Gmail', action: 'list', durationMs: 10, version: '1' })
+        assert.equal(r2.summary.count, 2)
+        assert.equal(r2.summary.first_item_preview.subject, 'Reunião')
+        const m0 = r2.data.messages[0]
+        assert.equal(m0.subject, 'Reunião')
+        assert.equal(m0.from, 'Ana <ana@x.com>')
+        assert.match(JSON.stringify(m0.payload.parts), /Reunião confirmada para sexta às 10h/)
+        assert.equal(r2.data.nextPageToken, 'tok', 'campos irmãos da lista ficam')
+
+        // Lista grande (Drive): resumo no topo + lista limitada, dentro do orçamento
+        const files = { files: Array.from({ length: 50 }, (_, i) => ({ id: 'f' + i, name: `Relatório ${i}.pdf`, mimeType: 'application/pdf', modifiedTime: '2026-11-1' + (i % 9) + 'T12:00:00Z', webViewLink: 'https://drive.google.com/file/d/' + 'x'.repeat(30) + '/view' })) }
+        const r3 = hub.shapeResult(files, { connector: 'Drive', action: 'list_files', durationMs: 5, version: '1' })
+        assert.ok(JSON.stringify(r3).length <= 2048, `lista deve caber em 2 KB (veio ${JSON.stringify(r3).length})`)
+        assert.equal(r3.summary.count, 50)
+        assert.equal(r3.summary.first_item_preview.subject, 'Relatório 0.pdf')
+        assert.ok(r3.summary.shown >= 2 && r3.summary.shown < 50)
+
+        // Objeto simples (ex.: linha criada): fica inteiro
+        const r4 = hub.shapeResult({ id: 7, row: ['a', 'b'], updated: true }, { connector: 'Sheets', action: 'insert_row', durationMs: 1, version: '1' })
+        assert.deepEqual(r4.data, { id: 7, row: ['a', 'b'], updated: true })
+        assert.equal(r4.note, undefined)
+
+        // completo=true: nada cortado, mas ainda decodificado
+        const r5 = hub.shapeResult(gmailMailparser, { connector: 'Gmail', action: 'x', durationMs: 1, version: '1' }, { full: true })
+        assert.ok(r5.data.results[0].text.length > 5000)
+        assert.equal(r5.data.results[0].text_truncated, undefined)
+
+        // texto puro e nulo
+        assert.equal(hub.shapeResult('ok', { connector: 'X', action: 'y' }).data, 'ok')
+        assert.equal(hub.shapeResult(null, { connector: 'X', action: 'y' }).data, null)
+        assert.equal(hub.decodeMimeWords('=?iso-8859-1?q?Ol=E1?= =?utf-8?b?bXVuZG8=?='), 'Olámundo')
+        assert.equal(hub.htmlToText('<p>a&nbsp;b</p><br><ul><li>x</li></ul>'), 'a b\n\n• x')
+    }
 
     // HTTP: token obrigatório, health livre, arquivos
     const server = hub.createServer()

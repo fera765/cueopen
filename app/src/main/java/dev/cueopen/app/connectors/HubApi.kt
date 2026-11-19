@@ -212,14 +212,42 @@ object HubApi {
             piece(name)
         }
         val id = newExternalId()
+        // Conta que veio de um backup (pendente de login) do mesmo app: a nova entra no lugar dela.
+        val pendingName = withContext(Dispatchers.IO) { loadAll().values.firstOrNull { it.s("pieceName") == name && it.s("status") == PENDING }?.s("displayName") }
         val entry = buildJsonObject {
             put("externalId", id); put("displayName", displayName.ifBlank { catalogPiece(name)?.displayName ?: name.substringAfter("piece-") })
             put("pieceName", name); put("status", "ACTIVE"); put("createdAt", System.currentTimeMillis()); put("value", conn)
         }
-        withContext(Dispatchers.IO) { connMutex.withLock { saveAll(loadAll().apply { put(id, entry) }) } }
+        withContext(Dispatchers.IO) { connMutex.withLock { saveAll(loadAll().apply {
+            if (pendingName != null) entries.firstOrNull { it.value.s("pieceName") == name && it.value.s("status") == PENDING }?.key?.let { remove(it) }
+            put(id, entry)
+        }) } }
         HubConnectors.invalidate()
         runCatching { HubConnectors.syncConnector(CueApp.instance.store) }
         return id
+    }
+
+    const val PENDING = "PENDING"
+
+    /** Lista contas vindas de um backup: aparecem como "entre de novo" até o usuário conectar o app outra vez. */
+    suspend fun importPending(list: List<Pair<String, String>>): Int {
+        var n = 0
+        withContext(Dispatchers.IO) { connMutex.withLock {
+            val all = loadAll()
+            list.forEach { (piece, display) ->
+                val name = pieceName(piece)
+                if (all.values.any { it.s("pieceName") == name && it.s("displayName") == display }) return@forEach
+                val id = newExternalId()
+                all[id] = buildJsonObject {
+                    put("externalId", id); put("displayName", display); put("pieceName", name); put("status", PENDING)
+                    put("createdAt", System.currentTimeMillis()); put("value", JsonObject(emptyMap()))
+                }
+                n++
+            }
+            saveAll(all)
+        } }
+        HubConnectors.invalidate()
+        return n
     }
 
     suspend fun connections(): List<HubConnection> = withContext(Dispatchers.IO) {

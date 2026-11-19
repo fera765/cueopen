@@ -162,6 +162,10 @@
                 android:resource="@xml/fluwy_accessibility_service" />
         </service>
 
+        <activity android:name=".backup.RestartActivity" android:exported="false" android:process=":restart"
+            android:excludeFromRecents="true" android:noHistory="true"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar" />
+
         <activity android:name=".device.DeviceVoiceInputActivity" android:exported="false"
             android:theme="@android:style/Theme.Translucent.NoTitleBar" />
 

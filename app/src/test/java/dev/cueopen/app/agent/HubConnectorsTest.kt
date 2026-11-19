@@ -59,17 +59,25 @@ class HubConnectorsTest {
         assertNull(HubConnectors.fields(JsonPrimitive("lixo")))
     }
 
-    /** A saída de conector_executar continua legível pelos gatilhos (JSON depois do cabeçalho). */
-    @Test fun runOutputKeepsTriggerFormat() {
+    /** Saída de conector_executar: só JSON identado; os gatilhos acham os itens em "data". */
+    @Test fun runOutputIsJsonAndTriggersStillFindItems() {
         val ok = HubConnectors.formatRun("@activepieces/piece-gmail", buildJsonObject {
-            put("ok", true); put("action", "gmail_search_mail"); put("durationMs", 120); put("version", "0.19.0")
-            put("output", buildJsonObject { put("messages", buildJsonArray { add(buildJsonObject { put("id", "m1") }); add(buildJsonObject { put("id", "m2") }) }) })
+            put("ok", true); put("action", "gmail_search_mail")
+            put("result", buildJsonObject {
+                put("status", "ok"); put("connector", "Gmail"); put("action", "gmail_search_mail"); put("duration_ms", 120)
+                put("summary", buildJsonObject { put("count", 2) })
+                put("data", buildJsonObject { put("messages", buildJsonArray { add(buildJsonObject { put("id", "m1") }); add(buildJsonObject { put("id", "m2") }) }) })
+            })
         })
-        assertTrue(ok.startsWith("✅"))
+        assertTrue(ok.startsWith("{"))
+        assertTrue("identado", ok.contains("\n  \"status\": \"ok\""))
+        val parsed = kotlinx.serialization.json.Json.parseToJsonElement(ok)
+        assertTrue(parsed is kotlinx.serialization.json.JsonObject)
         val items = TriggerLogic.items(TriggerLogic.payload(ok)!!)
         assertEquals(2, items.size)
         val err = HubConnectors.formatRun("@activepieces/piece-gmail", buildJsonObject { put("ok", false); put("action", "x"); put("error", "HTTP 403: forbidden") })
-        assertTrue(err.startsWith("ERRO"))
+        assertTrue(err.startsWith("ERRO: {"))
+        assertTrue(err.contains("\"status\": \"error\""))
         assertTrue(err.contains("403"))
     }
 
