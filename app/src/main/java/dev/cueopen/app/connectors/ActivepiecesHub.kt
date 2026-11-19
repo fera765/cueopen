@@ -173,7 +173,7 @@ object ActivepiecesHub {
     } }
 
     /** O hub antigo (imagem completa do Activepieces, ~1 GB) não é mais usado: libera o espaço. */
-    private fun removeOldHub() {
+    private suspend fun removeOldHub() {
         val old = File(sandbox.alpineDir, OLD_HUB_DIR)
         if (!old.exists()) return
         logLine("Removendo o hub antigo (imagem completa do Activepieces) para liberar espaço…\n")
