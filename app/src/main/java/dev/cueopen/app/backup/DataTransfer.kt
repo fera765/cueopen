@@ -1,3 +1,5 @@
+@file:OptIn(kotlinx.serialization.ExperimentalSerializationApi::class)
+
 package dev.cueopen.app.backup
 
 import android.content.ContentValues
@@ -24,6 +26,8 @@ import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.put
+import kotlinx.serialization.json.decodeFromStream
+import kotlinx.serialization.json.encodeToStream
 import java.io.File
 import java.io.InputStream
 import java.io.OutputStream
@@ -227,7 +231,6 @@ object DataTransfer {
         }
     }
 
-    @OptIn(kotlinx.serialization.ExperimentalSerializationApi::class)
     private fun putState(z: ZipOutputStream, s: AppState) {
         z.putNextEntry(ZipEntry("data/state.json"))
         // Escreve em fluxo (o estado pode passar de dezenas de MB) sem fechar o zip.
@@ -360,7 +363,6 @@ object DataTransfer {
             onProgress(0.3f, "Restaurando agentes, sessões e configurações")
             val stateFile = File(outer, "data/state.json")
             if (stateFile.isFile) {
-                @OptIn(kotlinx.serialization.ExperimentalSerializationApi::class)
                 val imported = stateFile.inputStream().buffered().use { AppJson.decodeFromStream(AppState.serializer(), it) }
                 val secureSettings = File(secureDir, "settings.json").takeIf { it.isFile }?.let { runCatching { AppJson.decodeFromString(Settings.serializer(), it.readText()) }.getOrNull() }
                 val current = app.store.state.value
