@@ -227,9 +227,9 @@ class Store(context: Context) {
     // ---------- Seções
     fun section(id: String?) = id?.let { i -> _state.value.sections.firstOrNull { it.id == i } }
     fun upsertSection(sec: Section) = update { st ->
+        // Sem kanban automático do plano: a seção tem só a página que o pedido do usuário pede.
         st.copy(sections = if (st.sections.any { it.id == sec.id }) st.sections.map { if (it.id == sec.id) sec else it } else st.sections + sec,
-            // Quadro do time: o kanban da seção acompanha o plano sozinho.
-            pages = runCatching { dev.cueopen.app.pages.PageOps.syncBoard(st.pages, sec) }.getOrDefault(st.pages))
+            pages = st.pages.filterNot { it.id == dev.cueopen.app.pages.PageOps.boardId(sec.id) })
     }
 
     // ---------- Fluwy Pages

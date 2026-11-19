@@ -57,7 +57,7 @@ object PageOps {
         listOf("op", "type", "action", "operation").firstNotNullOfOrNull { k -> o.s(k).takeIf { it.isNotBlank() } }
             .orEmpty().lowercase().replace('-', '_').replace(' ', '_')
 
-    const val OPS_HELP = "rename, set_markdown, append_markdown, replace_text, replace_section, set_data, set_html, add_column, " +
+    const val OPS_HELP = "rename, set_kind, set_markdown, append_markdown, replace_text, replace_section, set_data, set_html, add_column, " +
         "add_card, move_card, update_card, remove_card, check, uncheck, set_headers, add_row, update_row, remove_row"
 
     private fun column(p: FluwyPage, name: String): String? =
@@ -75,6 +75,17 @@ object PageOps {
             val op = opName(o)
             fun fail(msg: String): Result<FluwyPage> = Result.failure(IllegalArgumentException("operação ${n + 1} ($op): $msg — nada foi alterado"))
             p = when (op) {
+                "set_kind" -> {
+                    // A conversa tem UMA página: trocar de formato (ex.: o usuário pediu um kanban) muda esta mesma página.
+                    val k = o.s("kind").trim().lowercase()
+                    if (k !in FluwyPage.KINDS) return fail("kind inválido: use ${FluwyPage.KINDS.joinToString()}")
+                    val cols = when (k) {
+                        FluwyPage.KIND_KANBAN -> p.columns.takeIf { p.kind == k && it.isNotEmpty() } ?: FluwyPage.DEFAULT_COLUMNS
+                        FluwyPage.KIND_CHECKLIST -> FluwyPage.CHECKLIST_COLUMNS
+                        else -> emptyList()
+                    }
+                    if (k == p.kind) p else p.copy(kind = k, columns = cols, cards = if (k == FluwyPage.KIND_KANBAN || k == FluwyPage.KIND_CHECKLIST) emptyList() else p.cards)
+                }
                 "rename" -> o.s("title").takeIf { it.isNotBlank() }?.let { p.copy(title = it.take(120)) } ?: return fail("informe title")
                 "set_markdown" -> p.copy(markdown = o.s("markdown").takeIf { it.length <= MAX_MARKDOWN } ?: return fail("markdown grande demais"))
                 "append_markdown" -> (p.markdown.trimEnd() + "\n\n" + o.s("markdown")).trim().takeIf { it.length <= MAX_MARKDOWN }?.let { p.copy(markdown = it) } ?: return fail("página grande demais")
@@ -202,6 +213,8 @@ object PageOps {
      */
     fun prune(pages: List<FluwyPage>, sessionIds: Set<String>, agentIds: Set<String>, sectionIds: Set<String>): List<FluwyPage> =
         pages.filter { p ->
+            // O antigo "Quadro do time" automático saiu: cada conversa tem uma única página, a do pedido do usuário.
+            !p.id.startsWith("board_") &&
             p.spaceId in sessionIds && (p.creatorAgentId == null || p.creatorAgentId in agentIds) && (p.sectionId == null || p.sectionId in sectionIds)
         }
 

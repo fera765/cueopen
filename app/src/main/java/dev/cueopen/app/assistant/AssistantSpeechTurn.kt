@@ -68,6 +68,13 @@ internal class AssistantSpeechTurn(
         return transcript.takeIf(String::isNotBlank)
     }
 
+    /** Entrega já o que foi transcrito (o turno acabou): sem esperar nova janela nem reabrir o microfone. */
+    fun flush(): String? {
+        val transcript = finalSegments.joinToString(" ").trim()
+        reset()
+        return transcript.takeIf(String::isNotBlank)
+    }
+
     val hasPendingSpeech: Boolean
         get() = speechActive || awaitingTerminalResult || finalSegments.isNotEmpty()
 

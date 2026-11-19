@@ -63,4 +63,19 @@ class PageOpsTest {
         assertEquals(listOf(a, c), PageOps.prune(listOf(a, b, c), setOf("chat1", "chat2"), emptySet(), setOf("sec1")))
         assertEquals(listOf(b), PageOps.prune(listOf(a, b, c), setOf("chat2"), setOf("ag1"), emptySet()))
     }
+
+    @Test fun setKindMudaOFormatoDaMesmaPagina() {
+        val p = PageOps.create("s1", "Minerador de ofertas", "html", "a", html = "<p>x</p>").getOrThrow()
+        val op = Json.parseToJsonElement("""{"op":"set_kind","kind":"kanban"}""").jsonObject
+        val k = PageOps.apply(p, listOf(op), "a").getOrThrow()
+        assertEquals(p.id, k.id)
+        assertEquals("kanban", k.kind)
+        assertTrue(k.columns.isNotEmpty())
+    }
+
+    @Test fun pruneRemoveOQuadroAutomaticoAntigo() {
+        val p = PageOps.create("s1", "Marketing", "doc", "a").getOrThrow()
+        val board = p.copy(id = PageOps.boardId("sec1"), kind = "kanban")
+        assertEquals(listOf(p), PageOps.prune(listOf(p, board), setOf("s1"), emptySet(), setOf("sec1")))
+    }
 }

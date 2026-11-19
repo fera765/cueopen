@@ -20,5 +20,14 @@ internal object AssistantListeningPolicy {
         return (MIN_RESTART_DELAY_MS * multiplier).coerceAtMost(MAX_RESTART_DELAY_MS)
     }
 
+    const val MAX_TRANSIENT_RETRIES = 2
+
+    /** Falhas do serviço (ocupado, cliente, servidor). "Não ouvi"/"sem fala" encerram o turno. */
+    fun isTransientError(code: Int): Boolean = code in setOf(
+        android.speech.SpeechRecognizer.ERROR_RECOGNIZER_BUSY,
+        android.speech.SpeechRecognizer.ERROR_CLIENT,
+        11, // ERROR_SERVER_DISCONNECTED (API 31)
+    )
+
     fun shouldDispatchFinal(transcript: String): Boolean = transcript.isNotBlank()
 }

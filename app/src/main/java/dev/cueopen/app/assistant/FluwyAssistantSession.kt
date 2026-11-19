@@ -46,6 +46,8 @@ class FluwyAssistantSession(baseContext: Context) : VoiceInteractionSession(base
     private var restartRunnable: Runnable? = null
     private var terminalCallbackWatchdog: Runnable? = null
     private var consecutiveRecognitionErrors = 0
+    /** Um turno por ativação: depois de enviar (ou de não ouvir nada) o microfone não reabre sozinho. */
+    private var turnDone = false
     private var liveTranscript = ""
     private var lastVoiceActivityAt = 0L
     private var sessionShownAtWallClock = 0L
@@ -78,9 +80,9 @@ class FluwyAssistantSession(baseContext: Context) : VoiceInteractionSession(base
             }
 
             val completedTurn = speechTurn.finishIfSilent(now)
-            if (completedTurn != null && AssistantListeningPolicy.shouldDispatchFinal(completedTurn)) {
-                dispatchUtterance(completedTurn)
-                orb?.contentDescription = "Mensagem enviada. A escuta continua ativa para a próxima fala."
+            if (completedTurn != null) {
+                endTurn(completedTurn)
+                return
             }
             scheduleTurnSilenceCheck()
         }
@@ -129,12 +131,12 @@ class FluwyAssistantSession(baseContext: Context) : VoiceInteractionSession(base
         }
         orb = AssistantOrbView(appContext).apply {
             layoutParams = FrameLayout.LayoutParams(dp(310), dp(310), Gravity.CENTER)
-            contentDescription = "Assistente de voz. Escuta contínua ativa; uma pausa de 2 segundos envia a mensagem. A fala pode usar internet e bateria."
+            contentDescription = "Assistente de voz. Fale; uma pausa de 2 segundos envia a mensagem e o microfone desliga. Toque para falar de novo."
             setOnClickListener {
                 if (ContextCompat.checkSelfPermission(appContext, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
                     requestMicrophonePermission()
                 } else if (speechRecognizer == null && restartRunnable == null) {
-                    startListening()
+                    beginTurn()
                 }
             }
         }
@@ -167,7 +169,26 @@ class FluwyAssistantSession(baseContext: Context) : VoiceInteractionSession(base
         lastVoiceActivityAt = SystemClock.elapsedRealtime()
         mainHandler.removeCallbacks(closeAfterInactivity)
         mainHandler.postDelayed(closeAfterInactivity, INACTIVITY_CHECK_INTERVAL_MS)
-        if (speechRecognizer == null && restartRunnable == null) startListening()
+        if (speechRecognizer == null && restartRunnable == null) beginTurn()
+    }
+
+    private fun beginTurn() {
+        turnDone = false
+        consecutiveRecognitionErrors = 0
+        speechTurn.reset()
+        startListening()
+    }
+
+    /** Encerra o turno: envia o que foi dito (se houver) e desliga o microfone sem reinício automático. */
+    private fun endTurn(transcript: String?) {
+        turnDone = true
+        stopListening()
+        if (transcript != null && AssistantListeningPolicy.shouldDispatchFinal(transcript)) {
+            dispatchUtterance(transcript)
+            orb?.contentDescription = "Mensagem enviada. Toque no círculo para falar de novo."
+        } else {
+            orb?.contentDescription = "Não ouvi nada. Toque no círculo para falar."
+        }
     }
 
     override fun onHandleScreenshot(screenshot: android.graphics.Bitmap?) {
@@ -195,7 +216,7 @@ class FluwyAssistantSession(baseContext: Context) : VoiceInteractionSession(base
     }
 
     private fun startListening() {
-        if (!sessionVisible || speechRecognizer != null || restartRunnable != null || recognitionLoop.isActive) return
+        if (turnDone || !sessionVisible || speechRecognizer != null || restartRunnable != null || recognitionLoop.isActive) return
         if (ContextCompat.checkSelfPermission(appContext, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
             orb?.setListening(false)
             orb?.contentDescription = "Permissão do microfone necessária. Toque no círculo para abrir o app e autorizá-la."
@@ -207,7 +228,12 @@ class FluwyAssistantSession(baseContext: Context) : VoiceInteractionSession(base
             return
         }
         val recognizer = runCatching { SpeechRecognizers.create(appContext) }.getOrElse {
-            orb?.contentDescription = "Não foi possível iniciar o microfone. Tentarei novamente com uma pausa curta."
+            if (consecutiveRecognitionErrors >= AssistantListeningPolicy.MAX_TRANSIENT_RETRIES) {
+                endTurn(null)
+                orb?.contentDescription = "Não foi possível iniciar o microfone. Toque no círculo para tentar de novo."
+                return
+            }
+            orb?.contentDescription = "Não foi possível iniciar o microfone. Tentando de novo."
             consecutiveRecognitionErrors += 1
             scheduleRecognitionRestart(nextRecognitionRetryDelay())
             return
@@ -309,26 +335,12 @@ class FluwyAssistantSession(baseContext: Context) : VoiceInteractionSession(base
             return
         }
         if (!recognitionLoop.onTerminalCallback()) return
+        val live = liveTranscript
         releaseCurrentRecognizer(recognizer, gate, cancel = false)
-        if (text.isNotBlank()) {
-            consecutiveRecognitionErrors = 0
-            speechTurn.onFinalResult(text, SystemClock.elapsedRealtime())
-        } else {
-            speechTurn.onRecognitionError()
-            consecutiveRecognitionErrors += 1
-        }
-        liveTranscript = ""
-        providerEndedSpeech = false
-        orb?.setRms(0f)
-        orb?.setListening(false)
-        orb?.contentDescription = if (text.isNotBlank()) {
-            "Transcrição final recebida. A escuta será reiniciada; uma pausa de 2 segundos envia a mensagem."
-        } else {
-            "A transcrição final veio vazia. Vou reiniciar a escuta automaticamente."
-        }
-        scheduleTurnSilenceCheck()
-        val delay = if (text.isNotBlank()) RESTART_AFTER_RESULT_MS else nextRecognitionRetryDelay()
-        scheduleRecognitionRestart(delay)
+        // O provedor já encerrou a fala: o turno termina aqui. Reabrir o microfone era o que fazia
+        // o assistente "se reativar" sozinho com ruído ou com o próprio bipe.
+        speechTurn.onFinalResult(text.ifBlank { live }, SystemClock.elapsedRealtime())
+        endTurn(speechTurn.flush())
     }
 
     private fun handleRecognitionError(recognizer: SpeechRecognizer, gate: AssistantRecognitionGate, error: Int) {
@@ -338,22 +350,30 @@ class FluwyAssistantSession(baseContext: Context) : VoiceInteractionSession(base
             return
         }
         if (!recognitionLoop.onTerminalCallback()) return
+        val live = liveTranscript
         releaseCurrentRecognizer(recognizer, gate, cancel = false)
         speechTurn.onRecognitionError()
+        if (live.isNotBlank()) speechTurn.onFinalResult(live, SystemClock.elapsedRealtime())
         liveTranscript = ""
         providerEndedSpeech = false
         orb?.setRms(0f)
         orb?.setListening(false)
-        scheduleTurnSilenceCheck()
 
         if (error == SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS) {
+            turnDone = true
             orb?.contentDescription = "O Android negou o acesso ao microfone. Toque no círculo para autorizá-lo."
             return
         }
-
-        consecutiveRecognitionErrors += 1
-        orb?.contentDescription = "${speechError(error)} A escuta será retomada automaticamente."
-        scheduleRecognitionRestart(nextRecognitionRetryDelay())
+        val pending = speechTurn.flush()
+        // Só falhas técnicas momentâneas, sem nada dito, ganham nova tentativa (no máximo 2).
+        if (pending == null && AssistantListeningPolicy.isTransientError(error) &&
+            consecutiveRecognitionErrors < AssistantListeningPolicy.MAX_TRANSIENT_RETRIES) {
+            consecutiveRecognitionErrors += 1
+            orb?.contentDescription = "${speechError(error)} Tentando de novo."
+            scheduleRecognitionRestart(nextRecognitionRetryDelay())
+            return
+        }
+        endTurn(pending)
     }
 
     private fun dispatchUtterance(text: String) {
@@ -516,7 +536,6 @@ class FluwyAssistantSession(baseContext: Context) : VoiceInteractionSession(base
         const val INACTIVITY_CHECK_INTERVAL_MS = 5_000L
         const val STATE_REFRESH_INTERVAL_MS = 450L
         const val SCREENSHOT_DISPATCH_DELAY_MS = 450L
-        const val RESTART_AFTER_RESULT_MS = 250L
         const val TERMINAL_CALLBACK_TIMEOUT_MS = 3_000L
         const val MAX_TRANSCRIPT_LENGTH = 4_000
     }

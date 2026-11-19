@@ -2904,12 +2904,6 @@ class AgentRunner(
         return "[A leitura direta não funcionou (${directResult.lineSequence().first().take(140)}); abri automaticamente no browser:]\n" + nav.take(300) + "\n\n" + page
     }
 
-    /** A página da seção (a primeira criada, fora o quadro automático do plano). Null fora de seção. */
-    private fun sectionPage(sessionId: String): dev.cueopen.app.pages.FluwyPage? {
-        if (store.session(sessionId)?.sectionId == null) return null
-        return store.pagesIn(pageSpace(sessionId)).filter { it.sectionId == null }.minByOrNull { it.createdAt }
-    }
-
     /** Espaço das páginas: a seção inteira compartilha (chat do coordenador); fora de seção, o próprio chat. */
     private fun pageSpace(sessionId: String): String = store.section(store.session(sessionId)?.sectionId)?.sessionId ?: sessionId
 
@@ -3351,7 +3345,7 @@ class AgentRunner(
                 store.section(session.sectionId)?.takeIf { it.coordinatorAgentId != agent?.id && it.sessionId != session.id }?.let { sec ->
                     appendLine(); appendLine("## Você é agente da seção ${sec.name} (o coordenador define o seu trabalho)")
                     appendLine("- Execute exatamente a tarefa recebida do coordenador, sem criar etapas novas nem ampliar o escopo: ele divide o trabalho entre o time, e sair do escopo gera retrabalho e conflito com outros agentes.")
-                    appendLine("- Página da seção (Pages): a seção tem UMA página compartilhada por todos os agentes. Nunca crie outra: leia com page_read e atualize só a sua parte com page_update (a seção com o seu nome, os seus cartões). Se ainda não existir página e a tarefa pedir uma, crie-a — ela vira a página da seção.")
+                    appendLine("- Página da seção (Pages): a seção tem UMA página compartilhada por todos os agentes. Nunca crie outra: leia com page_read e atualize só a sua parte com page_update (a seção com o seu nome, os seus cartões). Se ainda não existir página e a tarefa pedir uma, crie-a — ela vira a página da seção, com o formato e o tema do pedido do usuário.")
                     appendLine("- A cada etapa, escreva 1–2 frases de feedback (o que fez, o que vai fazer, o que falta). É por elas que o coordenador e o usuário acompanham você; não encadeie ferramentas em silêncio.")
                     appendLine("- Os arquivos do time ficam em /root/workspace, compartilhado entre os agentes. Liste com file_list; varrer o sistema inteiro (find /) é lento e não traz nada útil.")
                     appendLine("- Se faltar um insumo (arquivo, ID, acesso), diga exatamente o que falta e encerre com a resposta final: o coordenador resolve e devolve a tarefa. Insistir por conta própria só gasta tempo e tokens.")
@@ -3377,7 +3371,7 @@ class AgentRunner(
                     appendLine("- Cada delegação precisa de objetivo, formato da entrega (output_format), fontes/ferramentas (tools_hint) e limites (boundaries) — tarefas vagas geram trabalho duplicado e lacunas. Dispare as partes independentes juntas, em paralelo.")
                     appendLine("- Os agentes salvam o material completo em arquivo e devolvem só um resumo com o caminho: leia o arquivo quando precisar do detalhe, sem pedir para colarem tudo no relatório.")
                     appendLine("- Antes de entregar ao usuário, confira o resultado final contra o pedido: precisão, fontes citadas, completude e se faltou alguma parte. O que falhar volta com team_review.")
-                    appendLine("- Quadro do time: o plano aparece sozinho como kanban em Pages (\"Quadro do time\"), atualizado a cada mudança de estado. A seção tem UMA página compartilhada (além do quadro automático): crie-a uma vez com page_create e, daí em diante, você e os agentes só a atualizam com page_update (cada agente na sua parte). Ao delegar trabalho que vai para a página, diga ao agente o page_id e qual parte ele atualiza.")
+                    appendLine("- Página da seção: a seção tem UMA única página em Pages, sobre o que o usuário pediu (nada de quadro/kanban do plano à parte). Crie-a uma vez com page_create e, daí em diante, você e os agentes só a atualizam com page_update (cada agente na sua parte). Ao delegar trabalho que vai para a página, diga ao agente o page_id e qual parte ele atualiza.")
                     if (agent?.confirmMode == "auto") appendLine("- Seção 100% autônoma: o usuário não acompanha o chat e não vai responder. Por isso, não faça perguntas, não peça escolha nem confirmação e não termine com \"me diga\" ou \"quer que eu\". Em cada decisão, escolha a melhor opção com base nos dados, registre a escolha em uma frase e siga para a próxima etapa. Um feedback não encerra o trabalho: depois de cada entrega, passe para a fase seguinte com um novo team_plan. O trabalho só termina quando o objetivo inteiro estiver entregue e você chamar section_done(summary).")
                     if (sec.scheduleMinutes > 0) appendLine("- Esta seção roda sozinha ${scheduleLabel(sec.scheduleMinutes)}: o app acorda você com uma mensagem [Heartbeat] e você executa o ciclo completo de novo. O agendamento já está feito; não chame set_schedule.")
                     else appendLine("- Se o usuário pedir repetição (ex.: \"uma vez por dia\"), chame set_schedule(minutes, mission) — 1440 = diário. A partir daí o Android acorda você sozinho.")
@@ -3699,12 +3693,14 @@ class AgentRunner(
             put("path", str("Caminho do arquivo")); put("offset", int("Linha inicial (1 = início; padrão 1)")); put("limit", int("Quantidade de linhas (padrão 250, máx. 1000)")); put("stale_ok", bool("true apenas quando o usuário ou o coordenador pediu para reler um snapshot antigo do browser arquivado em .cue/out; por padrão snapshots antigos são recusados"))
         }, listOf("path")))
         if (pagesEnabled) {
-            add(tool("page_create", "Cria uma página Fluwy Pages NOVA (aparece em Pages, mobile-first). Para mudar uma página que já existe use page_update, nunca page_create. kind: doc (relatório em markdown), kanban, checklist, table ou html (app/página livre com HTML/CSS/JS). " +
+            add(tool("page_create", "Cria A página Fluwy Pages desta conversa (aparece em Pages, mobile-first). Cada conversa tem UMA única página: se já existe, use page_update nela, nunca page_create. " +
+                "A página é 100% sobre o pedido do usuário (ex.: sessão de marketing → página de marketing; minerador de ofertas → o minerador de ofertas). " +
+                "kind: html (app/página feita para o pedido — o padrão para ferramentas e painéis), doc (relatório em markdown), table, checklist ou kanban. Só use kanban/checklist se o usuário pediu esse formato; nunca crie um kanban de tarefas por conta própria. " +
                 "Páginas html podem conversar com o app pelo objeto window.Fluwy: Fluwy.getData() devolve o JSON salvo, Fluwy.saveData(jsonString) salva (o agente lê no page_read), Fluwy.ask(texto) manda uma mensagem a você. Use isso para formulários, listas e controles que o usuário preenche. Numa seção, todo o time vê e atualiza a mesma página.",
-                buildJsonObject { put("title", str("Título")); put("kind", str("doc | kanban | checklist | table | html")); put("markdown", str("Conteúdo inicial (doc)")); put("html", str("HTML completo, mobile-first (html)"))
+                buildJsonObject { put("title", str("Título")); put("kind", str("html | doc | table | checklist | kanban (kanban/checklist só se o usuário pediu)")); put("markdown", str("Conteúdo inicial (doc)")); put("html", str("HTML completo, mobile-first (html)"))
                     put("columns", strArray("Colunas do kanban (padrão: A fazer, Fazendo, Revisão, Feito)")); put("headers", strArray("Cabeçalhos da tabela")) }, listOf("title", "kind")))
             add(tool("page_update", "Atualiza uma página com um lote de operações (tudo ou nada). Mude só o necessário em vez de reescrever. ops: " +
-                "rename{title} · set_markdown{markdown} · append_markdown{markdown} · replace_section{heading,markdown} · replace_text{find,replace} (vale para markdown e para HTML; copie o trecho do page_read) · set_html{html} · set_data{data} · add_column{name} · " +
+                "rename{title} · set_kind{kind} (mudar o formato desta mesma página, ex.: o usuário pediu um kanban) · set_markdown{markdown} · append_markdown{markdown} · replace_section{heading,markdown} · replace_text{find,replace} (vale para markdown e para HTML; copie o trecho do page_read) · set_html{html} · set_data{data} · add_column{name} · " +
                 "add_card{title,column?,assignee?,note?} · move_card{card_id|title,column} · update_card{card_id,new_title?,note?,assignee?,column?} · remove_card{card_id} · " +
                 "add_item{title} · check{card_id|title} · uncheck{card_id|title} · set_headers{headers[]} · add_row{cells[]} · update_row{index,cells[]} · remove_row{index}. " +
                 "Exemplos: [{\"op\":\"move_card\",\"card_id\":\"c_ab12\",\"column\":\"Feito\"}] · [{\"op\":\"replace_section\",\"heading\":\"Preços\",\"markdown\":\"novo texto\"}] · " +
@@ -5266,12 +5262,13 @@ class AgentRunner(
                 "page_create" -> {
                     val by = store.agent(store.session(sessionId)?.agentId)?.name ?: "Agente"
                     fun arr(k: String) = (a[k] as? kotlinx.serialization.json.JsonArray)?.mapNotNull { (it as? kotlinx.serialization.json.JsonPrimitive)?.contentOrNull }.orEmpty()
-                    val dup = dev.cueopen.app.pages.PageOps.sameTitle(store.state.value.pages, pageSpace(sessionId), s("title"))
-                        ?: sectionPage(sessionId)
-                    if (dup != null && store.session(sessionId)?.sectionId != null && dup.sectionId == null)
+                    // Uma página por conversa/seção: se já existe, nunca cria outra.
+                    val dup = store.pagesIn(pageSpace(sessionId)).minByOrNull { it.createdAt }
+                    if (dup != null && store.session(sessionId)?.sectionId != null)
                         "RECUSADO: esta seção trabalha numa única página compartilhada: \"${dup.title}\" (${dup.id}, ${dup.kind}). Todos os agentes atualizam essa mesma página: " +
                             "leia com page_read(\"${dup.id}\") e mude só a sua parte com page_update(\"${dup.id}\", ops=[...]) — por exemplo uma seção com o seu nome (replace_section/append_markdown) ou os seus cartões."
-                    else if (dup != null) "RECUSADO: já existe a página \"${dup.title}\" (${dup.id}, ${dup.kind}). Para editar, leia com page_read e altere com page_update(page_id=\"${dup.id}\"). Só crie outra se o usuário pediu uma página NOVA — e com outro título."
+                    else if (dup != null) "RECUSADO: esta conversa já tem a sua única página: \"${dup.title}\" (${dup.id}, ${dup.kind}). Leia com page_read e altere com page_update(page_id=\"${dup.id}\"). " +
+                        "Para outro formato (ex.: o usuário pediu um kanban) use a op set_kind nessa mesma página; para outro tema, rename + o novo conteúdo."
                     else dev.cueopen.app.pages.PageOps.create(pageSpace(sessionId), s("title"), s("kind"), by, s("markdown"), s("html"), arr("columns"), arr("headers")).fold({ p ->
                         if (store.pagesIn(p.spaceId).size >= 60) "RECUSADO: esta conversa já tem 60 páginas; atualize uma existente." else {
                             store.upsertPage(p.copy(creatorAgentId = store.session(sessionId)?.agentId))
