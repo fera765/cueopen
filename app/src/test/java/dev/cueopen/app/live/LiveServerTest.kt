@@ -21,4 +21,19 @@ class LiveServerTest {
         assertTrue("live" in groups("coloque no ar e me mande o link"))
         assertFalse("live" in groups("crie um site de uma página para minha padaria"))
     }
+
+    @Test fun despublicarAchaOProjetoMesmoComNomeDiferente() {
+        val a = LiveServer.Project("loja-da-ana", "Loja da Ana", "https://x", 8801, "/d", true)
+        val b = LiveServer.Project("blog", "Blog", "https://y", 8802, "/e", false)
+        assertEquals("loja-da-ana", LiveServer.resolve("Loja da Ana", listOf(a, b))?.slug)
+        assertEquals("loja-da-ana", LiveServer.resolve("loja", listOf(a, b))?.slug)
+        assertEquals("loja-da-ana", LiveServer.resolve("Sessão qualquer", listOf(a, b))?.slug) // único no ar
+        assertEquals(null, LiveServer.resolve("outro", listOf(a, a.copy(slug = "c", title = "C"))))
+    }
+
+    @Test fun pedidoDeDespublicarOfereceOLiveServer() {
+        listOf("despublique o app", "tire do ar o site da loja", "pare o app publicado").forEach {
+            assertTrue(it, "live" in groups(it))
+        }
+    }
 }

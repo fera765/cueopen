@@ -62,7 +62,9 @@ object ToolContextPlanner {
         // Live Server: só quando o usuário pede para publicar/expor (não em qualquer menção a site).
         "live" to listOf("publique", "publicar", "publica o", "publica a", "publicacao", "deploy", "coloque no ar", "colocar no ar", "por no ar", "ponha no ar",
             "link publico", "url publica", "endereco publico", "expor", "exponha", "hospede", "hospedar", "deixe online", "deixar online", "acessar de fora",
-            "compartilhar o site", "live server", "go live"),
+            "compartilhar o site", "live server", "go live",
+            "despublique", "tirar do ar", "tire do ar", "tira do ar", "derrube o site", "derrubar o site", "parar o site", "pare o site", "parar o app", "pare o app",
+            "desligar o site", "desligue o site", "unpublish"),
         "channels" to listOf("telegram", "discord", "slack", "envie o arquivo", "enviar o arquivo", "mande o arquivo", "mandar o arquivo", "envie a imagem", "mande a imagem", "enviar imagem", "mandar imagem", "envie o pdf", "mande o pdf", "enviar o relatório", "mande o relatório"),
         "skills_admin" to listOf("crie uma skill", "criar skill", "nova skill", "salve como skill", "skill.md", "instale a skill", "instalar skill", "instalar a skill", "install skill", "set up http", "setup http", "skill local"),
         "wallet" to listOf("carteira", "wallet", "solana", "sol ", "token", "swap", "saldo", "comprar", "vender", "day trade", "daytrade", "trade", "cripto", "crypto", "memecoin", "stop loss", "take profit", "liquidez", "pump", "jupiter", "usdc"),

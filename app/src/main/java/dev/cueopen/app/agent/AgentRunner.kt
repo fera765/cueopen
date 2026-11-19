@@ -3950,9 +3950,9 @@ class AgentRunner(
         if (allowMultiAgent) add(tool("live_server",
                 "Live Server: publica um site (pasta do workspace com index.html) ou um servidor/API já rodando (porta local) numa URL pública HTTPS de acesso direto (sem tela de aviso), sem conta. " +
                     "Use SÓ quando o usuário pedir para publicar/colocar no ar/expor. Publicar de novo gera um link novo; para mudar só o conteúdo de um site já no ar, edite os arquivos da pasta (o link continua o mesmo). " +
-                    "action=publish (dir OU port), stop, status. Mostre a URL ao usuário.",
+                    "action=publish (dir OU port), stop (despublicar: tira o link do ar e encerra o app; project=\"todos\" para todos), status. Mostre a URL ao usuário.",
                 buildJsonObject {
-                    put("action", str("publish | stop | status"))
+                    put("action", str("publish | stop (despublicar) | status"))
                     put("project", str("Nome do projeto. Use sempre o mesmo nome para o mesmo site."))
                     put("dir", str("Pasta do site no workspace, ex.: /root/workspace/site (para sites estáticos)"))
                     put("port", int("Porta local de um servidor/API já em execução (em vez de dir)"))
@@ -5535,7 +5535,7 @@ class AgentRunner(
                     val project = s("project").ifBlank { store.session(sessionId)?.title.orEmpty() }.ifBlank { "site" }
                     when (s("action").lowercase().ifBlank { "publish" }) {
                         "status" -> dev.cueopen.app.live.LiveServer.status()
-                        "stop" -> dev.cueopen.app.live.LiveServer.stop(project)
+                        "stop", "unpublish", "despublicar", "kill", "down" -> dev.cueopen.app.live.LiveServer.stop(s("project").ifBlank { project })
                         else -> {
                             val dir = s("dir").trim()
                             val port = a["port"]?.jsonPrimitive?.intOrNull

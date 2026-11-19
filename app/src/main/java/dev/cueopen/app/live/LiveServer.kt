@@ -122,6 +122,7 @@ object LiveServer {
             if (!ensureTools { logs.appendLine(it) }) return@withContext "ERRO: $logs"
             val slug = slugOf(title)
             val all = readAll()
+            all[slug]?.let { kill(it) } // republicar: nada do túnel/servidor antigo fica órfão no ar
             // 1) O que vai ao ar: pasta estática (servidor próprio) ou porta já aberta.
             val targetPort: Int
             if (dirHost != null) {
@@ -133,7 +134,7 @@ object LiveServer {
                 servers.remove(slug)?.destroy()
                 if (!alive(targetPort)) {
                     val serverLog = File(hostDir(), "$slug.server.log")
-                    servers[slug] = sandbox.spawn("cd '${dirHost.replace("'", "")}' && exec python3 -m http.server $targetPort --bind 127.0.0.1", serverLog)
+                    servers[slug] = sandbox.spawn(": ${marker(slug)}; cd '${dirHost.replace("'", "")}' && exec python3 -m http.server $targetPort --bind 127.0.0.1", serverLog)
                     repeat(30) { if (alive(targetPort)) return@repeat; delay(300) }
                     if (!alive(targetPort)) return@withContext "ERRO: o servidor do site não subiu: ${runCatching { serverLog.readText().takeLast(400) }.getOrDefault("")}"
                 }
@@ -152,7 +153,7 @@ object LiveServer {
                 // O link vive enquanto ESTE processo viver: --retries alto faz o cloudflared reconectar por quedas de rede
                 // sem sair (mesma URL). O loop só age se o processo morrer de vez (aí sai URL nova, registrada no log).
                 tunnels[slug] = sandbox.spawn(
-                    "while true; do $cf tunnel --no-autoupdate --protocol http2 --edge-ip-version auto --retries 100000 --grace-period 30s --url http://127.0.0.1:$targetPort; echo FLUWY_TUNNEL_RESTART; sleep 3; done", cfLog,
+                    ": ${marker(slug)}; while true; do $cf tunnel --no-autoupdate --protocol http2 --edge-ip-version auto --retries 100000 --grace-period 30s --url http://127.0.0.1:$targetPort; echo FLUWY_TUNNEL_RESTART; sleep 3; done", cfLog,
                 )
                 val deadline = System.currentTimeMillis() + 45_000
                 while (System.currentTimeMillis() < deadline && url == null) {
@@ -170,7 +171,7 @@ object LiveServer {
                 if (!ensureTools { logs.appendLine(it) }) return@withContext "ERRO: $logs"
                 val key = ensureKey(slug)
                 val tLog = File(hostDir(), "$slug.tunnel.jsonl").apply { delete() }
-                val cmd = "mkdir -p $DIR && while true; do ssh -n -T -i $key -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new " +
+                val cmd = ": ${marker(slug)}; mkdir -p $DIR && while true; do ssh -n -T -i $key -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new " +
                     "-o UserKnownHostsFile=$DIR/known_hosts -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -o ExitOnForwardFailure=yes " +
                     "-R 80:localhost:$targetPort stable@$HOST output=json host=localhost:$targetPort; sleep 5; done"
                 tunnels[slug] = sandbox.spawn(cmd, tLog)
@@ -196,15 +197,47 @@ object LiveServer {
         }
     }
 
+    /** Marca colocada nos comandos do projeto: permite matar o laço e os filhos dentro do Linux do app. */
+    private fun marker(slug: String) = "fluwy-live:$slug:"
+
+    /** Acha o projeto pelo nome: exato, depois parcial; sem nome (ou nome sem par) e um único no ar → esse. */
+    fun resolve(name: String, all: Collection<Project> = projects()): Project? {
+        val slug = slugOf(name)
+        all.firstOrNull { it.slug == slug }?.let { return it }
+        if (name.isNotBlank()) all.filter { it.slug.contains(slug) || slug.contains(it.slug) || it.title.equals(name, true) }
+            .let { m -> (m.filter { it.active }.takeIf { it.size == 1 } ?: m.takeIf { it.size == 1 })?.let { return it.first() } }
+        return all.filter { it.active }.singleOrNull()
+    }
+
+    /** Mata TUDO do projeto: o laço de reconexão, o cloudflared/ssh e o servidor estático (não só o processo do proot). */
+    private suspend fun kill(p: Project) {
+        tunnels.remove(p.slug)?.destroy(); servers.remove(p.slug)?.destroy()
+        val port = p.port
+        // [x]: o padrão não casa com a linha de comando do próprio shell que roda o pkill.
+        val pats = listOf("[f]luwy-live:${p.slug}:", "[u]rl http://127.0.0.1:$port", "[l]ocalhost:$port stable@", "[h]ttp.server $port")
+        val sh = pats.joinToString(" ; ") { "pkill -f '$it'" } + " ; sleep 0.6 ; " + pats.joinToString(" ; ") { "pkill -9 -f '$it'" } + " ; true"
+        runCatching { sandbox.exec(sh, cwd = "/tmp", timeoutSec = 30) }
+    }
+
+    /** Despublica: tira o link do ar, mata o app/servidor e marca o projeto como parado (não volta ao abrir o app). */
     suspend fun stop(title: String): String = mutex.withLock {
         withContext(Dispatchers.IO) {
-            val slug = slugOf(title)
-            tunnels.remove(slug)?.destroy(); servers.remove(slug)?.destroy()
             val all = readAll()
-            val p = all[slug] ?: return@withContext "Nenhum projeto publicado com o nome \"$title\"."
-            all[slug] = p.copy(active = false); save(all)
+            val all2 = all.values
+            val stopAll = title.trim().lowercase() in setOf("*", "all", "todos", "tudo")
+            val targets = if (stopAll) all2.filter { it.active || tunnels[it.slug] != null }
+                else listOfNotNull(resolve(title, all2))
+            if (targets.isEmpty()) {
+                val on = all2.filter { it.active }.joinToString { it.title }
+                return@withContext if (on.isBlank()) "Nenhum projeto publicado no ar." else "Não achei \"$title\". No ar: $on. Use project com um desses nomes (ou \"todos\")."
+            }
+            targets.forEach { p -> kill(p); all[p.slug] = p.copy(active = false) }
+            save(all)
             if (!hasActive()) runCatching { SandboxService.start(CueApp.instance, "Terminal ativo") }
-            "⏹ \"$title\" saiu do ar (${p.url ?: ""})."
+            targets.joinToString("\n") { p ->
+                val left = if (p.dir != null && alive(p.port)) " (aviso: a porta ${p.port} ainda responde)" else ""
+                "⏹ \"${p.title}\" despublicado: o link ${p.url ?: ""} saiu do ar e o app foi encerrado.$left"
+            }
         }
     }
 
