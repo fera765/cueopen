@@ -76,8 +76,8 @@ fun AgentsScreen(nav: NavController) {
                         }
                         Spacer(Modifier.width(12.dp))
                         Column(Modifier.weight(1f)) {
-                            Text("Bots prontos", fontWeight = FontWeight.SemiBold)
-                            Text("${bots.size} bots do Grok Bot Marketplace para configurar e adicionar.", fontSize = 13.sp, color = c.ink2)
+                            Text("Agentes bots", fontWeight = FontWeight.SemiBold)
+                            Text("${bots.size} agentes bots para configurar e adicionar.", fontSize = 13.sp, color = c.ink2)
                         }
                         Icon(Icons.Rounded.ChevronRight, null, tint = c.ink3)
                     }
@@ -1073,7 +1073,7 @@ private fun NewTriggerDialog(onDismiss: () -> Unit) {
 }
 
 
-/** Bots prontos (Grok Bot Marketplace): tocar abre o agente preenchido para revisar; só é adicionado ao Salvar. */
+/** Agentes bots prontos: tocar abre o agente preenchido para revisar; só é adicionado ao Salvar. */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun AgentBotsScreen(nav: NavController) {
@@ -1083,10 +1083,10 @@ fun AgentBotsScreen(nav: NavController) {
     var category by remember { mutableStateOf<String?>(null) }
     val categories = remember(all) { all.map { it.category to it.categoryLabel }.distinct().sortedBy { it.second } }
     val shown = remember(query, category, all) { dev.cueopen.app.agent.BotCatalog.search(all, query, category) }
-    Scaffold(containerColor = c.bg, topBar = { CueTopBar("Bots", { nav.popBackStack() }) }) { pad ->
+    Scaffold(containerColor = c.bg, topBar = { CueTopBar("Agentes bots", { nav.popBackStack() }) }) { pad ->
         LazyColumn(Modifier.padding(pad), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             item {
-                Text("Bots oficiais do Grok Bot Marketplace. Toque em um para revisar nome, instruções e permissões; ele só entra nos seus agentes quando você tocar em Salvar.",
+                Text("Agentes bots prontos. Toque em um para revisar nome, instruções e permissões; ele só entra nos seus agentes quando você tocar em Salvar.",
                     fontSize = 13.sp, color = c.ink2)
             }
             item { CueField(query, { query = it }, "Buscar bots") }
@@ -1101,7 +1101,7 @@ fun AgentBotsScreen(nav: NavController) {
             items(shown, key = { it.id }) { b ->
                 CueCard(onClick = { nav.navigate("agent/new?bot=${b.id}") }) {
                     Row(verticalAlignment = Alignment.Top) {
-                        AgentFace(Color(dev.cueopen.app.agent.BotCatalog.colorFor(b)), "wink", 40.dp)
+                        AgentFace(Color(dev.cueopen.app.agent.BotCatalog.colorFor(b)), dev.cueopen.app.agent.BotCatalog.faceFor(b), 40.dp)
                         Spacer(Modifier.width(12.dp))
                         Column(Modifier.weight(1f)) {
                             Text(b.name, fontWeight = FontWeight.SemiBold)
@@ -1111,7 +1111,6 @@ fun AgentBotsScreen(nav: NavController) {
                     }
                 }
             }
-            item { Text("Fonte: Grok Bot Marketplace (x.ai/bot/marketplace), dados públicos CC0. As instruções são montadas pelo app a partir da descrição de cada bot.", fontSize = 11.sp, color = c.ink3) }
             item { Spacer(Modifier.height(40.dp)) }
         }
     }

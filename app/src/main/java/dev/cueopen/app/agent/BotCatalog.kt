@@ -5,7 +5,7 @@ import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 
 /**
- * Bots prontos do Grok Bot Marketplace (x.ai/bot/marketplace), os oficiais publicados pelo time do Grok Bot.
+ * Agentes bots prontos (catálogo público CC0).
  * Dados públicos (CC0) via github.com/kydlikebtc/awesome-grokbot, gerados por tools/bots/build-bots.py.
  *
  * O marketplace não publica as instruções internas dos bots: o app monta as instruções a partir da descrição e
@@ -34,7 +34,7 @@ object BotCatalog {
     fun parse(text: String): List<Bot> = json.decodeFromString(File.serializer(), text).bots.filter { it.id.isNotBlank() && it.name.isNotBlank() }
 
     fun all(): List<Bot> = cache ?: runCatching {
-        dev.cueopen.app.CueApp.instance.assets.open("bots/grokbots.json").use { it.readBytes().toString(Charsets.UTF_8) }.let { parse(it) }
+        dev.cueopen.app.CueApp.instance.assets.open("bots/agentbots.json").use { it.readBytes().toString(Charsets.UTF_8) }.let { parse(it) }
     }.getOrDefault(emptyList()).also { if (it.isNotEmpty()) cache = it }
 
     fun find(id: String?): Bot? = id?.takeIf { it.isNotBlank() }?.let { k -> all().firstOrNull { it.id == k } }
@@ -49,7 +49,17 @@ object BotCatalog {
 
     private val COLORS = listOf(0xFFFF6B3D, 0xFF4D8DFF, 0xFF2FBF71, 0xFFFFC53D, 0xFFB57BFF, 0xFFFF5C8A, 0xFF2EC4C4, 0xFF9C978E)
 
-    fun colorFor(b: Bot): Long = COLORS[Math.floorMod(b.category.hashCode(), COLORS.size)]
+    private val FACES = dev.cueopen.app.ui.mascot.Mascots.builtinIds
+
+    /** Posição fixa do bot no catálogo: garante um par mascote+cor diferente para cada bot. */
+    private fun slot(b: Bot): Int = all().indexOfFirst { it.id == b.id }.takeIf { it >= 0 } ?: Math.floorMod(b.id.hashCode(), 96)
+
+    /** Mascote do bot: percorre os 12 mascotes; com a cor abaixo, nenhum par se repete (até 96 bots). */
+    fun faceFor(b: Bot): String = avatarAt(slot(b)).first
+
+    fun colorFor(b: Bot): Long = avatarAt(slot(b)).second
+
+    fun avatarAt(i: Int): Pair<String, Long> = FACES[i % FACES.size] to COLORS[(i / FACES.size + i % FACES.size) % COLORS.size]
 
     private fun categoryRules(category: String): List<String> = when (category) {
         "coding-shipping" -> listOf("Para código, use o terminal (shell) e o browser para reproduzir e testar; registre os passos exatos e o que viu.")
@@ -63,7 +73,7 @@ object BotCatalog {
     }
 
     fun instructions(b: Bot): String = buildString {
-        appendLine("Você é o agente \"${b.name}\" (${b.categoryLabel}), inspirado no bot de mesmo nome do Grok Bot Marketplace.")
+        appendLine("Você é o agente \"${b.name}\" (${b.categoryLabel}), um agente pronto do catálogo de agentes bots.")
         appendLine()
         appendLine("Missão: ${b.summary}")
         appendLine()
@@ -78,6 +88,7 @@ object BotCatalog {
     /** Rascunho do agente (ainda não salvo): a tela de edição só grava ao tocar em Salvar. */
     fun draft(b: Bot, base: AgentProfile): AgentProfile = base.copy(
         name = b.name,
+        face = faceFor(b),
         color = colorFor(b),
         instructions = instructions(b),
     )

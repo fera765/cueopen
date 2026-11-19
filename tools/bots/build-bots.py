@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Gera app/src/main/assets/bots/grokbots.json a partir do catálogo público do Grok Bot Marketplace.
+"""Gera app/src/main/assets/bots/agentbots.json a partir do catálogo público do Grok Bot Marketplace.
 
 Fonte: github.com/kydlikebtc/awesome-grokbot (catalog.json; cada linha declara a licença; aqui só entram
 as linhas CC0-1.0 marcadas como oficiais — os bots publicados pelo time do Grok Bot no marketplace).
 O marketplace não publica as instruções internas dos bots, só nome, autor, categoria e descrição; o app monta
 as instruções do agente a partir dessa descrição e o usuário revisa antes de salvar.
 
-Uso: python3 tools/bots/build-bots.py <catalog.json> app/src/main/assets/bots/grokbots.json
+Uso: python3 tools/bots/build-bots.py <catalog.json> app/src/main/assets/bots/agentbots.json
 """
 import json
 import sys
