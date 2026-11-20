@@ -4734,11 +4734,7 @@ class AgentRunner(
         store.addItem(sessionId, step)
         setActivity(sessionId, Activity(kind, argPreview.take(80)))
         if (kind == Activity.Kind.BROWSER) browserFor(sessionId).setAgentControl(true)
-        // Agente do exército: o cursor dele no preview segue o elemento que está editando.
-        if (store.session(sessionId)?.squadParentId != null) BuildSquad.byWorkerSession(sessionId)?.let { (sq, w) ->
-            val sel = if (call.name == "file_edit" || call.name == "file_write") BuildSquad.selectorFromEdit(s("new_text") + "\n" + s("content")) else null
-            BuildSquad.editWorker(sq.id, w.idx) { it.copy(doing = (title + " " + argPreview).trim().take(60), target = sel ?: it.target) }
-        }
+        squadTrack(sessionId, call, title, argPreview)
 
         // marcador {{secret:x}} sem valor no cofre (ex.: app foi reiniciado) → pede de novo pelo formulário seguro
         SecretVault.missing(sessionId, call.argsJson.replace("\\\"", "\"")).takeIf { it.isNotEmpty() }?.let { miss ->
@@ -4748,7 +4744,7 @@ class AgentRunner(
         }
         val out0: String = try {
             when (call.name) {
-                "build_team" -> runBuildTeam(sessionId, s("goal"), s("tasks_json"), s("preview"), i("budget_tokens") ?: 30_000, i("max_parallel") ?: BuildSquad.PARALLEL)
+                "build_team" -> runBuildTeam(sessionId, call.argsJson)
                 "multi_agents" -> runMultiAgents(sessionId, s("tasks_json"), s("repo_path"), i("max_workers") ?: 3, i("budget_tokens") ?: 6000)
                 "wallet_get_address" -> {
                     val agentId = store.session(sessionId)?.agentId
@@ -5782,6 +5778,17 @@ class AgentRunner(
     }
 
     // ───────── Exército de agentes (build_team): dezenas de agentes no mesmo projeto, ao vivo no browser ─────────
+    /** Agente do exército: o cursor dele no preview segue o elemento que está editando (fora do runTool, que já está no limite da JVM). */
+    private fun squadTrack(sessionId: String, call: ToolCall, title: String, argPreview: String) {
+        if (store.session(sessionId)?.squadParentId == null) return
+        val (sq, w) = BuildSquad.byWorkerSession(sessionId) ?: return
+        val sel = if (call.name == "file_edit" || call.name == "file_write") runCatching {
+            val o = org.json.JSONObject(call.argsJson)
+            BuildSquad.selectorFromEdit(o.optString("new_text") + "\n" + o.optString("content"))
+        }.getOrNull() else null
+        BuildSquad.editWorker(sq.id, w.idx) { it.copy(doing = (title + " " + argPreview).trim().take(60), target = sel ?: it.target) }
+    }
+
     private data class SquadTask(val id: String, val role: String, val task: String, val target: String, val deps: List<String>)
 
     /** Endereço do preview: pasta do workspace (file://…/index.html) ou URL local; null = sem preview (back-end). */
@@ -5794,7 +5801,13 @@ class AgentRunner(
         return "file://" + page.absolutePath
     }
 
-    private suspend fun runBuildTeam(sessionId: String, goal: String, tasksJson: String, preview: String, budgetArg: Int, parallelArg: Int): String {
+    private suspend fun runBuildTeam(sessionId: String, argsJson: String): String {
+        val o = runCatching { org.json.JSONObject(argsJson) }.getOrElse { org.json.JSONObject() }
+        val goal = o.optString("goal")
+        val tasksJson = o.opt("tasks_json")?.toString().orEmpty()
+        val preview = o.optString("preview")
+        val budgetArg = o.optInt("budget_tokens", 30_000)
+        val parallelArg = o.optInt("max_parallel", BuildSquad.PARALLEL)
         val arr = runCatching { org.json.JSONArray(tasksJson.trim()) }.getOrElse { return "ERRO: tasks_json deve ser um array JSON de objetos {id, role, task, target, depends_on}." }
         val tasks = (0 until arr.length()).mapNotNull { n ->
             when (val v = arr.opt(n)) {
