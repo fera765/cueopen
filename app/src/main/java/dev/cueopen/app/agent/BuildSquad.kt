@@ -70,6 +70,8 @@ object BuildSquad {
     data class Squad(
         val id: String, val parentSessionId: String, val goal: String, val preview: String?,
         val workers: List<Worker>, val log: List<String> = emptyList(), val running: Boolean = true,
+        /** Aviso sobre o preview (ex.: servidor respondendo erro), mostrado no card. */
+        val notice: String = "",
     ) {
         val active get() = workers.count { it.status == St.RUNNING }
         val done get() = workers.count { it.status == St.DONE }

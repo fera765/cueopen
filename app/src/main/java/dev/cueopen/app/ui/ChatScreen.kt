@@ -1303,6 +1303,7 @@ private fun BuildSquadCard(step: ChatItem.Step, sessionId: String?, nav: android
                     }
                 }
             }
+            if (sq.notice.isNotBlank()) Text(sq.notice, fontSize = 12.sp, color = c.warn, maxLines = 3, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 4.dp))
             if (sq.workers.size > 8) Text(if (expanded) "Mostrar menos" else "Ver os ${sq.workers.size} agentes", fontSize = 12.sp, color = c.accent,
                 modifier = Modifier.clickable { expanded = !expanded }.padding(top = 4.dp))
             if (sq.preview != null && sessionId != null) {

@@ -519,6 +519,7 @@ class BrowserHost(private val appCtx: Context, private val sessionId: String = "
         v.webViewClient = object : WebViewClient() {
             override fun onPageStarted(view: WebView, url: String, favicon: Bitmap?) {
                 tab.diag.add("onPageStarted $url")
+                failedTabs.remove(tab.id)
                 if (!docStart) runCatching { view.evaluateJavascript(READINESS_JS, null) }
                 tab.progress = 0
                 if (tab.id == activeTabId) lastReadTabId = null
@@ -548,7 +549,7 @@ class BrowserHost(private val appCtx: Context, private val sessionId: String = "
                 // User Scripts do usuário (seção Browser) que valem para este domínio/agente.
                 runCatching { BrowserFeatures.applyUserScripts(view, url, sessionId) }
                 // Exército de agentes: cursores voltam após cada recarga do preview.
-                squadOverlay?.let { j -> runCatching { view.evaluateJavascript(dev.cueopen.app.agent.BuildSquad.overlayScript(j), null) } }
+                if (tab.id !in failedTabs) squadOverlay?.let { j -> runCatching { view.evaluateJavascript(dev.cueopen.app.agent.BuildSquad.overlayScript(j), null) } }
             }
             override fun doUpdateVisitedHistory(view: WebView, url: String, isReload: Boolean) {
                 if (demoPrefix != null && !isReload && url.startsWith("http")) addDemoStep(DemoRecorder.navigation(url))
@@ -567,6 +568,7 @@ class BrowserHost(private val appCtx: Context, private val sessionId: String = "
             override fun onReceivedHttpError(view: WebView, request: WebResourceRequest, errorResponse: android.webkit.WebResourceResponse) {
                 patchNet(request.url.toString(), tab.id) { it.copy(status = errorResponse.statusCode) }
                 if (request.isForMainFrame) tab.diag.add("HTTP ${errorResponse.statusCode} na página principal ${request.url}")
+                if (request.isForMainFrame && errorResponse.statusCode >= 400) failedTabs.add(tab.id)
                 // Só registra: vários sites (Meta, Cloudflare) respondem 403/429 e mesmo assim renderizam a página.
                 // A decisão (erro x página válida) é tomada em awaitLoad pelo conteúdo realmente visível.
                 tab.navigationStatus.recordHttpError(request.isForMainFrame, errorResponse.statusCode)
@@ -574,6 +576,7 @@ class BrowserHost(private val appCtx: Context, private val sessionId: String = "
             override fun onReceivedError(view: WebView, request: WebResourceRequest, error: android.webkit.WebResourceError) {
                 patchNet(request.url.toString(), tab.id) { it.copy(error = error.description?.toString()) }
                 if (request.isForMainFrame) tab.diag.add("erro de rede ${error.errorCode} ${error.description} em ${request.url}")
+                if (request.isForMainFrame) failedTabs.add(tab.id)
                 if (request.isForMainFrame) {
                     sync(view, loading = false)
                     val desc = error.description?.toString() ?: "Falha ao carregar a página"
@@ -1204,6 +1207,8 @@ class BrowserHost(private val appCtx: Context, private val sessionId: String = "
     /** Estado do exército de agentes desenhado sobre a página (null = sem overlay). */
     @Volatile var squadOverlay: String? = null
         private set
+    /** Abas cuja página principal falhou (erro de rede/HTTP): nada de cursores sobre a tela de erro do WebView. */
+    private val failedTabs = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
     private val mainHandler = android.os.Handler(android.os.Looper.getMainLooper())
 
     /** Atualiza (ou remove) os cursores dos agentes na aba ativa, sem esperar resposta. */
@@ -1213,7 +1218,8 @@ class BrowserHost(private val appCtx: Context, private val sessionId: String = "
             runCatching {
                 val js = if (json == null) "(function(){var r=document.getElementById('__fluwy_squad');if(r)r.remove();window.__fluwySquad=null;})();"
                     else dev.cueopen.app.agent.BuildSquad.overlayScript(json)
-                activeTab()?.webView?.evaluateJavascript(js, null)
+                val tab = activeTab()
+                if (json == null || tab?.id !in failedTabs) tab?.webView?.evaluateJavascript(js, null)
             }
         }
     }

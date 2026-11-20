@@ -5801,6 +5801,17 @@ class AgentRunner(
     /** Servidores de desenvolvimento do exército (um por chat), que continuam no ar depois do time terminar. */
     private val squadDevServers = java.util.concurrent.ConcurrentHashMap<String, Pair<Int, Process>>()
 
+    /** Status HTTP e começo da resposta do preview (0 = sem resposta). */
+    private fun previewStatus(url: String): Pair<Int, String> = runCatching {
+        val c = java.net.URL(url).openConnection() as java.net.HttpURLConnection
+        c.connectTimeout = 1_500; c.readTimeout = 3_000; c.instanceFollowRedirects = true
+        try {
+            val code = c.responseCode
+            val body = runCatching { (if (code >= 400) c.errorStream else c.inputStream)?.bufferedReader()?.use { it.readText().take(400) } }.getOrNull().orEmpty()
+            code to body
+        } finally { c.disconnect() }
+    }.getOrDefault(0 to "")
+
     private fun portAlive(port: Int): Boolean = runCatching {
         java.net.Socket().use { it.connect(java.net.InetSocketAddress("127.0.0.1", port), 500); true }
     }.getOrDefault(false)
@@ -5824,6 +5835,10 @@ class AgentRunner(
         val pkg = File(dir, "package.json")
         if (pkg.isFile) {
             val text = runCatching { pkg.readText() }.getOrDefault("")
+            if (text.contains("\"vite\"") && !File(dir, "index.html").isFile) {
+                log("O projeto Vite não tem index.html na raiz ($guestDir/index.html): sem ele o servidor responde 404. Crie index.html (com <div id=\"root\"> e <script type=\"module\" src=\"/src/main.jsx\">) antes de chamar build_team.")
+                return null
+            }
             val port = 5173 + (guestDir.hashCode() and 0x7fffffff) % 300
             squadDevServers[sessionId]?.let { (pt, proc) -> if (pt == port && proc.isAlive && portAlive(port)) return "http://127.0.0.1:$port/" }
             squadDevServers.remove(sessionId)?.second?.destroy()
@@ -5896,7 +5911,7 @@ class AgentRunner(
             val label = BuildSquad.shortLabel(t.task)
             val child = Session(title = "[Worker ${n + 1}] ${p.name} · $label", agentId = parent?.agentId, squadParentId = sessionId,
                 status = SessionStatus.RUNNING,
-                llm = listOf(LlmMessage("user", PromptContextPolicy.squadTask(p.name, p.role, goal, t.task, t.target, teamLine, parentRequest))))
+                llm = listOf(LlmMessage("user", PromptContextPolicy.squadTask(p.name, p.role, goal, t.task, t.target, teamLine, parentRequest, previewUrl))))
             store.upsertSession(child)
             BuildSquad.Worker(n, p, t.task, label, child.id, t.target)
         }
@@ -5919,6 +5934,8 @@ class AgentRunner(
                 val pageFile = previewUrl!!.takeIf { it.startsWith("file://") }?.let { File(it.removePrefix("file://")) }
                 var opened = false
                 var lastSig = ""
+                var previewBad = false
+                var badSince = 0L
                 while (isActive) {
                     if (!opened && (pageFile == null || pageFile.exists())) {
                         opened = true
@@ -5931,6 +5948,23 @@ class AgentRunner(
                                 .take(600).fold(0L) { acc, f -> acc * 31 + f.lastModified() + f.length() }.toString()
                         }.getOrDefault("")
                         if (lastSig.isNotEmpty() && sig != lastSig && previewUrl.startsWith("file://")) browser.softReload()
+                        // Dev server: se a página caiu em erro (servidor subindo, erro de compilação), recarrega quando voltar a responder.
+                        if (previewUrl.startsWith("http")) {
+                            val (code, body) = previewStatus(previewUrl)
+                            val okNow = code in 200..399
+                            if (okNow && previewBad) { browser.softReload(); BuildSquad.edit(squadId) { it.copy(notice = "") } }
+                            if (!okNow) {
+                                if (badSince == 0L) badSince = System.currentTimeMillis()
+                                if (System.currentTimeMillis() - badSince > 10_000) {
+                                    val devLog = runCatching { File(sandbox.workspaceFor(sessionId), ".cue/devserver.log").readText().takeLast(300) }.getOrDefault("")
+                                    val msg = (if (code == 0) "O servidor do preview não responde" else "O servidor do preview respondeu HTTP $code") +
+                                        (body.trim().takeIf { it.isNotEmpty() }?.let { ": " + it.replace(Regex("\\s+"), " ").take(160) } ?: "")
+                                    BuildSquad.edit(squadId) { it.copy(notice = msg) }
+                                    if (previewNotes.indexOf(msg) < 0) previewNotes.appendLine(msg + (if (devLog.isNotBlank()) "\nLog do servidor: " + devLog.trim() else ""))
+                                }
+                            } else badSince = 0L
+                            previewBad = !okNow
+                        }
                         lastSig = sig
                     }
                     kotlinx.coroutines.delay(1_500)

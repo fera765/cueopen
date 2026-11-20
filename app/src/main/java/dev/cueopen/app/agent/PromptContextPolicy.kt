@@ -76,7 +76,7 @@ internal object PromptContextPolicy {
     }
 
     /** Tarefa de um agente do exército de build: mesmo workspace do líder, editando por partes. */
-    fun squadTask(name: String, role: String, goal: String, task: String, target: String, team: String, parentRequest: String = ""): String = buildString {
+    fun squadTask(name: String, role: String, goal: String, task: String, target: String, team: String, parentRequest: String = "", previewUrl: String? = null): String = buildString {
         appendLine("Você é $name, agente de $role no exército de agentes que está construindo este software. Time: $team.")
         appendLine("O time inteiro trabalha AO MESMO TEMPO no MESMO projeto, em /root/workspace (compartilhado: as mudanças dos outros aparecem enquanto você trabalha).")
         appendLine(untrustedBlock("team_goal", goal, 600))
@@ -90,6 +90,7 @@ internal object PromptContextPolicy {
         appendLine("- Nunca reescreva com file_write um arquivo que já existe e que outros editam; arquivos novos só seus são livres (ex.: css/${name.lowercase().replace(' ', '-')}.css, ligado ao HTML com um file_edit pequeno).")
         appendLine("- Em React, cada seção é um componente próprio (src/components/<Nome>.jsx) com id/className igual ao nome; dê a todo elemento novo um className descritivo. O servidor de desenvolvimento já está rodando com HMR: salve em passos (estrutura primeiro, depois conteúdo, depois estilo) para o usuário ver o elemento sendo construído.")
         appendLine("- Mantenha os ids e classes que já existem e não apague o trabalho dos outros. Não suba nem pare servidores, não publique, não instale nada global (npm install de um pacote no projeto só se a sua tarefa exigir).")
+        if (previewUrl != null && previewUrl.startsWith("http")) appendLine("- O projeto está no ar em $previewUrl. Depois de cada edição, confira que não quebrou nada: curl -s -o /dev/null -w '%{http_code}' ${previewUrl.trimEnd('/')}/<caminho do arquivo editado, ex.: src/components/Hero.jsx>. 200 = ok; 500 = erro de compilação seu: leia a mensagem (curl sem -o) e corrija na hora.")
         append("- Ao terminar, responda em 1 a 3 linhas: o que fez e quais arquivos mudou. Só diga que testou se executou o teste.")
     }
 }
