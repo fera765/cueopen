@@ -4808,84 +4808,7 @@ class AgentRunner(
                         }
                     }
                 }
-                "wallet_request_transfer" -> {
-                    // Identity comes from the selected local session, never from LLM arguments.
-                    val agentId = store.session(sessionId)?.agentId
-                    val policies = WalletAgentPolicyStore(ctx.applicationContext)
-                    if (agentId.isNullOrBlank() || store.agent(agentId) == null) {
-                        "Pedido recusado: esta sessão não está vinculada a um agente local válido."
-                    } else if (!policies.canAgentRequestTransfer(agentId)) {
-                        "Pedido recusado: o usuário não concedeu a este agente permissão para solicitar transferências."
-                    } else {
-                        val networkPrefs = ctx.applicationContext.getSharedPreferences(
-                            "solana_wallet_settings", android.content.Context.MODE_PRIVATE
-                        )
-                        val networkResult = runCatching {
-                            val stored = networkPrefs.getString("network", null)
-                                ?: error("A rede da carteira não foi configurada. Abra a tela Carteira e selecione explicitamente Mainnet ou Devnet.")
-                            SolanaNetwork.valueOf(stored)
-                        }
-                        if (networkResult.isFailure) {
-                            "Pedido bloqueado: abra a carteira e selecione Mainnet ou Devnet antes de solicitar uma transferência."
-                        } else {
-                            val network = networkResult.getOrThrow()
-                            val wallet = SolanaWalletRepository(ctx.applicationContext)
-                            if (!wallet.hasWallet() || !wallet.backupConfirmed()) {
-                                "Pedido bloqueado: carteira indisponível ou backup ainda não confirmado."
-                            } else {
-                                runCatching {
-                                    val nowMs = System.currentTimeMillis()
-                                    val start = java.util.Calendar.getInstance().apply {
-                                        set(java.util.Calendar.HOUR_OF_DAY, 0)
-                                        set(java.util.Calendar.MINUTE, 0)
-                                        set(java.util.Calendar.SECOND, 0)
-                                        set(java.util.Calendar.MILLISECOND, 0)
-                                    }
-                                    val windowStart = start.timeInMillis
-                                    val windowEnd = (start.clone() as java.util.Calendar).apply {
-                                        add(java.util.Calendar.DAY_OF_YEAR, 1)
-                                    }.timeInMillis
-                                    val intent = dev.cueopen.app.wallet.WalletTransferIntent.fromSol(
-                                        requestId = java.util.UUID.randomUUID().toString().replace("-", ""),
-                                        agentId = agentId,
-                                        recipientAddress = s("recipient").trim(),
-                                        amountSol = s("amount_sol").trim(),
-                                        createdAtEpochMs = nowMs,
-                                        network = network
-                                    )
-                                    val policy = policies.transferPolicy(agentId, network)
-                                    val ledger = dev.cueopen.app.wallet.WalletRequestLedger(ctx.applicationContext)
-                                    val duplicate = ledger.findRecentDuplicateIntent(intent, nowMs)
-                                    if (duplicate != null) {
-                                        "Pedido duplicado recente detectado; nenhum novo pedido criado. ID: ${duplicate.requestId}; estado: ${duplicate.state}. Revise o pedido existente na tela Carteira."
-                                    } else {
-                                        when (val claim = ledger.claimAndAuthorize(
-                                            intent, policy, windowStart, windowEnd, nowMs
-                                        )) {
-                                            is dev.cueopen.app.wallet.LedgerAuthorizationResult.Created ->
-                                                if (claim.record.state == dev.cueopen.app.wallet.LedgerState.AWAITING_APPROVAL)
-                                                    "Pedido registrado e aguardando aprovação na tela Carteira. ID: ${intent.requestId}; rede: ${network.displayName}; destinatário: ${intent.recipientAddress}; valor: ${String.format(Locale.US, "%.9f SOL", intent.amountLamports / 1_000_000_000.0)}. Nenhuma assinatura ou transmissão foi realizada."
-                                                else
-                                                    // Autonomous grant: the user enabled automatic transfers for this agent,
-                                                    // so sign + broadcast without manual approval, still bounded by the
-                                                    // persisted policy (per-tx/daily limits + mandatory allowlist), which the
-                                                    // signer re-validates. Report only what the network actually returned.
-                                                    runAutonomousTransfer(intent, policy, ledger, wallet, network, agentId, windowStart, windowEnd, nowMs)
-                                            is dev.cueopen.app.wallet.LedgerAuthorizationResult.Rejected ->
-                                                "Pedido recusado pela política local: ${claim.decision.reason}"
-                                            is dev.cueopen.app.wallet.LedgerAuthorizationResult.Existing ->
-                                                "Pedido duplicado detectado; nenhuma nova autorização criada. ID: ${claim.record.requestId}; estado: ${claim.record.state}."
-                                            is dev.cueopen.app.wallet.LedgerAuthorizationResult.Approved ->
-                                                "Este pedido já foi aprovado anteriormente; nenhuma nova assinatura foi autorizada."
-                                        }
-                                    }
-                                }.getOrElse { error ->
-                                    "Pedido de transferência não criado: ${error.message ?: "erro de validação"}"
-                                }
-                            }
-                        }
-                    }
-                }
+                "wallet_request_transfer" -> walletRequestTransfer(sessionId, s("recipient"), s("amount_sol"))
                 "market_price", "market_candles", "market_liquidity", "market_discover", "market_token_info",
                 "wallet_list_tokens", "wallet_swap", "trade_set_rule", "trade_list", "trade_cancel", "trade_update_rule" -> {
                     val agentId = store.session(sessionId)?.agentId
@@ -5778,6 +5701,88 @@ class AgentRunner(
     }
 
     // ───────── Exército de agentes (build_team): dezenas de agentes no mesmo projeto, ao vivo no browser ─────────
+    /** wallet_request_transfer (fora do runTool, que está no limite de tamanho de método da JVM). */
+    private suspend fun walletRequestTransfer(sessionId: String, recipient: String, amountSol: String): String {
+        return run {
+                // Identity comes from the selected local session, never from LLM arguments.
+                val agentId = store.session(sessionId)?.agentId
+                val policies = WalletAgentPolicyStore(ctx.applicationContext)
+                if (agentId.isNullOrBlank() || store.agent(agentId) == null) {
+                    "Pedido recusado: esta sessão não está vinculada a um agente local válido."
+                } else if (!policies.canAgentRequestTransfer(agentId)) {
+                    "Pedido recusado: o usuário não concedeu a este agente permissão para solicitar transferências."
+                } else {
+                    val networkPrefs = ctx.applicationContext.getSharedPreferences(
+                        "solana_wallet_settings", android.content.Context.MODE_PRIVATE
+                    )
+                    val networkResult = runCatching {
+                        val stored = networkPrefs.getString("network", null)
+                            ?: error("A rede da carteira não foi configurada. Abra a tela Carteira e selecione explicitamente Mainnet ou Devnet.")
+                        SolanaNetwork.valueOf(stored)
+                    }
+                    if (networkResult.isFailure) {
+                        "Pedido bloqueado: abra a carteira e selecione Mainnet ou Devnet antes de solicitar uma transferência."
+                    } else {
+                        val network = networkResult.getOrThrow()
+                        val wallet = SolanaWalletRepository(ctx.applicationContext)
+                        if (!wallet.hasWallet() || !wallet.backupConfirmed()) {
+                            "Pedido bloqueado: carteira indisponível ou backup ainda não confirmado."
+                        } else {
+                            runCatching {
+                                val nowMs = System.currentTimeMillis()
+                                val start = java.util.Calendar.getInstance().apply {
+                                    set(java.util.Calendar.HOUR_OF_DAY, 0)
+                                    set(java.util.Calendar.MINUTE, 0)
+                                    set(java.util.Calendar.SECOND, 0)
+                                    set(java.util.Calendar.MILLISECOND, 0)
+                                }
+                                val windowStart = start.timeInMillis
+                                val windowEnd = (start.clone() as java.util.Calendar).apply {
+                                    add(java.util.Calendar.DAY_OF_YEAR, 1)
+                                }.timeInMillis
+                                val intent = dev.cueopen.app.wallet.WalletTransferIntent.fromSol(
+                                    requestId = java.util.UUID.randomUUID().toString().replace("-", ""),
+                                    agentId = agentId,
+                                    recipientAddress = recipient.trim(),
+                                    amountSol = amountSol.trim(),
+                                    createdAtEpochMs = nowMs,
+                                    network = network
+                                )
+                                val policy = policies.transferPolicy(agentId, network)
+                                val ledger = dev.cueopen.app.wallet.WalletRequestLedger(ctx.applicationContext)
+                                val duplicate = ledger.findRecentDuplicateIntent(intent, nowMs)
+                                if (duplicate != null) {
+                                    "Pedido duplicado recente detectado; nenhum novo pedido criado. ID: ${duplicate.requestId}; estado: ${duplicate.state}. Revise o pedido existente na tela Carteira."
+                                } else {
+                                    when (val claim = ledger.claimAndAuthorize(
+                                        intent, policy, windowStart, windowEnd, nowMs
+                                    )) {
+                                        is dev.cueopen.app.wallet.LedgerAuthorizationResult.Created ->
+                                            if (claim.record.state == dev.cueopen.app.wallet.LedgerState.AWAITING_APPROVAL)
+                                                "Pedido registrado e aguardando aprovação na tela Carteira. ID: ${intent.requestId}; rede: ${network.displayName}; destinatário: ${intent.recipientAddress}; valor: ${String.format(Locale.US, "%.9f SOL", intent.amountLamports / 1_000_000_000.0)}. Nenhuma assinatura ou transmissão foi realizada."
+                                            else
+                                                // Autonomous grant: the user enabled automatic transfers for this agent,
+                                                // so sign + broadcast without manual approval, still bounded by the
+                                                // persisted policy (per-tx/daily limits + mandatory allowlist), which the
+                                                // signer re-validates. Report only what the network actually returned.
+                                                runAutonomousTransfer(intent, policy, ledger, wallet, network, agentId, windowStart, windowEnd, nowMs)
+                                        is dev.cueopen.app.wallet.LedgerAuthorizationResult.Rejected ->
+                                            "Pedido recusado pela política local: ${claim.decision.reason}"
+                                        is dev.cueopen.app.wallet.LedgerAuthorizationResult.Existing ->
+                                            "Pedido duplicado detectado; nenhuma nova autorização criada. ID: ${claim.record.requestId}; estado: ${claim.record.state}."
+                                        is dev.cueopen.app.wallet.LedgerAuthorizationResult.Approved ->
+                                            "Este pedido já foi aprovado anteriormente; nenhuma nova assinatura foi autorizada."
+                                    }
+                                }
+                            }.getOrElse { error ->
+                                "Pedido de transferência não criado: ${error.message ?: "erro de validação"}"
+                            }
+                        }
+                    }
+                }
+        }
+    }
+
     /** Agente do exército: o cursor dele no preview segue o elemento que está editando (fora do runTool, que já está no limite da JVM). */
     private fun squadTrack(sessionId: String, call: ToolCall, title: String, argPreview: String) {
         if (store.session(sessionId)?.squadParentId == null) return
