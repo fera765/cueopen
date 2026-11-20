@@ -258,6 +258,8 @@ class Sandbox(private val ctx: Context) {
         timeoutSec: Long = 180,
         onOutput: (String) -> Unit = {},
         idleTimeoutSec: Long = 0,
+        /** Monta /root (/public) da pasta DESTA conversa; sem isso, caminhos /root/workspace/... são de outro ambiente. */
+        sessionId: String? = null,
     ): ExecResult = withContext(Dispatchers.IO) {
         if (!isInstalled()) return@withContext ExecResult(127, "Sandbox não instalado. Abra Configurações > Sandbox.", false)
         writeScripts()
@@ -265,7 +267,7 @@ class Sandbox(private val ctx: Context) {
         val pb = ProcessBuilder(
             "/system/bin/sh", File(prefix, "init-sandbox.sh").absolutePath, "/bin/sh", "-c", wrapped,
         ).directory(prefix).redirectErrorStream(true)
-        pb.environment().putAll(env() + terminalProxyEnv())
+        pb.environment().putAll(env() + terminalProxyEnv() + sessionMounts(sessionId))
         val proc = pb.start()
         val out = StringBuilder()
         val lastOutputAt = java.util.concurrent.atomic.AtomicLong(System.currentTimeMillis())
@@ -303,13 +305,20 @@ class Sandbox(private val ctx: Context) {
     }
 
     /** Inicia um processo de longa duração dentro do Alpine (ex.: gateway MCP local), com saída no [logFile]. */
-    fun spawn(command: String, logFile: File, extraEnv: Map<String, String> = emptyMap()): Process {
+    /** Variáveis que fazem o proot montar /root e /public na pasta da conversa (como no terminal dela). */
+    fun sessionMounts(sessionId: String?): Map<String, String> = if (sessionId == null) emptyMap() else mapOf(
+        "ALPINE_ROOT" to rootfsFor(sessionId).absolutePath,
+        "SESSION_PUBLIC_ROOT" to publicFor(sessionId).absolutePath,
+        "MOUNT_CONNECTORS" to (if (isConnectorSession(sessionId)) "0" else "1"),
+    )
+
+    fun spawn(command: String, logFile: File, extraEnv: Map<String, String> = emptyMap(), sessionId: String? = null): Process {
         check(isInstalled()) { "Sandbox não instalado." }
         writeScripts()
         logFile.parentFile?.mkdirs()
         val pb = ProcessBuilder("/system/bin/sh", File(prefix, "init-sandbox.sh").absolutePath, "/bin/sh", "-c", command)
             .directory(prefix).redirectErrorStream(true).redirectOutput(ProcessBuilder.Redirect.to(logFile))
-        pb.environment().putAll(env() + terminalProxyEnv() + extraEnv)
+        pb.environment().putAll(env() + terminalProxyEnv() + sessionMounts(sessionId) + extraEnv)
         return pb.start()
     }
 

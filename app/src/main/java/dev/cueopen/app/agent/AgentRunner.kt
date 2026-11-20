@@ -5800,6 +5800,10 @@ class AgentRunner(
 
     /** Servidores de desenvolvimento do exército (um por chat), que continuam no ar depois do time terminar. */
     private val squadDevServers = java.util.concurrent.ConcurrentHashMap<String, Pair<Int, Process>>()
+    /** Falhas seguidas de preview por chat: (quantas, assinatura da falha). */
+    private val squadPreviewFails = java.util.concurrent.ConcurrentHashMap<String, Pair<Int, String>>()
+    /** Pasta do projeto (caminho do sandbox) que o time está construindo, por chat. */
+    private val squadProjectDir = java.util.concurrent.ConcurrentHashMap<String, String>()
 
     /** Status HTTP e começo da resposta do preview (0 = sem resposta). */
     private fun previewStatus(url: String): Pair<Int, String> = runCatching {
@@ -5871,15 +5875,36 @@ class AgentRunner(
         val p = preview.trim()
         if (p.isBlank()) return null
         if (p.startsWith("http://") || p.startsWith("https://")) return p
-        val guest = p.removePrefix("file://").trimEnd('/')
-        val f = sandbox.hostFile(guest, sessionId)
+        // /public/workspace e caminhos relativos viram /root/workspace/… (o mesmo lugar que o agente e o time usam).
+        var guest = p.removePrefix("file://").trimEnd('/').let {
+            when {
+                it.startsWith("/public/") || it == "/public" -> "/root" + it.removePrefix("/public")
+                it.startsWith("/home/") -> "/root" + it.removePrefix("/home")
+                it.startsWith("/") -> it
+                else -> "/root/workspace/" + it.removePrefix("./")
+            }
+        }
+        var f = sandbox.hostFile(guest, sessionId)
         val isFile = f.isFile || (!f.exists() && f.name.contains('.'))
+        if (!isFile && !File(f, "package.json").isFile && !File(f, "index.html").isFile && f.isDirectory) {
+            // Preview apontou para a pasta de cima (ex.: /root/workspace) e o projeto está numa subpasta: usa a subpasta.
+            val subs = f.listFiles()?.filter { it.isDirectory && !it.name.startsWith(".") && it.name != "node_modules" && File(it, "package.json").isFile }.orEmpty()
+            if (subs.size == 1) { f = subs[0]; guest = guest.trimEnd('/') + "/" + subs[0].name; log("Projeto encontrado em $guest.") }
+        }
         val dir = if (isFile) f.parentFile else f
         val guestDir = if (isFile) guest.substringBeforeLast('/') else guest
+        squadProjectDir[sessionId] = guestDir
         val pkg = File(dir, "package.json")
         val staticSite = !pkg.isFile && (File(dir, "index.html").isFile || isFile)
         if (staticSite) return "file://" + (if (isFile) f else File(dir, "index.html")).absolutePath
-        if (!pkg.isFile) { log("Criando o projeto React + Vite em branco em $guestDir…"); scaffoldReactVite(dir) }
+        if (!pkg.isFile) {
+            // Nunca cria o projeto solto na raiz do workspace (misturaria com outros arquivos): usa /root/workspace/app.
+            if (guestDir.trimEnd('/') == "/root/workspace" && dir.listFiles()?.any { !it.name.startsWith(".") } == true) {
+                log("A raiz do workspace já tem outros arquivos; o projeto vai em /root/workspace/app.")
+                return squadPreviewUrl(sessionId, "/root/workspace/app", log)
+            }
+            log("Criando o projeto React + Vite em branco em $guestDir…"); scaffoldReactVite(dir)
+        }
         val text = runCatching { pkg.readText() }.getOrDefault("")
         if (text.contains("\"vite\"") && !File(dir, "index.html").isFile) {
             log("O projeto Vite não tinha index.html na raiz; criei um padrão (div#root + /src/main.jsx).")
@@ -5893,8 +5918,9 @@ class AgentRunner(
         // 1) Dependências: só segue com tudo instalado (erro aqui não liga o time).
         if (!File(dir, "node_modules").isDirectory) {
             log("Instalando as dependências (npm install)…")
-            val r = sandbox.exec("(command -v npm >/dev/null || apk add --no-cache nodejs npm >/dev/null 2>&1) && npm install --no-audit --no-fund --loglevel=error",
-                cwd = guestDir, timeoutSec = 900, idleTimeoutSec = 300)
+            val r = sandbox.exec("(command -v npm >/dev/null || apk add --no-cache nodejs npm >/dev/null 2>&1) && " + dev.cueopen.app.sandbox.InteractivePrompts.ENV +
+                " && npm install --no-audit --no-fund --loglevel=error < /dev/null",
+                cwd = guestDir, timeoutSec = 900, idleTimeoutSec = 300, sessionId = sessionId)
             if (r.exitCode != 0 || !File(dir, "node_modules").isDirectory) { log("npm install falhou: " + r.output.takeLast(600)); return null }
         }
         // 2) Servidor de desenvolvimento.
@@ -5906,7 +5932,7 @@ class AgentRunner(
         }
         log("Subindo o app na porta $port…")
         val logFile = File(sandbox.workspaceFor(sessionId), ".cue/devserver.log").apply { parentFile?.mkdirs(); delete() }
-        val proc = sandbox.spawn("cd $q && exec $run", logFile)
+        val proc = sandbox.spawn("cd $q && exec $run < /dev/null", logFile, sessionId = sessionId)
         squadDevServers[sessionId] = port to proc
         val url = "http://127.0.0.1:$port/"
         val deadline = System.currentTimeMillis() + 4 * 60_000L
@@ -5997,16 +6023,23 @@ class AgentRunner(
         if (preview.isNotBlank() && !alive) {
             BuildSquad.edit(squadId) { it.copy(running = false) }
             store.replaceItem(sessionId, card.copy(result = "O app não ficou de pé; o time não começou.", status = StepStatus.ERROR))
+            // Mesma falha de novo: não deixa o líder ficar tentando caminhos/portas às cegas.
+            val key = previewNotes.lines().lastOrNull { it.isNotBlank() }.orEmpty().replace(Regex("\\d+"), "#").take(160)
+            val n = squadPreviewFails.merge(sessionId, 1 to key) { old, new -> if (old.second == new.second) (old.first + 1) to key else new }!!.first
+            val project = squadProjectDir[sessionId]
             return "ERRO: o app não ficou rodando no browser, então o time NÃO começou.\n$previewNotes" +
-                "Corrija o projeto (leia o log acima, rode os comandos no terminal) até ele abrir no browser e chame build_team de novo com o mesmo preview."
+                (project?.let { "Pasta do projeto usada: $it (o app sobe o servidor nela com a MESMA visão de arquivos do seu terminal).\n" } ?: "") +
+                if (n >= 3) "Esta é a ${n}ª falha igual seguida. PARE de chamar build_team e de trocar caminhos. Rode no terminal, na pasta do projeto, `npm install` e depois `npx vite --host 127.0.0.1 --port 5173` (em segundo plano), leia o erro real e corrija; se não conseguir, explique ao usuário o erro exato."
+                else "Corrija o projeto (leia o log acima, rode os comandos no terminal) até ele abrir e chame build_team de novo com o mesmo preview (a pasta do projeto)."
         }
+        squadPreviewFails.remove(sessionId)
         if (previewUrl != null) note("App no ar em $previewUrl — o time entrou.")
         val workers = tasks.mapIndexed { n, t ->
             val p = personas[n]
             val label = BuildSquad.shortLabel(t.task)
             val child = Session(title = "[Worker ${n + 1}] ${p.name} · $label", agentId = parent?.agentId, squadParentId = sessionId,
                 status = SessionStatus.RUNNING,
-                llm = listOf(LlmMessage("user", PromptContextPolicy.squadTask(p.name, p.role, goal, t.task, t.target, teamLine, parentRequest, previewUrl))))
+                llm = listOf(LlmMessage("user", PromptContextPolicy.squadTask(p.name, p.role, goal, t.task, t.target, teamLine, parentRequest, previewUrl, squadProjectDir[sessionId]))))
             store.upsertSession(child)
             BuildSquad.Worker(n, p, t.task, label, child.id, t.target)
         }

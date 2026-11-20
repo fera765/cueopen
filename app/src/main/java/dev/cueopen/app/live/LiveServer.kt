@@ -130,6 +130,12 @@ object LiveServer {
                 if (!d.isDirectory) return@withContext "ERRO: a pasta $dirHost não existe."
                 if (!File(d, "index.html").exists() && d.listFiles()?.none { it.name.endsWith(".html") } == true)
                     return@withContext "ERRO: a pasta não tem index.html (nem outro .html) para publicar."
+                // Projeto de build (Vite/React/Next) servido como arquivos soltos: o browser recebe .jsx como text/plain e a página fica em branco.
+                val pkg = File(d, "package.json").takeIf { it.isFile }?.readText().orEmpty()
+                val idx = File(d, "index.html").takeIf { it.isFile }?.readText().orEmpty()
+                if (pkg.isNotEmpty() && (Regex("\"(vite|next|react-scripts|@vitejs/[^\"]+)\"").containsMatchIn(pkg) || Regex("src=[\"']/?src/[^\"']+\\.(jsx|tsx|ts)").containsMatchIn(idx)))
+                    return@withContext "ERRO: ${d.name} é um projeto de build (Vite/React). Servido como arquivos soltos, o .jsx chega como text/plain e a página fica em branco. " +
+                        "Faça `npm run build` e publique a pasta dist (dir=<projeto>/dist), ou suba o servidor de desenvolvimento em segundo plano e publique a porta (port=…)."
                 targetPort = staticPortOf(slug)
                 servers.remove(slug)?.destroy()
                 if (!alive(targetPort)) {

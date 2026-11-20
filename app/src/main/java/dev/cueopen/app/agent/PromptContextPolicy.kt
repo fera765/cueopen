@@ -76,9 +76,11 @@ internal object PromptContextPolicy {
     }
 
     /** Tarefa de um agente do exército de build: mesmo workspace do líder, editando por partes. */
-    fun squadTask(name: String, role: String, goal: String, task: String, target: String, team: String, parentRequest: String = "", previewUrl: String? = null): String = buildString {
+    fun squadTask(name: String, role: String, goal: String, task: String, target: String, team: String, parentRequest: String = "", previewUrl: String? = null, projectDir: String? = null): String = buildString {
         appendLine("Você é $name, agente de $role no exército de agentes que está construindo este software. Time: $team.")
-        appendLine("O time inteiro trabalha AO MESMO TEMPO no MESMO projeto, em /root/workspace (compartilhado: as mudanças dos outros aparecem enquanto você trabalha).")
+        val root = projectDir?.trimEnd('/') ?: "/root/workspace"
+        appendLine("O time inteiro trabalha AO MESMO TEMPO no MESMO projeto, na pasta $root (compartilhada: as mudanças dos outros aparecem enquanto você trabalha).")
+        appendLine("Use SEMPRE caminhos completos a partir dela (ex.: $root/src/App.jsx, $root/src/components/Hero.jsx) em file_read, file_edit, file_write e file_list; nunca só src/….")
         appendLine(untrustedBlock("team_goal", goal, 600))
         appendLine(untrustedBlock("assigned_task", task, 2_000))
         if (target.isNotBlank()) appendLine("Seu alvo na página: $target (é sobre ele que o usuário vê o seu cursor).")
