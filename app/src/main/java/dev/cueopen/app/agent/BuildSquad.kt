@@ -186,7 +186,3 @@ w.__fluwySquad.update(D);
 }catch(e){}})();"""
     }
 }
-w.__fluwySquad.update(D);
-}catch(e){}})();"""
-    }
-}
