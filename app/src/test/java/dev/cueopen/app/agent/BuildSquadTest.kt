@@ -51,4 +51,12 @@ class BuildSquadTest {
             assertTrue(it, "build" in g)
         }
     }
+
+    @Test fun reactClassNameEArquivoGuiamOCursor() {
+        assertEquals(".pricing-card", BuildSquad.selectorFromEdit("<div className=\"pricing-card\">"))
+        assertEquals(".hero", BuildSquad.selectorFromEdit("<section className={`hero ${x}`}>"))
+        assertEquals("pricing-table", BuildSquad.hintFromPath("src/components/PricingTable.jsx"))
+        assertEquals("footer", BuildSquad.hintFromPath("/root/workspace/app/src/components/Footer.tsx"))
+        assertEquals("", BuildSquad.hintFromPath("src/App.jsx"))
+    }
 }

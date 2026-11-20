@@ -88,7 +88,8 @@ internal object PromptContextPolicy {
         appendLine("- Faça só a sua parte. Comece já: leia só os arquivos de que precisa (file_list/file_read).")
         appendLine("- Releia o arquivo logo antes de editar (outro agente pode ter mudado) e edite com file_edit em trechos pequenos e únicos.")
         appendLine("- Nunca reescreva com file_write um arquivo que já existe e que outros editam; arquivos novos só seus são livres (ex.: css/${name.lowercase().replace(' ', '-')}.css, ligado ao HTML com um file_edit pequeno).")
-        appendLine("- Mantenha os ids e classes que já existem e não apague o trabalho dos outros. Não suba servidores, não publique, não instale nada global.")
+        appendLine("- Em React, cada seção é um componente próprio (src/components/<Nome>.jsx) com id/className igual ao nome; dê a todo elemento novo um className descritivo. O servidor de desenvolvimento já está rodando com HMR: salve em passos (estrutura primeiro, depois conteúdo, depois estilo) para o usuário ver o elemento sendo construído.")
+        appendLine("- Mantenha os ids e classes que já existem e não apague o trabalho dos outros. Não suba nem pare servidores, não publique, não instale nada global (npm install de um pacote no projeto só se a sua tarefa exigir).")
         append("- Ao terminar, responda em 1 a 3 linhas: o que fez e quais arquivos mudou. Só diga que testou se executou o teste.")
     }
 }

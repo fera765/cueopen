@@ -3669,12 +3669,13 @@ class AgentRunner(
             "Use SEMPRE que o usuário pedir para construir, desenvolver ou programar software, no lugar de fazer tudo sozinho: dezenas de agentes com nome e papel " +
             "(Layout, Copy, Design, Frontend, Backend, API, Banco de dados, QA, SEO, Visuals…) trabalham AO MESMO TEMPO no mesmo projeto (/root/workspace compartilhado), até 6 de cada vez. " +
             "No front-end o usuário assiste aos agentes trabalhando ao vivo no browser (cursor e caixa de cada um sobre o elemento que edita). " +
-            "Antes de chamar, crie você mesmo o esqueleto (ex.: index.html com todas as seções e ids, styles.css, ou a estrutura de pastas da API) para os agentes editarem por partes. " +
+            "Antes de chamar, crie você mesmo o esqueleto que JÁ RODA: no front-end, prefira um projeto React + Vite (package.json com vite, index.html, src/main.jsx, src/App.jsx que importa um componente por seção, cada seção com id/className); no back-end, a estrutura de pastas da API. " +
+            "Em preview passe a PASTA do projeto: o app instala as dependências, sobe o servidor de desenvolvimento numa porta local e abre o browser nele; cada edição aparece na hora (HMR), com o elemento sendo construído e o cursor do agente sobre ele. " +
             "Divida em 8 a 40 tarefas pequenas, uma por agente, cada uma num elemento ou arquivo diferente; use depends_on só quando uma parte precisa da outra. " +
             "Bloqueia até o time terminar e devolve o relatório; depois teste, corrija o que faltar e mostre o resultado ao usuário.", buildJsonObject {
             put("goal", str("Objetivo do time em uma frase"))
             put("tasks_json", str("Array JSON de objetos {id, role, task, target, depends_on:[ids]}. target (front-end): seletor CSS do elemento que o agente edita, ex.: \"#hero h1\", \".pricing\""))
-            put("preview", str("Front-end: pasta do site (ex.: /root/workspace/site) ou URL local (http://127.0.0.1:PORTA) para o usuário ver os agentes ao vivo. Vazio no back-end"))
+            put("preview", str("Front-end: pasta do projeto (ex.: /root/workspace/app; com package.json o app sobe o dev server sozinho) ou URL de um servidor já rodando (http://127.0.0.1:PORTA). Vazio no back-end"))
             put("max_parallel", int("Agentes trabalhando ao mesmo tempo (1-8; padrão 6)"))
             put("budget_tokens", int("Orçamento de tokens por agente (8000-80000; padrão 30000)"))
         }, listOf("goal", "tasks_json")))
@@ -5787,21 +5788,65 @@ class AgentRunner(
     private fun squadTrack(sessionId: String, call: ToolCall, title: String, argPreview: String) {
         if (store.session(sessionId)?.squadParentId == null) return
         val (sq, w) = BuildSquad.byWorkerSession(sessionId) ?: return
-        val sel = if (call.name == "file_edit" || call.name == "file_write") runCatching {
-            val o = org.json.JSONObject(call.argsJson)
-            BuildSquad.selectorFromEdit(o.optString("new_text") + "\n" + o.optString("content"))
-        }.getOrNull() else null
-        BuildSquad.editWorker(sq.id, w.idx) { it.copy(doing = (title + " " + argPreview).trim().take(60), target = sel ?: it.target) }
+        val o = runCatching { org.json.JSONObject(call.argsJson) }.getOrNull()
+        val edit = call.name == "file_edit" || call.name == "file_write"
+        val sel = if (edit && o != null) BuildSquad.selectorFromEdit(o.optString("new_text") + "\n" + o.optString("content")) else null
+        val hint = if (edit && o != null) BuildSquad.hintFromPath(o.optString("path")) else ""
+        BuildSquad.editWorker(sq.id, w.idx) { it.copy(doing = (title + " " + argPreview).trim().take(60),
+            target = sel ?: it.target, hint = hint.ifBlank { it.hint }) }
     }
 
     private data class SquadTask(val id: String, val role: String, val task: String, val target: String, val deps: List<String>)
 
-    /** Endereço do preview: pasta do workspace (file://…/index.html) ou URL local; null = sem preview (back-end). */
-    private fun squadPreviewUrl(sessionId: String, preview: String): String? {
+    /** Servidores de desenvolvimento do exército (um por chat), que continuam no ar depois do time terminar. */
+    private val squadDevServers = java.util.concurrent.ConcurrentHashMap<String, Pair<Int, Process>>()
+
+    private fun portAlive(port: Int): Boolean = runCatching {
+        java.net.Socket().use { it.connect(java.net.InetSocketAddress("127.0.0.1", port), 500); true }
+    }.getOrDefault(false)
+
+    /**
+     * Endereço do preview. Projeto com package.json (Vite, Next, CRA…): sobe o servidor de desenvolvimento e devolve
+     * http://127.0.0.1:PORTA (as edições aparecem na hora pelo HMR). Site estático: file://…/index.html. Vazio: sem preview.
+     */
+    private suspend fun squadPreviewUrl(sessionId: String, preview: String, log: (String) -> Unit): String? {
         val p = preview.trim()
         if (p.isBlank()) return null
-        if (p.startsWith("http://") || p.startsWith("https://")) return p
-        val f = sandbox.hostFile(p.removePrefix("file://"), sessionId)
+        if (p.startsWith("http://") || p.startsWith("https://")) {
+            val port = Regex("""//(?:127\.0\.0\.1|localhost|0\.0\.0\.0):(\d+)""").find(p)?.groupValues?.get(1)?.toIntOrNull()
+            if (port != null && !portAlive(port)) log("Atenção: nada respondendo em $p ainda; o preview abre quando o servidor subir.")
+            return p
+        }
+        val guest = p.removePrefix("file://").trimEnd('/')
+        val f = sandbox.hostFile(guest, sessionId)
+        val dir = if (f.isDirectory) f else f.parentFile
+        val guestDir = if (f.isDirectory) guest else guest.substringBeforeLast('/')
+        val pkg = File(dir, "package.json")
+        if (pkg.isFile) {
+            val text = runCatching { pkg.readText() }.getOrDefault("")
+            val port = 5173 + (guestDir.hashCode() and 0x7fffffff) % 300
+            squadDevServers[sessionId]?.let { (pt, proc) -> if (pt == port && proc.isAlive && portAlive(port)) return "http://127.0.0.1:$port/" }
+            squadDevServers.remove(sessionId)?.second?.destroy()
+            val run = when {
+                text.contains("\"next\"") -> "npx next dev -p $port -H 127.0.0.1"
+                text.contains("\"vite\"") -> "npx vite --host 127.0.0.1 --port $port --strictPort"
+                text.contains("react-scripts") -> "BROWSER=none HOST=127.0.0.1 PORT=$port npx react-scripts start"
+                else -> "HOST=127.0.0.1 PORT=$port npm run dev -- --host 127.0.0.1 --port $port"
+            }
+            log("Instalando dependências e subindo o servidor de desenvolvimento na porta $port…")
+            val logFile = File(sandbox.workspaceFor(sessionId), ".cue/devserver.log").apply { parentFile?.mkdirs() }
+            val q = "'" + guestDir.replace("'", "") + "'"
+            val proc = sandbox.spawn("cd $q && (command -v npm >/dev/null || apk add --no-cache nodejs npm >/dev/null 2>&1); " +
+                "[ -d node_modules ] || npm install --no-audit --no-fund --loglevel=error; exec $run", logFile)
+            squadDevServers[sessionId] = port to proc
+            val deadline = System.currentTimeMillis() + 6 * 60_000L
+            while (System.currentTimeMillis() < deadline && proc.isAlive && !portAlive(port)) kotlinx.coroutines.delay(1_000)
+            if (!portAlive(port)) {
+                log("O servidor de desenvolvimento não subiu: " + runCatching { logFile.readText().takeLast(500) }.getOrDefault(""))
+                return null
+            }
+            return "http://127.0.0.1:$port/"
+        }
         val page = if (f.isDirectory || !f.name.contains('.')) File(f, "index.html") else f
         return "file://" + page.absolutePath
     }
@@ -5840,7 +5885,10 @@ class AgentRunner(
         val parent = store.session(sessionId)
         val parentRequest = parent?.llm?.lastOrNull { it.role == "user" && it.content?.startsWith("[Sistema]") != true }?.content.orEmpty()
         val teamLine = personas.joinToString { "${it.name} (${it.role})" }.take(900)
-        val previewUrl = squadPreviewUrl(sessionId, preview)
+        val previewNotes = StringBuilder()
+        val previewUrl = squadPreviewUrl(sessionId, preview) { previewNotes.appendLine(it) }
+        if (preview.isNotBlank() && previewUrl == null) return "ERRO: não consegui abrir o preview.\n$previewNotes" +
+            "Confira o projeto (package.json, dependências) ou rode o servidor e passe preview=http://127.0.0.1:PORTA."
         val startedAt = System.currentTimeMillis()
         val squadId = java.util.UUID.randomUUID().toString()
         val workers = tasks.mapIndexed { n, t ->
@@ -5882,7 +5930,7 @@ class AgentRunner(
                                 .filter { it.isFile && it.extension.lowercase() in setOf("html", "htm", "css", "js", "mjs", "svg", "json", "png", "jpg", "jpeg", "webp") }
                                 .take(600).fold(0L) { acc, f -> acc * 31 + f.lastModified() + f.length() }.toString()
                         }.getOrDefault("")
-                        if (lastSig.isNotEmpty() && sig != lastSig) browser.softReload()
+                        if (lastSig.isNotEmpty() && sig != lastSig && previewUrl.startsWith("file://")) browser.softReload()
                         lastSig = sig
                     }
                     kotlinx.coroutines.delay(1_500)
@@ -5934,7 +5982,7 @@ class AgentRunner(
         val okCount = sq?.done ?: 0
         store.replaceItem(sessionId, card.copy(result = "$okCount de ${workers.size} agentes concluíram",
             status = if (okCount == workers.size) StepStatus.OK else StepStatus.ERROR))
-        if (browser != null) scope.launch { kotlinx.coroutines.delay(4_000); browser.pushSquadOverlay(null); browser.softReload() }
+        if (browser != null) scope.launch { kotlinx.coroutines.delay(4_000); browser.pushSquadOverlay(null); if (previewUrl!!.startsWith("file://")) browser.softReload() }
         return buildString {
             appendLine("Exército de agentes: $okCount de ${workers.size} concluíram (até $parallel ao mesmo tempo).")
             sq?.workers?.forEach { w ->
@@ -5942,7 +5990,8 @@ class AgentRunner(
                 appendLine("- ${w.persona.name} (${w.persona.role}) · ${w.label}: ${if (w.status == BuildSquad.St.DONE) "ok" else "FALHOU"} — ${answer.ifBlank { w.doing }.replace('\n', ' ').take(260)}")
             }
             append(workspaceChanges(sessionId, startedAt))
-            if (previewUrl != null) append("\nPreview: $previewUrl (o usuário acompanhou no browser). Agora abra a página, confira o resultado e corrija o que faltar.")
+            if (previewNotes.isNotBlank()) append("\n" + previewNotes.toString().trim())
+            if (previewUrl != null) append("\nPreview: $previewUrl (o usuário acompanhou no browser; o servidor de desenvolvimento continua no ar). Agora abra a página, confira o resultado e corrija o que faltar.")
             else append("\nAgora rode os testes/servidor para validar e corrija o que faltar.")
         }
     }
