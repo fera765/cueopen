@@ -679,7 +679,7 @@ private fun SessionDrawer(nav: NavController, sessions: List<Session>, agents: L
     var query by remember { mutableStateOf("") }
     // Sessões de subagentes são detalhes internos da tarefa pai, nunca chats independentes na navegação.
     val filtered = remember(sessions, query) {
-        sessions.filterNot { it.title.startsWith("[Worker ", ignoreCase = true) || it.sectionId != null || it.squadParentId != null }
+        sessions.filterNot { it.title.startsWith("[Worker ", ignoreCase = true) || it.title.startsWith("[Workflow]") || it.sectionId != null || it.squadParentId != null }
             .filter { query.isBlank() || it.title.contains(query, true) }
             .sortedByDescending { it.updatedAt }
     }
@@ -747,6 +747,7 @@ private fun SessionDrawer(nav: NavController, sessions: List<Session>, agents: L
             DrawerShortcut(Icons.Rounded.Psychology, "Memória", tint = 0xFFD94E8F) { go("memory") },
             DrawerShortcut(Icons.Rounded.LibraryBooks, "Knowledge", tint = 0xFF0FA3B1) { go("knowledge") },
             DrawerShortcut(Icons.Rounded.Language, "Browser", tint = 0xFF3B82F6) { go("browserhub") },
+            DrawerShortcut(Icons.Rounded.AccountTree, "Fluxos", tint = 0xFF2FBF71) { go("workflows") },
             DrawerShortcut(Icons.Rounded.Computer, "Linux", tint = 0xFF64748B) { go("sandbox") },
             DrawerShortcut(Icons.Rounded.AccountBalanceWallet, "Cofre", tint = 0xFF9945FF) { go("vault") },
         )

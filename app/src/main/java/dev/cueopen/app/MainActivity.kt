@@ -237,6 +237,8 @@ fun CueNav(nav: NavHostController, startOnboarding: Boolean) {
         composable("skills") { SkillsScreen(nav) }
         composable("skill/{id}") { e -> SkillEditScreen(nav, e.arguments!!.getString("id")!!) }
         composable("scheduled") { ScheduledScreen(nav) }
+        composable("workflows") { dev.cueopen.app.ui.WorkflowsScreen(nav) }
+        composable("workflow/{id}") { e -> dev.cueopen.app.ui.WorkflowEditorScreen(nav, e.arguments!!.getString("id")!!) }
         composable("scheduled/{id}") { e -> ScheduledEditScreen(nav, e.arguments!!.getString("id")!!) }
         composable("knowledge") { KnowledgeScreen(nav) }
         composable("knowledge/{id}") { e -> KnowledgeEditScreen(nav, e.arguments!!.getString("id")!!) }
