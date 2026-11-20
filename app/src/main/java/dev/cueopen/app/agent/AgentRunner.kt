@@ -3675,7 +3675,7 @@ class AgentRunner(
             "Divida em 8 a 40 tarefas pequenas, uma por agente, cada uma num elemento ou arquivo diferente; use depends_on só quando uma parte precisa da outra. " +
             "Bloqueia até o time terminar e devolve o relatório; depois teste, corrija o que faltar e mostre o resultado ao usuário.", buildJsonObject {
             put("goal", str("Objetivo do time em uma frase"))
-            put("tasks_json", str("Array JSON de objetos {id, role, task, target, depends_on:[ids]}. target (front-end): seletor CSS do elemento que o agente edita, ex.: \"#hero h1\", \".pricing\""))
+            put("tasks_json", str("Array JSON de objetos {id, role, task, file, target, depends_on:[ids]}. file (front-end): componente da tarefa, ex.: \"src/components/Hero.jsx\" — o app cria o esqueleto e liga no App ANTES do time, na ordem das tarefas. target: seletor CSS do elemento, ex.: \"#hero\""))
             put("preview", str("Pasta do projeto (ex.: /root/workspace/app): front-end React/Vite/Next ou API Node; o app instala, sobe e confere antes do time entrar. Ou a URL de um servidor já rodando (http://127.0.0.1:PORTA)"))
             put("max_parallel", int("Agentes trabalhando ao mesmo tempo (1-8; padrão 6)"))
             put("budget_tokens", int("Orçamento de tokens por agente (8000-80000; padrão 30000)"))
@@ -5797,7 +5797,7 @@ class AgentRunner(
             target = sel ?: it.target, hint = hint.ifBlank { it.hint }) }
     }
 
-    private data class SquadTask(val id: String, val role: String, val task: String, val target: String, val deps: List<String>)
+    private data class SquadTask(val id: String, val role: String, val task: String, val target: String, val deps: List<String>, val file: String = "")
 
     /** Servidores de desenvolvimento do exército (um por chat), que continuam no ar depois do time terminar. */
     private val squadDevServers = java.util.concurrent.ConcurrentHashMap<String, Pair<Int, Process>>()
@@ -5809,9 +5809,9 @@ class AgentRunner(
     private val squadProjectDir = java.util.concurrent.ConcurrentHashMap<String, String>()
 
     /** Status HTTP e começo da resposta do preview (0 = sem resposta). */
-    private fun previewStatus(url: String): Pair<Int, String> = runCatching {
+    private fun previewStatus(url: String, readTimeoutMs: Int = 3_000): Pair<Int, String> = runCatching {
         val c = java.net.URL(url).openConnection() as java.net.HttpURLConnection
-        c.connectTimeout = 1_500; c.readTimeout = 3_000; c.instanceFollowRedirects = true
+        c.connectTimeout = 1_500; c.readTimeout = readTimeoutMs; c.instanceFollowRedirects = true
         try {
             val code = c.responseCode
             val body = runCatching { (if (code >= 400) c.errorStream else c.inputStream)?.bufferedReader()?.use { it.readText().take(400) } }.getOrNull().orEmpty()
@@ -5827,18 +5827,117 @@ class AgentRunner(
      * Config do Vite que herda a do projeto e liga o polling do watcher (HMR ao vivo no proot), sem mexer no arquivo
      * do usuário. Vite empacota a config (e o import da original, inclusive .ts) antes de rodar. null = usa a do projeto.
      */
-    private fun viteWatchConfig(dir: File): String? {
+    private fun viteWatchConfig(dir: File, addTailwind: Boolean = false): String? {
         val base = listOf("vite.config.ts", "vite.config.mts", "vite.config.js", "vite.config.mjs", "vite.config.cjs").firstOrNull { File(dir, it).isFile }
             ?: return null  // sem config: o CHOKIDAR_USEPOLLING do ambiente já liga o polling
         val wrapper = File(dir, ".fluwy.vite.config.mjs")
         val importBase = base?.let { "import base from './$it'\n" } ?: ""
         return runCatching {
             wrapper.writeText(importBase + "import { mergeConfig } from 'vite'\n" +
-                "const over = { server: { host: '127.0.0.1', watch: { usePolling: true, interval: 250 } } }\n" +
+                (if (addTailwind) "import tailwindcss from '@tailwindcss/vite'\n" else "") +
+                "const over = { " + (if (addTailwind) "plugins: [tailwindcss()], " else "") +
+                "server: { host: '127.0.0.1', watch: { usePolling: true, interval: 250 } } }\n" +
                 (if (base != null) "export default async (env) => mergeConfig(typeof base === 'function' ? await base(env) : (base || {}), over)\n"
                     else "export default over\n"))
             wrapper.name
         }.getOrNull()
+    }
+
+    private fun pascal(raw: String): String = raw.split(Regex("[^A-Za-z0-9]+")).filter { it.isNotBlank() }
+        .joinToString("") { it.replaceFirstChar { c -> c.uppercase() } }.takeIf { it.isNotBlank() && it[0].isLetter() } ?: ""
+    private fun kebab(name: String) = name.replace(Regex("([a-z0-9])([A-Z])"), "$1-$2").lowercase()
+
+    /**
+     * Tailwind pedido (ou já no projeto): instala se faltar, liga o plugin do Vite (pela config do app, sem mexer na do
+     * usuário) e garante @import "tailwindcss" no CSS de entrada importado pelo main. Sem isso as classes não estilizam nada.
+     * Devolve true se o plugin do Vite precisa entrar pela config do app.
+     */
+    private suspend fun ensureTailwind(sessionId: String, dir: File, guestDir: String, wanted: Boolean, log: (String) -> Unit): Boolean {
+        val pkgFile = File(dir, "package.json")
+        var pkg = runCatching { pkgFile.readText() }.getOrDefault("")
+        val has = pkg.contains("\"tailwindcss\"")
+        if (!has && !wanted) return false
+        val v3 = Regex("\"tailwindcss\"\\s*:\\s*\"[\\^~>=]*3").containsMatchIn(pkg)
+        val needs = when {
+            !has -> "tailwindcss@^4 @tailwindcss/vite@^4"
+            !v3 && !pkg.contains("@tailwindcss/vite") && !pkg.contains("@tailwindcss/postcss") && pkg.contains("\"vite\"") -> "@tailwindcss/vite@^4"
+            else -> null
+        }
+        if (needs != null) {
+            log("Ligando o Tailwind CSS ($needs)…")
+            val r = sandbox.exec(dev.cueopen.app.sandbox.InteractivePrompts.ENV + " && npm install -D --no-audit --no-fund --loglevel=error $needs < /dev/null",
+                cwd = guestDir, timeoutSec = 600, idleTimeoutSec = 240, sessionId = sessionId)
+            if (r.exitCode != 0) { log("Não consegui instalar o Tailwind: " + r.output.takeLast(300)); return false }
+            pkg = runCatching { pkgFile.readText() }.getOrDefault(pkg)
+        }
+        // CSS de entrada: o importado pelo main (ou um novo src/index.css importado no topo do main).
+        val main = listOf("src/main.tsx", "src/main.jsx", "src/main.ts", "src/main.js", "src/index.tsx", "src/index.jsx").map { File(dir, it) }.firstOrNull { it.isFile }
+        if (main != null) {
+            val mainText = main.readText()
+            val cssRel = Regex("""import\s+['"](\./[^'"]+\.css)['"]""").find(mainText)?.groupValues?.get(1)
+            val css = if (cssRel != null) File(main.parentFile, cssRel.removePrefix("./")) else File(dir, "src/index.css")
+            if (cssRel == null) main.writeText("import './" + css.relativeTo(main.parentFile).path + "'\n" + mainText)
+            val text = if (css.isFile) css.readText() else ""
+            val isV3 = v3 && !pkg.contains("@tailwindcss/")
+            val fixed = if (isV3) {
+                if (text.contains("@tailwind base")) text else "@tailwind base;\n@tailwind components;\n@tailwind utilities;\n\n$text"
+            } else {
+                // Tema padrão do create-vite (body centralizado, cores escuras) atrapalha o layout: sai junto.
+                val base = if (text.contains("place-items: center") && text.contains(":root")) "" else text
+                val noOld = base.lines().filterNot { it.trim().startsWith("@tailwind ") }.joinToString("\n")
+                if (Regex("""@import\s+['"]tailwindcss['"]""").containsMatchIn(noOld)) noOld else "@import \"tailwindcss\";\n\n$noOld"
+            }
+            if (fixed != text) { css.parentFile?.mkdirs(); css.writeText(fixed) }
+        }
+        val viteCfg = listOf("vite.config.ts", "vite.config.mts", "vite.config.js", "vite.config.mjs").map { File(dir, it) }.firstOrNull { it.isFile }?.readText().orEmpty()
+        return !v3 && pkg.contains("@tailwindcss/vite") && !viteCfg.contains("@tailwindcss/vite")
+    }
+
+    /**
+     * Antes do time: cada componente do plano já existe (esqueleto visível) e já está no App. Assim o usuário vê cada seção
+     * sendo construída no lugar dela desde o primeiro salvamento — sem isso a tela ficava branca até o App ser editado no fim.
+     * Devolve tarefa → caminho do arquivo do componente (no sandbox).
+     */
+    private fun wireComponents(dir: File, guestDir: String, tasks: List<SquadTask>, log: (String) -> Unit): Map<String, String> {
+        val pkg = runCatching { File(dir, "package.json").readText() }.getOrDefault("")
+        if (!pkg.contains("\"react\"")) return emptyMap()
+        val ts = File(dir, "src/main.tsx").isFile || File(dir, "src/App.tsx").isFile
+        val ext = if (ts) "tsx" else "jsx"
+        val out = linkedMapOf<String, Pair<String, File>>()  // taskId → (Nome, arquivo)
+        tasks.forEach { t ->
+            val fromFile = Regex("""(?:^|/)(?:components|sections|pages)/([A-Za-z][A-Za-z0-9]*)\.(?:jsx|tsx|js|ts)$""").find(t.file)?.groupValues?.get(1)
+            val name = fromFile ?: t.target.trim().split(Regex("\\s+")).firstOrNull()?.takeIf { it.startsWith("#") || it.startsWith(".") }?.let { pascal(it.drop(1)) }.orEmpty()
+            if (name.isBlank() || name == "App" || name == "Main") return@forEach
+            val f = when {
+                t.file.startsWith("/") -> File(dir, t.file.substringAfter(guestDir.trimEnd('/') + "/", "src/components/$name.$ext"))
+                t.file.isNotBlank() -> File(dir, t.file.removePrefix("./"))
+                else -> File(dir, "src/components/$name.$ext")
+            }
+            if (out.values.none { it.first == name }) out[t.id] = name to f
+        }
+        if (out.isEmpty()) return emptyMap()
+        out.values.forEach { (name, f) ->
+            if (!f.exists()) {
+                f.parentFile?.mkdirs()
+                f.writeText("export default function $name() {\n  return (\n    <section id=\"${kebab(name)}\" className=\"${kebab(name)} fluwy-placeholder\"\n" +
+                    "      style={{ padding: '40px 24px', margin: '12px', border: '2px dashed #c9c9c9', borderRadius: 12, textAlign: 'center', color: '#888', fontFamily: 'system-ui' }}>\n" +
+                    "      $name · em construção…\n    </section>\n  )\n}\n")
+            }
+        }
+        val app = listOf("src/App.tsx", "src/App.jsx", "src/App.js").map { File(dir, it) }.firstOrNull { it.isFile } ?: File(dir, "src/App.$ext")
+        val appText = if (app.isFile) app.readText() else ""
+        val wired = out.values.count { (name, _) -> Regex("""import\s+$name\b""").containsMatchIn(appText) }
+        if (wired == 0) {
+            val imports = out.values.joinToString("") { (name, f) ->
+                val rel = f.relativeTo(app.parentFile).path.substringBeforeLast('.').let { if (it.startsWith(".")) it else "./$it" }
+                "import $name from '$rel'\n"
+            }
+            app.parentFile?.mkdirs()
+            app.writeText(imports + "\nexport default function App() {\n  return (\n    <div className=\"min-h-screen\">\n" +
+                out.values.joinToString("") { "      <${it.first} />\n" } + "    </div>\n  )\n}\n")
+            log("App ligado a ${out.size} componentes antes do time entrar (cada seção aparece no lugar dela).")
+        } else if (wired < out.size) log("O App já importa $wired de ${out.size} componentes; os demais precisam ser ligados pelo líder.")
+        return out.mapValues { (_, v) -> guestDir.trimEnd('/') + "/" + v.second.relativeTo(dir).path }
     }
 
     /** Projeto React + Vite em branco que já roda (o time constrói em cima dele). */
@@ -5850,13 +5949,14 @@ class AgentRunner(
               "name": "app", "private": true, "version": "0.0.0", "type": "module",
               "scripts": { "dev": "vite", "build": "vite build", "preview": "vite preview" },
               "dependencies": { "react": "^18.3.1", "react-dom": "^18.3.1" },
-              "devDependencies": { "@vitejs/plugin-react": "^4.3.4", "vite": "^5.4.11" }
+              "devDependencies": { "@vitejs/plugin-react": "^4.3.4", "vite": "^5.4.11", "tailwindcss": "^4.1.0", "@tailwindcss/vite": "^4.1.0" }
             }
         """)
         w("vite.config.js", """
             import { defineConfig } from 'vite'
             import react from '@vitejs/plugin-react'
-            export default defineConfig({ plugins: [react()], server: { host: '127.0.0.1', watch: { usePolling: true, interval: 250 } } })
+            import tailwindcss from '@tailwindcss/vite'
+            export default defineConfig({ plugins: [react(), tailwindcss()], server: { host: '127.0.0.1', watch: { usePolling: true, interval: 250 } } })
         """)
         w("index.html", """
             <!doctype html>
@@ -5882,8 +5982,8 @@ class AgentRunner(
             }
         """)
         w("src/index.css", """
-            * { box-sizing: border-box; } body { margin: 0; font-family: system-ui, sans-serif; }
-            .hero { padding: 64px 24px; text-align: center; }
+            @import "tailwindcss";
+            body { margin: 0; font-family: system-ui, sans-serif; }
         """)
     }
 
@@ -5892,7 +5992,7 @@ class AgentRunner(
      * instala as dependências e sobe o servidor de desenvolvimento (http://127.0.0.1:PORTA, com HMR). Site estático
      * (index.html sem package.json): file://. URL já rodando: usada como está. null = não ficou de pé (ver log).
      */
-    private suspend fun squadPreviewUrl(sessionId: String, preview: String, log: (String) -> Unit): String? {
+    private suspend fun squadPreviewUrl(sessionId: String, preview: String, log: (String) -> Unit, wantTailwind: Boolean = false): String? {
         val p = preview.trim()
         if (p.isBlank()) return null
         if (p.startsWith("http://") || p.startsWith("https://")) return p
@@ -5922,7 +6022,7 @@ class AgentRunner(
             // Nunca cria o projeto solto na raiz do workspace (misturaria com outros arquivos): usa /root/workspace/app.
             if (guestDir.trimEnd('/') == "/root/workspace" && dir.listFiles()?.any { !it.name.startsWith(".") } == true) {
                 log("A raiz do workspace já tem outros arquivos; o projeto vai em /root/workspace/app.")
-                return squadPreviewUrl(sessionId, "/root/workspace/app", log)
+                return squadPreviewUrl(sessionId, "/root/workspace/app", log, wantTailwind)
             }
             log("Criando o projeto React + Vite em branco em $guestDir…"); scaffoldReactVite(dir)
         }
@@ -5945,6 +6045,7 @@ class AgentRunner(
             if (r.exitCode != 0 || !File(dir, "node_modules").isDirectory) { log("npm install falhou: " + r.output.takeLast(600)); return null }
         }
         // 2) Servidor de desenvolvimento.
+        val tailwindPlugin = runCatching { ensureTailwind(sessionId, dir, guestDir, wantTailwind, log) }.getOrDefault(false)
         // API Node (Express, Fastify, Koa, Hono, Nest…) sem front-end: sobe com PORT e vale qualquer resposta HTTP.
         val isApi = !Regex("\"(vite|next|react-scripts)\"").containsMatchIn(text) &&
             Regex("\"(express|fastify|koa|hono|@nestjs/core|@hapi/hapi|restify|polka)\"").containsMatchIn(text)
@@ -5957,7 +6058,7 @@ class AgentRunner(
             isApi && scripts?.has("start") == true -> "PORT=$port HOST=127.0.0.1 npm start"
             isApi -> "PORT=$port HOST=127.0.0.1 node $main"
             text.contains("\"next\"") -> "npx next dev -p $port -H 127.0.0.1"
-            text.contains("\"vite\"") -> "npx vite --host 127.0.0.1 --port $port --strictPort" + (viteWatchConfig(dir)?.let { " --config $it" } ?: "")
+            text.contains("\"vite\"") -> "npx vite --host 127.0.0.1 --port $port --strictPort" + (viteWatchConfig(dir, tailwindPlugin)?.let { " --config $it" } ?: "")
             text.contains("react-scripts") -> "BROWSER=none HOST=127.0.0.1 PORT=$port npx react-scripts start"
             else -> "HOST=127.0.0.1 PORT=$port npm run dev -- --host 127.0.0.1 --port $port"
         }
@@ -5980,7 +6081,9 @@ class AgentRunner(
         if (text.contains("\"vite\"")) {
             val entry = Regex("""src=["'](/[^"']+\.(?:jsx?|tsx?))["']""").find(runCatching { File(dir, "index.html").readText() }.getOrDefault(""))?.groupValues?.get(1)
             if (entry != null) {
-                val (ec, eb) = previewStatus(url.trimEnd('/') + entry)
+                var res = previewStatus(url.trimEnd('/') + entry, 90_000)
+                repeat(2) { if (res.first == 0) { kotlinx.coroutines.delay(2_000); res = previewStatus(url.trimEnd('/') + entry, 90_000) } }
+                val (ec, eb) = res
                 if (ec != 200) { log("$entry não compila (HTTP $ec): ${eb.take(300)}"); return null }
             }
         }
@@ -5992,9 +6095,11 @@ class AgentRunner(
         val browser = browserFor(sessionId)
         runCatching { browser.navigate(url) }
         if (sessionId in squadApi) return previewStatus(url).first in 100..499  // API: responder já basta
-        val deadline = System.currentTimeMillis() + 45_000
+        val deadline = System.currentTimeMillis() + 120_000  // 1ª compilação no celular pode passar de 1 min
         var last = ""
+        var nextNav = System.currentTimeMillis() + 20_000
         while (System.currentTimeMillis() < deadline) {
+            if (System.currentTimeMillis() > nextNav && !last.contains("ok")) { runCatching { browser.navigate(url) }; nextNav = System.currentTimeMillis() + 20_000 }
             last = runCatching { browser.runJs(
                 "(function(){var t=document.title||'';if(/não disponível|not available|ERR_/i.test(t+document.body.innerText.slice(0,200)))return 'erro';" +
                     "var r=document.getElementById('root')||document.getElementById('__next')||document.getElementById('app')||document.body;" +
@@ -6003,7 +6108,7 @@ class AgentRunner(
             if (last.contains("erro")) { kotlinx.coroutines.delay(1_500); runCatching { browser.navigate(url) } }
             kotlinx.coroutines.delay(1_500)
         }
-        log("O app não apareceu no browser em 45 s (estado: ${last.ifBlank { "sem resposta" }}). Log do servidor: " +
+        log("O app não apareceu no browser em 2 min (estado: ${last.ifBlank { "sem resposta" }}). Log do servidor: " +
             runCatching { File(sandbox.workspaceFor(sessionId), ".cue/devserver.log").readText().takeLast(500) }.getOrDefault(""))
         return false
     }
@@ -6020,7 +6125,8 @@ class AgentRunner(
             when (val v = arr.opt(n)) {
                 is org.json.JSONObject -> v.optString("task").trim().takeIf { it.isNotBlank() }?.let { t ->
                     SquadTask(v.optString("id").trim().ifBlank { "t${n + 1}" }, v.optString("role").trim(), t, v.optString("target").trim(),
-                        v.optJSONArray("depends_on")?.let { d -> (0 until d.length()).map { d.optString(it).trim() }.filter { it.isNotBlank() } }.orEmpty())
+                        v.optJSONArray("depends_on")?.let { d -> (0 until d.length()).map { d.optString(it).trim() }.filter { it.isNotBlank() } }.orEmpty(),
+                        v.optString("file").trim())
                 }
                 null -> null
                 else -> v.toString().trim().takeIf { it.isNotBlank() }?.let { SquadTask("t${n + 1}", "", it, "", emptyList()) }
@@ -6052,7 +6158,12 @@ class AgentRunner(
             result = "${tasks.size} agentes", status = StepStatus.RUNNING)
         store.addItem(sessionId, card)
         val note: (String) -> Unit = { m -> previewNotes.appendLine(m); BuildSquad.edit(squadId) { it.copy(notice = m.lineSequence().first().take(160)) } }
-        val previewUrl = if (preview.isBlank()) null else squadPreviewUrl(sessionId, preview, note)
+        val wantTailwind = Regex("(?i)tailwind").containsMatchIn(goal + " " + parentRequest + " " + tasksJson)
+        val previewUrl = if (preview.isBlank()) null else squadPreviewUrl(sessionId, preview, note, wantTailwind)
+        // Componentes do plano já existem e já estão no App antes do time (a tela mostra cada seção sendo construída).
+        val componentFiles = squadProjectDir[sessionId]?.takeIf { previewUrl?.startsWith("http") == true && sessionId !in squadApi }?.let { g ->
+            runCatching { wireComponents(sandbox.hostFile(g, sessionId), g, tasks, note) }.getOrDefault(emptyMap())
+        }.orEmpty()
         // Regra: o time só entra com o app VIVO no browser. Sem isso, nenhum agente começa.
         val alive = previewUrl != null && (!previewUrl.startsWith("http") || appAliveInBrowser(sessionId, previewUrl, note))
         if (preview.isNotBlank() && !alive) {
@@ -6072,11 +6183,13 @@ class AgentRunner(
         val workers = tasks.mapIndexed { n, t ->
             val p = personas[n]
             val label = BuildSquad.shortLabel(t.task)
+            val compFile = componentFiles[t.id]
+            val taskText = t.task + (compFile?.let { "\n\nSeu arquivo: $it — já existe com um esqueleto e JÁ está importado e renderizado no App. Substitua o conteúdo dele pela seção pronta; não edite o App." } ?: "")
             val child = Session(title = "[Worker ${n + 1}] ${p.name} · $label", agentId = parent?.agentId, squadParentId = sessionId,
                 status = SessionStatus.RUNNING,
-                llm = listOf(LlmMessage("user", PromptContextPolicy.squadTask(p.name, p.role, goal, t.task, t.target, teamLine, parentRequest, previewUrl, squadProjectDir[sessionId]))))
+                llm = listOf(LlmMessage("user", PromptContextPolicy.squadTask(p.name, p.role, goal, taskText, t.target, teamLine, parentRequest, previewUrl, squadProjectDir[sessionId], wantTailwind))))
             store.upsertSession(child)
-            BuildSquad.Worker(n, p, t.task, label, child.id, t.target)
+            BuildSquad.Worker(n, p, t.task, label, child.id, t.target, hint = compFile?.let { BuildSquad.hintFromPath(it) }.orEmpty())
         }
         BuildSquad.edit(squadId) { it.copy(preview = previewUrl, workers = workers, notice = "") }
 

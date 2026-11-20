@@ -76,7 +76,7 @@ internal object PromptContextPolicy {
     }
 
     /** Tarefa de um agente do exército de build: mesmo workspace do líder, editando por partes. */
-    fun squadTask(name: String, role: String, goal: String, task: String, target: String, team: String, parentRequest: String = "", previewUrl: String? = null, projectDir: String? = null): String = buildString {
+    fun squadTask(name: String, role: String, goal: String, task: String, target: String, team: String, parentRequest: String = "", previewUrl: String? = null, projectDir: String? = null, tailwind: Boolean = false): String = buildString {
         appendLine("Você é $name, agente de $role no exército de agentes que está construindo este software. Time: $team.")
         val root = projectDir?.trimEnd('/') ?: "/root/workspace"
         appendLine("O time inteiro trabalha AO MESMO TEMPO no MESMO projeto, na pasta $root (compartilhada: as mudanças dos outros aparecem enquanto você trabalha).")
@@ -91,6 +91,8 @@ internal object PromptContextPolicy {
         appendLine("- Releia o arquivo logo antes de editar (outro agente pode ter mudado) e edite com file_edit em trechos pequenos e únicos.")
         appendLine("- Nunca reescreva com file_write um arquivo que já existe e que outros editam; arquivos novos só seus são livres (ex.: css/${name.lowercase().replace(' ', '-')}.css, ligado ao HTML com um file_edit pequeno).")
         appendLine("- Em React, cada seção é um componente próprio (src/components/<Nome>.jsx) com id/className igual ao nome; dê a todo elemento novo um className descritivo. O servidor de desenvolvimento já está rodando com HMR: salve em passos (estrutura primeiro, depois conteúdo, depois estilo) para o usuário ver o elemento sendo construído.")
+        if (tailwind) appendLine("- O projeto usa Tailwind CSS (já ligado pelo app): estilize com classes do Tailwind no className; não crie CSS solto nem troque a config.")
+        appendLine("- O App já importa e renderiza todos os componentes do plano: não edite App.jsx/App.tsx, salvo se a sua tarefa for o App.")
         appendLine("- Mantenha os ids e classes que já existem e não apague o trabalho dos outros. Não suba nem pare servidores, não publique, não instale nada global (npm install de um pacote no projeto só se a sua tarefa exigir).")
         if (previewUrl != null && previewUrl.startsWith("http")) appendLine("- O projeto está no ar em $previewUrl. Depois de cada edição, confira que não quebrou nada: curl -s -o /dev/null -w '%{http_code}' ${previewUrl.trimEnd('/')}/<caminho do arquivo editado, ex.: src/components/Hero.jsx>. 200 = ok; 500 = erro de compilação seu: leia a mensagem (curl sem -o) e corrija na hora.")
         append("- Ao terminar, responda em 1 a 3 linhas: o que fez e quais arquivos mudou. Só diga que testou se executou o teste.")
