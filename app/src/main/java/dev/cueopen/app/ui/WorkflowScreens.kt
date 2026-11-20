@@ -36,6 +36,7 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -54,8 +55,8 @@ import java.util.Date
 import java.util.Locale
 import kotlin.math.roundToInt
 
-private const val NODE_W = 196f
-private const val NODE_H = 76f
+private const val NODE_W = 212f
+private const val NODE_H = 84f
 private const val WORLD = 4000f
 
 private fun nodeIcon(type: String): ImageVector = when (WfCatalog.of(type).icon) {
@@ -89,22 +90,24 @@ private fun templates(): List<Pair<String, () -> Workflow>> = listOf(
     "Em branco (manual)" to { Workflow(name = "Novo fluxo", nodes = listOf(WfNode(type = "trigger_manual", label = "Início", x = 60f, y = 160f))) },
     "Resumo diário com IA" to {
         val t = WfNode(type = "trigger_schedule", label = "Todo dia 8h", x = 40f, y = 160f, config = mapOf("mode" to "daily", "time" to "08:00"))
-        val a = WfNode(type = "agent", label = "Pesquisar", x = 280f, y = 160f, config = mapOf("prompt" to "Pesquise as 5 notícias mais importantes de hoje sobre tecnologia e resuma cada uma em uma linha, com o link."))
-        val n = WfNode(type = "notify", label = "Avisar", x = 520f, y = 160f, config = mapOf("title" to "Resumo do dia", "text" to "{{prev}}"))
+        val a = WfNode(type = "agent", label = "Pesquisar", x = 320f, y = 160f, config = mapOf("prompt" to "Pesquise as 5 notícias mais importantes de hoje sobre tecnologia e resuma cada uma em uma linha, com o link."))
+        val n = WfNode(type = "notify", label = "Avisar", x = 600f, y = 160f, config = mapOf("title" to "Resumo do dia", "text" to "{{prev}}"))
         Workflow(name = "Resumo diário com IA", nodes = listOf(t, a, n), edges = listOf(WfEdge(from = t.id, to = a.id), WfEdge(from = a.id, to = n.id)))
     },
     "Monitorar site" to {
-        val t = WfNode(type = "trigger_schedule", label = "A cada 30 min", x = 40f, y = 160f, config = mapOf("mode" to "interval", "minutes" to "30"))
-        val h = WfNode(type = "http", label = "Baixar página", x = 280f, y = 160f, config = mapOf("method" to "GET", "url" to "https://example.com"))
-        val i = WfNode(type = "if", label = "Mudou?", x = 520f, y = 160f, config = mapOf("left" to "{{prev.status}}", "op" to "not_equals", "right" to "200"))
-        val n = WfNode(type = "notify", label = "Avisar", x = 760f, y = 100f, config = mapOf("title" to "Site com problema", "text" to "Status {{${h.id}.status}}"))
-        Workflow(name = "Monitorar site", nodes = listOf(t, h, i, n), edges = listOf(WfEdge(from = t.id, to = h.id), WfEdge(from = h.id, to = i.id), WfEdge(from = i.id, to = n.id, port = "true")))
+        val t = WfNode(type = "trigger_schedule", label = "A cada 30 min", x = 40f, y = 200f, config = mapOf("mode" to "interval", "minutes" to "30"))
+        val h = WfNode(type = "http", label = "Baixar página", x = 320f, y = 200f, config = mapOf("method" to "GET", "url" to "https://example.com", "timeout" to "20", "onError" to "continue"))
+        val i = WfNode(type = "if", label = "Está no ar?", x = 600f, y = 200f, config = mapOf("left" to "{{prev.status}}", "op" to "equals", "right" to "200"))
+        val ok = WfNode(type = "notify", label = "Site no ar", x = 900f, y = 100f, config = mapOf("title" to "✅ Site no ar", "text" to "Status {{${h.id}.status}} em {{trigger.time}}"))
+        val bad = WfNode(type = "notify", label = "Site com problema", x = 900f, y = 300f, config = mapOf("title" to "⚠ Site com problema", "text" to "Status {{${h.id}.status}} em {{trigger.time}}"))
+        Workflow(name = "Monitorar site", nodes = listOf(t, h, i, ok, bad), edges = listOf(WfEdge(from = t.id, to = h.id), WfEdge(from = h.id, to = i.id),
+            WfEdge(from = i.id, to = ok.id, port = "true"), WfEdge(from = i.id, to = bad.id, port = "false")))
     },
     "Agente + aprovação + app" to {
         val t = WfNode(type = "trigger_manual", label = "Início", x = 40f, y = 160f)
-        val a = WfNode(type = "agent", label = "Escrever e-mail", x = 280f, y = 160f, config = mapOf("prompt" to "Escreva um e-mail curto de follow-up para um cliente que pediu orçamento ontem."))
-        val ap = WfNode(type = "approval", label = "Aprovar envio", x = 520f, y = 160f, config = mapOf("question" to "Enviar este e-mail?\n\n{{prev}}"))
-        val g = WfNode(type = "connector", label = "Enviar (Gmail)", x = 760f, y = 100f, config = mapOf("conector" to "gmail", "acao" to "send_email", "campos" to "{\"body\":\"{{${a.id}}}\"}"))
+        val a = WfNode(type = "agent", label = "Escrever e-mail", x = 320f, y = 160f, config = mapOf("prompt" to "Escreva um e-mail curto de follow-up para um cliente que pediu orçamento ontem."))
+        val ap = WfNode(type = "approval", label = "Aprovar envio", x = 600f, y = 160f, config = mapOf("question" to "Enviar este e-mail?\n\n{{prev}}"))
+        val g = WfNode(type = "connector", label = "Enviar (Gmail)", x = 900f, y = 100f, config = mapOf("conector" to "gmail", "acao" to "send_email", "campos" to "{\"body\":\"{{${a.id}}}\"}"))
         Workflow(name = "E-mail com aprovação", nodes = listOf(t, a, ap, g), edges = listOf(WfEdge(from = t.id, to = a.id), WfEdge(from = a.id, to = ap.id), WfEdge(from = ap.id, to = g.id, port = "true")))
     },
 )
@@ -175,6 +178,19 @@ private fun runLabel(r: WfRun): String = when (r.status) {
 
 // ───────────────────────────── Editor (canvas) ─────────────────────────────
 
+private const val GRID = 20f
+
+private fun snap(v: Float) = (Math.round(v / GRID) * GRID).toFloat()
+
+/** Lugar livre perto de (x, y): desce até não encostar em nenhum nó. */
+private fun freeSpot(w: Workflow, x: Float, y: Float, except: String? = null): Pair<Float, Float> {
+    var ny = snap(y); val nx = snap(x).coerceIn(0f, WORLD - NODE_W)
+    fun hit(yy: Float) = w.nodes.any { it.id != except && kotlin.math.abs(it.x - nx) < NODE_W + 20f && kotlin.math.abs(it.y - yy) < NODE_H + 20f }
+    var guard = 0
+    while (hit(ny) && guard++ < 40) ny += NODE_H + 30f
+    return nx to ny.coerceIn(0f, WORLD - NODE_H)
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun WorkflowEditorScreen(nav: NavController, id: String) {
@@ -190,12 +206,16 @@ fun WorkflowEditorScreen(nav: NavController, id: String) {
         return
     }
     val density = LocalDensity.current
-    val scope = rememberCoroutineScope()
+    val dens = density.density
     var scale by remember { mutableFloatStateOf(1f) }
     var offset by remember { mutableStateOf(Offset(0f, 0f)) }
+    var viewport by remember { mutableStateOf(androidx.compose.ui.unit.IntSize.Zero) }
+    var fitted by remember { mutableStateOf(false) }
     var selected by remember { mutableStateOf<String?>(null) }
     var connectFrom by remember { mutableStateOf<Pair<String, String>?>(null) }
+    // Arrasto e posição recém-gravada ficam na memória até o fluxo salvo refletir (o nó não "pula" ao soltar).
     val dragOff = remember { mutableStateMapOf<String, Offset>() }
+    val pending = remember { mutableStateMapOf<String, Offset>() }
     var palette by remember { mutableStateOf(false) }
     var history by remember { mutableStateOf(false) }
     var rename by remember { mutableStateOf(false) }
@@ -203,15 +223,36 @@ fun WorkflowEditorScreen(nav: NavController, id: String) {
     var menu by remember { mutableStateOf(false) }
     var confirmDelete by remember { mutableStateOf(false) }
     var toast by remember { mutableStateOf<String?>(null) }
+    var watchRun by remember { mutableStateOf<String?>(null) }
+    var result by remember { mutableStateOf<WfRun?>(null) }
     val problems = remember(w) { WfLogic.problems(w) }
     val myRuns = runs.filter { it.workflowId == w.id }.sortedByDescending { it.startedAt }
     val active = myRuns.firstOrNull { it.status == "running" || it.status == "waiting" }
     val shown = active ?: myRuns.firstOrNull()
     val nodeStatus = shown?.steps?.associate { it.nodeId to it.status }.orEmpty()
 
+    LaunchedEffect(w.nodes) { pending.keys.toList().forEach { k -> val n = w.nodes.firstOrNull { it.id == k }; if (n == null || (n.x == pending[k]?.x && n.y == pending[k]?.y)) pending.remove(k) } }
+    // Execução disparada daqui terminou: mostra o resultado na tela.
+    LaunchedEffect(myRuns.firstOrNull { it.id == watchRun }?.status) {
+        val r = myRuns.firstOrNull { it.id == watchRun } ?: return@LaunchedEffect
+        if (r.status != "running" && r.status != "waiting") { result = r; watchRun = null }
+    }
+
+    fun pos(n: WfNode): Offset { val p = pending[n.id] ?: Offset(n.x, n.y); val d = dragOff[n.id] ?: Offset.Zero; return Offset(p.x + d.x, p.y + d.y) }
+    fun fit() {
+        if (viewport.width == 0 || w.nodes.isEmpty()) { scale = 1f; offset = Offset(40f, 40f); return }
+        val d = dens
+        val minX = w.nodes.minOf { it.x }; val minY = w.nodes.minOf { it.y }
+        val maxX = w.nodes.maxOf { it.x + NODE_W + 40f }; val maxY = w.nodes.maxOf { it.y + NODE_H }
+        val pad = 48f
+        val s = minOf(viewport.width / ((maxX - minX + pad * 2) * d), (viewport.height - 160 * d) / ((maxY - minY + pad * 2) * d), 1.15f).coerceIn(0.35f, 1.15f)
+        scale = s
+        val contentW = (maxX - minX) * d * s; val contentH = (maxY - minY) * d * s
+        offset = Offset((viewport.width - contentW) / 2 - minX * d * s, (viewport.height - 120 * d - contentH) / 2 - minY * d * s)
+    }
+    LaunchedEffect(viewport, w.id) { if (!fitted && viewport.width > 0) { fit(); fitted = true } }
+
     fun save(v: Workflow) { val s = WorkflowStore.upsert(v); if (s.enabled) WorkflowScheduler.sync(ctx, s) }
-    fun moveNode(nid: String, dx: Float, dy: Float) = save(w.copy(nodes = w.nodes.map {
-        if (it.id == nid) it.copy(x = (it.x + dx).coerceIn(0f, WORLD - NODE_W), y = (it.y + dy).coerceIn(0f, WORLD - NODE_H)) else it }))
     fun connect(to: String) {
         val (from, port) = connectFrom ?: return
         connectFrom = null
@@ -220,21 +261,25 @@ fun WorkflowEditorScreen(nav: NavController, id: String) {
             from == to -> toast = "Um nó não pode ligar nele mesmo."
             WfCatalog.of(target.type).trigger -> toast = "Gatilhos não recebem ligação de entrada."
             w.edges.any { it.from == from && it.to == to && it.port == port } -> toast = "Essa ligação já existe."
-            else -> save(w.copy(edges = w.edges + WfEdge(from = from, to = to, port = port)))
+            else -> { save(w.copy(edges = w.edges + WfEdge(from = from, to = to, port = port))); toast = "Ligado" }
         }
     }
-    fun addNode(type: String) {
-        // Novo nó no centro da área visível, ligado ao nó selecionado (ou ao último), como no n8n.
-        val cx = ((-offset.x + 160 * density.density) / scale / density.density).coerceIn(0f, WORLD - NODE_W)
-        val cy = ((-offset.y + 220 * density.density) / scale / density.density).coerceIn(0f, WORLD - NODE_H)
-        val anchor = w.nodes.firstOrNull { it.id == selected } ?: w.nodes.lastOrNull()
-        val pos = anchor?.let { (it.x + NODE_W + 50f).coerceAtMost(WORLD - NODE_W) to it.y } ?: (cx to cy)
-        val n = WfNode(type = type, x = pos.first, y = pos.second, config = WfCatalog.of(type).fields.filter { it.default.isNotEmpty() }.associate { it.key to it.default })
-        val edge = anchor?.takeIf { !WfCatalog.of(type).trigger }?.let { a ->
-            WfEdge(from = a.id, to = n.id, port = WfCatalog.of(a.type).ports.first())
-        }
+    fun addNode(type: String, preset: WfPreset? = null) {
+        val t = WfCatalog.of(type)
+        val anchor = w.nodes.firstOrNull { it.id == selected } ?: w.nodes.maxByOrNull { it.x }
+        val d = dens
+        val center = Offset((viewport.width / 2f - offset.x) / (d * scale) - NODE_W / 2, (viewport.height / 2.5f - offset.y) / (d * scale))
+        val (x, y) = if (anchor != null && !t.trigger) freeSpot(w, anchor.x + NODE_W + 60f, anchor.y) else freeSpot(w, center.x, center.y)
+        val cfg = t.fields.filter { it.default.isNotEmpty() }.associate { it.key to it.default } + preset?.config.orEmpty()
+        val n = WfNode(type = type, label = preset?.title.orEmpty(), x = x, y = y, config = cfg)
+        val edge = anchor?.takeIf { !t.trigger }?.let { a -> WfEdge(from = a.id, to = n.id, port = WfCatalog.of(a.type).ports.first()) }
         save(w.copy(nodes = w.nodes + n, edges = w.edges + listOfNotNull(edge)))
         selected = n.id
+    }
+    fun runNow() {
+        result = null
+        WorkflowEngine.start(w.id).onFailure { toast = it.message?.lineSequence()?.firstOrNull(); problemsOpen = problems.isNotEmpty() }
+            .onSuccess { watchRun = it; toast = "Executando…" }
     }
 
     Scaffold(containerColor = c.bg, topBar = {
@@ -244,13 +289,14 @@ fun WorkflowEditorScreen(nav: NavController, id: String) {
                 Column(Modifier.clickable { rename = true }) {
                     Text(w.name, maxLines = 1, overflow = TextOverflow.Ellipsis, fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
                     val next = WorkflowScheduler.nextRuns(w).minOrNull()
+                    val done = active?.steps?.count { it.status == "ok" } ?: 0
                     Text(when {
-                        active?.status == "waiting" -> "Aguardando aprovação"
-                        active != null -> "Executando…"
+                        active?.status == "waiting" -> "Aguardando sua aprovação"
+                        active != null -> "Executando · $done de ${w.nodes.size} nós"
                         next != null -> "Ativo · próxima ${timeFmt.format(Date(next))}"
                         w.nodes.any { it.type == "trigger_schedule" } -> "Agendamento desligado"
-                        else -> "Manual"
-                    }, fontSize = 12.sp, color = c.ink3)
+                        else -> "Manual · ${w.nodes.size} nós"
+                    }, fontSize = 12.sp, color = if (active != null) c.accent else c.ink3)
                 }
             },
             actions = {
@@ -258,11 +304,27 @@ fun WorkflowEditorScreen(nav: NavController, id: String) {
                     if (on && problems.any { !it.contains("não está ligado") }) { problemsOpen = true }
                     else { val v = WorkflowStore.upsert(w.copy(enabled = on)); WorkflowScheduler.sync(ctx, v); toast = if (on) "Agendamento ligado" else "Agendamento desligado" }
                 }, modifier = Modifier.padding(end = 4.dp))
-                IconButton({ history = true }) { Icon(Icons.Rounded.History, "Execuções") }
+                IconButton({ history = true }) {
+                    BadgedBox(badge = { if (active?.status == "waiting") Badge(containerColor = c.warn) }) { Icon(Icons.Rounded.History, "Execuções") }
+                }
                 Box {
                     IconButton({ menu = true }) { Icon(Icons.Rounded.MoreVert, "Mais") }
                     DropdownMenu(menu, { menu = false }) {
                         DropdownMenuItem({ Text("Renomear") }, { menu = false; rename = true }, leadingIcon = { Icon(Icons.Rounded.Edit, null) })
+                        DropdownMenuItem({ Text("Organizar nós") }, {
+                            menu = false
+                            // Layout automático por camadas a partir do gatilho (esquerda → direita), alinhado à grade.
+                            val layers = mutableMapOf<String, Int>()
+                            val q = ArrayDeque(w.nodes.filter { WfCatalog.of(it.type).trigger }.map { it.id }.onEach { layers[it] = 0 })
+                            while (q.isNotEmpty()) { val cur = q.removeFirst(); w.edges.filter { it.from == cur }.forEach { e -> if (e.to !in layers) { layers[e.to] = layers.getValue(cur) + 1; q.add(e.to) } } }
+                            val byLayer = w.nodes.groupBy { layers[it.id] ?: (layers.values.maxOrNull() ?: 0) + 1 }
+                            val placed = w.nodes.map { n ->
+                                val l = layers[n.id] ?: ((layers.values.maxOrNull() ?: 0) + 1)
+                                val i = byLayer.getValue(l).indexOf(n)
+                                n.copy(x = 40f + l * (NODE_W + 80f), y = 120f + i * (NODE_H + 60f))
+                            }
+                            save(w.copy(nodes = placed)); fitted = false
+                        }, leadingIcon = { Icon(Icons.Rounded.AutoFixHigh, null) })
                         DropdownMenuItem({ Text("Duplicar fluxo") }, {
                             menu = false
                             val idMap = w.nodes.associate { it.id to WfIds.new() }
@@ -270,15 +332,16 @@ fun WorkflowEditorScreen(nav: NavController, id: String) {
                                 edges = w.edges.mapNotNull { e -> val f = idMap[e.from]; val t = idMap[e.to]; if (f != null && t != null) e.copy(id = WfIds.new(), from = f, to = t) else null }))
                             nav.navigate("workflow/${copy.id}")
                         }, leadingIcon = { Icon(Icons.Rounded.ContentCopy, null) })
-                        DropdownMenuItem({ Text("Centralizar") }, { menu = false; scale = 1f; offset = Offset.Zero }, leadingIcon = { Icon(Icons.Rounded.CenterFocusStrong, null) })
+                        DropdownMenuItem({ Text("Ver ajustes pendentes") }, { menu = false; problemsOpen = true }, leadingIcon = { Icon(Icons.Rounded.Rule, null) })
                         DropdownMenuItem({ Text("Excluir fluxo", color = c.err) }, { menu = false; confirmDelete = true }, leadingIcon = { Icon(Icons.Rounded.Delete, null, tint = c.err) })
                     }
                 }
             })
     }) { pad ->
         Box(Modifier.padding(pad).fillMaxSize()) {
-            // Fundo: pan/zoom com dois dedos ou arrasto; toque cancela a ligação em andamento.
-            Box(Modifier.fillMaxSize().clip(RoundedCornerShape(0.dp)).background(c.surface2)
+            val minor = c.line.copy(alpha = .35f); val major = c.line.copy(alpha = .75f)
+            Box(Modifier.fillMaxSize().background(c.surface2)
+                .onSizeChanged { viewport = it }
                 .pointerInput(Unit) {
                     detectTransformGestures { centroid, pan, zoom, _ ->
                         val ns = (scale * zoom).coerceIn(0.35f, 2.2f)
@@ -286,119 +349,141 @@ fun WorkflowEditorScreen(nav: NavController, id: String) {
                         scale = ns
                     }
                 }
-                .pointerInput(Unit) { detectTapGestures { connectFrom = null } }) {
-                val dot = c.line
+                .pointerInput(Unit) { detectTapGestures { connectFrom = null; selected = null } }) {
+                // Canvas quadriculado (linhas finas a cada 20 e marcadas a cada 100), acompanhando pan e zoom.
                 Canvas(Modifier.fillMaxSize()) {
-                    val step = 28.dp.toPx() * scale
-                    if (step > 6f) {
-                        var x = offset.x % step
-                        while (x < size.width) { var y = offset.y % step; while (y < size.height) { drawCircle(dot, 1.6f, Offset(x, y)); y += step }; x += step }
+                    val step = GRID * dens * scale
+                    if (step >= 6f) {
+                        var i = kotlin.math.floor(-offset.x / step).toInt()
+                        var x = offset.x + i * step
+                        while (x < size.width) { drawLine(if (i % 5 == 0) major else minor, Offset(x, 0f), Offset(x, size.height), if (i % 5 == 0) 1.2f else 0.8f); x += step; i++ }
+                        var j = kotlin.math.floor(-offset.y / step).toInt()
+                        var y = offset.y + j * step
+                        while (y < size.height) { drawLine(if (j % 5 == 0) major else minor, Offset(0f, y), Offset(size.width, y), if (j % 5 == 0) 1.2f else 0.8f); y += step; j++ }
                     }
                 }
-                // Ligações num canvas do tamanho da tela (sem camada gigante): coordenadas do mundo → tela.
+                // Ligações: curvas suaves; o caminho que a execução percorreu fica sólido e, enquanto roda, anima.
+                val flow = rememberInfiniteTransition(label = "wfflow")
+                val phase by flow.animateFloat(0f, 36f, infiniteRepeatable(tween(900, easing = androidx.compose.animation.core.LinearEasing)), label = "phase")
                 val edgeColor = c.ink3
-                val okColor = c.ok; val errColor = c.err
-                fun pos(n: WfNode): Offset { val d = dragOff[n.id] ?: Offset.Zero; return Offset(n.x + d.x, n.y + d.y) }
+                val okColor = c.ok; val errColor = c.err; val accent = c.accent
                 Canvas(Modifier.fillMaxSize()) {
-                    val k = density.density * scale
+                    val k = dens * scale
                     fun scr(xDp: Float, yDp: Float) = Offset(offset.x + xDp * k, offset.y + yDp * k)
                     w.edges.forEach { e ->
                         val a = w.nodes.firstOrNull { it.id == e.from } ?: return@forEach
                         val b = w.nodes.firstOrNull { it.id == e.to } ?: return@forEach
                         val pa = pos(a); val pb = pos(b)
                         val ports = WfCatalog.of(a.type).ports
-                        val py = if (ports.size > 1) (if (e.port == "false") NODE_H * 0.72f else NODE_H * 0.32f) else NODE_H / 2
+                        val py = if (ports.size > 1) (if (e.port == "false") NODE_H * 0.70f else NODE_H * 0.32f) else NODE_H / 2
                         val s0 = scr(pa.x + NODE_W, pa.y + py)
                         val t0 = scr(pb.x, pb.y + NODE_H / 2)
-                        val dx = ((t0.x - s0.x) / 2).coerceAtLeast(40f * k)
+                        val dx = (kotlin.math.abs(t0.x - s0.x) / 2).coerceAtLeast(50f * k)
                         val path = Path().apply { moveTo(s0.x, s0.y); cubicTo(s0.x + dx, s0.y, t0.x - dx, t0.y, t0.x, t0.y) }
-                        val col = when (e.port) { "true" -> okColor; "false" -> errColor; else -> edgeColor }
+                        val base = when (e.port) { "true" -> okColor; "false" -> errColor; else -> edgeColor }
                         val ran = nodeStatus[e.from] == "ok" && nodeStatus.containsKey(e.to)
-                        drawPath(path, col.copy(alpha = if (ran) 1f else .75f), style = Stroke(width = (if (ran) 3f else 2f) * k,
-                            pathEffect = if (ran) null else PathEffect.dashPathEffect(floatArrayOf(10f * k, 8f * k))))
-                        drawCircle(col, 4f * k, t0)
+                        val live = ran && nodeStatus[e.to] == "running"
+                        drawPath(path, (if (live) accent else base).copy(alpha = if (ran) 1f else .55f), style = Stroke(width = (if (ran) 2.6f else 1.8f) * k,
+                            cap = androidx.compose.ui.graphics.StrokeCap.Round,
+                            pathEffect = if (live) PathEffect.dashPathEffect(floatArrayOf(12f * k, 6f * k), -phase * k) else if (ran) null else PathEffect.dashPathEffect(floatArrayOf(7f * k, 6f * k))))
+                        // Seta de chegada.
+                        val ah = 6f * k
+                        drawPath(Path().apply { moveTo(t0.x, t0.y); lineTo(t0.x - ah * 1.4f, t0.y - ah); lineTo(t0.x - ah * 1.4f, t0.y + ah); close() }, base.copy(alpha = if (ran) 1f else .7f))
                     }
                 }
                 w.nodes.forEach { n ->
                     val p = pos(n)
-                    Box(Modifier.offset { IntOffset((offset.x + p.x * density.density * scale).roundToInt(), (offset.y + p.y * density.density * scale).roundToInt()) }
+                    Box(Modifier.offset { IntOffset((offset.x + p.x * dens * scale).roundToInt(), (offset.y + p.y * dens * scale).roundToInt()) }
                         .graphicsLayer { scaleX = scale; scaleY = scale; transformOrigin = TransformOrigin(0f, 0f) }) {
-                        NodeCard(n, nodeStatus[n.id], selected == n.id, connectFrom != null && connectFrom?.first != n.id,
+                        NodeCard(n, nodeStatus[n.id], selected == n.id, connectFrom != null && connectFrom?.first != n.id, connectFrom?.first == n.id,
                             onTap = { if (connectFrom != null) connect(n.id) else selected = n.id },
                             onDrag = { dx, dy ->
-                                // Arrasto só na memória (a tela acompanha); grava uma vez ao soltar.
+                                val base = pending[n.id] ?: Offset(n.x, n.y)
                                 val d = dragOff[n.id] ?: Offset.Zero
-                                val nx = (n.x + d.x + dx / density.density).coerceIn(0f, WORLD - NODE_W) - n.x
-                                val ny = (n.y + d.y + dy / density.density).coerceIn(0f, WORLD - NODE_H) - n.y
+                                val nx = (base.x + d.x + dx / dens).coerceIn(0f, WORLD - NODE_W) - base.x
+                                val ny = (base.y + d.y + dy / dens).coerceIn(0f, WORLD - NODE_H) - base.y
                                 dragOff[n.id] = Offset(nx, ny)
                             },
-                            onDragEnd = { dragOff.remove(n.id)?.let { d -> moveNode(n.id, d.x, d.y) } },
+                            onDragEnd = {
+                                val d = dragOff.remove(n.id) ?: return@NodeCard
+                                val base = pending[n.id] ?: Offset(n.x, n.y)
+                                // Encaixa na grade e evita ficar em cima de outro nó.
+                                val (fx, fy) = freeSpot(w, base.x + d.x, base.y + d.y, except = n.id)
+                                pending[n.id] = Offset(fx, fy)
+                                save(w.copy(nodes = w.nodes.map { if (it.id == n.id) it.copy(x = fx, y = fy) else it }))
+                            },
                             onPort = { port -> connectFrom = if (connectFrom == n.id to port) null else n.id to port })
                     }
                 }
+                if (w.nodes.isEmpty()) Column(Modifier.align(Alignment.Center).padding(24.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                    Icon(Icons.Rounded.AccountTree, null, Modifier.size(40.dp), tint = c.ink3)
+                    Spacer(Modifier.height(8.dp))
+                    Text("Comece adicionando um gatilho", color = c.ink2, fontWeight = FontWeight.Medium)
+                    TextButton({ palette = true }) { Text("Adicionar nó") }
+                }
             }
-            // Avisos e ajuda.
+            // Avisos.
             Column(Modifier.align(Alignment.TopCenter).padding(10.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                if (connectFrom != null) Banner("Toque no nó de destino (toque no fundo para cancelar)", c.accent) { connectFrom = null }
-                if (problems.isNotEmpty() && connectFrom == null) Banner("${problems.size} ajuste(s) pendente(s) — toque para ver", c.warn) { problemsOpen = true }
-                if (active?.status == "waiting") Banner("Aguardando sua aprovação — toque para responder", c.warn) { history = true }
+                if (connectFrom != null) Banner("Toque no nó de destino · toque no fundo para cancelar", c.accent) { connectFrom = null }
+                else if (active?.status == "waiting") Banner("Aguardando sua aprovação — toque para responder", c.warn) { history = true }
+                else if (problems.isNotEmpty()) Banner("${problems.size} ajuste(s) pendente(s)", c.warn) { problemsOpen = true }
             }
-            // Barra de ações (mobile-first, alcance do polegar).
-            Row(Modifier.align(Alignment.BottomCenter).padding(14.dp).clip(RoundedCornerShape(22.dp)).background(c.surface)
-                .border(1.dp, c.line, RoundedCornerShape(22.dp)).padding(6.dp), verticalAlignment = Alignment.CenterVertically) {
-                IconButton({ scale = (scale / 1.25f).coerceAtLeast(0.35f) }) { Icon(Icons.Rounded.ZoomOut, "Diminuir") }
-                IconButton({ scale = (scale * 1.25f).coerceAtMost(2.2f) }) { Icon(Icons.Rounded.ZoomIn, "Aumentar") }
-                Spacer(Modifier.width(4.dp))
-                FilledTonalButton({ palette = true }) { Icon(Icons.Rounded.Add, null); Spacer(Modifier.width(4.dp)); Text("Nó") }
+            // Resultado da execução disparada aqui.
+            result?.let { r ->
+                val col = statusColor(r.status, c) ?: c.ink3
+                Row(Modifier.align(Alignment.BottomCenter).padding(start = 14.dp, end = 14.dp, bottom = 84.dp).fillMaxWidth()
+                    .clip(RoundedCornerShape(18.dp)).background(c.surface).border(1.dp, col.copy(alpha = .6f), RoundedCornerShape(18.dp))
+                    .clickable { history = true; result = null }.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Icon(if (r.status == "ok") Icons.Rounded.CheckCircle else if (r.status == "error") Icons.Rounded.Error else Icons.Rounded.StopCircle, null, tint = col)
+                    Spacer(Modifier.width(10.dp))
+                    Column(Modifier.weight(1f)) {
+                        Text(when (r.status) { "ok" -> "Execução concluída"; "error" -> "A execução falhou"; else -> "Execução parada" }, fontWeight = FontWeight.SemiBold)
+                        val lastOut = r.steps.lastOrNull { it.status == "ok" }?.output.orEmpty()
+                        Text((if (r.status == "error") r.error else "${r.steps.size} passos · ${(((r.finishedAt ?: r.startedAt) - r.startedAt) / 100) / 10.0} s" +
+                            (lastOut.takeIf { it.isNotBlank() }?.let { " · " + it.replace(Regex("\\s+"), " ").take(70) } ?: "")),
+                            fontSize = 12.sp, color = if (r.status == "error") c.err else c.ink3, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                    }
+                    IconButton({ result = null }) { Icon(Icons.Rounded.Close, "Fechar", tint = c.ink3) }
+                }
+            }
+            // Barra de ações (alcance do polegar).
+            Row(Modifier.align(Alignment.BottomCenter).padding(14.dp).clip(RoundedCornerShape(26.dp)).background(c.surface)
+                .border(1.dp, c.line, RoundedCornerShape(26.dp)).padding(horizontal = 6.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+                IconButton({ scale = (scale / 1.25f).coerceAtLeast(0.35f) }) { Icon(Icons.Rounded.Remove, "Diminuir") }
+                Text("${(scale * 100).roundToInt()}%", fontSize = 12.sp, color = c.ink3, modifier = Modifier.width(40.dp), textAlign = androidx.compose.ui.text.style.TextAlign.Center)
+                IconButton({ scale = (scale * 1.25f).coerceAtMost(2.2f) }) { Icon(Icons.Rounded.Add, "Aumentar") }
+                IconButton({ fit() }) { Icon(Icons.Rounded.FitScreen, "Ajustar à tela") }
+                Spacer(Modifier.width(2.dp))
+                FilledTonalButton({ palette = true }, contentPadding = PaddingValues(horizontal = 12.dp)) { Icon(Icons.Rounded.AddBox, null, Modifier.size(18.dp)); Spacer(Modifier.width(4.dp)); Text("Nó") }
                 Spacer(Modifier.width(6.dp))
-                if (active != null) Button({ WorkflowEngine.cancel(active.id) }, colors = ButtonDefaults.buttonColors(containerColor = c.err)) {
-                    Icon(Icons.Rounded.Stop, null); Spacer(Modifier.width(4.dp)); Text("Parar")
-                } else Button({
-                    WorkflowEngine.start(w.id).onFailure { problemsOpen = true; toast = it.message?.lineSequence()?.firstOrNull() }
-                        .onSuccess { toast = "Executando…" }
-                }, colors = ButtonDefaults.buttonColors(containerColor = c.accent)) {
-                    Icon(Icons.Rounded.PlayArrow, null); Spacer(Modifier.width(4.dp)); Text("Executar")
+                if (active != null) Button({ WorkflowEngine.cancel(active.id) }, colors = ButtonDefaults.buttonColors(containerColor = c.err), contentPadding = PaddingValues(horizontal = 14.dp)) {
+                    Icon(Icons.Rounded.Stop, null, Modifier.size(18.dp)); Spacer(Modifier.width(4.dp)); Text("Parar")
+                } else Button({ runNow() }, colors = ButtonDefaults.buttonColors(containerColor = c.accent), contentPadding = PaddingValues(horizontal = 14.dp)) {
+                    Icon(Icons.Rounded.PlayArrow, null, Modifier.size(18.dp)); Spacer(Modifier.width(4.dp)); Text("Executar")
                 }
             }
             toast?.let { msg ->
                 LaunchedEffect(msg) { kotlinx.coroutines.delay(2_200); toast = null }
-                Text(msg, Modifier.align(Alignment.BottomCenter).padding(bottom = 86.dp).clip(RoundedCornerShape(12.dp))
-                    .background(c.ink.copy(alpha = .9f)).padding(horizontal = 14.dp, vertical = 8.dp), color = c.bg, fontSize = 13.sp)
+                Text(msg, Modifier.align(Alignment.TopCenter).padding(top = 56.dp).clip(RoundedCornerShape(12.dp))
+                    .background(c.ink.copy(alpha = .92f)).padding(horizontal = 14.dp, vertical = 8.dp), color = c.bg, fontSize = 13.sp)
             }
         }
     }
 
-    if (palette) ModalBottomSheet(onDismissRequest = { palette = false }, containerColor = c.surface) {
-        Column(Modifier.padding(16.dp, 0.dp, 16.dp, 28.dp).verticalScroll(rememberScrollState())) {
-            WfCatalog.categories().forEach { cat ->
-                SectionLabel(cat)
-                WfCatalog.TYPES.filter { it.category == cat }.forEach { t ->
-                    Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).clickable { addNode(t.type); palette = false }.padding(vertical = 8.dp),
-                        verticalAlignment = Alignment.CenterVertically) {
-                        Box(Modifier.size(36.dp).clip(RoundedCornerShape(10.dp)).background(Color(t.color).copy(alpha = .18f)), contentAlignment = Alignment.Center) {
-                            Icon(nodeIcon(t.type), null, tint = Color(t.color))
-                        }
-                        Spacer(Modifier.width(12.dp))
-                        Column(Modifier.weight(1f)) {
-                            Text(t.title, fontWeight = FontWeight.Medium)
-                            Text(t.description, fontSize = 12.sp, color = c.ink3, maxLines = 2)
-                        }
-                    }
-                }
-            }
-        }
+    if (palette) ModalBottomSheet(onDismissRequest = { palette = false }, containerColor = c.surface, sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)) {
+        NodePalette(onPick = { type, preset -> addNode(type, preset); palette = false })
     }
 
     selected?.let { nid ->
         val node = w.nodes.firstOrNull { it.id == nid }
-        if (node == null) selected = null
-        else ModalBottomSheet(onDismissRequest = { selected = null }, containerColor = c.surface, sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)) {
+        if (node != null) ModalBottomSheet(onDismissRequest = { selected = null }, containerColor = c.surface, sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)) {
             NodeEditor(w, node, shown?.steps?.lastOrNull { it.nodeId == node.id }, nav,
                 onChange = { nn -> save(w.copy(nodes = w.nodes.map { if (it.id == nn.id) nn else it })) },
                 onDeleteEdge = { eid -> save(w.copy(edges = w.edges.filterNot { it.id == eid })) },
                 onConnect = { port -> connectFrom = node.id to port; selected = null },
                 onDuplicate = {
-                    val copy = node.copy(id = WfIds.new(), x = (node.x + 30f).coerceAtMost(WORLD - NODE_W), y = (node.y + NODE_H + 30f).coerceAtMost(WORLD - NODE_H))
+                    val (x, y) = freeSpot(w, node.x, node.y + NODE_H + 40f)
+                    val copy = node.copy(id = WfIds.new(), x = x, y = y)
                     save(w.copy(nodes = w.nodes + copy)); selected = copy.id
                 },
                 onDelete = { save(w.copy(nodes = w.nodes.filterNot { it.id == nid }, edges = w.edges.filterNot { it.from == nid || it.to == nid })); selected = null })
@@ -430,14 +515,60 @@ fun WorkflowEditorScreen(nav: NavController, id: String) {
         dismissButton = { TextButton({ confirmDelete = false }) { Text("Cancelar") } })
 }
 
+/** Paleta: busca + nós prontos + tipos básicos, por categoria. */
+@Composable
+private fun NodePalette(onPick: (String, WfPreset?) -> Unit) {
+    val c = Cue.c
+    var q by remember { mutableStateOf("") }
+    val norm = { s: String -> java.text.Normalizer.normalize(s.lowercase(), java.text.Normalizer.Form.NFD).replace(Regex("\\p{M}+"), "") }
+    Column(Modifier.padding(16.dp, 0.dp, 16.dp, 28.dp)) {
+        Text("Adicionar nó", fontWeight = FontWeight.SemiBold, fontSize = 17.sp)
+        Spacer(Modifier.height(8.dp))
+        OutlinedTextField(q, { q = it }, Modifier.fillMaxWidth(), placeholder = { Text("Buscar: gmail, resumo, http, condição…") },
+            leadingIcon = { Icon(Icons.Rounded.Search, null) }, singleLine = true, shape = RoundedCornerShape(14.dp))
+        Spacer(Modifier.height(8.dp))
+        LazyColumn(Modifier.heightIn(max = 560.dp)) {
+            WfCatalog.categories().forEach { cat ->
+                val basics = WfCatalog.TYPES.filter { it.category == cat }.map { Triple(it.type, null as WfPreset?, it.title to it.description) }
+                val presets = WfCatalog.PRESETS.filter { it.category == cat }.map { Triple(it.type, it, it.title to it.description) }
+                val all = (basics + presets).filter { q.isBlank() || norm(it.third.first + " " + it.third.second).contains(norm(q.trim())) }
+                if (all.isNotEmpty()) {
+                    item(key = "h_$cat") { SectionLabel(cat) }
+                    items(all, key = { cat + it.third.first }) { (type, preset, td) ->
+                        val t = WfCatalog.of(type)
+                        Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).clickable { onPick(type, preset) }.padding(vertical = 8.dp, horizontal = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically) {
+                            Box(Modifier.size(40.dp).clip(RoundedCornerShape(12.dp)).background(Color(t.color).copy(alpha = .16f)), contentAlignment = Alignment.Center) {
+                                Icon(nodeIcon(type), null, tint = Color(t.color), modifier = Modifier.size(22.dp))
+                            }
+                            Spacer(Modifier.width(12.dp))
+                            Column(Modifier.weight(1f)) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Text(td.first, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
+                                    if (preset != null) {
+                                        Spacer(Modifier.width(6.dp))
+                                        Text("pronto", fontSize = 10.sp, color = Color(t.color), modifier = Modifier.clip(RoundedCornerShape(6.dp))
+                                            .background(Color(t.color).copy(alpha = .14f)).padding(horizontal = 5.dp, vertical = 1.dp))
+                                    }
+                                }
+                                Text(td.second, fontSize = 12.sp, color = c.ink3, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 @Composable
 private fun Banner(text: String, color: Color, onClick: () -> Unit) {
-    Text(text, Modifier.clip(RoundedCornerShape(12.dp)).background(color.copy(alpha = .16f)).border(1.dp, color.copy(alpha = .5f), RoundedCornerShape(12.dp))
+    Text(text, Modifier.clip(RoundedCornerShape(12.dp)).background(Cue.c.surface).border(1.dp, color.copy(alpha = .6f), RoundedCornerShape(12.dp))
         .clickable(onClick = onClick).padding(horizontal = 12.dp, vertical = 7.dp), color = color, fontSize = 12.sp, fontWeight = FontWeight.Medium)
 }
 
 @Composable
-private fun NodeCard(n: WfNode, status: String?, selected: Boolean, targetable: Boolean,
+private fun NodeCard(n: WfNode, status: String?, selected: Boolean, targetable: Boolean, source: Boolean,
                      onTap: () -> Unit, onDrag: (Float, Float) -> Unit, onDragEnd: () -> Unit, onPort: (String) -> Unit) {
     val c = Cue.c
     val t = WfCatalog.of(n.type)
@@ -448,39 +579,46 @@ private fun NodeCard(n: WfNode, status: String?, selected: Boolean, targetable: 
     val dragEnd by rememberUpdatedState(onDragEnd)
     val pulse = rememberInfiniteTransition(label = "wfpulse")
     val a by pulse.animateFloat(0.35f, 1f, infiniteRepeatable(tween(700), RepeatMode.Reverse), label = "a")
-    val border = statusColor(status, c)?.let { if (status == "running" || status == "waiting") it.copy(alpha = a) else it }
-        ?: if (selected) c.accent else if (targetable) tint.copy(alpha = .8f) else c.line
+    val st = statusColor(status, c)
+    val border = st?.let { if (status == "running" || status == "waiting") it.copy(alpha = a) else it }
+        ?: if (selected || source) c.accent else if (targetable) tint.copy(alpha = a) else c.line
+    val shape = RoundedCornerShape(if (t.trigger) 22.dp else 16.dp)
     Box(Modifier.size(NODE_W.dp, NODE_H.dp)) {
-        Row(Modifier.fillMaxSize().clip(RoundedCornerShape(16.dp)).background(c.surface)
-            .border(if (selected || status != null) 2.dp else 1.dp, border, RoundedCornerShape(16.dp))
+        Row(Modifier.fillMaxSize().clip(shape).background(c.surface)
+            .border(if (selected || st != null || source || targetable) 2.dp else 1.dp, border, shape)
             .pointerInput(n.id) { detectDragGestures(onDragEnd = { dragEnd() }, onDragCancel = { dragEnd() }) { ch, d -> ch.consume(); drag(d.x, d.y) } }
-            .pointerInput(n.id) { detectTapGestures { tap() } }
-            .padding(10.dp), verticalAlignment = Alignment.CenterVertically) {
-            Box(Modifier.size(38.dp).clip(RoundedCornerShape(11.dp)).background(tint.copy(alpha = .18f)), contentAlignment = Alignment.Center) {
-                Icon(nodeIcon(n.type), null, tint = tint)
-            }
-            Spacer(Modifier.width(10.dp))
-            Column(Modifier.weight(1f)) {
-                Text(WfLogic.label(n), fontWeight = FontWeight.SemiBold, fontSize = 14.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                Text(subtitle(n), fontSize = 11.sp, color = c.ink3, maxLines = 2, overflow = TextOverflow.Ellipsis)
-            }
-            when (status) {
-                "ok" -> Icon(Icons.Rounded.CheckCircle, null, Modifier.size(16.dp), tint = c.ok)
-                "error" -> Icon(Icons.Rounded.Error, null, Modifier.size(16.dp), tint = c.err)
-                "waiting" -> Icon(Icons.Rounded.HourglassTop, null, Modifier.size(16.dp), tint = c.warn)
+            .pointerInput(n.id) { detectTapGestures { tap() } }) {
+            // Faixa de cor do tipo à esquerda.
+            Box(Modifier.width(5.dp).fillMaxHeight().background(tint))
+            Row(Modifier.weight(1f).fillMaxHeight().padding(start = 10.dp, end = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+                Box(Modifier.size(40.dp).clip(RoundedCornerShape(12.dp)).background(tint.copy(alpha = .16f)), contentAlignment = Alignment.Center) {
+                    if (status == "running") CircularProgressIndicator(Modifier.size(22.dp), color = tint, strokeWidth = 2.5.dp)
+                    else Icon(nodeIcon(n.type), null, tint = tint, modifier = Modifier.size(22.dp))
+                }
+                Spacer(Modifier.width(10.dp))
+                Column(Modifier.weight(1f)) {
+                    Text(t.title.uppercase(), fontSize = 9.sp, color = tint, fontWeight = FontWeight.Bold, letterSpacing = 0.6.sp, maxLines = 1)
+                    Text(WfLogic.label(n), fontWeight = FontWeight.SemiBold, fontSize = 14.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Text(subtitle(n), fontSize = 11.sp, color = c.ink3, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
+                when (status) {
+                    "ok" -> Icon(Icons.Rounded.CheckCircle, null, Modifier.size(18.dp), tint = c.ok)
+                    "error" -> Icon(Icons.Rounded.Error, null, Modifier.size(18.dp), tint = c.err)
+                    "waiting" -> Icon(Icons.Rounded.HourglassTop, null, Modifier.size(18.dp), tint = c.warn)
+                }
             }
         }
         // Entrada (esquerda) e saídas (direita). Toque numa saída e depois no nó de destino para ligar.
-        if (!t.trigger) Box(Modifier.align(Alignment.CenterStart).offset(x = (-6).dp).size(12.dp).clip(CircleShape).background(c.ink3))
+        if (!t.trigger) Box(Modifier.align(Alignment.CenterStart).offset(x = (-7).dp).size(14.dp).clip(CircleShape).background(c.surface).border(2.dp, c.ink3, CircleShape))
         t.ports.forEachIndexed { i, port ->
-            val y = if (t.ports.size > 1) (if (i == 0) NODE_H * 0.32f else NODE_H * 0.72f) else NODE_H / 2
+            val y = if (t.ports.size > 1) (if (i == 0) NODE_H * 0.32f else NODE_H * 0.70f) else NODE_H / 2
             val col = when (port) { "true" -> c.ok; "false" -> c.err; else -> tint }
-            Box(Modifier.offset { IntOffset((NODE_W - 13).dp.roundToPx(), (y - 13).dp.roundToPx()) }.size(26.dp).clip(CircleShape)
+            Box(Modifier.offset { IntOffset((NODE_W - 15).dp.roundToPx(), (y - 15).dp.roundToPx()) }.size(30.dp).clip(CircleShape)
                 .clickable { onPort(port) }, contentAlignment = Alignment.Center) {
-                Box(Modifier.size(14.dp).clip(CircleShape).background(col).border(2.dp, c.surface, CircleShape))
+                Box(Modifier.size(16.dp).clip(CircleShape).background(col).border(3.dp, c.surface, CircleShape))
             }
-            if (port != "main") Text(if (port == "true") "sim" else "não", Modifier.offset { IntOffset((NODE_W + 14).dp.roundToPx(), (y - 8).dp.roundToPx()) },
-                fontSize = 10.sp, color = col)
+            if (port != "main") Text(if (port == "true") "sim" else "não", Modifier.offset { IntOffset((NODE_W + 16).dp.roundToPx(), (y - 8).dp.roundToPx()) }
+                .clip(RoundedCornerShape(6.dp)).background(col.copy(alpha = .15f)).padding(horizontal = 5.dp), fontSize = 10.sp, color = col, fontWeight = FontWeight.Bold)
         }
     }
 }

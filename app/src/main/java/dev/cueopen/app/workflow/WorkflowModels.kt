@@ -60,6 +60,9 @@ object WfIds {
     fun new(): String = java.util.UUID.randomUUID().toString().replace("-", "").take(12)
 }
 
+/** Nó pronto da paleta: um tipo básico com nome e configuração já preenchidos. */
+data class WfPreset(val title: String, val category: String, val type: String, val description: String, val config: Map<String, String>)
+
 /** Campo de configuração de um tipo de nó (o editor monta o formulário a partir disto). */
 data class WfField(
     val key: String,
@@ -129,6 +132,7 @@ object WfCatalog {
                 WfField("headers", "Cabeçalhos (um por linha: Nome: valor)", WfField.Kind.MULTILINE),
                 WfField("body", "Corpo", WfField.Kind.MULTILINE, TEMPLATE_HINT),
                 WfField("timeout", "Tempo máximo (segundos)", WfField.Kind.NUMBER, default = "30"),
+                WfField("onError", "Se der erro (4xx/5xx ou sem rede)", WfField.Kind.SELECT, options = listOf("stop" to "Parar o fluxo", "continue" to "Continuar (status 0 se sem rede)"), default = "stop"),
             )),
         WfNodeType("shell", "Terminal", CAT_APPS, "Roda um comando no Linux do app e devolve a saída.", 0xFF9C978E, "terminal",
             fields = listOf(
@@ -162,5 +166,56 @@ object WfCatalog {
     )
 
     fun of(type: String): WfNodeType = TYPES.firstOrNull { it.type == type } ?: TYPES.first()
+
+    /** Nós prontos (já configurados) que aparecem na paleta, além dos tipos básicos. */
+    val PRESETS: List<WfPreset> = listOf(
+        // Gatilhos
+        WfPreset("Todo dia às 8h", CAT_TRIGGER, "trigger_schedule", "Roda todos os dias às 08:00.", mapOf("mode" to "daily", "time" to "08:00")),
+        WfPreset("A cada 15 minutos", CAT_TRIGGER, "trigger_schedule", "Roda a cada 15 minutos.", mapOf("mode" to "interval", "minutes" to "15")),
+        WfPreset("Toda segunda às 9h", CAT_TRIGGER, "trigger_schedule", "Roda toda segunda-feira às 09:00.", mapOf("mode" to "weekly", "weekday" to "1", "time" to "09:00")),
+        WfPreset("Toda hora", CAT_TRIGGER, "trigger_schedule", "Roda a cada 60 minutos.", mapOf("mode" to "interval", "minutes" to "60")),
+        // IA
+        WfPreset("Resumir texto", CAT_AI, "agent", "Resume a saída anterior em tópicos curtos.", mapOf("prompt" to "Resuma em até 5 tópicos curtos, em português:\n\n{{prev}}")),
+        WfPreset("Traduzir para inglês", CAT_AI, "agent", "Traduz a saída anterior.", mapOf("prompt" to "Traduza para o inglês, mantendo o tom, e responda só com a tradução:\n\n{{prev}}")),
+        WfPreset("Classificar sentimento", CAT_AI, "agent", "Responde positivo, negativo ou neutro.", mapOf("prompt" to "Classifique o sentimento do texto abaixo. Responda só com uma palavra: positivo, negativo ou neutro.\n\n{{prev}}")),
+        WfPreset("Pesquisar na web", CAT_AI, "agent", "Pesquisa um tema e traz as fontes.", mapOf("prompt" to "Pesquise na web as novidades mais recentes sobre: inteligência artificial. Traga 5 itens, cada um com uma linha e o link.")),
+        WfPreset("Notícias do dia", CAT_AI, "agent", "As notícias mais importantes de hoje, resumidas.", mapOf("prompt" to "Liste as 5 notícias mais importantes de hoje no Brasil, uma linha cada, com o link da fonte.")),
+        WfPreset("Post para redes sociais", CAT_AI, "agent", "Escreve um post a partir da saída anterior.", mapOf("prompt" to "Escreva um post curto e envolvente para Instagram (com 3 hashtags) a partir disto:\n\n{{prev}}")),
+        WfPreset("Extrair dados (JSON)", CAT_AI, "agent", "Transforma texto em JSON estruturado.", mapOf("prompt" to "Extraia nome, e-mail, telefone e assunto do texto abaixo e responda APENAS com um JSON válido com essas chaves:\n\n{{prev}}")),
+        WfPreset("Responder e-mail", CAT_AI, "agent", "Rascunha uma resposta educada.", mapOf("prompt" to "Escreva uma resposta curta, cordial e profissional para esta mensagem:\n\n{{prev}}")),
+        // Apps (hub de conectores / APIs)
+        WfPreset("Gmail · enviar e-mail", CAT_APPS, "connector", "Envia um e-mail pelo Gmail conectado.", mapOf("conector" to "gmail", "acao" to "send_email",
+            "campos" to "{\"receiver\": [\"email@exemplo.com\"], \"subject\": \"Resumo\", \"body_text\": \"{{prev}}\"}")),
+        WfPreset("Google Sheets · nova linha", CAT_APPS, "connector", "Adiciona uma linha numa planilha.", mapOf("conector" to "google-sheets", "acao" to "insert_row",
+            "campos" to "{\"values\": {\"A\": \"{{trigger.time}}\", \"B\": \"{{prev}}\"}}")),
+        WfPreset("Slack · mensagem", CAT_APPS, "connector", "Envia mensagem num canal do Slack.", mapOf("conector" to "slack", "acao" to "send_channel_message",
+            "campos" to "{\"channel\": \"#geral\", \"text\": \"{{prev}}\"}")),
+        WfPreset("Notion · nova página", CAT_APPS, "connector", "Cria um item num banco do Notion.", mapOf("conector" to "notion", "acao" to "create_database_item",
+            "campos" to "{\"title\": \"{{trigger.time}}\", \"content\": \"{{prev}}\"}")),
+        WfPreset("Telegram · mensagem", CAT_APPS, "http", "Envia mensagem por um bot do Telegram (troque TOKEN e CHAT_ID).", mapOf("method" to "POST",
+            "url" to "https://api.telegram.org/botTOKEN/sendMessage", "headers" to "Content-Type: application/json",
+            "body" to "{\"chat_id\": \"CHAT_ID\", \"text\": \"{{prev}}\"}")),
+        WfPreset("Discord · webhook", CAT_APPS, "http", "Posta num canal do Discord (cole a URL do webhook).", mapOf("method" to "POST",
+            "url" to "https://discord.com/api/webhooks/SEU_WEBHOOK", "headers" to "Content-Type: application/json", "body" to "{\"content\": \"{{prev}}\"}")),
+        WfPreset("Webhook (POST JSON)", CAT_APPS, "http", "Envia os dados para qualquer URL.", mapOf("method" to "POST", "url" to "https://seu-servidor.com/webhook",
+            "headers" to "Content-Type: application/json", "body" to "{\"data\": \"{{prev}}\", \"time\": \"{{trigger.time}}\"}")),
+        WfPreset("Cotação do dólar", CAT_APPS, "http", "USD → BRL agora (AwesomeAPI).", mapOf("method" to "GET", "url" to "https://economia.awesomeapi.com.br/json/last/USD-BRL")),
+        WfPreset("Preço do Bitcoin", CAT_APPS, "http", "BTC em reais e dólares (CoinGecko).", mapOf("method" to "GET", "url" to "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=brl,usd")),
+        WfPreset("Clima agora (São Paulo)", CAT_APPS, "http", "Temperatura e vento atuais (Open-Meteo).", mapOf("method" to "GET",
+            "url" to "https://api.open-meteo.com/v1/forecast?latitude=-23.55&longitude=-46.63&current=temperature_2m,wind_speed_10m")),
+        WfPreset("Verificar site no ar", CAT_APPS, "http", "Baixa uma página e devolve o status.", mapOf("method" to "GET", "url" to "https://example.com", "timeout" to "20", "onError" to "continue")),
+        WfPreset("Espaço em disco", CAT_APPS, "shell", "Uso do armazenamento do Linux do app.", mapOf("command" to "df -h /root | tail -1")),
+        // Lógica
+        WfPreset("Se contém texto", CAT_LOGIC, "if", "Segue pelo sim se a saída contém um texto.", mapOf("left" to "{{prev}}", "op" to "contains", "right" to "erro")),
+        WfPreset("Se HTTP deu certo", CAT_LOGIC, "if", "Sim quando o status HTTP é 200.", mapOf("left" to "{{prev.status}}", "op" to "equals", "right" to "200")),
+        WfPreset("Se número maior que", CAT_LOGIC, "if", "Compara números (ex.: preço).", mapOf("left" to "{{prev}}", "op" to "gt", "right" to "100")),
+        WfPreset("Se está vazio", CAT_LOGIC, "if", "Sim quando a saída anterior veio vazia.", mapOf("left" to "{{prev}}", "op" to "empty")),
+        WfPreset("Esperar 1 minuto", CAT_LOGIC, "delay", "Pausa 60 segundos.", mapOf("seconds" to "60")),
+        WfPreset("Pedir aprovação", CAT_LOGIC, "approval", "Você aprova antes de continuar.", mapOf("question" to "Posso continuar com isto?\n\n{{prev}}")),
+        WfPreset("Montar mensagem", CAT_LOGIC, "set", "Cria campos a partir das saídas.", mapOf("values" to "titulo = Resultado de {{trigger.time}}\ntexto = {{prev}}")),
+        // Saídas
+        WfPreset("Notificar resultado", CAT_OUT, "notify", "Mostra a saída anterior numa notificação.", mapOf("title" to "Fluxo concluído", "text" to "{{prev}}")),
+        WfPreset("Alerta de problema", CAT_OUT, "notify", "Notificação de alerta.", mapOf("title" to "⚠ Atenção", "text" to "Algo deu errado: {{prev}}")),
+    )
     fun categories(): List<String> = listOf(CAT_TRIGGER, CAT_AI, CAT_APPS, CAT_LOGIC, CAT_OUT)
 }

@@ -166,7 +166,13 @@ object WorkflowEngine {
                 if (Regex("^\\s*(ERRO|ERROR|RECUSADO)", RegexOption.IGNORE_CASE).containsMatchIn(out)) NodeResult(error = out.take(1_500)) else NodeResult(out)
             }
 
-            "http" -> withContext(Dispatchers.IO) { http(r("method").ifBlank { "GET" }, r("url").trim(), r("headers"), r("body"), (r("timeout").toIntOrNull() ?: 30).coerceIn(1, 300)) }
+            "http" -> withContext(Dispatchers.IO) {
+                val res = http(r("method").ifBlank { "GET" }, r("url").trim(), r("headers"), r("body"), (r("timeout").toIntOrNull() ?: 30).coerceIn(1, 300))
+                // "Continuar": o erro vira dado ({status, error}) para um nó Condição decidir o caminho.
+                if (res.error != null && node.config["onError"] == "continue")
+                    NodeResult(res.output.ifBlank { buildJsonObject { put("status", 0); put("error", res.error) }.toString() })
+                else res
+            }
 
             "shell" -> {
                 val cmd = r("command").trim()
