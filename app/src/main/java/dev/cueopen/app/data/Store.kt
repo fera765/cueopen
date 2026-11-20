@@ -153,6 +153,8 @@ class Store(context: Context) {
     }
 
     var onDeleteWorkspace: ((String) -> Unit)? = null
+    /** Tira chats da lista sem tocar nos arquivos (a limpeza pesada roda depois, em segundo plano). */
+    fun dropSessions(ids: Set<String>) { if (ids.isNotEmpty()) update { st -> st.copy(sessions = st.sessions.filterNot { it.id in ids }) } }
     fun deleteSession(id: String) { runCatching { onDeleteWorkspace?.invoke(id) }; update { st -> st.copy(sessions = st.sessions.filterNot { it.id == id }) } }
 
     /** Remove chat, agendas explicitamente ligadas, execuções dessas agendas e heartbeats órfãos. */

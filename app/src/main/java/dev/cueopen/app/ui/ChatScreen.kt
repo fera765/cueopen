@@ -1265,6 +1265,11 @@ private fun teamActivityLabel(a: Activity?, running: Boolean, waiting: Boolean, 
 private fun BuildSquadCard(step: ChatItem.Step, sessionId: String?, nav: androidx.navigation.NavController?) {
     val c = Cue.c
     val squads by dev.cueopen.app.agent.BuildSquad.squads.collectAsStateWithLifecycle()
+    // App reiniciado: o time salvo volta para o card (estado final de cada agente).
+    LaunchedEffect(step.args) {
+        if (dev.cueopen.app.agent.BuildSquad.get(step.args) == null)
+            kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) { dev.cueopen.app.agent.BuildSquad.restore(step.args) }
+    }
     val sq = squads[step.args]
     var expanded by remember(step.id) { mutableStateOf(false) }
     Column(

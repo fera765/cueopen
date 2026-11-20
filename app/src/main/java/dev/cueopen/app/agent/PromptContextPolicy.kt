@@ -76,7 +76,7 @@ internal object PromptContextPolicy {
     }
 
     /** Tarefa de um agente do exército de build: mesmo workspace do líder, editando por partes. */
-    fun squadTask(name: String, role: String, goal: String, task: String, target: String, team: String, parentRequest: String = "", previewUrl: String? = null, projectDir: String? = null, tailwind: Boolean = false): String = buildString {
+    fun squadTask(name: String, role: String, goal: String, task: String, target: String, team: String, parentRequest: String = "", previewUrl: String? = null, projectDir: String? = null, tailwind: Boolean = false, teamPlan: String = ""): String = buildString {
         appendLine("Você é $name, agente de $role no exército de agentes que está construindo este software. Time: $team.")
         val root = projectDir?.trimEnd('/') ?: "/root/workspace"
         appendLine("O time inteiro trabalha AO MESMO TEMPO no MESMO projeto, na pasta $root (compartilhada: as mudanças dos outros aparecem enquanto você trabalha).")
@@ -85,6 +85,7 @@ internal object PromptContextPolicy {
         appendLine(untrustedBlock("assigned_task", task, 2_000))
         if (target.isNotBlank()) appendLine("Seu alvo na página: $target (é sobre ele que o usuário vê o seu cursor).")
         if (parentRequest.isNotBlank()) appendLine(untrustedBlock("user_request", parentRequest, 1_200))
+        if (teamPlan.isNotBlank()) { appendLine(); appendLine("PLANO DO TIME (o mesmo para todos; siga nomes, ids, âncoras e contrato exatamente — também salvo em .fluwy/TIME.md na pasta do projeto):"); appendLine(teamPlan.take(6_000)) }
         appendLine()
         appendLine("Regras do time:")
         appendLine("- Faça só a sua parte. Comece já: leia só os arquivos de que precisa (file_list/file_read).")

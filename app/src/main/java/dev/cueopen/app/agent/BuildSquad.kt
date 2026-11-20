@@ -3,6 +3,7 @@ package dev.cueopen.app.agent
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.launch
 
 /**
  * Exército de agentes para desenvolvimento de software (inspirado no time do OpenBot):
@@ -83,8 +84,68 @@ object BuildSquad {
     private val _squads = MutableStateFlow<Map<String, Squad>>(emptyMap())
     val squads: StateFlow<Map<String, Squad>> = _squads
     fun get(id: String) = _squads.value[id]
-    fun put(s: Squad) = _squads.update { it + (s.id to s) }
-    fun edit(id: String, f: (Squad) -> Squad) = _squads.update { m -> m[id]?.let { m + (id to f(it)) } ?: m }
+    fun put(s: Squad) { _squads.update { it + (s.id to s) }; saveSoon(s.id) }
+    fun edit(id: String, f: (Squad) -> Squad) { _squads.update { m -> m[id]?.let { m + (id to f(it)) } ?: m }; saveSoon(id) }
+
+    // ── Persistência: o time continua no card depois de o app reiniciar (antes sumia, só ficava o card vazio) ──
+    @Volatile var dir: java.io.File? = null
+    private val io = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob() + kotlinx.coroutines.Dispatchers.IO)
+    private val dirty = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+    private fun saveSoon(id: String) {
+        if (dir == null || !dirty.add(id)) return
+        io.launch { kotlinx.coroutines.delay(700); dirty.remove(id); runCatching { save(id) } }
+    }
+    private fun save(id: String) {
+        val s = get(id) ?: return
+        val d = dir ?: return
+        d.mkdirs()
+        val tmp = java.io.File(d, "$id.json.tmp")
+        tmp.writeText(toJson(s))
+        tmp.renameTo(java.io.File(d, "$id.json"))
+    }
+    /** Carrega um time salvo (app reiniciado): quem estava trabalhando fica marcado como interrompido. */
+    fun restore(id: String): Squad? {
+        get(id)?.let { return it }
+        val f = dir?.let { java.io.File(it, "$id.json") }?.takeIf { it.isFile } ?: return null
+        val s = runCatching { fromJson(f.readText()) }.getOrNull() ?: return null
+        val fixed = if (!s.running) s else s.copy(running = false, workers = s.workers.map {
+            if (it.status == St.RUNNING || it.status == St.QUEUED) it.copy(status = St.FAILED, doing = "interrompido (app reiniciado)") else it })
+        _squads.update { it + (id to fixed) }
+        return fixed
+    }
+
+    private fun str(o: kotlinx.serialization.json.JsonObject, k: String) = (o[k] as? kotlinx.serialization.json.JsonPrimitive)?.content.orEmpty()
+    fun toJson(s: Squad): String = kotlinx.serialization.json.buildJsonObject {
+        fun p(v: Any?) = when (v) { is Number -> kotlinx.serialization.json.JsonPrimitive(v); is Boolean -> kotlinx.serialization.json.JsonPrimitive(v)
+            else -> kotlinx.serialization.json.JsonPrimitive(v?.toString()) }
+        put("id", p(s.id)); put("parent", p(s.parentSessionId)); put("goal", p(s.goal)); put("preview", p(s.preview))
+        put("running", p(s.running)); put("notice", p(s.notice))
+        put("log", kotlinx.serialization.json.buildJsonArray { s.log.forEach { add(p(it)) } })
+        put("workers", kotlinx.serialization.json.buildJsonArray {
+            s.workers.forEach { w ->
+                add(kotlinx.serialization.json.buildJsonObject {
+                    put("idx", p(w.idx)); put("name", p(w.persona.name)); put("role", p(w.persona.role)); put("face", p(w.persona.face))
+                    put("color", p(w.persona.color)); put("task", p(w.task)); put("label", p(w.label)); put("session", p(w.sessionId))
+                    put("target", p(w.target)); put("status", p(w.status.name)); put("doing", p(w.doing)); put("hint", p(w.hint))
+                })
+            }
+        })
+    }.toString()
+
+    fun fromJson(text: String): Squad {
+        val o = kotlinx.serialization.json.Json.parseToJsonElement(text) as kotlinx.serialization.json.JsonObject
+        val ws = (o["workers"] as? kotlinx.serialization.json.JsonArray).orEmpty().mapNotNull { e ->
+            val w = e as? kotlinx.serialization.json.JsonObject ?: return@mapNotNull null
+            Worker(str(w, "idx").toIntOrNull() ?: 0,
+                Persona(str(w, "name"), str(w, "role"), str(w, "face").ifBlank { "bot" }, str(w, "color").toLongOrNull() ?: 0xFF7C5CFF, emptyList()),
+                str(w, "task"), str(w, "label"), str(w, "session"), str(w, "target"),
+                runCatching { St.valueOf(str(w, "status")) }.getOrDefault(St.FAILED), str(w, "doing"), str(w, "hint"))
+        }
+        val preview = str(o, "preview").takeIf { it.isNotBlank() && it != "null" }
+        return Squad(str(o, "id"), str(o, "parent"), str(o, "goal"), preview, ws,
+            (o["log"] as? kotlinx.serialization.json.JsonArray).orEmpty().map { (it as? kotlinx.serialization.json.JsonPrimitive)?.content.orEmpty() },
+            str(o, "running") == "true", str(o, "notice"))
+    }
     fun editWorker(id: String, idx: Int, f: (Worker) -> Worker) = edit(id) { s -> s.copy(workers = s.workers.map { if (it.idx == idx) f(it) else it }) }
     /** Worker (chat) → (squad, índice). */
     fun byWorkerSession(sessionId: String): Pair<Squad, Worker>? =

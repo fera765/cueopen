@@ -129,6 +129,25 @@ fun SettingsScreen(nav: NavController) {
                 Text(lastCrash.take(3000), Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(Color(0xFF0F1115)).padding(12.dp),
                     color = Color(0xFFFF8A8A), fontFamily = FontFamily.Monospace, fontSize = 10.sp)
             }
+            SectionLabel("Dados")
+            Text("JSON completo da interação dos chats — mensagens, chamadas de ferramenta, resultados, schemas das funções, agentes e times de build — para enviar e rastrear falhas. Não inclui chaves de API, cofre, carteira nem logins.",
+                fontSize = 12.sp, color = c.ink2)
+            OutlinedButton(modifier = Modifier.fillMaxWidth(), onClick = {
+                val context = nav.context
+                scope.launch {
+                    runCatching {
+                        val f = withContext(Dispatchers.IO) { dev.cueopen.app.diag.ChatDataExport.export(context) }
+                        val uri = androidx.core.content.FileProvider.getUriForFile(context, context.packageName + ".files", f)
+                        val send = android.content.Intent(android.content.Intent.ACTION_SEND).apply {
+                            type = "application/json"
+                            putExtra(android.content.Intent.EXTRA_STREAM, uri)
+                            putExtra(android.content.Intent.EXTRA_SUBJECT, "Fluwy Bot — dados dos chats")
+                            addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                        }
+                        context.startActivity(android.content.Intent.createChooser(send, "Baixar / enviar dados").addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK))
+                    }
+                }
+            }) { Icon(Icons.Rounded.Download, null, Modifier.size(16.dp)); Spacer(Modifier.width(6.dp)); Text("Baixar dados (JSON)") }
             SectionLabel("Logs de erros")
             Text(
                 "Guarda as FALHAS reais do app — IA/provedores, agentes e ferramentas, conectores, skills, hub de apps, Linux, browser e crashes — nunca o conteúdo das conversas. Baixe o diagnóstico completo e envie aqui no Claude para eu corrigir.",

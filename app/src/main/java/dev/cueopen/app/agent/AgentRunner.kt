@@ -3677,6 +3677,7 @@ class AgentRunner(
             put("goal", str("Objetivo do time em uma frase"))
             put("tasks_json", str("Array JSON de objetos {id, role, task, file, target, depends_on:[ids]}. file (front-end): componente da tarefa, ex.: \"src/components/Hero.jsx\" — o app cria o esqueleto e liga no App ANTES do time, na ordem das tarefas. target: seletor CSS do elemento, ex.: \"#hero\""))
             put("preview", str("Pasta do projeto (ex.: /root/workspace/app): front-end React/Vite/Next ou API Node; o app instala, sobe e confere antes do time entrar. Ou a URL de um servidor já rodando (http://127.0.0.1:PORTA)"))
+            put("contract", str("Contrato compartilhado por TODOS os agentes: nome da marca, paleta (cores Tailwind/hex), fontes, tom de voz, dados reais (endereço, telefone, preços), ids/âncoras e rotas. Evita que cada agente invente nomes e links diferentes"))
             put("max_parallel", int("Agentes trabalhando ao mesmo tempo (1-8; padrão 6)"))
             put("budget_tokens", int("Orçamento de tokens por agente (8000-80000; padrão 30000)"))
         }, listOf("goal", "tasks_json")))
@@ -5799,6 +5800,25 @@ class AgentRunner(
 
     private data class SquadTask(val id: String, val role: String, val task: String, val target: String, val deps: List<String>, val file: String = "")
 
+    /** Schemas de TODAS as ferramentas (como o modelo as recebe), para o arquivo "Dados" das Configurações. */
+    fun toolSchemasForExport(): String = tools(null, allowMultiAgent = true).toString()
+
+    /** Chat excluído: derruba o servidor de desenvolvimento do exército e esquece o estado dele. */
+    fun releaseSession(sessionId: String) {
+        squadDevServers.remove(sessionId)?.let { (port, proc) ->
+            runCatching { proc.destroy() }
+            runCatching { kotlinx.coroutines.runBlocking { killPort(port, sessionId) } }
+        }
+        squadProjectDir.remove(sessionId); squadApi.remove(sessionId); squadPreviewFails.remove(sessionId)
+    }
+
+    /** Mata servidores de desenvolvimento órfãos numa porta (o destroy() do proot não derruba o processo filho). */
+    private suspend fun killPort(port: Int, sessionId: String?) {
+        val pats = listOf("[v]ite.*--port $port", "[n]ext dev -p $port", "[r]eact-scripts start", "PORT=$port").filterNot { it == "[r]eact-scripts start" }
+        sandbox.exec(pats.joinToString(" ; ") { "pkill -f '$it'" } + " ; fuser -k $port/tcp 2>/dev/null ; sleep 0.5 ; " + pats.joinToString(" ; ") { "pkill -9 -f '$it'" } + " ; true",
+            cwd = "/tmp", timeoutSec = 20, sessionId = sessionId)
+    }
+
     /** Servidores de desenvolvimento do exército (um por chat), que continuam no ar depois do time terminar. */
     private val squadDevServers = java.util.concurrent.ConcurrentHashMap<String, Pair<Int, Process>>()
     /** Falhas seguidas de preview por chat: (quantas, assinatura da falha). */
@@ -5841,6 +5861,18 @@ class AgentRunner(
                     else "export default over\n"))
             wrapper.name
         }.getOrNull()
+    }
+
+    /** Âncoras internas (href="#x") sem elemento com id="x" no código do projeto. Devolve (quebradas, ids existentes). */
+    private fun brokenAnchors(dir: File): Pair<List<String>, List<String>> {
+        val files = (listOf(File(dir, "index.html")) + File(dir, "src").walkTopDown().filter { it.isFile && it.extension in setOf("jsx", "tsx", "js", "ts", "html", "vue", "svelte") }.take(400).toList())
+            .filter { it.isFile }
+        val text = files.joinToString("\n") { runCatching { it.readText() }.getOrDefault("") }
+        val hrefs = Regex("""href\s*=\s*\{?\s*["'`]#([A-Za-z][\w-]*)["'`]""").findAll(text).map { it.groupValues[1] }.toSet()
+        val ids = (Regex("""\bid\s*=\s*\{?\s*["'`]([A-Za-z][\w-]*)["'`]""").findAll(text) + Regex("""\bid\s*:\s*["'`]([A-Za-z][\w-]*)["'`]""").findAll(text))
+            .map { it.groupValues[1] }.toSet()
+        // Menus montados de uma lista ({ id: 'servicos' } / href={`#${s.id}`}) contam como ids conhecidos.
+        return hrefs.filter { it !in ids && it != "top" }.sorted() to ids.sorted()
     }
 
     private fun pascal(raw: String): String = raw.split(Regex("[^A-Za-z0-9]+")).filter { it.isNotBlank() }
@@ -6065,14 +6097,31 @@ class AgentRunner(
         log("Subindo o app na porta $port…")
         val logFile = File(sandbox.workspaceFor(sessionId), ".cue/devserver.log").apply { parentFile?.mkdirs(); delete() }
         // Polling: no Linux do app (proot) o watcher de arquivos do Vite/Next/CRA não vê as edições, e o HMR não atualiza a tela.
-        val proc = sandbox.spawn("cd $q && exec $run < /dev/null", logFile, sessionId = sessionId,
+        // Servidor antigo (de outra rodada ou de antes do app reiniciar) segurando a porta: com --strictPort o novo morria
+        // na hora e o app via "HTTP 0", enquanto um wget depois achava o antigo de pé. Derruba o antigo e espera a porta liberar.
+        if (portAlive(port)) {
+            killPort(port, sessionId)
+            repeat(20) { if (portAlive(port)) kotlinx.coroutines.delay(300) }
+        }
+        // `env VAR=x cmd`: `exec VAR=x cmd` tentava executar "VAR=x" como programa (API Node e CRA nunca subiam).
+        val proc = sandbox.spawn("cd $q && exec env $run < /dev/null", logFile, sessionId = sessionId,
             extraEnv = mapOf("CHOKIDAR_USEPOLLING" to "true", "CHOKIDAR_INTERVAL" to "250", "WATCHPACK_POLLING" to "true", "BROWSER" to "none"))
         squadDevServers[sessionId] = port to proc
         val url = "http://127.0.0.1:$port/"
         val deadline = System.currentTimeMillis() + 4 * 60_000L
         fun up(c: Int) = if (isApi) c in 100..499 else c == 200
-        while (System.currentTimeMillis() < deadline && proc.isAlive && !up(previewStatus(url).first)) kotlinx.coroutines.delay(1_000)
-        val (code, body) = previewStatus(url)
+        // Espera de verdade: a 1ª resposta do Vite (pré-empacotamento) pode levar dezenas de segundos no celular.
+        // Só desiste antes do prazo se o processo morreu E a porta não abriu.
+        var code = 0
+        var body = ""
+        while (System.currentTimeMillis() < deadline) {
+            val r = if (portAlive(port)) previewStatus(url, 30_000) else (0 to "")
+            code = r.first; body = r.second
+            if (up(code)) break
+            if (!proc.isAlive && !portAlive(port)) { kotlinx.coroutines.delay(1_500); if (!portAlive(port)) break }
+            kotlinx.coroutines.delay(1_000)
+        }
+        if (up(code)) log("App respondeu (HTTP $code) na porta $port.")
         if (!up(code)) {
             log("O app não respondeu 200 (HTTP $code) ${body.take(200)}\nLog do servidor: " + runCatching { logFile.readText().takeLast(600) }.getOrDefault(""))
             return null
@@ -6120,6 +6169,7 @@ class AgentRunner(
         val preview = o.optString("preview")
         val budgetArg = o.optInt("budget_tokens", 30_000)
         val parallelArg = o.optInt("max_parallel", BuildSquad.PARALLEL)
+        val contract = o.optString("contract").trim().take(3_000)
         val arr = runCatching { org.json.JSONArray(tasksJson.trim()) }.getOrElse { return "ERRO: tasks_json deve ser um array JSON de objetos {id, role, task, target, depends_on}." }
         val tasks = (0 until arr.length()).mapNotNull { n ->
             when (val v = arr.opt(n)) {
@@ -6180,14 +6230,33 @@ class AgentRunner(
         }
         squadPreviewFails.remove(sessionId)
         if (previewUrl != null) note("App no ar em $previewUrl — o time entrou.")
+        // Plano único do time: TODOS veem quem faz o quê, o arquivo e o id de cada seção, as âncoras e o contrato do líder.
+        // (Antes cada agente só sabia o nome dos colegas e inventava ids, âncoras e nomes diferentes.)
+        val squadPlanText = buildString {
+            if (contract.isNotBlank()) { appendLine("Contrato do projeto (vale para todos, use exatamente):"); appendLine(contract); appendLine() }
+            val secs = tasks.mapNotNull { t -> componentFiles[t.id]?.let { f -> BuildSquad.hintFromPath(f).takeIf { it.isNotBlank() }?.let { it to f } } }
+            if (secs.isNotEmpty()) {
+                appendLine("Seções da página, nesta ordem (id do elemento raiz = alvo dos links do menu):")
+                secs.forEach { (id, f) -> appendLine("- #$id → ${f.substringAfterLast('/')}") }
+                appendLine("Links internos usam EXATAMENTE href=\"#<id>\" com estes ids; não crie outros nomes de seção.")
+                appendLine()
+            }
+            appendLine("Quem faz o quê:")
+            tasks.forEachIndexed { n, t ->
+                appendLine("- ${personas[n].name} (${personas[n].role}): ${BuildSquad.shortLabel(t.task)}" + (componentFiles[t.id]?.let { " — ${it.substringAfterLast('/')}" } ?: ""))
+            }
+        }.take(6_000)
+        squadProjectDir[sessionId]?.let { g -> runCatching { File(sandbox.hostFile(g, sessionId), ".fluwy/TIME.md").apply { parentFile?.mkdirs() }.writeText("# Plano do time\n\nObjetivo: $goal\n\n$squadPlanText") } }
         val workers = tasks.mapIndexed { n, t ->
             val p = personas[n]
             val label = BuildSquad.shortLabel(t.task)
             val compFile = componentFiles[t.id]
+            val myId = compFile?.let { BuildSquad.hintFromPath(it) }
             val taskText = t.task + (compFile?.let { "\n\nSeu arquivo: $it — já existe com um esqueleto e JÁ está importado e renderizado no App. Substitua o conteúdo dele pela seção pronta; não edite o App." } ?: "")
             val child = Session(title = "[Worker ${n + 1}] ${p.name} · $label", agentId = parent?.agentId, squadParentId = sessionId,
                 status = SessionStatus.RUNNING,
-                llm = listOf(LlmMessage("user", PromptContextPolicy.squadTask(p.name, p.role, goal, taskText, t.target, teamLine, parentRequest, previewUrl, squadProjectDir[sessionId], wantTailwind))))
+                llm = listOf(LlmMessage("user", PromptContextPolicy.squadTask(p.name, p.role, goal, taskText, t.target.ifBlank { myId?.let { "#$it" }.orEmpty() },
+                    teamLine, parentRequest, previewUrl, squadProjectDir[sessionId], wantTailwind, squadPlanText))))
             store.upsertSession(child)
             BuildSquad.Worker(n, p, t.task, label, child.id, t.target, hint = compFile?.let { BuildSquad.hintFromPath(it) }.orEmpty())
         }
@@ -6240,7 +6309,7 @@ class AgentRunner(
          * Erro no preview (overlay do Vite, falha de import, página quebrada): pacote ausente é instalado na hora;
          * o resto vira tarefa de um agente "Doc" que corrige com edição mínima. Mesma mensagem não é atacada duas vezes.
          */
-        suspend fun handlePreviewError(err: String) {
+        suspend fun handlePreviewError(err: String, customTask: String? = null) {
             val key = err.replace(Regex("\\d+"), "#").replace(Regex("\\s+"), " ").take(200)
             if (!fixedErrors.add(key)) return
             BuildSquad.edit(squadId) { it.copy(notice = "Erro no preview: " + err.lineSequence().first().take(140)) }
@@ -6257,7 +6326,7 @@ class AgentRunner(
             if (fixes.get() >= 6) return
             fixes.incrementAndGet()
             val doc = BuildSquad.FIXER.copy(name = if (fixes.get() == 1) BuildSquad.FIXER.name else "${BuildSquad.FIXER.name} ${fixes.get()}")
-            val fixTask = "O preview do projeto QUEBROU com este erro (detectado pelo app no browser):\n" + err.take(1_500) +
+            val fixTask = customTask ?: "O preview do projeto QUEBROU com este erro (detectado pelo app no browser):\n" + err.take(1_500) +
                 "\n\nEncontre a causa (arquivo e linha costumam estar na mensagem), corrija com a MENOR edição possível e confira que o preview volta " +
                 "(curl do arquivo editado = 200). Pacote ausente: npm install <pacote> na pasta do projeto. Não reescreva nem refatore o resto."
             val n = BuildSquad.get(squadId)?.workers?.size ?: return
@@ -6265,7 +6334,7 @@ class AgentRunner(
             finished[id] = CompletableDeferred()
             val child = Session(title = "[Worker ${n + 1}] ${doc.name} · Corrigir erro", agentId = parent?.agentId, squadParentId = sessionId,
                 status = SessionStatus.RUNNING,
-                llm = listOf(LlmMessage("user", PromptContextPolicy.squadTask(doc.name, doc.role, goal, fixTask, "", teamLine, parentRequest, previewUrl, projectGuest))))
+                llm = listOf(LlmMessage("user", PromptContextPolicy.squadTask(doc.name, doc.role, goal, fixTask, "", teamLine, parentRequest, previewUrl, projectGuest, wantTailwind, squadPlanText))))
             store.upsertSession(child)
             val w = BuildSquad.Worker(n, doc, fixTask, "Corrigir erro", child.id)
             BuildSquad.edit(squadId) { it.copy(workers = it.workers + w) }
@@ -6361,9 +6430,22 @@ class AgentRunner(
         try {
             // Espera todos, inclusive os "Doc" chamados no meio; no fim, confere uma última vez se o preview está sem erro.
             var finalChecks = 0
+            var anchorsChecked = false
             while (true) {
                 val active = synchronized(jobs) { jobs.filter { it.isActive } }
                 if (active.isNotEmpty()) { active.joinAll(); continue }
+                // Coerência entre os agentes: todo link interno (#id) precisa ter a seção com esse id.
+                if (!anchorsChecked && projectGuest != null && sessionId !in squadApi) {
+                    anchorsChecked = true
+                    val broken = runCatching { brokenAnchors(sandbox.hostFile(projectGuest, sessionId)) }.getOrNull()
+                    if (broken != null && broken.first.isNotEmpty()) {
+                        handlePreviewError("Âncoras quebradas: " + broken.first.joinToString { "#$it" },
+                            "Links internos do site apontam para seções que não existem: " + broken.first.joinToString { "#$it" } +
+                                ". Ids que existem: " + broken.second.joinToString { "#$it" }.ifBlank { "(nenhum)" } +
+                                ". Alinhe com o plano do time: cada link deve usar o id do elemento raiz da seção certa (corrija o href ou o id, o que for menor e coerente com o plano). Não mude mais nada.")
+                        continue
+                    }
+                }
                 if (browser == null || !previewUrl!!.startsWith("http") || finalChecks++ >= 2) break
                 kotlinx.coroutines.delay(2_500)
                 val err = pageState().first ?: break

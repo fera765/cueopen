@@ -65,18 +65,26 @@ class CueApp : Application() {
         browsers.values.forEach { browser -> runCatching { browser.persistState() } }
         if (::terminals.isInitialized) runCatching { terminals.persistAll() }
     }
-    /** Exclui um chat e encerra somente suas execuções, agendas e heartbeats associados. */
+    /**
+     * Exclui um chat NA HORA: some da lista no mesmo quadro; parar agentes, fechar browser/terminal, derrubar o servidor
+     * do exército e apagar o workspace (node_modules tem milhares de arquivos) correm em segundo plano.
+     */
     fun deleteChat(sessionId: String) {
+        val squadKids = store.state.value.sessions.filter { it.squadParentId == sessionId }.map { it.id }
         val deletion = store.deleteSessionAndLinkedWork(sessionId)
+        store.dropSessions(squadKids.toSet())
+        val ids = (deletion.removedSessionIds + squadKids).distinct()
         deletion.cancelledScheduledTaskIds.forEach { dev.cueopen.app.scheduler.Scheduler.cancel(this, it) }
         deletion.cancelledHeartbeatAgentIds.forEach { dev.cueopen.app.scheduler.Heartbeat.cancel(this, it) }
-        deletion.removedSessionIds.forEach { id ->
-            agent.stop(id)
-            closeBrowser(id, clearPersistentData = true)
-            getSystemService(NotificationManager::class.java)
-                .cancel(SessionNotificationRouting.stableId(id))
+        val nm = getSystemService(NotificationManager::class.java)
+        ids.forEach { id -> runCatching { nm.cancel(SessionNotificationRouting.stableId(id)) } }
+        applicationScope.launch(kotlinx.coroutines.Dispatchers.Main) {
+            ids.forEach { id -> runCatching { agent.stop(id) }; runCatching { closeBrowser(id, clearPersistentData = true) } }
+            kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                ids.forEach { id -> runCatching { agent.releaseSession(id) } }
+                store.cleanupWorkspaces(ids)
+            }
         }
-        store.cleanupWorkspaces(deletion.removedSessionIds)
     }
     val browser: BrowserHost get() = browserFor("__legacy__")
     lateinit var llm: OpenRouter; private set
@@ -122,6 +130,7 @@ class CueApp : Application() {
         }
         // Tudo de uma Seção é compartilhado: workspace (acima) e cofre de dados seguros (e-mail, senha, API key).
         dev.cueopen.app.agent.SecretVault.scopeOf = { sid -> store.session(sid)?.sectionId?.let { "section_$it" } }
+        dev.cueopen.app.agent.BuildSquad.dir = java.io.File(filesDir, "squads")
         store.onDeleteWorkspace = { sid ->
             // Workspace compartilhado de Seção ainda ativa: não apaga ao remover só um chat do time.
             val sharedAlive = store.session(sid)?.sectionId?.let { store.section(it) != null } == true
