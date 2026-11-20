@@ -3680,6 +3680,7 @@ class AgentRunner(
             "API Node (Express, Fastify…): crie package.json com a dependência e um server.js que escuta process.env.PORT, e passe a pasta em preview: o app instala, sobe e confere que responde antes do time entrar. " +
             "Cada edição do time aparece na hora (HMR), com o elemento sendo construído e o cursor do agente sobre ele. Se o preview quebrar, o app corrige sozinho: instala pacote que faltou ou chama o agente Doc para consertar. " +
             "Divida em 8 a 40 tarefas pequenas, uma por agente, cada uma num elemento ou arquivo diferente; use depends_on só quando uma parte precisa da outra. " +
+            "NÃO crie tarefa de revisão geral (\"QA/revisar o app inteiro\"): o app já confere compilação, imports, export default e âncoras no fim e chama o agente Doc para cada falha; revisão, se precisar, é por seção e objetiva. " +
             "Bloqueia até o time terminar e devolve o relatório; depois teste, corrija o que faltar e mostre o resultado ao usuário.", buildJsonObject {
             put("goal", str("Objetivo do time em uma frase"))
             put("tasks_json", str("Array JSON de objetos {id, role, task, file, target, depends_on:[ids]}. file (front-end): componente da tarefa, ex.: \"src/components/Hero.jsx\" — o app cria o esqueleto e liga no App ANTES do time, na ordem das tarefas. target: seletor CSS do elemento, ex.: \"#hero\""))
@@ -6430,7 +6431,11 @@ class AgentRunner(
                         val fin = store.session(w.sessionId)
                         val st = fin?.status
                         // Parou no limite de tokens/passos sem resposta final: NÃO é concluído (antes aparecia ✓ com trabalho pela metade).
-                        val lastIsAnswer = fin?.llm?.lastOrNull()?.let { it.role == "assistant" && it.toolCallsJson.isNullOrBlank() && !it.content.isNullOrBlank() } == true
+                        // Resposta final = texto do agente OU encerramento pela ferramenta finish/complete_step (antes o QA que fechou
+                        // com finish aparecia como ✗ mesmo tendo concluído).
+                        val lastIsAnswer = fin?.llm?.lastOrNull()?.let { it.role == "assistant" && it.toolCallsJson.isNullOrBlank() && !it.content.isNullOrBlank() } == true ||
+                            fin?.llm?.lastOrNull()?.let { it.role == "tool" && (it.name == "finish" || it.name == "complete_step") } == true ||
+                            (fin?.items?.lastOrNull { it is ChatItem.Assistant } as? ChatItem.Assistant)?.final == true
                         val cut = fin?.items?.any { it is ChatItem.Assistant && it.text.startsWith("Progresso parcial preservado") } == true
                         ok = (st == SessionStatus.DONE || st == SessionStatus.IDLE) && lastIsAnswer && !cut
                         // Componente da tarefa precisa continuar exportando default (o App importa assim).
@@ -6528,6 +6533,7 @@ class AgentRunner(
                 var badSince = 0L
                 var errSince = 0L
                 var lastErr: String? = null
+                var tick = 0
                 val exts = setOf("html", "htm", "css", "scss", "js", "jsx", "ts", "tsx", "mjs", "vue", "svelte", "svg", "json", "png", "jpg", "jpeg", "webp")
                 while (isActive) {
                     if (!opened && (pageFile == null || pageFile.exists())) {
@@ -6561,12 +6567,15 @@ class AgentRunner(
                                 }
                             } else {
                                 badSince = 0L
-                                val (err, sinceMut) = if (sessionId in squadApi) (null to -1L) else pageState()
+                                // A cada 2 voltas (~2,4 s): ler a página pesa no WebView do celular (o renderer chegou a travar).
+                                val skip = sessionId in squadApi || (++tick % 2 == 1 && changedAt == 0L)
+                                val (err, sinceMut) = if (skip) (null to -1L) else pageState()
                                 // Arquivo mudou e a página não mexeu em 2,5 s: o HMR não pegou (watcher do proot); recarrega.
                                 if (err == null && changedAt > 0 && now - changedAt in 2_500..20_000 && (sinceMut < 0 || sinceMut > now - changedAt) && now - lastReload > 3_000) {
                                     browser.softReload(); lastReload = now; changedAt = 0
                                 } else if (sinceMut in 0..(now - changedAt)) changedAt = 0
-                                if (err != null) {
+                                if (skip) Unit
+                                else if (err != null) {
                                     if (err != lastErr) { lastErr = err; errSince = now }
                                     // Erro que persiste 4 s (não é só um salvamento no meio do caminho): orquestrador age.
                                     else if (now - errSince >= 4_000) handlePreviewError(err)

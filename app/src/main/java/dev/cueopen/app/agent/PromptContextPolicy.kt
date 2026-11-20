@@ -96,6 +96,7 @@ internal object PromptContextPolicy {
         appendLine("- O App já importa e renderiza todos os componentes do plano: não edite App.jsx/App.tsx, salvo se a sua tarefa for o App.")
         appendLine("- Mantenha os ids e classes que já existem e não apague o trabalho dos outros. Não suba nem pare servidores, não publique, não instale nada global (npm install de um pacote no projeto só se a sua tarefa exigir).")
         if (previewUrl != null && previewUrl.startsWith("http")) appendLine("- O projeto está no ar em $previewUrl. Depois de cada edição, confira que não quebrou nada: curl -s -o /dev/null -w '%{http_code}' ${previewUrl.trimEnd('/')}/<caminho do arquivo editado, ex.: src/components/Hero.jsx>. 200 = ok; 500 = erro de compilação seu: leia a mensagem (curl sem -o) e corrija na hora.")
+        appendLine("- Seja econômico: leia cada arquivo no máximo uma vez (o conteúdo fica no seu contexto), não repita cat/grep do que já leu e termine em poucos passos.")
         append("- Ao terminar, responda em 1 a 3 linhas: o que fez e quais arquivos mudou. Só diga que testou se executou o teste.")
     }
 }
