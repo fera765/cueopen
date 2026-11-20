@@ -131,6 +131,7 @@ class CueApp : Application() {
         // Tudo de uma Seção é compartilhado: workspace (acima) e cofre de dados seguros (e-mail, senha, API key).
         dev.cueopen.app.agent.SecretVault.scopeOf = { sid -> store.session(sid)?.sectionId?.let { "section_$it" } }
         dev.cueopen.app.agent.BuildSquad.dir = java.io.File(filesDir, "squads")
+        sandbox.relativeBase = { sid -> store.session(sid)?.squadParentId?.let { if (::agent.isInitialized) agent.projectDirOf(it) else null } }
         store.onDeleteWorkspace = { sid ->
             // Workspace compartilhado de Seção ainda ativa: não apaga ao remover só um chat do time.
             val sharedAlive = store.session(sid)?.sectionId?.let { store.section(it) != null } == true

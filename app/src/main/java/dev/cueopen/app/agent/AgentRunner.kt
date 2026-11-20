@@ -5800,6 +5800,9 @@ class AgentRunner(
 
     private data class SquadTask(val id: String, val role: String, val task: String, val target: String, val deps: List<String>, val file: String = "")
 
+    /** Pasta do projeto que o exército deste chat está construindo (caminho do sandbox). */
+    fun projectDirOf(sessionId: String): String? = squadProjectDir[sessionId]
+
     /** Schemas de TODAS as ferramentas (como o modelo as recebe), para o arquivo "Dados" das Configurações. */
     fun toolSchemasForExport(): String = tools(null, allowMultiAgent = true).toString()
 

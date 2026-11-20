@@ -64,6 +64,8 @@ class Sandbox(private val ctx: Context) {
      * Antes cada agente tinha um workspace isolado e passava horas procurando arquivos "inexistentes".
      */
     @Volatile var environmentAlias: ((String) -> String?)? = null
+    /** Pasta (caminho do sandbox) base para caminhos relativos de um chat; null = /root/workspace. */
+    @Volatile var relativeBase: ((String) -> String?)? = null
 
     fun environmentRoot(sessionId: String): File =
         if (isConnectorSession(sessionId)) File(connectorsDir, connectorId(sessionId))
@@ -127,7 +129,14 @@ class Sandbox(private val ctx: Context) {
             // /public, /home e /root são o MESMO bind no proot; tracebacks do Python mostram /public/workspace/...
             p.startsWith("/public/") || p == "/public" -> File(publicFor(sessionId), p.removePrefix("/public").trimStart('/'))
             p.startsWith("/") -> File(rootfsFor(sessionId), p.trimStart('/'))
-            else -> File(workspaceFor(sessionId), p)
+            // Agente do exército: "src/…" relativo é dentro da pasta do projeto do time (não na raiz do workspace).
+            else -> {
+                val ws = File(workspaceFor(sessionId), p)
+                val base = relativeBase?.invoke(sessionId)?.takeIf { it.startsWith("/") }?.trimEnd('/')
+                // Existe a partir da raiz do workspace (ou já começa pela pasta do projeto, ex.: "app/src/…"): usa a raiz.
+                if (base == null || ws.exists() || p.startsWith(base.substringAfterLast('/') + "/")) ws
+                else hostFile(base + "/" + p.removePrefix("./"), sessionId)
+            }
         }
     }
 
