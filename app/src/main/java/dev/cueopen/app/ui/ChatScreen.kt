@@ -455,6 +455,7 @@ fun TimelineItem(item: ChatItem, onOpenComputer: (String) -> Unit, onOpenMedia: 
         is ChatItem.Assistant -> AssistantText(item, onSend, onReply)
         is ChatItem.Step -> when (item.tool) {
             dev.cueopen.app.agent.TEAM_MEMBER_STEP -> TeamMemberPill(item, nav)
+            dev.cueopen.app.agent.BuildSquad.STEP -> BuildSquadCard(item, sessionId, nav)
             "team_delegate", "team_status" -> {}  // a pílula do agente já representa a delegação
             "page" -> PageStepCard(item, nav)
             "login_needed" -> LoginNeededCard(item, sessionId, nav)
@@ -1259,6 +1260,65 @@ private fun teamActivityLabel(a: Activity?, running: Boolean, waiting: Boolean, 
 }
 
 /** Pílula de um agente da seção no chat do coordenador: mostra ao vivo o que ele está fazendo; tocar abre o chat dele. */
+/** Exército de agentes: o time inteiro, cada um com mascote, papel e estado; abre o browser ao vivo. */
+@Composable
+private fun BuildSquadCard(step: ChatItem.Step, sessionId: String?, nav: androidx.navigation.NavController?) {
+    val c = Cue.c
+    val squads by dev.cueopen.app.agent.BuildSquad.squads.collectAsStateWithLifecycle()
+    val sq = squads[step.args]
+    var expanded by remember(step.id) { mutableStateOf(false) }
+    Column(
+        Modifier.padding(vertical = 4.dp).fillMaxWidth().clip(RoundedCornerShape(18.dp)).background(c.surface)
+            .border(1.dp, if (sq?.running == true) c.ok.copy(alpha = .5f) else c.line, RoundedCornerShape(18.dp)).padding(12.dp),
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text("Exército de agentes", fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
+                Text(if (sq == null) step.result.ifBlank { step.title } else if (sq.running) "Construindo · ${sq.active} trabalhando · ${sq.done}/${sq.workers.size} prontos"
+                    else "${sq.done} de ${sq.workers.size} concluíram", fontSize = 12.sp, color = c.ink3)
+            }
+            if (sq?.running == true) PulsingDot(c.ok)
+            else if (step.status == StepStatus.OK) Icon(Icons.Rounded.Check, null, Modifier.size(16.dp), tint = c.ok)
+        }
+        if (sq != null) {
+            Spacer(Modifier.height(8.dp))
+            val shown = if (expanded) sq.workers else sq.workers.sortedBy { if (it.status == dev.cueopen.app.agent.BuildSquad.St.RUNNING) 0 else 1 }.take(8)
+            shown.forEach { w ->
+                Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp)).clickable { nav?.navigate("chat/${w.sessionId}") }.padding(vertical = 3.dp),
+                    verticalAlignment = Alignment.CenterVertically) {
+                    val running = w.status == dev.cueopen.app.agent.BuildSquad.St.RUNNING
+                    AnimatedAgentFace(Color(w.persona.color), w.persona.face, 20.dp,
+                        state = if (running) dev.cueopen.app.ui.mascot.MascotState.THINKING else dev.cueopen.app.ui.mascot.MascotState.IDLE)
+                    Spacer(Modifier.width(8.dp))
+                    Text(buildAnnotatedString {
+                        withStyle(SpanStyle(fontWeight = FontWeight.SemiBold, color = Color(w.persona.color))) { append(w.persona.name) }
+                        append(" · ${w.persona.role} · ")
+                        withStyle(SpanStyle(color = c.ink3)) { append(if (running) w.doing.ifBlank { w.label } else w.label) }
+                    }, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+                    when (w.status) {
+                        dev.cueopen.app.agent.BuildSquad.St.RUNNING -> PulsingDot(Color(w.persona.color))
+                        dev.cueopen.app.agent.BuildSquad.St.DONE -> Icon(Icons.Rounded.Check, null, Modifier.size(14.dp), tint = c.ok)
+                        dev.cueopen.app.agent.BuildSquad.St.FAILED -> Icon(Icons.Rounded.Close, null, Modifier.size(14.dp), tint = c.err)
+                        else -> Text("na fila", fontSize = 11.sp, color = c.ink3)
+                    }
+                }
+            }
+            if (sq.workers.size > 8) Text(if (expanded) "Mostrar menos" else "Ver os ${sq.workers.size} agentes", fontSize = 12.sp, color = c.accent,
+                modifier = Modifier.clickable { expanded = !expanded }.padding(top = 4.dp))
+            if (sq.preview != null && sessionId != null) {
+                Spacer(Modifier.height(8.dp))
+                Row(Modifier.clip(RoundedCornerShape(12.dp)).background(c.accent.copy(alpha = .12f))
+                    .clickable { nav?.navigate("computer/$sessionId?tab=browser") }.padding(horizontal = 12.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Rounded.Computer, null, Modifier.size(16.dp), tint = c.accent)
+                    Spacer(Modifier.width(6.dp))
+                    Text(if (sq.running) "Ver os agentes ao vivo no browser" else "Abrir o resultado no browser", fontSize = 13.sp, color = c.accent, fontWeight = FontWeight.SemiBold)
+                }
+            }
+        }
+    }
+}
+
 @Composable
 private fun TeamMemberPill(step: ChatItem.Step, nav: androidx.navigation.NavController?) {
     val c = Cue.c

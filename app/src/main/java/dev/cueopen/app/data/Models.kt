@@ -340,6 +340,8 @@ data class Session(
     val connectorEditId: String? = null,
     /** Fingerprint da configuração apresentada ao abrir o chat de edição. */
     val connectorEditFingerprint: String? = null,
+    /** Agente do exército de build: trabalha no MESMO workspace deste chat (o líder). */
+    val squadParentId: String? = null,
 )
 
 /** Memória de longo prazo (global ou de um Agent), recuperada por relevância — não toda de uma vez. */

@@ -27,6 +27,7 @@ object ToolContextPlanner {
             "conectores_listar", "conector_acoes", "conector_executar"),
         "web_dev" to setOf("browser_js", "browser_network", "browser_console"),
         "agents" to setOf("multi_agents"),
+        "build" to setOf("build_team"),
         "schedule" to setOf("sleep", "set_schedule", "cron_add", "cron_list", "cron_remove", "trigger_create", "trigger_list", "trigger_delete"),
         "channels" to setOf("send_file"),
         "cofre" to setOf("cofre_listar", "pix_qr"),
@@ -65,6 +66,9 @@ object ToolContextPlanner {
             "compartilhar o site", "live server", "go live",
             "despublique", "tirar do ar", "tire do ar", "tira do ar", "derrube o site", "derrubar o site", "parar o site", "pare o site", "parar o app", "pare o app",
             "desligar o site", "desligue o site", "unpublish"),
+        // Exército de agentes: qualquer pedido de desenvolver software (front-end ou back-end).
+        "build" to listOf("um site", "o site", "site de", "website", "landing", "pagina web", "web app", "app web", "aplicativo web", "frontend", "front-end",
+            "backend", "back-end", "api", "sistema web", "software", "programe", "programar", "desenvolva", "desenvolver", "codifique", "exercito de agentes", "build_team"),
         "channels" to listOf("telegram", "discord", "slack", "envie o arquivo", "enviar o arquivo", "mande o arquivo", "mandar o arquivo", "envie a imagem", "mande a imagem", "enviar imagem", "mandar imagem", "envie o pdf", "mande o pdf", "enviar o relatório", "mande o relatório"),
         "skills_admin" to listOf("crie uma skill", "criar skill", "nova skill", "salve como skill", "skill.md", "instale a skill", "instalar skill", "instalar a skill", "install skill", "set up http", "setup http", "skill local"),
         "wallet" to listOf("carteira", "wallet", "solana", "sol ", "token", "swap", "saldo", "comprar", "vender", "day trade", "daytrade", "trade", "cripto", "crypto", "memecoin", "stop loss", "take profit", "liquidez", "pump", "jupiter", "usdc"),

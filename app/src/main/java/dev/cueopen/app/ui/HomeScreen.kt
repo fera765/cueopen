@@ -679,7 +679,7 @@ private fun SessionDrawer(nav: NavController, sessions: List<Session>, agents: L
     var query by remember { mutableStateOf("") }
     // Sessões de subagentes são detalhes internos da tarefa pai, nunca chats independentes na navegação.
     val filtered = remember(sessions, query) {
-        sessions.filterNot { it.title.startsWith("[Worker ", ignoreCase = true) || it.sectionId != null }
+        sessions.filterNot { it.title.startsWith("[Worker ", ignoreCase = true) || it.sectionId != null || it.squadParentId != null }
             .filter { query.isBlank() || it.title.contains(query, true) }
             .sortedByDescending { it.updatedAt }
     }

@@ -31,6 +31,10 @@ import dev.cueopen.app.uiconnector.iqoption.IqTradeWaitDirective
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.sync.withPermit
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.distinctUntilChanged
 import dev.cueopen.app.wallet.WalletAgentPolicyStore
 import dev.cueopen.app.wallet.SolanaWalletRepository
 import dev.cueopen.app.wallet.SolanaRpcClient
@@ -3180,6 +3184,7 @@ class AgentRunner(
             appendLine("3a. Trabalhe somente no seu workspace (${sandbox.guestPath(sessionId)}). O /root/workspace de outras tarefas pertence a elas; não leia.")
             appendLine("3b. Caminhos de arquivo: use caminhos relativos ao workspace da tarefa ou o alias /root/workspace/.... Caminhos Android (/data/user/...), /storage, /sdcard e outros absolutos ficam fora do seu alcance. file_write e file_edit alteram apenas o workspace da tarefa; file_read e file_list também leem /root/connectors/<id>/workspace/.... Se um arquivo não existir, liste o diretório pai uma vez em vez de repetir o mesmo caminho; se ele realmente não estiver disponível, peça-o ao usuário. Para alterar um trecho, leia-o antes com file_read e use file_edit com old_text copiado do texto lido (o trecho precisa ser único); depois de uma falha, releia em vez de tentar de novo de memória. Para acrescentar no fim do arquivo, use file_write com append=true. Use file_write para criar ou sobrescrever o arquivo inteiro, com append=true para conteúdo grande em partes, e confira depois com file_read.")
             appendLine("3c. Ao gerar imagem, SVG, HTML ou PDF, mostre o resultado ao usuário com `show_file`.")
+            if (session.squadParentId == null && !session.title.startsWith("[Worker ")) appendLine("3d. Desenvolver software (site, landing page, app web, front-end, back-end, API): crie o esqueleto e acione o exército de agentes com build_team (carregue o grupo \"build\" com tools_load se ainda não tiver a ferramenta), passando preview no front-end para o usuário ver os agentes trabalhando ao vivo no browser. Não construa tudo sozinho.")
             appendLine("3d. Com um plano ativo, chame `complete_step` ao concluir cada fase, antes de começar a próxima — é assim que o usuário vê o progresso.")
             appendLine("3e. Leitura eficiente: procure primeiro por símbolos ou termos e leia apenas os trechos necessários; limite as saídas e não despeje arquivos ou logs inteiros no contexto. Preserve requisitos, decisões, evidências, caminhos, erros e pendências. Só cite economia percentual se tiver medido o uso real.")
             appendLine("3f. Delegação de leitura: em investigações amplas com fontes independentes, use multi_agents com subtarefas delimitadas, escopo explícito e saída curta (conclusões + caminho/linhas/URLs + incertezas). Leituras triviais você mesmo faz; evidências críticas você valida na fonte principal. Se a ferramenta não estiver disponível, não afirme que delegou.")
@@ -3660,6 +3665,19 @@ class AgentRunner(
             put("max_workers", int("Quantidade de workers (1-5; padrão 3)"))
             put("budget_tokens", int("Orçamento de tokens por worker (2000-12000; padrão 6000)"))
         }, listOf("tasks_json")))
+        if (allowMultiAgent) add(tool("build_team", "Exército de agentes para DESENVOLVER SOFTWARE (site, landing page, app web, front-end, back-end, API, sistema). " +
+            "Use SEMPRE que o usuário pedir para construir, desenvolver ou programar software, no lugar de fazer tudo sozinho: dezenas de agentes com nome e papel " +
+            "(Layout, Copy, Design, Frontend, Backend, API, Banco de dados, QA, SEO, Visuals…) trabalham AO MESMO TEMPO no mesmo projeto (/root/workspace compartilhado), até 6 de cada vez. " +
+            "No front-end o usuário assiste aos agentes trabalhando ao vivo no browser (cursor e caixa de cada um sobre o elemento que edita). " +
+            "Antes de chamar, crie você mesmo o esqueleto (ex.: index.html com todas as seções e ids, styles.css, ou a estrutura de pastas da API) para os agentes editarem por partes. " +
+            "Divida em 8 a 40 tarefas pequenas, uma por agente, cada uma num elemento ou arquivo diferente; use depends_on só quando uma parte precisa da outra. " +
+            "Bloqueia até o time terminar e devolve o relatório; depois teste, corrija o que faltar e mostre o resultado ao usuário.", buildJsonObject {
+            put("goal", str("Objetivo do time em uma frase"))
+            put("tasks_json", str("Array JSON de objetos {id, role, task, target, depends_on:[ids]}. target (front-end): seletor CSS do elemento que o agente edita, ex.: \"#hero h1\", \".pricing\""))
+            put("preview", str("Front-end: pasta do site (ex.: /root/workspace/site) ou URL local (http://127.0.0.1:PORTA) para o usuário ver os agentes ao vivo. Vazio no back-end"))
+            put("max_parallel", int("Agentes trabalhando ao mesmo tempo (1-8; padrão 6)"))
+            put("budget_tokens", int("Orçamento de tokens por agente (8000-80000; padrão 30000)"))
+        }, listOf("goal", "tasks_json")))
         val term = agent?.useTerminal != false
         val web = agent?.useBrowser != false && allowMultiAgent
         // Pages: sempre numa seção (time compartilha quadro/relatórios) e quando o planner carrega o grupo "pages".
@@ -4716,6 +4734,11 @@ class AgentRunner(
         store.addItem(sessionId, step)
         setActivity(sessionId, Activity(kind, argPreview.take(80)))
         if (kind == Activity.Kind.BROWSER) browserFor(sessionId).setAgentControl(true)
+        // Agente do exército: o cursor dele no preview segue o elemento que está editando.
+        if (store.session(sessionId)?.squadParentId != null) BuildSquad.byWorkerSession(sessionId)?.let { (sq, w) ->
+            val sel = if (call.name == "file_edit" || call.name == "file_write") BuildSquad.selectorFromEdit(s("new_text") + "\n" + s("content")) else null
+            BuildSquad.editWorker(sq.id, w.idx) { it.copy(doing = (title + " " + argPreview).trim().take(60), target = sel ?: it.target) }
+        }
 
         // marcador {{secret:x}} sem valor no cofre (ex.: app foi reiniciado) → pede de novo pelo formulário seguro
         SecretVault.missing(sessionId, call.argsJson.replace("\\\"", "\"")).takeIf { it.isNotEmpty() }?.let { miss ->
@@ -4725,6 +4748,7 @@ class AgentRunner(
         }
         val out0: String = try {
             when (call.name) {
+                "build_team" -> runBuildTeam(sessionId, s("goal"), s("tasks_json"), s("preview"), i("budget_tokens") ?: 30_000, i("max_parallel") ?: BuildSquad.PARALLEL)
                 "multi_agents" -> runMultiAgents(sessionId, s("tasks_json"), s("repo_path"), i("max_workers") ?: 3, i("budget_tokens") ?: 6000)
                 "wallet_get_address" -> {
                     val agentId = store.session(sessionId)?.agentId
@@ -5755,6 +5779,154 @@ class AgentRunner(
             return cycle
         }
         return tasks.any { visit(it.id) }
+    }
+
+    // ───────── Exército de agentes (build_team): dezenas de agentes no mesmo projeto, ao vivo no browser ─────────
+    private data class SquadTask(val id: String, val role: String, val task: String, val target: String, val deps: List<String>)
+
+    /** Endereço do preview: pasta do workspace (file://…/index.html) ou URL local; null = sem preview (back-end). */
+    private fun squadPreviewUrl(sessionId: String, preview: String): String? {
+        val p = preview.trim()
+        if (p.isBlank()) return null
+        if (p.startsWith("http://") || p.startsWith("https://")) return p
+        val f = sandbox.hostFile(p.removePrefix("file://"), sessionId)
+        val page = if (f.isDirectory || !f.name.contains('.')) File(f, "index.html") else f
+        return "file://" + page.absolutePath
+    }
+
+    private suspend fun runBuildTeam(sessionId: String, goal: String, tasksJson: String, preview: String, budgetArg: Int, parallelArg: Int): String {
+        val arr = runCatching { org.json.JSONArray(tasksJson.trim()) }.getOrElse { return "ERRO: tasks_json deve ser um array JSON de objetos {id, role, task, target, depends_on}." }
+        val tasks = (0 until arr.length()).mapNotNull { n ->
+            when (val v = arr.opt(n)) {
+                is org.json.JSONObject -> v.optString("task").trim().takeIf { it.isNotBlank() }?.let { t ->
+                    SquadTask(v.optString("id").trim().ifBlank { "t${n + 1}" }, v.optString("role").trim(), t, v.optString("target").trim(),
+                        v.optJSONArray("depends_on")?.let { d -> (0 until d.length()).map { d.optString(it).trim() }.filter { it.isNotBlank() } }.orEmpty())
+                }
+                null -> null
+                else -> v.toString().trim().takeIf { it.isNotBlank() }?.let { SquadTask("t${n + 1}", "", it, "", emptyList()) }
+            }
+        }.take(BuildSquad.MAX_TASKS)
+        if (tasks.isEmpty()) return "ERRO: informe ao menos uma tarefa em tasks_json."
+        if (tasks.map { it.id }.toSet().size != tasks.size) return "ERRO: ids repetidos em tasks_json."
+        val ids = tasks.map { it.id }.toSet()
+        // Ciclo em depends_on travaria o time: recusa antes de começar.
+        run {
+            val byId = tasks.associateBy { it.id }; val visiting = mutableSetOf<String>(); val ok = mutableSetOf<String>()
+            fun cyc(id: String): Boolean { if (id in ok) return false; if (!visiting.add(id)) return true
+                val r = byId[id]?.deps.orEmpty().filter { it in ids }.any { cyc(it) }; visiting.remove(id); ok.add(id); return r }
+            if (tasks.any { cyc(it.id) }) return "ERRO: depends_on tem ciclo."
+        }
+        val budget = budgetArg.coerceIn(8_000, 80_000).toLong()
+        val parallel = parallelArg.coerceIn(1, 8)
+        val personas = BuildSquad.assign(tasks.map { it.role to it.task })
+        val parent = store.session(sessionId)
+        val parentRequest = parent?.llm?.lastOrNull { it.role == "user" && it.content?.startsWith("[Sistema]") != true }?.content.orEmpty()
+        val teamLine = personas.joinToString { "${it.name} (${it.role})" }.take(900)
+        val previewUrl = squadPreviewUrl(sessionId, preview)
+        val startedAt = System.currentTimeMillis()
+        val squadId = java.util.UUID.randomUUID().toString()
+        val workers = tasks.mapIndexed { n, t ->
+            val p = personas[n]
+            val label = BuildSquad.shortLabel(t.task)
+            val child = Session(title = "[Worker ${n + 1}] ${p.name} · $label", agentId = parent?.agentId, squadParentId = sessionId,
+                status = SessionStatus.RUNNING,
+                llm = listOf(LlmMessage("user", PromptContextPolicy.squadTask(p.name, p.role, goal, t.task, t.target, teamLine, parentRequest))))
+            store.upsertSession(child)
+            BuildSquad.Worker(n, p, t.task, label, child.id, t.target)
+        }
+        BuildSquad.put(BuildSquad.Squad(squadId, sessionId, goal.ifBlank { "Construindo" }, previewUrl, workers))
+        val card = ChatItem.Step(tool = BuildSquad.STEP, title = goal.ifBlank { "Exército de agentes" }.take(120), args = squadId,
+            result = "${workers.size} agentes", status = StepStatus.RUNNING)
+        store.addItem(sessionId, card)
+
+        val browser = if (previewUrl != null) browserFor(sessionId) else null
+        // Preview ao vivo: abre a página assim que ela existe, recarrega quando os arquivos mudam e redesenha os cursores.
+        val watchers = mutableListOf<Job>()
+        if (browser != null) {
+            watchers += scope.launch {
+                BuildSquad.squads.map { it[squadId] }.distinctUntilChanged().collect { sq ->
+                    if (sq != null) browser.pushSquadOverlay(BuildSquad.overlayJson(sq))
+                }
+            }
+            watchers += scope.launch {
+                val root = sandbox.workspaceFor(sessionId)
+                val pageFile = previewUrl!!.takeIf { it.startsWith("file://") }?.let { File(it.removePrefix("file://")) }
+                var opened = false
+                var lastSig = ""
+                while (isActive) {
+                    if (!opened && (pageFile == null || pageFile.exists())) {
+                        opened = true
+                        runCatching { browser.navigate(previewUrl) }
+                        BuildSquad.get(squadId)?.let { browser.pushSquadOverlay(BuildSquad.overlayJson(it)) }
+                    } else if (opened) {
+                        val sig = runCatching {
+                            root.walkTopDown().maxDepth(5).onEnter { it.name != "node_modules" && !it.name.startsWith(".") }
+                                .filter { it.isFile && it.extension.lowercase() in setOf("html", "htm", "css", "js", "mjs", "svg", "json", "png", "jpg", "jpeg", "webp") }
+                                .take(600).fold(0L) { acc, f -> acc * 31 + f.lastModified() + f.length() }.toString()
+                        }.getOrDefault("")
+                        if (lastSig.isNotEmpty() && sig != lastSig) browser.softReload()
+                        lastSig = sig
+                    }
+                    kotlinx.coroutines.delay(1_500)
+                }
+            }
+        }
+
+        val sem = kotlinx.coroutines.sync.Semaphore(parallel)
+        val finished = tasks.associate { it.id to CompletableDeferred<Boolean>() }
+        val jobs = workers.mapIndexed { n, w ->
+            scope.launch {
+                val t = tasks[n]
+                val depsOk = t.deps.filter { it in ids && it != t.id }.map { finished.getValue(it).await() }.all { it }
+                if (!depsOk) {
+                    BuildSquad.editWorker(squadId, n) { it.copy(status = BuildSquad.St.FAILED, doing = "dependência falhou") }
+                    store.editSession(w.sessionId) { it.copy(status = SessionStatus.STOPPED) }
+                    finished.getValue(t.id).complete(false); return@launch
+                }
+                var ok = false
+                try {
+                    sem.withPermit {
+                        BuildSquad.editWorker(squadId, n) { it.copy(status = BuildSquad.St.RUNNING, doing = "começando") }
+                        loop(w.sessionId, maxStepsOverride = 24, tokenBudgetOverride = budget)
+                        val st = store.session(w.sessionId)?.status
+                        ok = st == SessionStatus.DONE || st == SessionStatus.IDLE
+                    }
+                } catch (c: kotlinx.coroutines.CancellationException) {
+                    store.editSession(w.sessionId) { it.copy(status = SessionStatus.STOPPED) }
+                    BuildSquad.editWorker(squadId, n) { it.copy(status = BuildSquad.St.FAILED, doing = "parado") }
+                    finished.getValue(t.id).complete(false)
+                    throw c
+                } catch (e: Throwable) {
+                    store.addItem(w.sessionId, ChatItem.Error(text = "Agente falhou: " + (e.message ?: e.toString()).take(300)))
+                    store.editSession(w.sessionId) { it.copy(status = SessionStatus.ERROR) }
+                }
+                BuildSquad.editWorker(squadId, n) { it.copy(status = if (ok) BuildSquad.St.DONE else BuildSquad.St.FAILED, doing = if (ok) "pronto" else "falhou") }
+                BuildSquad.edit(squadId) { it.copy(log = (it.log + "${w.persona.name}|${w.label}|${if (ok) "ok" else "erro"}").takeLast(60)) }
+                finished.getValue(t.id).complete(ok)
+                runCatching { terminals.close(w.sessionId) }
+            }
+        }
+        synchronized(childJobsByParent) { childJobsByParent[sessionId] = jobs.toMutableList() }
+        try { jobs.joinAll() } finally {
+            synchronized(childJobsByParent) { childJobsByParent.remove(sessionId) }
+            watchers.forEach { it.cancel() }
+            BuildSquad.edit(squadId) { it.copy(running = false) }
+        }
+        val sq = BuildSquad.get(squadId)
+        val okCount = sq?.done ?: 0
+        store.replaceItem(sessionId, card.copy(result = "$okCount de ${workers.size} agentes concluíram",
+            status = if (okCount == workers.size) StepStatus.OK else StepStatus.ERROR))
+        if (browser != null) scope.launch { kotlinx.coroutines.delay(4_000); browser.pushSquadOverlay(null); browser.softReload() }
+        return buildString {
+            appendLine("Exército de agentes: $okCount de ${workers.size} concluíram (até $parallel ao mesmo tempo).")
+            sq?.workers?.forEach { w ->
+                val answer = (store.session(w.sessionId)?.items?.lastOrNull { it is ChatItem.Assistant } as? ChatItem.Assistant)?.text.orEmpty()
+                appendLine("- ${w.persona.name} (${w.persona.role}) · ${w.label}: ${if (w.status == BuildSquad.St.DONE) "ok" else "FALHOU"} — ${answer.ifBlank { w.doing }.replace('\n', ' ').take(260)}")
+            }
+            append(workspaceChanges(sessionId, startedAt))
+            if (previewUrl != null) append("\nPreview: $previewUrl (o usuário acompanhou no browser). Agora abra a página, confira o resultado e corrija o que faltar.")
+            else append("\nAgora rode os testes/servidor para validar e corrija o que faltar.")
+        }
     }
 
     private suspend fun runMultiAgentsBatch(sessionId: String, tasksJson: String, repoPathArg: String, requestedWorkers: Int, requestedBudget: Int, allowDirtyWorkspace: Boolean = false): String {

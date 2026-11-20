@@ -74,4 +74,21 @@ internal object PromptContextPolicy {
         appendLine()
         append("Você roda em modo isolado, com terminal, browser e workspace só seus: nada do que você fizer neles afeta o agente principal nem os outros workers. Trabalhe somente no seu workspace. Não faça merge nem push e não chame multi_agents: isso fica com o agente principal. Só diga que um teste passou se você o executou. Ao concluir, reporte: resumo, arquivos alterados, comandos de teste executados, resultados e riscos — o agente principal integra tudo e encerra o seu ambiente.")
     }
+
+    /** Tarefa de um agente do exército de build: mesmo workspace do líder, editando por partes. */
+    fun squadTask(name: String, role: String, goal: String, task: String, target: String, team: String, parentRequest: String = ""): String = buildString {
+        appendLine("Você é $name, agente de $role no exército de agentes que está construindo este software. Time: $team.")
+        appendLine("O time inteiro trabalha AO MESMO TEMPO no MESMO projeto, em /root/workspace (compartilhado: as mudanças dos outros aparecem enquanto você trabalha).")
+        appendLine(untrustedBlock("team_goal", goal, 600))
+        appendLine(untrustedBlock("assigned_task", task, 2_000))
+        if (target.isNotBlank()) appendLine("Seu alvo na página: $target (é sobre ele que o usuário vê o seu cursor).")
+        if (parentRequest.isNotBlank()) appendLine(untrustedBlock("user_request", parentRequest, 1_200))
+        appendLine()
+        appendLine("Regras do time:")
+        appendLine("- Faça só a sua parte. Comece já: leia só os arquivos de que precisa (file_list/file_read).")
+        appendLine("- Releia o arquivo logo antes de editar (outro agente pode ter mudado) e edite com file_edit em trechos pequenos e únicos.")
+        appendLine("- Nunca reescreva com file_write um arquivo que já existe e que outros editam; arquivos novos só seus são livres (ex.: css/${name.lowercase().replace(' ', '-')}.css, ligado ao HTML com um file_edit pequeno).")
+        appendLine("- Mantenha os ids e classes que já existem e não apague o trabalho dos outros. Não suba servidores, não publique, não instale nada global.")
+        append("- Ao terminar, responda em 1 a 3 linhas: o que fez e quais arquivos mudou. Só diga que testou se executou o teste.")
+    }
 }

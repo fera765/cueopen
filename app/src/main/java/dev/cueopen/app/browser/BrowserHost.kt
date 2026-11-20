@@ -547,6 +547,8 @@ class BrowserHost(private val appCtx: Context, private val sessionId: String = "
                 runCatching { cookieManagerFor(view).flush() }
                 // User Scripts do usuário (seção Browser) que valem para este domínio/agente.
                 runCatching { BrowserFeatures.applyUserScripts(view, url, sessionId) }
+                // Exército de agentes: cursores voltam após cada recarga do preview.
+                squadOverlay?.let { j -> runCatching { view.evaluateJavascript(dev.cueopen.app.agent.BuildSquad.overlayScript(j), null) } }
             }
             override fun doUpdateVisitedHistory(view: WebView, url: String, isReload: Boolean) {
                 if (demoPrefix != null && !isReload && url.startsWith("http")) addDemoStep(DemoRecorder.navigation(url))
@@ -1199,6 +1201,26 @@ class BrowserHost(private val appCtx: Context, private val sessionId: String = "
             ?: return
         awaitLoad(tab)
     }
+    /** Estado do exército de agentes desenhado sobre a página (null = sem overlay). */
+    @Volatile var squadOverlay: String? = null
+        private set
+    private val mainHandler = android.os.Handler(android.os.Looper.getMainLooper())
+
+    /** Atualiza (ou remove) os cursores dos agentes na aba ativa, sem esperar resposta. */
+    fun pushSquadOverlay(json: String?) {
+        squadOverlay = json
+        mainHandler.post {
+            runCatching {
+                val js = if (json == null) "(function(){var r=document.getElementById('__fluwy_squad');if(r)r.remove();window.__fluwySquad=null;})();"
+                    else dev.cueopen.app.agent.BuildSquad.overlayScript(json)
+                activeTab()?.webView?.evaluateJavascript(js, null)
+            }
+        }
+    }
+
+    /** Recarrega o preview sem bloquear (arquivos do site mudaram). */
+    fun softReload() { mainHandler.post { runCatching { activeTab()?.webView?.reload() } } }
+
     suspend fun reload() {
         val tab = onMain { activeTab()?.also { it.navigationStatus = BrowserNavigationStatus(); it.pageDone = CompletableDeferred(); it.webView?.reload() } }
             ?: return
