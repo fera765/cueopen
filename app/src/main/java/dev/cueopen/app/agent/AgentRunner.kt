@@ -3679,7 +3679,7 @@ class AgentRunner(
             put("preview", str("Pasta do projeto (ex.: /root/workspace/app): front-end React/Vite/Next ou API Node; o app instala, sobe e confere antes do time entrar. Ou a URL de um servidor já rodando (http://127.0.0.1:PORTA)"))
             put("contract", str("Contrato compartilhado por TODOS os agentes: nome da marca, paleta (cores Tailwind/hex), fontes, tom de voz, dados reais (endereço, telefone, preços), ids/âncoras e rotas. Evita que cada agente invente nomes e links diferentes"))
             put("max_parallel", int("Agentes trabalhando ao mesmo tempo (1-8; padrão 6)"))
-            put("budget_tokens", int("Orçamento de tokens por agente (8000-80000; padrão 30000)"))
+            put("budget_tokens", int("Orçamento de tokens por agente, contando o prompt de cada chamada (150000-2000000; padrão 600000)"))
         }, listOf("goal", "tasks_json")))
         val term = agent?.useTerminal != false
         val web = agent?.useBrowser != false && allowMultiAgent
@@ -6139,14 +6139,58 @@ class AgentRunner(
         return url
     }
 
+    /**
+     * Aquece o dev server antes do browser: pede o código de entrada e os módulos que ele importa (App, componentes e as
+     * dependências pré-empacotadas do Vite). Sem isso a 1ª carga no WebView travava (só onPageStarted por 30 s) enquanto o
+     * Vite empacotava o React, e no celular com pouca memória o renderer chegava a ser encerrado.
+     */
+    private fun warmDevServer(url: String, html: String) {
+        val base = url.trimEnd('/')
+        val seen = mutableSetOf<String>()
+        val queue = ArrayDeque(Regex("""src=["'](/[^"']+)["']""").findAll(html).map { it.groupValues[1] }.toList() + "/@vite/client")
+        val deadline = System.currentTimeMillis() + 120_000
+        while (queue.isNotEmpty() && seen.size < 60 && System.currentTimeMillis() < deadline) {
+            val path = queue.removeFirst().substringBefore('?')
+            if (!seen.add(path)) continue
+            val (code, _) = previewStatus(base + path, 60_000)
+            if (code != 200) continue
+            val body = runCatching {
+                (java.net.URL(base + path).openConnection() as java.net.HttpURLConnection).run {
+                    connectTimeout = 1_500; readTimeout = 60_000
+                    try { inputStream.bufferedReader().use { it.readText() } } finally { disconnect() }
+                }
+            }.getOrDefault("")
+            Regex("""(?:from\s*|import\s*\(?\s*)["'](/(?:src|node_modules/\.vite/deps)/[^"'?]+)""").findAll(body).forEach { queue.add(it.groupValues[1]) }
+        }
+    }
+
+    /** O App compila no dev server? (Vite: GET /src/App.jsx|tsx = 200). null = não dá para saber. */
+    private fun appModuleOk(url: String): Boolean? {
+        val base = url.trimEnd('/')
+        for (p in listOf("/src/App.jsx", "/src/App.tsx", "/src/App.js")) {
+            val c = previewStatus(base + p, 60_000).first
+            if (c == 200) return true
+            if (c in 500..599) return false
+        }
+        return null
+    }
+
     /** O app precisa estar VIVO no browser (página carregada e desenhando algo) antes de o time entrar. */
     private suspend fun appAliveInBrowser(sessionId: String, url: String, log: (String) -> Unit): Boolean {
         val browser = browserFor(sessionId)
+        if (sessionId !in squadApi) runCatching {
+            log("Aquecendo o app (pré-carregando React e componentes)…")
+            kotlinx.coroutines.withContext(Dispatchers.IO) {
+                val html = runCatching { java.net.URL(url).readText() }.getOrDefault("")
+                warmDevServer(url, html)
+            }
+        }
         runCatching { browser.navigate(url) }
         if (sessionId in squadApi) return previewStatus(url).first in 100..499  // API: responder já basta
         val deadline = System.currentTimeMillis() + 120_000  // 1ª compilação no celular pode passar de 1 min
         var last = ""
         var nextNav = System.currentTimeMillis() + 20_000
+        var jsFails = 0
         while (System.currentTimeMillis() < deadline) {
             if (System.currentTimeMillis() > nextNav && !last.contains("ok")) { runCatching { browser.navigate(url) }; nextNav = System.currentTimeMillis() + 20_000 }
             last = runCatching { browser.runJs(
@@ -6154,6 +6198,15 @@ class AgentRunner(
                     "var r=document.getElementById('root')||document.getElementById('__next')||document.getElementById('app')||document.body;" +
                     "return (r&&r.children.length>0&&(r.innerText||'').trim().length+r.querySelectorAll('img,svg,canvas').length>0)?'ok':'vazio';})()") }.getOrDefault("")
             if (last.contains("ok")) return true
+            // WebView sem responder JS (renderer ocupado/encerrado por memória) mas servidor e código OK: não barra o time por isso.
+            if (last.startsWith("timeout") || last.startsWith("ERROR")) {
+                jsFails++
+                if (jsFails == 3) runCatching { browser.navigate(url) }
+                if (jsFails >= 5 && previewStatus(url, 15_000).first == 200 && (appModuleOk(url) != false)) {
+                    log("O browser do celular demorou a responder, mas o app está no ar e compilando (HTTP 200); o time vai começar.")
+                    return true
+                }
+            } else jsFails = 0
             if (last.contains("erro")) { kotlinx.coroutines.delay(1_500); runCatching { browser.navigate(url) } }
             kotlinx.coroutines.delay(1_500)
         }
@@ -6167,7 +6220,8 @@ class AgentRunner(
         val goal = o.optString("goal")
         val tasksJson = o.opt("tasks_json")?.toString().orEmpty()
         val preview = o.optString("preview")
-        val budgetArg = o.optInt("budget_tokens", 30_000)
+        // Cada chamada reenvia o prompt de sistema (~10 mil tokens): 30 mil davam só 2–3 passos e o agente "concluía" no meio.
+        val budgetArg = o.optInt("budget_tokens", 600_000)
         val parallelArg = o.optInt("max_parallel", BuildSquad.PARALLEL)
         val contract = o.optString("contract").trim().take(3_000)
         val arr = runCatching { org.json.JSONArray(tasksJson.trim()) }.getOrElse { return "ERRO: tasks_json deve ser um array JSON de objetos {id, role, task, target, depends_on}." }
@@ -6192,7 +6246,7 @@ class AgentRunner(
                 val r = byId[id]?.deps.orEmpty().filter { it in ids }.any { cyc(it) }; visiting.remove(id); ok.add(id); return r }
             if (tasks.any { cyc(it.id) }) return "ERRO: depends_on tem ciclo."
         }
-        val budget = budgetArg.coerceIn(8_000, 80_000).toLong()
+        val budget = budgetArg.coerceIn(150_000, 2_000_000).toLong()
         val parallel = parallelArg.coerceIn(1, 8)
         val personas = BuildSquad.assign(tasks.map { it.role to it.task })
         val parent = store.session(sessionId)
@@ -6283,9 +6337,15 @@ class AgentRunner(
                 try {
                     sem.withPermit {
                         BuildSquad.editWorker(squadId, n) { it.copy(status = BuildSquad.St.RUNNING, doing = "começando") }
-                        loop(w.sessionId, maxStepsOverride = 24, tokenBudgetOverride = budget)
-                        val st = store.session(w.sessionId)?.status
-                        ok = st == SessionStatus.DONE || st == SessionStatus.IDLE
+                        loop(w.sessionId, maxStepsOverride = 30, tokenBudgetOverride = budget)
+                        val fin = store.session(w.sessionId)
+                        val st = fin?.status
+                        // Parou no limite de tokens/passos sem resposta final: NÃO é concluído (antes aparecia ✓ com trabalho pela metade).
+                        val lastIsAnswer = fin?.llm?.lastOrNull()?.let { it.role == "assistant" && it.toolCallsJson.isNullOrBlank() && !it.content.isNullOrBlank() } == true
+                        val cut = fin?.items?.any { it is ChatItem.Assistant && it.text.startsWith("Progresso parcial preservado") } == true
+                        ok = (st == SessionStatus.DONE || st == SessionStatus.IDLE) && lastIsAnswer && !cut
+                        if (!ok && (st == SessionStatus.DONE || st == SessionStatus.IDLE))
+                            BuildSquad.editWorker(squadId, n) { it.copy(doing = "parou antes de terminar (limite)") }
                     }
                 } catch (c: kotlinx.coroutines.CancellationException) {
                     store.editSession(w.sessionId) { it.copy(status = SessionStatus.STOPPED) }
@@ -6296,7 +6356,8 @@ class AgentRunner(
                     store.addItem(w.sessionId, ChatItem.Error(text = "Agente falhou: " + (e.message ?: e.toString()).take(300)))
                     store.editSession(w.sessionId) { it.copy(status = SessionStatus.ERROR) }
                 }
-                BuildSquad.editWorker(squadId, n) { it.copy(status = if (ok) BuildSquad.St.DONE else BuildSquad.St.FAILED, doing = if (ok) "pronto" else "falhou") }
+                BuildSquad.editWorker(squadId, n) { it.copy(status = if (ok) BuildSquad.St.DONE else BuildSquad.St.FAILED,
+                    doing = if (ok) "pronto" else it.doing.takeIf { d -> d.startsWith("parou") } ?: "falhou") }
                 BuildSquad.edit(squadId) { it.copy(log = (it.log + "${w.persona.name}|${w.label}|${if (ok) "ok" else "erro"}").takeLast(60)) }
                 finished[t.id]?.complete(ok)
                 runCatching { terminals.close(w.sessionId) }
