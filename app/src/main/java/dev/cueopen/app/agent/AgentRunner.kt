@@ -3184,7 +3184,7 @@ class AgentRunner(
             appendLine("3a. Trabalhe somente no seu workspace (${sandbox.guestPath(sessionId)}). O /root/workspace de outras tarefas pertence a elas; não leia.")
             appendLine("3b. Caminhos de arquivo: use caminhos relativos ao workspace da tarefa ou o alias /root/workspace/.... Caminhos Android (/data/user/...), /storage, /sdcard e outros absolutos ficam fora do seu alcance. file_write e file_edit alteram apenas o workspace da tarefa; file_read e file_list também leem /root/connectors/<id>/workspace/.... Se um arquivo não existir, liste o diretório pai uma vez em vez de repetir o mesmo caminho; se ele realmente não estiver disponível, peça-o ao usuário. Para alterar um trecho, leia-o antes com file_read e use file_edit com old_text copiado do texto lido (o trecho precisa ser único); depois de uma falha, releia em vez de tentar de novo de memória. Para acrescentar no fim do arquivo, use file_write com append=true. Use file_write para criar ou sobrescrever o arquivo inteiro, com append=true para conteúdo grande em partes, e confira depois com file_read.")
             appendLine("3c. Ao gerar imagem, SVG, HTML ou PDF, mostre o resultado ao usuário com `show_file`.")
-            if (session.squadParentId == null && !session.title.startsWith("[Worker ")) appendLine("3d. Desenvolver software (site, landing page, app web, front-end, back-end, API): crie o esqueleto e acione o exército de agentes com build_team (carregue o grupo \"build\" com tools_load se ainda não tiver a ferramenta), passando preview no front-end para o usuário ver os agentes trabalhando ao vivo no browser. Não construa tudo sozinho.")
+            if (session.squadParentId == null && !session.title.startsWith("[Worker ")) appendLine("3d. Desenvolver software (site, landing page, app web, front-end, back-end, API): acione o exército de agentes com build_team (carregue o grupo \"build\" com tools_load se ainda não tiver a ferramenta). No front-end passe em preview a pasta do projeto: o app cria o projeto em branco, instala, sobe e confere que ele está vivo no browser ANTES de o time entrar. Se build_team voltar com ERRO de preview, corrija o projeto até ele abrir e chame de novo. Não construa tudo sozinho.")
             appendLine("3d. Com um plano ativo, chame `complete_step` ao concluir cada fase, antes de começar a próxima — é assim que o usuário vê o progresso.")
             appendLine("3e. Leitura eficiente: procure primeiro por símbolos ou termos e leia apenas os trechos necessários; limite as saídas e não despeje arquivos ou logs inteiros no contexto. Preserve requisitos, decisões, evidências, caminhos, erros e pendências. Só cite economia percentual se tiver medido o uso real.")
             appendLine("3f. Delegação de leitura: em investigações amplas com fontes independentes, use multi_agents com subtarefas delimitadas, escopo explícito e saída curta (conclusões + caminho/linhas/URLs + incertezas). Leituras triviais você mesmo faz; evidências críticas você valida na fonte principal. Se a ferramenta não estiver disponível, não afirme que delegou.")
@@ -3669,8 +3669,8 @@ class AgentRunner(
             "Use SEMPRE que o usuário pedir para construir, desenvolver ou programar software, no lugar de fazer tudo sozinho: dezenas de agentes com nome e papel " +
             "(Layout, Copy, Design, Frontend, Backend, API, Banco de dados, QA, SEO, Visuals…) trabalham AO MESMO TEMPO no mesmo projeto (/root/workspace compartilhado), até 6 de cada vez. " +
             "No front-end o usuário assiste aos agentes trabalhando ao vivo no browser (cursor e caixa de cada um sobre o elemento que edita). " +
-            "Antes de chamar, crie você mesmo o esqueleto que JÁ RODA: no front-end, prefira um projeto React + Vite (package.json com vite, index.html, src/main.jsx, src/App.jsx que importa um componente por seção, cada seção com id/className); no back-end, a estrutura de pastas da API. " +
-            "Em preview passe a PASTA do projeto: o app instala as dependências, sobe o servidor de desenvolvimento numa porta local e abre o browser nele; cada edição aparece na hora (HMR), com o elemento sendo construído e o cursor do agente sobre ele. " +
+            "Fluxo obrigatório no front-end: em preview passe a PASTA do projeto (pode estar vazia). O app ANTES cria o projeto React + Vite em branco se não houver um, instala as dependências, sobe o servidor de desenvolvimento e confere que o app abriu e desenhou no browser; só então o time entra. Se o app não ficar de pé, nenhum agente começa e você recebe o log para corrigir. " +
+            "No back-end, crie a estrutura de pastas da API antes. Cada edição do time aparece na hora (HMR), com o elemento sendo construído e o cursor do agente sobre ele. " +
             "Divida em 8 a 40 tarefas pequenas, uma por agente, cada uma num elemento ou arquivo diferente; use depends_on só quando uma parte precisa da outra. " +
             "Bloqueia até o time terminar e devolve o relatório; depois teste, corrija o que faltar e mostre o resultado ao usuário.", buildJsonObject {
             put("goal", str("Objetivo do time em uma frase"))
@@ -5816,54 +5816,135 @@ class AgentRunner(
         java.net.Socket().use { it.connect(java.net.InetSocketAddress("127.0.0.1", port), 500); true }
     }.getOrDefault(false)
 
+    /** Projeto React + Vite em branco que já roda (o time constrói em cima dele). */
+    private fun scaffoldReactVite(dir: File) {
+        dir.mkdirs()
+        fun w(path: String, text: String) { val f = File(dir, path); if (!f.exists()) { f.parentFile?.mkdirs(); f.writeText(text.trimIndent() + "\n") } }
+        w("package.json", """
+            {
+              "name": "app", "private": true, "version": "0.0.0", "type": "module",
+              "scripts": { "dev": "vite", "build": "vite build", "preview": "vite preview" },
+              "dependencies": { "react": "^18.3.1", "react-dom": "^18.3.1" },
+              "devDependencies": { "@vitejs/plugin-react": "^4.3.4", "vite": "^5.4.11" }
+            }
+        """)
+        w("vite.config.js", """
+            import { defineConfig } from 'vite'
+            import react from '@vitejs/plugin-react'
+            export default defineConfig({ plugins: [react()], server: { host: '127.0.0.1' } })
+        """)
+        w("index.html", """
+            <!doctype html>
+            <html lang="pt-BR">
+              <head><meta charset="UTF-8" /><meta name="viewport" content="width=device-width, initial-scale=1.0" /><title>App</title></head>
+              <body><div id="root"></div><script type="module" src="/src/main.jsx"></script></body>
+            </html>
+        """)
+        w("src/main.jsx", """
+            import React from 'react'
+            import ReactDOM from 'react-dom/client'
+            import App from './App.jsx'
+            import './index.css'
+            ReactDOM.createRoot(document.getElementById('root')).render(<App />)
+        """)
+        w("src/App.jsx", """
+            export default function App() {
+              return (
+                <main className="app">
+                  <section id="hero" className="hero"><h1>Em construção…</h1></section>
+                </main>
+              )
+            }
+        """)
+        w("src/index.css", """
+            * { box-sizing: border-box; } body { margin: 0; font-family: system-ui, sans-serif; }
+            .hero { padding: 64px 24px; text-align: center; }
+        """)
+    }
+
     /**
-     * Endereço do preview. Projeto com package.json (Vite, Next, CRA…): sobe o servidor de desenvolvimento e devolve
-     * http://127.0.0.1:PORTA (as edições aparecem na hora pelo HMR). Site estático: file://…/index.html. Vazio: sem preview.
+     * Prepara o app AO VIVO antes do time entrar: pasta vazia vira um projeto React + Vite em branco; com package.json,
+     * instala as dependências e sobe o servidor de desenvolvimento (http://127.0.0.1:PORTA, com HMR). Site estático
+     * (index.html sem package.json): file://. URL já rodando: usada como está. null = não ficou de pé (ver log).
      */
     private suspend fun squadPreviewUrl(sessionId: String, preview: String, log: (String) -> Unit): String? {
         val p = preview.trim()
         if (p.isBlank()) return null
-        if (p.startsWith("http://") || p.startsWith("https://")) {
-            val port = Regex("""//(?:127\.0\.0\.1|localhost|0\.0\.0\.0):(\d+)""").find(p)?.groupValues?.get(1)?.toIntOrNull()
-            if (port != null && !portAlive(port)) log("Atenção: nada respondendo em $p ainda; o preview abre quando o servidor subir.")
-            return p
-        }
+        if (p.startsWith("http://") || p.startsWith("https://")) return p
         val guest = p.removePrefix("file://").trimEnd('/')
         val f = sandbox.hostFile(guest, sessionId)
-        val dir = if (f.isDirectory) f else f.parentFile
-        val guestDir = if (f.isDirectory) guest else guest.substringBeforeLast('/')
+        val isFile = f.isFile || (!f.exists() && f.name.contains('.'))
+        val dir = if (isFile) f.parentFile else f
+        val guestDir = if (isFile) guest.substringBeforeLast('/') else guest
         val pkg = File(dir, "package.json")
-        if (pkg.isFile) {
-            val text = runCatching { pkg.readText() }.getOrDefault("")
-            if (text.contains("\"vite\"") && !File(dir, "index.html").isFile) {
-                log("O projeto Vite não tem index.html na raiz ($guestDir/index.html): sem ele o servidor responde 404. Crie index.html (com <div id=\"root\"> e <script type=\"module\" src=\"/src/main.jsx\">) antes de chamar build_team.")
-                return null
-            }
-            val port = 5173 + (guestDir.hashCode() and 0x7fffffff) % 300
-            squadDevServers[sessionId]?.let { (pt, proc) -> if (pt == port && proc.isAlive && portAlive(port)) return "http://127.0.0.1:$port/" }
-            squadDevServers.remove(sessionId)?.second?.destroy()
-            val run = when {
-                text.contains("\"next\"") -> "npx next dev -p $port -H 127.0.0.1"
-                text.contains("\"vite\"") -> "npx vite --host 127.0.0.1 --port $port --strictPort"
-                text.contains("react-scripts") -> "BROWSER=none HOST=127.0.0.1 PORT=$port npx react-scripts start"
-                else -> "HOST=127.0.0.1 PORT=$port npm run dev -- --host 127.0.0.1 --port $port"
-            }
-            log("Instalando dependências e subindo o servidor de desenvolvimento na porta $port…")
-            val logFile = File(sandbox.workspaceFor(sessionId), ".cue/devserver.log").apply { parentFile?.mkdirs() }
-            val q = "'" + guestDir.replace("'", "") + "'"
-            val proc = sandbox.spawn("cd $q && (command -v npm >/dev/null || apk add --no-cache nodejs npm >/dev/null 2>&1); " +
-                "[ -d node_modules ] || npm install --no-audit --no-fund --loglevel=error; exec $run", logFile)
-            squadDevServers[sessionId] = port to proc
-            val deadline = System.currentTimeMillis() + 6 * 60_000L
-            while (System.currentTimeMillis() < deadline && proc.isAlive && !portAlive(port)) kotlinx.coroutines.delay(1_000)
-            if (!portAlive(port)) {
-                log("O servidor de desenvolvimento não subiu: " + runCatching { logFile.readText().takeLast(500) }.getOrDefault(""))
-                return null
-            }
-            return "http://127.0.0.1:$port/"
+        val staticSite = !pkg.isFile && (File(dir, "index.html").isFile || isFile)
+        if (staticSite) return "file://" + (if (isFile) f else File(dir, "index.html")).absolutePath
+        if (!pkg.isFile) { log("Criando o projeto React + Vite em branco em $guestDir…"); scaffoldReactVite(dir) }
+        val text = runCatching { pkg.readText() }.getOrDefault("")
+        if (text.contains("\"vite\"") && !File(dir, "index.html").isFile) {
+            log("O projeto Vite não tinha index.html na raiz; criei um padrão (div#root + /src/main.jsx).")
+            File(dir, "index.html").writeText("<!doctype html>\n<html lang=\"pt-BR\"><head><meta charset=\"UTF-8\" /><meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\" /><title>App</title></head>\n" +
+                "<body><div id=\"root\"></div><script type=\"module\" src=\"/src/main.jsx\"></script></body></html>\n")
         }
-        val page = if (f.isDirectory || !f.name.contains('.')) File(f, "index.html") else f
-        return "file://" + page.absolutePath
+        val port = 5173 + (guestDir.hashCode() and 0x7fffffff) % 300
+        squadDevServers[sessionId]?.let { (pt, proc) -> if (pt == port && proc.isAlive && previewStatus("http://127.0.0.1:$port/").first == 200) return "http://127.0.0.1:$port/" }
+        squadDevServers.remove(sessionId)?.second?.destroy()
+        val q = "'" + guestDir.replace("'", "") + "'"
+        // 1) Dependências: só segue com tudo instalado (erro aqui não liga o time).
+        if (!File(dir, "node_modules").isDirectory) {
+            log("Instalando as dependências (npm install)…")
+            val r = sandbox.exec("(command -v npm >/dev/null || apk add --no-cache nodejs npm >/dev/null 2>&1) && npm install --no-audit --no-fund --loglevel=error",
+                cwd = guestDir, timeoutSec = 900, idleTimeoutSec = 300)
+            if (r.exitCode != 0 || !File(dir, "node_modules").isDirectory) { log("npm install falhou: " + r.output.takeLast(600)); return null }
+        }
+        // 2) Servidor de desenvolvimento.
+        val run = when {
+            text.contains("\"next\"") -> "npx next dev -p $port -H 127.0.0.1"
+            text.contains("\"vite\"") -> "npx vite --host 127.0.0.1 --port $port --strictPort"
+            text.contains("react-scripts") -> "BROWSER=none HOST=127.0.0.1 PORT=$port npx react-scripts start"
+            else -> "HOST=127.0.0.1 PORT=$port npm run dev -- --host 127.0.0.1 --port $port"
+        }
+        log("Subindo o app na porta $port…")
+        val logFile = File(sandbox.workspaceFor(sessionId), ".cue/devserver.log").apply { parentFile?.mkdirs(); delete() }
+        val proc = sandbox.spawn("cd $q && exec $run", logFile)
+        squadDevServers[sessionId] = port to proc
+        val url = "http://127.0.0.1:$port/"
+        val deadline = System.currentTimeMillis() + 4 * 60_000L
+        while (System.currentTimeMillis() < deadline && proc.isAlive && previewStatus(url).first != 200) kotlinx.coroutines.delay(1_000)
+        val (code, body) = previewStatus(url)
+        if (code != 200) {
+            log("O app não respondeu 200 (HTTP $code) ${body.take(200)}\nLog do servidor: " + runCatching { logFile.readText().takeLast(600) }.getOrDefault(""))
+            return null
+        }
+        // 3) O código de entrada compila (Vite responde 500 se não).
+        if (text.contains("\"vite\"")) {
+            val entry = Regex("""src=["'](/[^"']+\.(?:jsx?|tsx?))["']""").find(runCatching { File(dir, "index.html").readText() }.getOrDefault(""))?.groupValues?.get(1)
+            if (entry != null) {
+                val (ec, eb) = previewStatus(url.trimEnd('/') + entry)
+                if (ec != 200) { log("$entry não compila (HTTP $ec): ${eb.take(300)}"); return null }
+            }
+        }
+        return url
+    }
+
+    /** O app precisa estar VIVO no browser (página carregada e desenhando algo) antes de o time entrar. */
+    private suspend fun appAliveInBrowser(sessionId: String, url: String, log: (String) -> Unit): Boolean {
+        val browser = browserFor(sessionId)
+        runCatching { browser.navigate(url) }
+        val deadline = System.currentTimeMillis() + 45_000
+        var last = ""
+        while (System.currentTimeMillis() < deadline) {
+            last = runCatching { browser.runJs(
+                "(function(){var t=document.title||'';if(/não disponível|not available|ERR_/i.test(t+document.body.innerText.slice(0,200)))return 'erro';" +
+                    "var r=document.getElementById('root')||document.getElementById('__next')||document.getElementById('app')||document.body;" +
+                    "return (r&&r.children.length>0&&(r.innerText||'').trim().length+r.querySelectorAll('img,svg,canvas').length>0)?'ok':'vazio';})()") }.getOrDefault("")
+            if (last.contains("ok")) return true
+            if (last.contains("erro")) { kotlinx.coroutines.delay(1_500); runCatching { browser.navigate(url) } }
+            kotlinx.coroutines.delay(1_500)
+        }
+        log("O app não apareceu no browser em 45 s (estado: ${last.ifBlank { "sem resposta" }}). Log do servidor: " +
+            runCatching { File(sandbox.workspaceFor(sessionId), ".cue/devserver.log").readText().takeLast(500) }.getOrDefault(""))
+        return false
     }
 
     private suspend fun runBuildTeam(sessionId: String, argsJson: String): String {
@@ -5901,11 +5982,25 @@ class AgentRunner(
         val parentRequest = parent?.llm?.lastOrNull { it.role == "user" && it.content?.startsWith("[Sistema]") != true }?.content.orEmpty()
         val teamLine = personas.joinToString { "${it.name} (${it.role})" }.take(900)
         val previewNotes = StringBuilder()
-        val previewUrl = squadPreviewUrl(sessionId, preview) { previewNotes.appendLine(it) }
-        if (preview.isNotBlank() && previewUrl == null) return "ERRO: não consegui abrir o preview.\n$previewNotes" +
-            "Confira o projeto (package.json, dependências) ou rode o servidor e passe preview=http://127.0.0.1:PORTA."
         val startedAt = System.currentTimeMillis()
         val squadId = java.util.UUID.randomUUID().toString()
+        // O card aparece já na preparação: o usuário vê o app sendo montado antes do time entrar.
+        BuildSquad.put(BuildSquad.Squad(squadId, sessionId, goal.ifBlank { "Construindo" }, null, emptyList(),
+            notice = if (preview.isNotBlank()) "Preparando o app…" else ""))
+        val card = ChatItem.Step(tool = BuildSquad.STEP, title = goal.ifBlank { "Exército de agentes" }.take(120), args = squadId,
+            result = "${tasks.size} agentes", status = StepStatus.RUNNING)
+        store.addItem(sessionId, card)
+        val note: (String) -> Unit = { m -> previewNotes.appendLine(m); BuildSquad.edit(squadId) { it.copy(notice = m.lineSequence().first().take(160)) } }
+        val previewUrl = if (preview.isBlank()) null else squadPreviewUrl(sessionId, preview, note)
+        // Regra: o time só entra com o app VIVO no browser. Sem isso, nenhum agente começa.
+        val alive = previewUrl != null && (!previewUrl.startsWith("http") || appAliveInBrowser(sessionId, previewUrl, note))
+        if (preview.isNotBlank() && !alive) {
+            BuildSquad.edit(squadId) { it.copy(running = false) }
+            store.replaceItem(sessionId, card.copy(result = "O app não ficou de pé; o time não começou.", status = StepStatus.ERROR))
+            return "ERRO: o app não ficou rodando no browser, então o time NÃO começou.\n$previewNotes" +
+                "Corrija o projeto (leia o log acima, rode os comandos no terminal) até ele abrir no browser e chame build_team de novo com o mesmo preview."
+        }
+        if (previewUrl != null) note("App no ar em $previewUrl — o time entrou.")
         val workers = tasks.mapIndexed { n, t ->
             val p = personas[n]
             val label = BuildSquad.shortLabel(t.task)
@@ -5915,10 +6010,7 @@ class AgentRunner(
             store.upsertSession(child)
             BuildSquad.Worker(n, p, t.task, label, child.id, t.target)
         }
-        BuildSquad.put(BuildSquad.Squad(squadId, sessionId, goal.ifBlank { "Construindo" }, previewUrl, workers))
-        val card = ChatItem.Step(tool = BuildSquad.STEP, title = goal.ifBlank { "Exército de agentes" }.take(120), args = squadId,
-            result = "${workers.size} agentes", status = StepStatus.RUNNING)
-        store.addItem(sessionId, card)
+        BuildSquad.edit(squadId) { it.copy(preview = previewUrl, workers = workers, notice = "") }
 
         val browser = if (previewUrl != null) browserFor(sessionId) else null
         // Preview ao vivo: abre a página assim que ela existe, recarrega quando os arquivos mudam e redesenha os cursores.
@@ -5932,7 +6024,7 @@ class AgentRunner(
             watchers += scope.launch {
                 val root = sandbox.workspaceFor(sessionId)
                 val pageFile = previewUrl!!.takeIf { it.startsWith("file://") }?.let { File(it.removePrefix("file://")) }
-                var opened = false
+                var opened = previewUrl.startsWith("http")  // já aberto e conferido em appAliveInBrowser
                 var lastSig = ""
                 var previewBad = false
                 var badSince = 0L
