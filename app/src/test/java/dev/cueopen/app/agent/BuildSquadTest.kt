@@ -34,9 +34,10 @@ class BuildSquadTest {
             BuildSquad.Worker(1, ps[1], "b", "B", "x1", status = BuildSquad.St.QUEUED),
             BuildSquad.Worker(2, ps[2], "c", "C", "x2", status = BuildSquad.St.DONE),
         ))
-        val j = org.json.JSONObject(BuildSquad.overlayJson(sq)).getJSONArray("w")
-        assertEquals(2, j.length())
-        assertEquals("#a", j.getJSONObject(0).getString("s"))
+        val j = kotlinx.serialization.json.Json.parseToJsonElement(BuildSquad.overlayJson(sq))
+            .let { (it as kotlinx.serialization.json.JsonObject)["w"] as kotlinx.serialization.json.JsonArray }
+        assertEquals(2, j.size)
+        assertEquals("\"#a\"", (j[0] as kotlinx.serialization.json.JsonObject)["s"].toString())
         assertTrue(BuildSquad.overlayScript(BuildSquad.overlayJson(sq)).contains("__fluwySquad"))
     }
 

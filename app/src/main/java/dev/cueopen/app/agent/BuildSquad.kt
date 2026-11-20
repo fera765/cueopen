@@ -3,8 +3,6 @@ package dev.cueopen.app.agent
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.update
-import org.json.JSONArray
-import org.json.JSONObject
 
 /**
  * Exército de agentes para desenvolvimento de software (inspirado no time do OpenBot):
@@ -102,12 +100,20 @@ object BuildSquad {
     }
 
     /** Estado para o overlay do browser: só quem está trabalhando (e quem acabou de terminar, com ✓). */
-    fun overlayJson(s: Squad): String = JSONObject().put("w", JSONArray().apply {
-        s.workers.filter { it.status == St.RUNNING || it.status == St.DONE }.forEach { w ->
-            put(JSONObject().put("n", w.persona.name).put("c", String.format("#%06X", w.persona.color and 0xFFFFFF))
-                .put("s", w.target).put("l", w.label).put("d", w.status == St.DONE).put("i", w.idx))
-        }
-    }).toString()
+    fun overlayJson(s: Squad): String = kotlinx.serialization.json.buildJsonObject {
+        put("w", kotlinx.serialization.json.buildJsonArray {
+            s.workers.filter { it.status == St.RUNNING || it.status == St.DONE }.forEach { w ->
+                add(kotlinx.serialization.json.buildJsonObject {
+                    put("n", kotlinx.serialization.json.JsonPrimitive(w.persona.name))
+                    put("c", kotlinx.serialization.json.JsonPrimitive(String.format("#%06X", w.persona.color and 0xFFFFFF)))
+                    put("s", kotlinx.serialization.json.JsonPrimitive(w.target))
+                    put("l", kotlinx.serialization.json.JsonPrimitive(w.label))
+                    put("d", kotlinx.serialization.json.JsonPrimitive(w.status == St.DONE))
+                    put("i", kotlinx.serialization.json.JsonPrimitive(w.idx))
+                })
+            }
+        })
+    }.toString()
 
     /**
      * Script do overlay: cursores coloridos com o nome do agente, caixa tracejada e etiqueta sobre o elemento-alvo.
