@@ -294,19 +294,25 @@ class TerminalManager(private val ctx: Context, private val sandbox: Sandbox) {
                 val dir = File(sandbox.workspaceFor(key), ".cue").apply { mkdirs() }
                 val gcue = "$cwd/.cue"
                 val cmd = command.trim()
-                val simple = !cmd.contains('\n') && cmd.length <= 300 && !cmd.contains("<<") && cmd.count { it == '"' } % 2 == 0 && cmd.count { it == '\'' } % 2 == 0
+                val simple = !cmd.contains('\n') && cmd.length <= 300 && !cmd.contains("<<") && cmd.count { it == '"' } % 2 == 0 && cmd.count { it == '\'' } % 2 == 0 &&
+                    !cmd.trimEnd().endsWith("&")
+                // Sem interação: ninguém responde "y"/senha/menu. stdin vem de /dev/null (a pergunta falha na hora em vez de
+                // travar) e o ambiente manda npm/pip/apt/git seguirem sem perguntar.
+                val nonInteractive = InteractivePrompts.ENV
                 val outputFile = File(dir, "out_$id.log")
                 val typed = when {
-                    background && simple -> "( $cmd ) > $gcue/bg_$id.log 2>&1 &"
-                    background -> { File(dir, "run_$id.sh").writeText(cmd + "\n"); "nohup bash $gcue/run_$id.sh > $gcue/bg_$id.log 2>&1 &" }
+                    background && simple -> "( $nonInteractive; $cmd ) > $gcue/bg_$id.log 2>&1 < /dev/null &"
+                    background -> { File(dir, "run_$id.sh").writeText("$nonInteractive\n$cmd\n"); "nohup bash $gcue/run_$id.sh > $gcue/bg_$id.log 2>&1 < /dev/null &" }
                     else -> {
-                        if (!simple) File(dir, "run_$id.sh").writeText(cmd + "\n")
-                        val invocation = if (simple) cmd else "bash $gcue/run_$id.sh"
+                        if (!simple) File(dir, "run_$id.sh").writeText("$nonInteractive\n$cmd\n")
+                        // { …; } agrupa TODO o comando: com `a && b | tail; c > log` só o último ia para o log (a pergunta do
+                        // npm ia para a tela e o agente nunca a via). Sem subshell: `cd` continua valendo no próximo comando.
+                        val invocation = if (simple) "{ $nonInteractive; $cmd ; }" else "bash $gcue/run_$id.sh"
                         // Captura stdout/stderr num arquivo no filesystem do Android. A saída
                         // não depende do tamanho da tela, do scrollback ou de parsing do transcript.
                         // PROMPT_COMMAND é a única fonte do exit code. O segundo OSC aqui emitia
                         // outro marcador (geralmente 0 do printf), que podia ser atribuído ao próximo comando.
-                        "$invocation > $gcue/out_$id.log 2>&1"
+                        "$invocation > $gcue/out_$id.log 2>&1 < /dev/null"
                     }
                 }
                 val waiter = kotlinx.coroutines.CompletableDeferred<Int>()
@@ -316,8 +322,30 @@ class TerminalManager(private val ctx: Context, private val sandbox: Sandbox) {
                 // OSC de fim (cue;done;0) ANTES do comando rodar — completando o waiter com exit 0 e
                 // saída vazia. Era a causa de "executou mas não retornou saída".
                 write("\u0015$typed\r")
+                // Enquanto espera: se a saída parar numa pergunta (y/n, senha, menu), interrompe na hora e avisa o agente,
+                // em vez de esperar o tempo todo e o agente repetir o mesmo comando.
+                var waitingPrompt: String? = null
                 val exit = try {
-                    withTimeoutOrNull(timeoutSec * 1000) { waiter.await() }
+                    withTimeoutOrNull(timeoutSec * 1000) {
+                        var lastLen = -1L
+                        var stillSince = System.currentTimeMillis()
+                        var code: Int? = null
+                        while (code == null) {
+                            code = withTimeoutOrNull(1_000) { waiter.await() }
+                            if (code != null || background) continue
+                            val len = if (outputFile.isFile) outputFile.length() else 0L
+                            val now = System.currentTimeMillis()
+                            if (len != lastLen) { lastLen = len; stillSince = now }
+                            else if (len > 0 && now - stillSince >= 5_000) {
+                                val tail = runCatching { java.io.RandomAccessFile(outputFile, "r").use { f ->
+                                    val n = minOf(f.length(), 800L); f.seek(f.length() - n); ByteArray(n.toInt()).also { f.readFully(it) }.toString(Charsets.UTF_8) } }.getOrDefault("")
+                                val asked = InteractivePrompts.waitingPrompt(tail)
+                                if (asked != null) { waitingPrompt = asked; break }
+                                stillSince = now  // confere de novo daqui a 5 s
+                            }
+                        }
+                        code
+                    }
                 } finally {
                     // Se o agente for pausado/cancelado, interrompe também o processo no PTY.
                     if (!waiter.isCompleted) {
@@ -360,7 +388,15 @@ class TerminalManager(private val ctx: Context, private val sandbox: Sandbox) {
                 // "bash: …/run_x.sh: No such file or directory" e o servidor nunca subia.
                 if (!background) File(dir, "run_$id.sh").delete()
                 outputFile.delete()
-                Sandbox.ExecResult(exit ?: -1, out, exit == null)
+                val note = when {
+                    background -> ""
+                    waitingPrompt != null -> "\n\n[App] " + InteractivePrompts.hint(cmd, waitingPrompt)
+                    (exit ?: 1) != 0 && InteractivePrompts.looksCancelled(out) -> "\n\n[App] " + InteractivePrompts.hint(cmd, null)
+                    exit == null && InteractivePrompts.waitingPrompt(out.takeLast(800)) != null ->
+                        "\n\n[App] " + InteractivePrompts.hint(cmd, InteractivePrompts.waitingPrompt(out.takeLast(800)))
+                    else -> ""
+                }
+                Sandbox.ExecResult(if (waitingPrompt != null) 130 else exit ?: -1, out + note, exit == null && waitingPrompt == null)
             }
     }
 
