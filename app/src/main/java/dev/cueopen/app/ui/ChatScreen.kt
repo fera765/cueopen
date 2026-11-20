@@ -1274,7 +1274,7 @@ private fun BuildSquadCard(step: ChatItem.Step, sessionId: String?, nav: android
         Row(verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
                 Text("Exército de agentes", fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
-                Text(if (sq == null) step.result.ifBlank { step.title } else if (sq.running) "Construindo · ${sq.active} trabalhando · ${sq.done}/${sq.workers.size} prontos"
+                Text(if (sq == null) step.result.ifBlank { step.title } else if (sq.running && sq.workers.isEmpty()) "Preparando o app antes de o time entrar" else if (sq.running) "Construindo · ${sq.active} trabalhando · ${sq.done}/${sq.workers.size} prontos"
                     else "${sq.done} de ${sq.workers.size} concluíram", fontSize = 12.sp, color = c.ink3)
             }
             if (sq?.running == true) PulsingDot(c.ok)
