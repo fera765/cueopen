@@ -313,17 +313,7 @@ fun WorkflowEditorScreen(nav: NavController, id: String) {
                         DropdownMenuItem({ Text("Renomear") }, { menu = false; rename = true }, leadingIcon = { Icon(Icons.Rounded.Edit, null) })
                         DropdownMenuItem({ Text("Organizar nós") }, {
                             menu = false
-                            // Layout automático por camadas a partir do gatilho (esquerda → direita), alinhado à grade.
-                            val layers = mutableMapOf<String, Int>()
-                            val q = ArrayDeque(w.nodes.filter { WfCatalog.of(it.type).trigger }.map { it.id }.onEach { layers[it] = 0 })
-                            while (q.isNotEmpty()) { val cur = q.removeFirst(); w.edges.filter { it.from == cur }.forEach { e -> if (e.to !in layers) { layers[e.to] = layers.getValue(cur) + 1; q.add(e.to) } } }
-                            val byLayer = w.nodes.groupBy { layers[it.id] ?: (layers.values.maxOrNull() ?: 0) + 1 }
-                            val placed = w.nodes.map { n ->
-                                val l = layers[n.id] ?: ((layers.values.maxOrNull() ?: 0) + 1)
-                                val i = byLayer.getValue(l).indexOf(n)
-                                n.copy(x = 40f + l * (NODE_W + 80f), y = 120f + i * (NODE_H + 60f))
-                            }
-                            save(w.copy(nodes = placed)); fitted = false
+                            save(WfLogic.layout(w, NODE_W, NODE_H)); fitted = false
                         }, leadingIcon = { Icon(Icons.Rounded.AutoFixHigh, null) })
                         DropdownMenuItem({ Text("Duplicar fluxo") }, {
                             menu = false
@@ -529,7 +519,7 @@ private fun NodePalette(onPick: (String, WfPreset?) -> Unit) {
         Spacer(Modifier.height(8.dp))
         LazyColumn(Modifier.heightIn(max = 560.dp)) {
             WfCatalog.categories().forEach { cat ->
-                val basics = WfCatalog.TYPES.filter { it.category == cat }.map { Triple(it.type, null as WfPreset?, it.title to it.description) }
+                val basics = WfCatalog.TYPES.filter { it.category == cat && !it.hidden }.map { Triple(it.type, null as WfPreset?, it.title to it.description) }
                 val presets = WfCatalog.PRESETS.filter { it.category == cat }.map { Triple(it.type, it, it.title to it.description) }
                 val all = (basics + presets).filter { q.isBlank() || norm(it.third.first + " " + it.third.second).contains(norm(q.trim())) }
                 if (all.isNotEmpty()) {
@@ -627,7 +617,7 @@ private fun subtitle(n: WfNode): String = when (n.type) {
     "trigger_schedule" -> WfLogic.scheduleLabel(n.config)
     "trigger_manual" -> "Toque em Executar"
     "agent" -> n.config["prompt"].orEmpty().ifBlank { "Defina a instrução" }
-    "connector" -> listOf(n.config["conector"].orEmpty(), n.config["acao"].orEmpty()).filter { it.isNotBlank() }.joinToString(" · ").ifBlank { "Escolha app e ação" }
+    "connector" -> listOf(n.config["conector"].orEmpty(), n.config["acao"].orEmpty()).filter { it.isNotBlank() }.joinToString(" · ").ifBlank { "Escolha conector e ação" }
     "mcp" -> n.config["tool"].orEmpty().ifBlank { "Escolha a ferramenta" }
     "http" -> "${n.config["method"] ?: "GET"} ${n.config["url"].orEmpty()}".trim()
     "shell" -> n.config["command"].orEmpty().ifBlank { "Defina o comando" }
@@ -670,7 +660,8 @@ private fun NodeEditor(w: Workflow, node: WfNode, lastStep: WfStep?, nav: NavCon
         CueField(label, { commit(newLabel = it) }, "Nome do nó (${t.title})")
         Text("Id para usar em outros nós: {{${node.id}}}", fontSize = 11.sp, color = c.ink3, fontFamily = FontFamily.Monospace)
 
-        t.fields.forEach { f ->
+        if (node.type == "connector") ConnectorConfig(node, cfg, w.nodes.filter { it.id != node.id && w.edges.any { e -> e.to == node.id && e.from == it.id } }) { commit(it) }
+        else t.fields.forEach { f ->
             val v = cfg[f.key] ?: f.default
             val visible = when {
                 node.type == "trigger_schedule" && f.key == "minutes" -> (cfg["mode"] ?: "daily") == "interval"
@@ -697,7 +688,7 @@ private fun NodeEditor(w: Workflow, node: WfNode, lastStep: WfStep?, nav: NavCon
 
         // Variáveis: toque para inserir no último campo editado.
         val others = w.nodes.filter { it.id != node.id && w.edges.any { e -> e.to == node.id || e.from == it.id } }
-        if (lastKey != null && t.fields.any { it.kind != WfField.Kind.SELECT }) {
+        if (node.type != "connector" && lastKey != null && t.fields.any { it.kind != WfField.Kind.SELECT }) {
             Text("Inserir dados de outros nós", fontSize = 12.sp, color = c.ink2)
             Row(Modifier.fillMaxWidth().horizontalScrollIfNeeded(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 (listOf("{{prev}}" to "Saída anterior", "{{trigger.time}}" to "Hora do disparo") +
@@ -717,15 +708,6 @@ private fun NodeEditor(w: Workflow, node: WfNode, lastStep: WfStep?, nav: NavCon
                         Chip("Padrão", selected = cfg["agent"].isNullOrBlank()) { commit(cfg + ("agent" to "")) }
                         agents.forEach { a -> Chip(a.name, selected = cfg["agent"].equals(a.name, true)) { commit(cfg + ("agent" to a.name)) } }
                     }
-                }
-            }
-            "connector" -> {
-                val hub = dev.cueopen.app.connectors.HubConnectors.available(app.store)
-                if (!hub) Text("O hub de conectores está desligado. Ligue em Conectores › Apps para usar este nó.", fontSize = 12.sp, color = c.warn)
-                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    OutlinedButton({ loadHelper { dev.cueopen.app.connectors.HubConnectors.list(app.store) } }, enabled = hub) { Text("Ver conectores") }
-                    OutlinedButton({ loadHelper { dev.cueopen.app.connectors.HubConnectors.actions(app.store, cfg["conector"].orEmpty(), cfg["acao"].orEmpty(), "") } },
-                        enabled = hub && !cfg["conector"].isNullOrBlank()) { Text(if (cfg["acao"].isNullOrBlank()) "Ver ações" else "Ver campos") }
                 }
             }
             "mcp" -> {
@@ -766,11 +748,10 @@ private fun NodeEditor(w: Workflow, node: WfNode, lastStep: WfStep?, nav: NavCon
             }
         }
 
+        if (!WfCatalog.of(node.type).trigger && node.type != "approval") NodeTester(w.copy(nodes = w.nodes.map { if (it.id == node.id) node.copy(config = cfg, label = label) else it }), node, lastStep)
         lastStep?.let { s ->
-            SectionLabel("Última execução deste nó")
-            Text((if (s.status == "error") "Erro: ${s.error}" else s.output.ifBlank { "(sem saída)" }).take(3_000),
-                Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(c.surface2).padding(10.dp),
-                fontSize = 11.sp, fontFamily = FontFamily.Monospace, color = if (s.status == "error") c.err else c.ink2)
+            if (s.status == "error") Text("Última execução: erro — ${s.error}".take(1_500), Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(c.surface2).padding(10.dp),
+                fontSize = 11.sp, fontFamily = FontFamily.Monospace, color = c.err)
             s.sessionId?.let { sid -> TextButton({ nav.navigate("chat/$sid") }) { Text("Abrir o chat do agente") } }
         }
 
@@ -778,6 +759,210 @@ private fun NodeEditor(w: Workflow, node: WfNode, lastStep: WfStep?, nav: NavCon
             OutlinedButton(onDuplicate) { Icon(Icons.Rounded.ContentCopy, null, Modifier.size(16.dp)); Spacer(Modifier.width(4.dp)); Text("Duplicar") }
             OutlinedButton(onDelete, colors = ButtonDefaults.outlinedButtonColors(contentColor = c.err)) {
                 Icon(Icons.Rounded.Delete, null, Modifier.size(16.dp)); Spacer(Modifier.width(4.dp)); Text("Excluir nó")
+            }
+        }
+    }
+}
+
+// ───────────────────────────── Nó Conector (unificado) ─────────────────────────────
+
+private val prettyJson = kotlinx.serialization.json.Json { prettyPrint = true; prettyPrintIndent = "  " }
+
+private fun prettyOut(raw: String): String = runCatching {
+    prettyJson.encodeToString(kotlinx.serialization.json.JsonElement.serializer(), kotlinx.serialization.json.Json.parseToJsonElement(raw))
+}.getOrDefault(raw)
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun ConnectorConfig(node: WfNode, cfg: Map<String, String>, upstream: List<WfNode>, onCfg: (Map<String, String>) -> Unit) {
+    val c = Cue.c
+    val app = CueApp.instance
+    val kind = cfg["source"].orEmpty().ifBlank { WfConnectors.HUB }
+    val id = cfg["conector"].orEmpty()
+    val action = cfg["acao"].orEmpty()
+    var sources by remember { mutableStateOf<List<WfConnectors.Source>?>(null) }
+    var reload by remember { mutableIntStateOf(0) }
+    LaunchedEffect(reload) { sources = runCatching { WfConnectors.sources(app.store) }.getOrDefault(emptyList()) }
+    var actions by remember(kind, id) { mutableStateOf<List<WfConnectors.Action>?>(null) }
+    LaunchedEffect(kind, id) { actions = if (id.isBlank()) null else runCatching { WfConnectors.actions(app.store, kind, id) }.getOrDefault(emptyList()) }
+    var fields by remember(kind, id, action) { mutableStateOf<List<WfConnectors.Field>?>(null) }
+    var fieldsErr by remember(kind, id, action) { mutableStateOf<String?>(null) }
+    LaunchedEffect(kind, id, action) {
+        if (id.isBlank() || action.isBlank()) return@LaunchedEffect
+        runCatching { WfConnectors.fields(app.store, kind, id, action, cfg["conexao"].orEmpty()) }
+            .onSuccess { fields = it }.onFailure { fieldsErr = it.message; fields = emptyList() }
+    }
+    val campos = remember(cfg["campos"]) {
+        runCatching { kotlinx.serialization.json.Json.parseToJsonElement(cfg["campos"].orEmpty().ifBlank { "{}" }) as kotlinx.serialization.json.JsonObject }.getOrNull()
+    }
+    var raw by remember(node.id) { mutableStateOf(false) }
+    var focus by remember(node.id) { mutableStateOf<String?>(null) }
+    var pickAction by remember { mutableStateOf(false) }
+    fun value(k: String): String = campos?.get(k)?.let { (it as? kotlinx.serialization.json.JsonPrimitive)?.takeIf { p -> p.isString }?.content ?: it.toString() }.orEmpty()
+    fun setValue(k: String, v: String) {
+        val base = campos ?: kotlinx.serialization.json.JsonObject(emptyMap())
+        val next = if (v.isEmpty()) base - k else base + (k to kotlinx.serialization.json.JsonPrimitive(v))
+        onCfg(cfg + ("campos" to prettyJson.encodeToString(kotlinx.serialization.json.JsonObject.serializer(), kotlinx.serialization.json.JsonObject(next))))
+    }
+
+    // 1 · Conector
+    SectionLabel("1 · Conector")
+    val list = sources
+    when {
+        list == null -> LinearProgressIndicator(Modifier.fillMaxWidth(), color = c.accent)
+        list.isEmpty() -> Text("Nenhum conector ativo. Conecte um app ou servidor MCP em Conectores e volte aqui.", fontSize = 13.sp, color = c.warn)
+        else -> {
+            val current = list.firstOrNull { it.kind == kind && (it.id.equals(id, true) || it.name.equals(id, true)) && (cfg["conexao"].isNullOrBlank() || it.connection.isBlank() || it.connection == cfg["conexao"]) }
+            if (id.isNotBlank() && current == null)
+                Text("\"$id\" não está conectado. Escolha um conector ativo abaixo (ou conecte-o em Conectores).", fontSize = 12.sp, color = c.warn)
+            list.groupBy { it.kind }.forEach { (k, items) ->
+                Text(WfConnectors.kindLabel(k), fontSize = 11.sp, color = c.ink3, fontWeight = FontWeight.Medium)
+                items.forEach { s ->
+                    val sel = s == current
+                    Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(if (sel) c.accent.copy(alpha = .10f) else c.surface2)
+                        .border(1.dp, if (sel) c.accent else c.line, RoundedCornerShape(14.dp))
+                        .clickable {
+                            if (!sel) onCfg(cfg + mapOf("source" to s.kind, "conector" to s.id, "conexao" to s.connection) +
+                                (if (s.kind != kind || !s.id.equals(id, true)) mapOf("acao" to "", "campos" to "{}") else emptyMap()))
+                        }.padding(10.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Box(Modifier.size(34.dp).clip(RoundedCornerShape(10.dp)).background(Color(0xFF2FBF71).copy(alpha = .16f)), contentAlignment = Alignment.Center) {
+                            Text(s.name.take(1).uppercase(), fontWeight = FontWeight.Bold, color = Color(0xFF2FBF71))
+                        }
+                        Spacer(Modifier.width(10.dp))
+                        Column(Modifier.weight(1f)) {
+                            Text(s.name, fontWeight = FontWeight.Medium, fontSize = 14.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            Text(s.detail + if (!s.ready) " · precisa reconectar" else "", fontSize = 11.sp, color = if (s.ready) c.ink3 else c.warn, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        }
+                        if (sel) Icon(Icons.Rounded.CheckCircle, null, tint = c.accent, modifier = Modifier.size(20.dp))
+                    }
+                    Spacer(Modifier.height(6.dp))
+                }
+            }
+            TextButton({ sources = null; reload++ }) { Icon(Icons.Rounded.Refresh, null, Modifier.size(16.dp)); Spacer(Modifier.width(4.dp)); Text("Atualizar lista") }
+        }
+    }
+
+    // 2 · Ação
+    if (id.isNotBlank()) {
+        SectionLabel("2 · Ação")
+        val a = actions?.firstOrNull { it.name == action }
+        Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(c.surface2).border(1.dp, c.line, RoundedCornerShape(14.dp))
+            .clickable(enabled = !actions.isNullOrEmpty()) { pickAction = true }.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text(a?.title ?: action.ifBlank { if (actions == null) "Carregando ações…" else if (actions!!.isEmpty()) "Sem ações disponíveis" else "Escolher ação" },
+                    fontWeight = FontWeight.Medium, fontSize = 14.sp)
+                (a?.description?.takeIf { it.isNotBlank() } ?: action.takeIf { it.isNotBlank() && a == null }?.let { "Nome técnico: $it" })?.let {
+                    Text(it, fontSize = 11.sp, color = c.ink3, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                }
+            }
+            if (actions == null) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp) else Icon(Icons.Rounded.UnfoldMore, null, tint = c.ink3)
+        }
+    }
+
+    // 3 · Campos
+    if (id.isNotBlank() && action.isNotBlank()) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Box(Modifier.weight(1f)) { SectionLabel("3 · Campos") }
+            TextButton({ raw = !raw }) { Text(if (raw) "Formulário" else "Editar JSON", fontSize = 12.sp) }
+        }
+        val fs = fields
+        when {
+            raw || campos == null -> {
+                if (campos == null) Text("O JSON dos campos está inválido; corrija abaixo.", fontSize = 12.sp, color = c.err)
+                CueField(cfg["campos"].orEmpty(), { onCfg(cfg + ("campos" to it)) }, "Campos (JSON)", minLines = 4)
+            }
+            fs == null -> LinearProgressIndicator(Modifier.fillMaxWidth(), color = c.accent)
+            fs.isEmpty() -> Text(fieldsErr?.let { "Não foi possível ler os campos: $it" } ?: "Esta ação não precisa de campos.", fontSize = 12.sp, color = if (fieldsErr != null) c.warn else c.ink3)
+            else -> fs.forEach { f ->
+                val v = value(f.key)
+                if (f.type == "checkbox" || f.type == "boolean") {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) {
+                            Text(f.label + if (f.required) " *" else "", fontSize = 14.sp)
+                            if (f.description.isNotBlank()) Text(f.description, fontSize = 11.sp, color = c.ink3, maxLines = 2)
+                        }
+                        Switch(checked = (v.ifBlank { f.default }).equals("true", true), onCheckedChange = { setValue(f.key, it.toString()) })
+                    }
+                } else {
+                    CueField(v, { setValue(f.key, it); focus = f.key }, f.label + (if (f.required) " *" else "") + if (f.default.isNotBlank() && v.isBlank()) " (padrão: ${f.default.take(30)})" else "",
+                        minLines = if (f.type.contains("long") || f.type == "json" || f.type == "object" || f.key.contains("body", true) || f.key.contains("content", true)) 3 else 1)
+                    if (f.description.isNotBlank()) Text(f.description, fontSize = 11.sp, color = c.ink3, maxLines = 3, overflow = TextOverflow.Ellipsis)
+                    if (f.options.isNotEmpty()) FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        f.options.take(30).forEach { (lbl, ov) -> Chip(lbl.take(40), selected = v == ov) { setValue(f.key, ov); focus = f.key } }
+                    } else if (f.dynamic) Text("Lista carregada do app quando a conta está conectada; você também pode digitar o valor.", fontSize = 11.sp, color = c.ink3)
+                }
+            }
+        }
+        if (!raw && !fields.isNullOrEmpty()) {
+            Text("Inserir dados de outros nós" + (focus?.let { " em \"$it\"" } ?: " (edite um campo primeiro)"), fontSize = 12.sp, color = c.ink2)
+            Row(Modifier.fillMaxWidth().horizontalScrollIfNeeded(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                (listOf("{{prev}}" to "Saída anterior", "{{trigger.time}}" to "Hora do disparo") + upstream.map { "{{${it.id}}}" to WfLogic.label(it) }).forEach { (token, text) ->
+                    Chip(text) { focus?.let { k -> setValue(k, value(k) + token) } }
+                }
+            }
+        }
+        SectionLabel("Formato da resposta")
+        Text(WfConnectors.responseShape(kind, node.id), Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(c.surface2).padding(10.dp),
+            fontSize = 11.sp, fontFamily = FontFamily.Monospace, color = c.ink2)
+    }
+
+    if (pickAction) {
+        var q by remember { mutableStateOf("") }
+        AlertDialog(onDismissRequest = { pickAction = false }, containerColor = c.surface, title = { Text("Escolher ação") },
+            text = {
+                Column {
+                    OutlinedTextField(q, { q = it }, Modifier.fillMaxWidth(), placeholder = { Text("Buscar ação") }, singleLine = true,
+                        leadingIcon = { Icon(Icons.Rounded.Search, null) }, shape = RoundedCornerShape(12.dp))
+                    Spacer(Modifier.height(8.dp))
+                    LazyColumn(Modifier.heightIn(max = 420.dp)) {
+                        items(actions.orEmpty().filter { q.isBlank() || (it.name + " " + it.title + " " + it.description).contains(q.trim(), true) }, key = { it.name }) { a ->
+                            Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp)).clickable {
+                                pickAction = false
+                                if (a.name != action) onCfg(cfg + mapOf("acao" to a.name, "campos" to "{}"))
+                            }.padding(vertical = 8.dp, horizontal = 4.dp)) {
+                                Text(a.title, fontWeight = FontWeight.Medium, fontSize = 14.sp, color = if (a.name == action) c.accent else c.ink)
+                                if (a.description.isNotBlank()) Text(a.description, fontSize = 11.sp, color = c.ink3, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                            }
+                        }
+                    }
+                }
+            }, confirmButton = { TextButton({ pickAction = false }) { Text("Fechar") } })
+    }
+}
+
+/** Testa o nó sozinho e mostra a resposta real, com os caminhos prontos para usar em outros nós. */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun NodeTester(w: Workflow, node: WfNode, lastStep: WfStep?) {
+    val c = Cue.c
+    val scope = rememberCoroutineScope()
+    val clip = androidx.compose.ui.platform.LocalClipboardManager.current
+    var busy by remember(node.id) { mutableStateOf(false) }
+    var res by remember(node.id) { mutableStateOf<WorkflowEngine.NodeResult?>(null) }
+    var copied by remember { mutableStateOf<String?>(null) }
+    SectionLabel("Testar este nó")
+    Text("Roda só este nó agora, com os dados da última execução como entrada. Ações reais (enviar e-mail, postar) acontecem de verdade.", fontSize = 11.sp, color = c.ink3)
+    Button({ busy = true; res = null; scope.launch { res = WorkflowEngine.testNode(w, node.id); busy = false } }, enabled = !busy,
+        colors = ButtonDefaults.buttonColors(containerColor = c.accent)) {
+        if (busy) CircularProgressIndicator(Modifier.size(16.dp), color = c.bg, strokeWidth = 2.dp) else Icon(Icons.Rounded.PlayArrow, null, Modifier.size(18.dp))
+        Spacer(Modifier.width(6.dp)); Text(if (busy) "Testando…" else "Testar")
+    }
+    val out = res?.takeIf { it.error == null }?.output ?: lastStep?.takeIf { res == null && it.status == "ok" }?.output
+    res?.error?.let { e ->
+        Text("Erro: $e", Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(c.err.copy(alpha = .08f)).padding(10.dp), fontSize = 12.sp, color = c.err)
+    }
+    if (out != null) {
+        Text(if (res != null) "Resposta do teste" else "Resposta da última execução", fontSize = 12.sp, color = c.ink2)
+        Text(prettyOut(out).take(4_000), Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(c.surface2).padding(10.dp),
+            fontSize = 11.sp, fontFamily = FontFamily.Monospace, color = c.ink2)
+        val paths = WfLogic.paths(out)
+        if (paths.isNotEmpty()) {
+            Text("Use em outros nós (toque para copiar)" + (copied?.let { " · copiado $it" } ?: ""), fontSize = 12.sp, color = c.ink2)
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                (listOf("") + paths.take(30)).forEach { p ->
+                    val token = if (p.isEmpty()) "{{${node.id}}}" else "{{${node.id}.$p}}"
+                    Chip(if (p.isEmpty()) "tudo" else p) { clip.setText(androidx.compose.ui.text.AnnotatedString(token)); copied = token }
+                }
             }
         }
     }

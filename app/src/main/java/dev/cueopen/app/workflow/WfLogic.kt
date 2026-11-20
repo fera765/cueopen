@@ -79,6 +79,50 @@ object WfLogic {
         }
     }
 
+    /** Texto legível de uma página HTML (sem scripts, estilos e tags), para resumir com IA. */
+    fun htmlText(html: String): String = html
+        .replace(Regex("(?is)<(script|style|noscript|svg|head)[^>]*>.*?</\\1>"), " ")
+        .replace(Regex("(?i)<br\\s*/?>|</(p|div|li|h[1-6]|tr)>"), "\n")
+        .replace(Regex("<[^>]+>"), " ")
+        .replace("&nbsp;", " ").replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">").replace("&quot;", "\"").replace("&#39;", "'")
+        .replace(Regex("[ \\t\\x0B\\f\\r]+"), " ").replace(Regex("\\s*\\n\\s*"), "\n").replace(Regex("\\n{3,}"), "\n\n").trim()
+
+    /** Caminhos utilizáveis em {{id.caminho}} de uma saída JSON (até 3 níveis, 40 itens). */
+    fun paths(raw: String): List<String> {
+        val root = runCatching { Json.parseToJsonElement(raw) }.getOrNull() ?: return emptyList()
+        val out = mutableListOf<String>()
+        fun walk(e: JsonElement, p: String, depth: Int) {
+            if (out.size >= 40) return
+            when (e) {
+                is JsonObject -> e.forEach { (k, v) -> val np = if (p.isEmpty()) k else "$p.$k"; out += np; if (depth < 3) walk(v, np, depth + 1) }
+                is JsonArray -> e.firstOrNull()?.let { v -> val np = if (p.isEmpty()) "0" else "$p.0"; out += np; if (depth < 3) walk(v, np, depth + 1) }
+                else -> {}
+            }
+        }
+        walk(root, "", 0)
+        return out.distinct()
+    }
+
+    /** Organiza os nós em colunas a partir dos gatilhos (esquerda → direita), alinhados à grade do canvas. */
+    fun layout(w: Workflow, nodeW: Float = 212f, nodeH: Float = 84f): Workflow {
+        val layers = mutableMapOf<String, Int>()
+        val q = ArrayDeque(w.nodes.filter { WfCatalog.of(it.type).trigger }.map { it.id }.onEach { layers[it] = 0 })
+        while (q.isNotEmpty()) { val cur = q.removeFirst(); w.edges.filter { it.from == cur }.forEach { e -> if (e.to !in layers) { layers[e.to] = layers.getValue(cur) + 1; q.add(e.to) } } }
+        val extra = (layers.values.maxOrNull() ?: 0) + 1
+        val byLayer = w.nodes.groupBy { layers[it.id] ?: extra }
+        return w.copy(nodes = w.nodes.map { n ->
+            val l = layers[n.id] ?: extra
+            val col = byLayer.getValue(l)
+            val i = col.indexOf(n)
+            val top = 200f - (col.size - 1) * (nodeH + 60f) / 2
+            n.copy(x = 40f + l * (nodeW + 80f), y = (Math.round((top + i * (nodeH + 60f)).coerceAtLeast(20f) / 20f) * 20f).toFloat())
+        })
+    }
+
+    /** Assinatura do conteúdo (nós + ligações) para saber se o teste ainda vale. */
+    fun signature(w: Workflow): String = (w.nodes.sortedBy { it.id }.joinToString("|") { it.id + it.type + it.config.toSortedMap() } +
+        "#" + w.edges.sortedBy { it.from + it.to + it.port }.joinToString("|") { it.from + ">" + it.to + ":" + it.port }).hashCode().toString()
+
     // ───────── Condição ─────────
     fun condition(left: String, op: String, right: String): Boolean {
         val l = left.trim(); val r = right.trim()

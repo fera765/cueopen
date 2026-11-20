@@ -507,6 +507,25 @@ class UiConnectorHub(context: Context) {
         return Redactor.redact(out, c.secrets())
     }
 
+    /**
+     * Execução por um nó de Fluxo (sem agente). Ações que abrem ordens e conectores que exigem o terminal de um
+     * agente não rodam em automação. Nunca lança: devolve texto; erros começam com "ERRO"/"RECUSADO".
+     */
+    suspend fun callForWorkflow(id: String, tool: String, args: JsonObject): String {
+        val c = get(id) ?: return "ERRO: conector desconhecido: $id"
+        if (!enabled(id)) return "ERRO: o conector ${c.spec.name} está desligado (Conectores)."
+        val ts = c.spec.tools.firstOrNull { it.name == tool } ?: return "ERRO: ${c.spec.name} não tem a ação \"$tool\"."
+        if (ts.opensOrder) return "RECUSADO: ações que abrem ordens não rodam em fluxos automáticos."
+        if (c is RequiresAgentTerminal) return "RECUSADO: ${c.spec.name} precisa do terminal de um agente; use um nó Agente IA."
+        val strArgs = args.entries.associate { (k, v) -> k to ((v as? JsonPrimitive)?.contentOrNull ?: v.toString()) }
+        val out = try {
+            ensureLoggedIn(id).getOrThrow()
+            if (c is CustomConnector) c.callTool(tool, strArgs, settings(c)) else c.callTool(tool, strArgs, settings(c), UiConnectorCallContext())
+        } catch (t: kotlinx.coroutines.CancellationException) { throw t
+        } catch (t: Throwable) { "ERRO em ${c.spec.name}: ${t.message ?: t.javaClass.simpleName}" }
+        return Redactor.redact(out, c.secrets())
+    }
+
     /** Serializa ordens por venue, identifica intent e impede dois agentes de operar o mesmo ativo juntos. */
     private suspend fun guardedCall(c: UiConnector, tool: String, agentKey: String, args: Map<String, String>): String {
         val venue = c.spec.id

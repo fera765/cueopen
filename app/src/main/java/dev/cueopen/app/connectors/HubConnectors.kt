@@ -133,17 +133,23 @@ object HubConnectors {
 
     /** Opções de um campo dinâmico ("rótulo=valor"), com a conta quando houver. */
     private suspend fun options(piece: String, action: String, prop: String, conexao: String?): String? {
-        val connValue = conexao?.let { HubApi.connectionValue(it) }
+        val opts = optionList(piece, action, prop, conexao, JsonObject(emptyMap()))
+        if (opts.isEmpty()) return null
+        return opts.take(25).joinToString { it.first.take(60) + "=" + it.second.take(80) } + if (opts.size > 25) " … (+${opts.size - 25})" else ""
+    }
+
+    /** Opções de um campo dinâmico como (rótulo, valor JSON). [input] leva os campos já preenchidos (para campos dependentes). */
+    suspend fun optionList(piece: String, action: String, prop: String, conexao: String?, input: JsonObject): List<Pair<String, String>> {
+        val connValue = conexao?.takeIf { it.isNotBlank() }?.let { HubApi.connectionValue(it) }
         val r = ActivepiecesHub.call("/options", buildJsonObject {
             put("name", piece); HubApi.catalogVersion(piece)?.let { put("version", it) }
-            put("action", action); put("prop", prop); put("input", JsonObject(emptyMap()))
+            put("action", action); put("prop", prop); put("input", input)
             connValue?.let { put("connection", it) }
         }, 60)
-        (r["connection"] as? JsonObject)?.let { if (conexao != null) HubApi.updateConnection(conexao, it) }
-        if (r.s("ok") != "true") return null
-        val opts = ((r["options"] as? JsonObject)?.get("options") as? JsonArray).orEmpty().mapNotNull { it as? JsonObject }
-        if (opts.isEmpty()) return null
-        return opts.take(25).joinToString { it.s("label").ifBlank { it.s("value") }.take(60) + "=" + it["value"].toString().take(80) } + if (opts.size > 25) " … (+${opts.size - 25})" else ""
+        (r["connection"] as? JsonObject)?.let { if (!conexao.isNullOrBlank()) HubApi.updateConnection(conexao, it) }
+        if (r.s("ok") != "true") return emptyList()
+        return ((r["options"] as? JsonObject)?.get("options") as? JsonArray).orEmpty().mapNotNull { it as? JsonObject }
+            .map { it.s("label").ifBlank { it.s("value") } to (it["value"]?.let { v -> (v as? JsonPrimitive)?.takeIf { p -> p.isString }?.content ?: v.toString() } ?: "") }
     }
 
     /** "campos" pode vir como objeto ou como texto JSON (alguns modelos mandam string). */

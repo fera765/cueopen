@@ -12,6 +12,8 @@ data class Workflow(
     val edges: List<WfEdge> = emptyList(),
     val createdAt: Long = System.currentTimeMillis(),
     val updatedAt: Long = System.currentTimeMillis(),
+    /** Assinatura (WfLogic.signature) da versão que passou no último teste completo; vazio = nunca testado. */
+    val testedSig: String = "",
 )
 
 @Serializable
@@ -87,6 +89,8 @@ data class WfNodeType(
     val fields: List<WfField> = emptyList(),
     val ports: List<String> = listOf("main"),
     val trigger: Boolean = false,
+    /** Fora da paleta (tipo antigo mantido só para fluxos já salvos). */
+    val hidden: Boolean = false,
 )
 
 object WfCatalog {
@@ -113,14 +117,15 @@ object WfCatalog {
                 WfField("agent", "Agente (nome; vazio = padrão)", WfField.Kind.TEXT),
                 WfField("timeout", "Tempo máximo (minutos)", WfField.Kind.NUMBER, default = "15"),
             )),
-        WfNodeType("connector", "Conector (apps)", CAT_APPS, "Executa uma ação de um app conectado (Gmail, Sheets, Slack, Notion, CRM…) pelo hub de conectores.", 0xFF2FBF71, "apps",
+        WfNodeType("connector", "Conector", CAT_APPS, "Usa qualquer conector ativo — apps (Gmail, Sheets, Slack, Notion…), servidores MCP ou conectores do app: escolha o conector, a ação e preencha os campos.", 0xFF2FBF71, "apps",
             fields = listOf(
-                WfField("conector", "Conector", WfField.Kind.TEXT, "Nome do app conectado (ex.: gmail)", required = true),
-                WfField("acao", "Ação", WfField.Kind.TEXT, "Nome da ação (veja em Ver ações)", required = true),
+                WfField("source", "Tipo", WfField.Kind.SELECT, options = listOf("hub" to "App conectado", "mcp" to "MCP", "app" to "Conector do app"), default = "hub"),
+                WfField("conector", "Conector", WfField.Kind.TEXT, "Ex.: gmail", required = true),
+                WfField("acao", "Ação", WfField.Kind.TEXT, "Ex.: send_email", required = true),
                 WfField("campos", "Campos (JSON)", WfField.Kind.JSON, "Ex.: {\"to\":\"{{prev}}\"}. $TEMPLATE_HINT", default = "{}"),
-                WfField("conexao", "Conexão (opcional)", WfField.Kind.TEXT),
+                WfField("conexao", "Conta (opcional)", WfField.Kind.TEXT),
             )),
-        WfNodeType("mcp", "Ferramenta MCP", CAT_APPS, "Chama uma ferramenta de um conector MCP configurado.", 0xFF2EC4C4, "mcp",
+        WfNodeType("mcp", "Ferramenta MCP (antigo)", CAT_APPS, "Use o nó Conector › MCP.", 0xFF2EC4C4, "mcp", hidden = true,
             fields = listOf(
                 WfField("tool", "Ferramenta", WfField.Kind.TEXT, "mcp_<conector>__<ferramenta>", required = true),
                 WfField("args", "Argumentos (JSON)", WfField.Kind.JSON, TEMPLATE_HINT, default = "{}"),
@@ -184,13 +189,13 @@ object WfCatalog {
         WfPreset("Extrair dados (JSON)", CAT_AI, "agent", "Transforma texto em JSON estruturado.", mapOf("prompt" to "Extraia nome, e-mail, telefone e assunto do texto abaixo e responda APENAS com um JSON válido com essas chaves:\n\n{{prev}}")),
         WfPreset("Responder e-mail", CAT_AI, "agent", "Rascunha uma resposta educada.", mapOf("prompt" to "Escreva uma resposta curta, cordial e profissional para esta mensagem:\n\n{{prev}}")),
         // Apps (hub de conectores / APIs)
-        WfPreset("Gmail · enviar e-mail", CAT_APPS, "connector", "Envia um e-mail pelo Gmail conectado.", mapOf("conector" to "gmail", "acao" to "send_email",
+        WfPreset("Gmail · enviar e-mail", CAT_APPS, "connector", "Envia um e-mail pelo Gmail conectado.", mapOf("source" to "hub", "conector" to "gmail", "acao" to "send_email",
             "campos" to "{\"receiver\": [\"email@exemplo.com\"], \"subject\": \"Resumo\", \"body_text\": \"{{prev}}\"}")),
-        WfPreset("Google Sheets · nova linha", CAT_APPS, "connector", "Adiciona uma linha numa planilha.", mapOf("conector" to "google-sheets", "acao" to "insert_row",
+        WfPreset("Google Sheets · nova linha", CAT_APPS, "connector", "Adiciona uma linha numa planilha.", mapOf("source" to "hub", "conector" to "google-sheets", "acao" to "insert_row",
             "campos" to "{\"values\": {\"A\": \"{{trigger.time}}\", \"B\": \"{{prev}}\"}}")),
-        WfPreset("Slack · mensagem", CAT_APPS, "connector", "Envia mensagem num canal do Slack.", mapOf("conector" to "slack", "acao" to "send_channel_message",
+        WfPreset("Slack · mensagem", CAT_APPS, "connector", "Envia mensagem num canal do Slack.", mapOf("source" to "hub", "conector" to "slack", "acao" to "send_channel_message",
             "campos" to "{\"channel\": \"#geral\", \"text\": \"{{prev}}\"}")),
-        WfPreset("Notion · nova página", CAT_APPS, "connector", "Cria um item num banco do Notion.", mapOf("conector" to "notion", "acao" to "create_database_item",
+        WfPreset("Notion · nova página", CAT_APPS, "connector", "Cria um item num banco do Notion.", mapOf("source" to "hub", "conector" to "notion", "acao" to "create_database_item",
             "campos" to "{\"title\": \"{{trigger.time}}\", \"content\": \"{{prev}}\"}")),
         WfPreset("Telegram · mensagem", CAT_APPS, "http", "Envia mensagem por um bot do Telegram (troque TOKEN e CHAT_ID).", mapOf("method" to "POST",
             "url" to "https://api.telegram.org/botTOKEN/sendMessage", "headers" to "Content-Type: application/json",

@@ -60,6 +60,35 @@ object WorkflowEngine {
         }
     }
 
+    /** Espera uma execução terminar (ou ficar aguardando aprovação). Null se passar do tempo. */
+    suspend fun awaitRun(runId: String, timeoutMs: Long): WfRun? {
+        val end = System.currentTimeMillis() + timeoutMs
+        while (System.currentTimeMillis() < end) {
+            val r = WorkflowStore.runs.value.firstOrNull { it.id == runId }
+            if (r != null && r.status != "running") return r
+            delay(400)
+        }
+        return null
+    }
+
+    /** Testa um nó sozinho, usando as saídas da última execução como dados de entrada ({{prev}}, {{id}}). */
+    suspend fun testNode(w: Workflow, nodeId: String): NodeResult {
+        val node = w.nodes.firstOrNull { it.id == nodeId } ?: return NodeResult(error = "Nó não encontrado.")
+        if (node.type == "approval") return NodeResult(error = "A aprovação não é testada sozinha: execute o fluxo inteiro.")
+        val outputs = linkedMapOf<String, String>()
+        WorkflowStore.runsOf(w.id).reversed().forEach { run -> run.steps.filter { it.status == "ok" }.forEach { outputs[it.nodeId] = it.output } }
+        val prev = w.edges.filter { it.to == nodeId }.firstNotNullOfOrNull { outputs[it.from] }.orEmpty()
+        val labels = w.nodes.associate { it.id to WfLogic.label(it) }
+        val vars = mapOf("trigger.time" to java.text.SimpleDateFormat("yyyy-MM-dd HH:mm", java.util.Locale.US).format(java.util.Date()),
+            "trigger.type" to "test", "workflow.name" to w.name)
+        fun r(key: String) = WfLogic.render(node.config[key] ?: WfCatalog.of(node.type).fields.firstOrNull { it.key == key }?.default.orEmpty(), outputs, labels, prev, vars)
+        if (node.type == "delay") return NodeResult(prev)
+        val run = WfRun(workflowId = w.id, workflowName = w.name, trigger = "test")
+        return try { runNode(w, run, node, prev, ::r) { } } catch (c: kotlinx.coroutines.CancellationException) { throw c } catch (e: Throwable) {
+            NodeResult(error = (e.message ?: e.javaClass.simpleName).take(1_500))
+        }
+    }
+
     /** Resposta do usuário a um nó de Aprovação. */
     fun approve(runId: String, nodeId: String, ok: Boolean) { approvals.remove("$runId|$nodeId")?.complete(ok) }
     fun pendingApproval(runId: String, nodeId: String) = approvals.containsKey("$runId|$nodeId")
@@ -100,6 +129,8 @@ object WorkflowEngine {
                 WfLogic.nextNodes(w, node.id, res.port).forEach { queue.add(it to res.output) }
             }
             save(run.copy(status = "ok", finishedAt = System.currentTimeMillis()))
+            // Versão testada com sucesso (vale para publicar enquanto ninguém alterar nós/ligações).
+            WorkflowStore.get(w.id)?.let { cur -> val sig = WfLogic.signature(w); if (WfLogic.signature(cur) == sig && cur.testedSig != sig) WorkflowStore.upsert(cur.copy(testedSig = sig)) }
         } catch (c: kotlinx.coroutines.CancellationException) {
             if (run.status == "running" || run.status == "waiting") save(run.copy(status = "cancelled", finishedAt = System.currentTimeMillis(), error = "Parada pelo usuário."))
         } catch (e: Throwable) {
@@ -111,7 +142,7 @@ object WorkflowEngine {
     }
 
     private fun notifyResult(w: Workflow, run: WfRun) {
-        if (run.trigger == "manual") return
+        if (run.trigger == "manual" || run.trigger == "test") return
         runCatching {
             dev.cueopen.app.notify.NotificationCenter.post("Fluxo \"${w.name}\" falhou", run.error.take(200),
                 dev.cueopen.app.notify.NotificationCenter.Priority.HIGH, dev.cueopen.app.notify.NotificationCenter.Category.FAILURE)
@@ -151,19 +182,16 @@ object WorkflowEngine {
             }
 
             "connector" -> {
-                if (!dev.cueopen.app.connectors.HubConnectors.available(app.store))
-                    return NodeResult(error = "O hub de conectores não está ligado (Conectores › Apps).")
                 val camposText = r("campos").ifBlank { "{}" }
-                val campos = runCatching { Json.parseToJsonElement(camposText) }.getOrElse { return NodeResult(error = "Campos não são um JSON válido depois de preencher os valores: ${camposText.take(300)}") }
-                val out = dev.cueopen.app.connectors.HubConnectors.run(app.store, r("conector").trim(), r("acao").trim(), campos, r("conexao").trim(), full = true)
-                if (Regex("^\\s*(ERRO|ERROR|RECUSADO|Falha)", RegexOption.IGNORE_CASE).containsMatchIn(out)) NodeResult(error = out.take(1_500)) else NodeResult(out)
+                val campos = runCatching { Json.parseToJsonElement(camposText) as JsonObject }.getOrElse { return NodeResult(error = "Campos não são um objeto JSON válido depois de preencher os valores: ${camposText.take(300)}") }
+                val o = WfConnectors.run(app.store, node.config["source"].orEmpty().ifBlank { WfConnectors.HUB }, r("conector").trim(), r("acao").trim(), campos, r("conexao").trim())
+                NodeResult(o.output, error = o.error)
             }
-
             "mcp" -> {
                 val argsText = r("args").ifBlank { "{}" }
                 val args = runCatching { Json.parseToJsonElement(argsText) as JsonObject }.getOrElse { return NodeResult(error = "Argumentos não são um objeto JSON válido: ${argsText.take(300)}") }
                 val out = dev.cueopen.app.connectors.Connectors.callTool(app.store, r("tool").trim(), args)
-                if (Regex("^\\s*(ERRO|ERROR|RECUSADO)", RegexOption.IGNORE_CASE).containsMatchIn(out)) NodeResult(error = out.take(1_500)) else NodeResult(out)
+                if (Regex("^\\s*(ERRO|ERROR|RECUSADO|Falha)", RegexOption.IGNORE_CASE).containsMatchIn(out)) NodeResult(error = out.take(1_500)) else NodeResult(out)
             }
 
             "http" -> withContext(Dispatchers.IO) {
@@ -240,7 +268,8 @@ object WorkflowEngine {
             val code = c.responseCode
             val text = runCatching { (if (code >= 400) c.errorStream else c.inputStream)?.bufferedReader()?.use { it.readText() } }.getOrNull().orEmpty().take(200_000)
             val data = runCatching { Json.parseToJsonElement(text) }.getOrNull()
-            val out = buildJsonObject { put("status", code); put("body", text.take(50_000)); if (data != null) put("data", data) }.toString()
+            val out = buildJsonObject { put("status", code); put("body", text.take(50_000)); if (data != null) put("data", data)
+                if (data == null && Regex("<(html|body|div|p)[\\s>]", RegexOption.IGNORE_CASE).containsMatchIn(text)) put("text", WfLogic.htmlText(text).take(20_000)) }.toString()
             if (code >= 400) NodeResult(out, error = "HTTP $code: ${text.take(400)}") else NodeResult(out)
         } catch (e: Exception) {
             NodeResult(error = "Falha de rede: ${e.message ?: e.javaClass.simpleName}")

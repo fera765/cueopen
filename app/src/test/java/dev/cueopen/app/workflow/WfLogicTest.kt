@@ -61,4 +61,28 @@ class WfLogicTest {
         assertEquals(listOf(s.id), WfLogic.nextNodes(w, i.id, "true").map { it.id })
         assertEquals(listOf(n.id), WfLogic.nextNodes(w, i.id, "false").map { it.id })
     }
+
+    @Test fun htmlTextStripsMarkup() {
+        val t = WfLogic.htmlText("<html><head><title>x</title></head><body><script>var a=1</script><h1>Olá</h1><p>Mundo &amp; cia</p></body></html>")
+        assertTrue(t.contains("Olá")); assertTrue(t.contains("Mundo & cia")); assertFalse(t.contains("var a"))
+    }
+
+    @Test fun pathsListNestedKeys() {
+        val p = WfLogic.paths("""{"status":"ok","data":{"id":"1","items":[{"name":"a"}]}}""")
+        assertTrue("data.id" in p); assertTrue("data.items.0.name" in p)
+    }
+
+    @Test fun layoutPutsChainLeftToRight() {
+        val t = WfNode(type = "trigger_manual"); val h = WfNode(type = "http"); val n = WfNode(type = "notify")
+        val w = WfLogic.layout(Workflow(nodes = listOf(n, h, t), edges = listOf(WfEdge(from = t.id, to = h.id), WfEdge(from = h.id, to = n.id))))
+        val x = w.nodes.associate { it.id to it.x }
+        assertTrue(x.getValue(t.id) < x.getValue(h.id)); assertTrue(x.getValue(h.id) < x.getValue(n.id))
+    }
+
+    @Test fun signatureChangesWithConfig() {
+        val a = WfNode(id = "a", type = "notify", config = mapOf("title" to "x"))
+        val w = Workflow(nodes = listOf(a))
+        assertEquals(WfLogic.signature(w), WfLogic.signature(w.copy(name = "outro")))
+        assertFalse(WfLogic.signature(w) == WfLogic.signature(w.copy(nodes = listOf(a.copy(config = mapOf("title" to "y"))))))
+    }
 }

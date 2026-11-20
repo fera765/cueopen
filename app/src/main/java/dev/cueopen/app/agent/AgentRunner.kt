@@ -3689,14 +3689,20 @@ class AgentRunner(
             put("max_parallel", int("Agentes trabalhando ao mesmo tempo (1-8; padrão 6)"))
             put("budget_tokens", int("Orçamento de tokens por agente, contando o prompt de cada chamada (150000-2000000; padrão 600000)"))
         }, listOf("goal", "tasks_json")))
-        if (allowMultiAgent) add(tool("workflow_manage", "Fluxos (automação estilo n8n, página Fluxos na barra lateral): action=list | get | create | update | run | enable | disable | delete. " +
-            "create/update recebem workflow_json {name, nodes:[{id, type, label, config}], edges:[{from, to, port}]}. Tipos: trigger_manual, trigger_schedule " +
-            "(config mode=interval|daily|weekly, minutes, time HH:mm, weekday 1-7), agent (prompt, agent), connector (conector, acao, campos JSON, conexao), mcp (tool, args JSON), " +
-            "http (method, url, headers, body), shell (command), set (values: linhas nome = valor), if (left, op=contains|not_contains|equals|not_equals|gt|lt|empty|not_empty|regex, right; " +
-            "portas true/false nas edges), delay (seconds), approval (question; portas true/false), notify (title, text). Em textos use {{prev}}, {{<id>}} e {{<id>.campo}}. " +
-            "Use quando o usuário pedir uma automação recorrente ou um fluxo; diga o nome e que ele pode abrir e editar em Fluxos (barra lateral).", buildJsonObject {
-            put("action", str("list | get | create | update | run | enable | disable | delete"))
-            put("id", str("Id ou nome do fluxo (get/update/run/enable/disable/delete)"))
+        if (allowMultiAgent) add(tool("workflow_manage", "Fluxos (automação estilo n8n; página Fluxos na barra lateral). Use SÓ quando o usuário pedir claramente para criar/alterar um fluxo ou automação recorrente. " +
+            "Roteiro obrigatório: 1) descubra os conectores ativos (conectores_listar; ações e campos com conector_acoes); 2) action=create (salva RASCUNHO e valida); " +
+            "3) corrija com update até a validação passar; 4) action=test (executa de verdade e devolve cada passo); 5) se falhar, update + test de novo; " +
+            "6) só com teste ok: action=publish (ativa o agendamento). Nunca diga que publicou sem publish OK. Avise o usuário que o teste executa ações reais (ex.: envia o e-mail). " +
+            "Actions: list | get | create | update | validate | test | status | publish | run | disable | delete. " +
+            "workflow_json = {name, nodes:[{id, type, label, config}], edges:[{from, to, port}]} (ids curtos como t1, h1, a1; layout é automático). Tipos e config (valores em texto): " +
+            "trigger_manual; trigger_schedule (mode=interval|daily|weekly, minutes, time HH:mm, weekday 1-7); " +
+            "agent (prompt, agent, timeout min) — IA para resumir/classificar/escrever; a resposta vira o texto da saída; " +
+            "connector (source=hub|mcp|app, conector=<id do app ex. gmail | id do servidor MCP | id do conector do app>, acao=<nome técnico>, campos=objeto JSON com os campos da ação, conexao=<conta, opcional>) — saída {status, connector, action, summary, data, text}; " +
+            "http (method, url, headers, body, onError=stop|continue) — saída {status, body, data (se JSON), text (texto limpo se HTML)}; shell (command); set (values: linhas nome = valor); " +
+            "if (left, op=contains|not_contains|equals|not_equals|gt|lt|empty|not_empty|regex, right; edges com port true/false); delay (seconds); approval (question; port true/false); notify (title, text). " +
+            "Dados entre nós: {{prev}} (saída anterior), {{<id>}}, {{<id>.campo.sub}} (JSON), {{trigger.time}}. Ex.: site → resumo → e-mail: trigger_schedule(interval 30) → http GET → agent prompt \"Resuma: {{h1.text}}\" → connector gmail send_email campos {\"receiver\":[\"x@y.com\"],\"subject\":\"Resumo\",\"body_text\":\"{{a1}}\"}.", buildJsonObject {
+            put("action", str("list | get | create | update | validate | test | status | publish | run | disable | delete"))
+            put("id", str("Id ou nome do fluxo"))
             put("workflow_json", str("JSON do fluxo para create/update"))
         }, listOf("action")))
         val term = agent?.useTerminal != false
@@ -5853,53 +5859,83 @@ class AgentRunner(
     }
 
     /** Ferramenta workflow_manage (fora do runTool, que está no limite de tamanho da JVM). */
-    private fun workflowTool(argsJson: String): String = runCatching {
+    private suspend fun workflowTool(argsJson: String): String = runCatching {
         val o = org.json.JSONObject(argsJson)
         val st = dev.cueopen.app.workflow.WorkflowStore
+        val logic = dev.cueopen.app.workflow.WfLogic
+        val engine = dev.cueopen.app.workflow.WorkflowEngine
         val id = o.optString("id").trim()
         fun find() = st.get(id) ?: st.flows.value.firstOrNull { it.name.equals(id, true) }
-        fun describe(w: dev.cueopen.app.workflow.Workflow) = "\"${w.name}\" (id ${w.id}) · ${w.nodes.size} nós · " + (if (w.enabled) "ativo" else "inativo") +
-            dev.cueopen.app.workflow.WfLogic.problems(w).takeIf { it.isNotEmpty() }?.let { "\nAjustes pendentes: " + it.joinToString("; ") }.orEmpty()
-        when (o.optString("action").trim().lowercase()) {
+        fun describe(w: dev.cueopen.app.workflow.Workflow) = "\"${w.name}\" (id ${w.id}) · ${w.nodes.size} nós · " +
+            (if (w.enabled) "publicado" else "rascunho") + (if (w.testedSig.isNotEmpty() && w.testedSig == logic.signature(w)) " · testado" else " · não testado") +
+            logic.problems(w).takeIf { it.isNotEmpty() }?.let { "\nAjustes pendentes: " + it.joinToString("; ") }.orEmpty()
+        suspend fun validation(w: dev.cueopen.app.workflow.Workflow): List<String> =
+            logic.problems(w).filterNot { it.contains("não está ligado a nada") } +
+                w.nodes.flatMap { dev.cueopen.app.workflow.WfConnectors.validate(store, it) }
+        fun report(r: dev.cueopen.app.workflow.WfRun) = "Status: ${r.status}" + (if (r.error.isNotBlank()) " — ${r.error.take(600)}" else "") + "\n" +
+            r.steps.joinToString("\n") { s -> "- ${s.label} [${s.type}] ${s.status}" + (if (s.error.isNotBlank()) ": ${s.error.take(400)}" else if (s.output.isNotBlank()) " → " + s.output.replace(Regex("\\s+"), " ").take(350) else "") }
+        when (val action = o.optString("action").trim().lowercase()) {
             "list" -> st.flows.value.joinToString("\n") { "- " + describe(it) }.ifBlank { "Nenhum fluxo ainda." }
             "get" -> find()?.let { kotlinx.serialization.json.Json.encodeToString(dev.cueopen.app.workflow.Workflow.serializer(), it) } ?: "ERRO: fluxo não encontrado."
             "create", "update" -> {
                 val j = org.json.JSONObject(o.optString("workflow_json").ifBlank { "{}" })
-                val isUpdate = o.optString("action").equals("update", true)
-                val base = if (isUpdate) (find() ?: return@runCatching "ERRO: fluxo não encontrado.") else null
+                val base = if (action == "update") (find() ?: return@runCatching "ERRO: fluxo não encontrado.") else null
                 val nodesJ = j.optJSONArray("nodes") ?: org.json.JSONArray()
-                val types = dev.cueopen.app.workflow.WfCatalog.TYPES.map { it.type }.toSet()
+                val types = dev.cueopen.app.workflow.WfCatalog.TYPES.filter { !it.hidden }.map { it.type }.toSet()
                 val nodes = mutableListOf<dev.cueopen.app.workflow.WfNode>()
                 for (i in 0 until nodesJ.length()) {
                     val n = nodesJ.getJSONObject(i)
-                    val type = n.optString("type")
-                    if (type !in types) return@runCatching "ERRO: tipo de nó desconhecido \"$type\". Tipos: ${types.joinToString()}."
+                    var type = n.optString("type")
                     val cfgJ = n.optJSONObject("config") ?: org.json.JSONObject()
-                    val cfg = cfgJ.keys().asSequence().associateWith { k -> cfgJ.get(k).toString() }
-                    // Layout automático da esquerda para a direita (o usuário reorganiza no canvas).
-                    nodes += dev.cueopen.app.workflow.WfNode(id = n.optString("id").ifBlank { dev.cueopen.app.workflow.WfIds.new() }, type = type,
-                        label = n.optString("label"), x = 40f + 240f * i, y = 160f + if (i % 2 == 1) 40f else 0f, config = cfg)
+                    var cfg = cfgJ.keys().asSequence().associateWith { k -> cfgJ.get(k).toString() }
+                    if (type == "mcp") { type = "connector"; cfg = mapOf("source" to "mcp", "conector" to cfg["conector"].orEmpty(), "acao" to cfg["tool"].orEmpty(), "campos" to cfg["args"].orEmpty().ifBlank { "{}" }) }
+                    if (type !in types) return@runCatching "ERRO: tipo de nó desconhecido \"$type\". Tipos: ${types.joinToString()}."
+                    if (type == "connector" && cfg["source"].isNullOrBlank()) cfg = cfg + ("source" to "hub")
+                    nodes += dev.cueopen.app.workflow.WfNode(id = n.optString("id").ifBlank { dev.cueopen.app.workflow.WfIds.new() }, type = type, label = n.optString("label"), config = cfg)
                 }
+                if (nodes.map { it.id }.toSet().size != nodes.size) return@runCatching "ERRO: ids de nós repetidos."
                 val edgesJ = j.optJSONArray("edges") ?: org.json.JSONArray()
                 val edges = (0 until edgesJ.length()).map { i -> edgesJ.getJSONObject(i).let { e ->
                     dev.cueopen.app.workflow.WfEdge(from = e.optString("from"), to = e.optString("to"), port = e.optString("port").ifBlank { "main" }) } }
-                val w = (base ?: dev.cueopen.app.workflow.Workflow()).copy(name = j.optString("name").ifBlank { base?.name ?: "Novo fluxo" },
-                    nodes = if (nodes.isEmpty() && base != null) base.nodes else nodes, edges = if (edges.isEmpty() && base != null) base.edges else edges)
+                val finalNodes = if (nodes.isEmpty() && base != null) base.nodes else nodes
+                val ids = finalNodes.map { it.id }.toSet()
+                edges.firstOrNull { it.from !in ids || it.to !in ids }?.let { return@runCatching "ERRO: ligação ${it.from} → ${it.to} aponta para nó inexistente. Ids: ${ids.joinToString()}." }
+                var w = (base ?: dev.cueopen.app.workflow.Workflow()).copy(name = j.optString("name").ifBlank { base?.name ?: "Novo fluxo" },
+                    nodes = finalNodes, edges = if (edges.isEmpty() && base != null) base.edges else edges, enabled = false)
+                w = logic.layout(w)
+                if (base != null && base.enabled) dev.cueopen.app.workflow.WorkflowScheduler.cancel(ctx, base.id)
                 val saved = st.upsert(w)
-                if (saved.enabled) dev.cueopen.app.workflow.WorkflowScheduler.sync(ctx, saved)
-                "OK: fluxo salvo — " + describe(saved)
+                val v = validation(saved)
+                "OK: rascunho salvo — " + describe(saved) + "\n" + (if (v.isEmpty()) "Validação: ok. Próximo passo: action=test id=${saved.id}."
+                    else "Validação falhou:\n" + v.joinToString("\n") { "• $it" } + "\nCorrija com action=update (veja conectores com conectores_listar / conector_acoes).")
             }
-            "run" -> find()?.let { w -> dev.cueopen.app.workflow.WorkflowEngine.start(w.id).fold({ "Execução iniciada (id $it). Acompanhe em Fluxos › ${w.name} › Execuções." }, { "ERRO: ${it.message}" }) } ?: "ERRO: fluxo não encontrado."
-            "enable", "disable" -> find()?.let { w ->
-                val on = o.optString("action").equals("enable", true)
-                val blocking = dev.cueopen.app.workflow.WfLogic.problems(w).filterNot { it.contains("não está ligado") }
-                if (on && blocking.isNotEmpty()) "ERRO: corrija antes de ativar: ${blocking.joinToString("; ")}"
-                else { val v = st.upsert(w.copy(enabled = on)); dev.cueopen.app.workflow.WorkflowScheduler.sync(ctx, v); "OK: " + describe(v) }
-            } ?: "ERRO: fluxo não encontrado."
+            "validate" -> find()?.let { w -> validation(w).let { v -> if (v.isEmpty()) "Validação: ok." else "Validação falhou:\n" + v.joinToString("\n") { "• $it" } } } ?: "ERRO: fluxo não encontrado."
+            "test" -> {
+                val w = find() ?: return@runCatching "ERRO: fluxo não encontrado."
+                val v = validation(w)
+                if (v.isNotEmpty()) return@runCatching "ERRO: corrija antes de testar:\n" + v.joinToString("\n") { "• $it" }
+                val runId = engine.start(w.id, trigger = "test").getOrElse { return@runCatching "ERRO: ${it.message}" }
+                val r = engine.awaitRun(runId, 5 * 60_000L) ?: return@runCatching "O teste ainda está rodando (id $runId). Consulte com action=status id=${w.id}."
+                if (r.status == "waiting") "O teste está aguardando a aprovação do usuário (nó Aprovação). Peça para ele aprovar em Fluxos › ${w.name} › Execuções; depois consulte action=status."
+                else "Teste concluído.\n" + report(r) + if (r.status == "ok") "\nTudo certo: publique com action=publish id=${w.id}." else "\nCorrija com action=update e teste de novo."
+            }
+            "status" -> find()?.let { w -> st.runsOf(w.id).firstOrNull()?.let { "Última execução (${it.trigger}):\n" + report(it) } ?: "Nenhuma execução ainda." } ?: "ERRO: fluxo não encontrado."
+            "publish" -> {
+                val w = find() ?: return@runCatching "ERRO: fluxo não encontrado."
+                val v = validation(w)
+                if (v.isNotEmpty()) return@runCatching "ERRO: corrija antes de publicar:\n" + v.joinToString("\n") { "• $it" }
+                if (w.testedSig != logic.signature(w)) return@runCatching "ERRO: esta versão ainda não passou num teste completo. Rode action=test id=${w.id} primeiro."
+                val p = st.upsert(w.copy(enabled = true)); dev.cueopen.app.workflow.WorkflowScheduler.sync(ctx, p)
+                val next = dev.cueopen.app.workflow.WorkflowScheduler.nextRuns(p).minOrNull()
+                "OK: publicado — " + describe(p) + (next?.let { "\nPróxima execução: " + java.text.SimpleDateFormat("dd/MM HH:mm", java.util.Locale("pt", "BR")).format(java.util.Date(it)) } ?: "\nSem agendamento: roda quando executado.")
+            }
+            "run" -> find()?.let { w -> engine.start(w.id).fold({ "Execução iniciada (id $it). Veja o resultado com action=status id=${w.id}." }, { "ERRO: ${it.message}" }) } ?: "ERRO: fluxo não encontrado."
+            "enable" -> "ERRO: use action=publish (valida e exige teste aprovado antes de ativar)."
+            "disable" -> find()?.let { w -> val v = st.upsert(w.copy(enabled = false)); dev.cueopen.app.workflow.WorkflowScheduler.sync(ctx, v); "OK: despublicado — " + describe(v) } ?: "ERRO: fluxo não encontrado."
             "delete" -> find()?.let { w -> dev.cueopen.app.workflow.WorkflowScheduler.cancel(ctx, w.id); st.delete(w.id); "OK: fluxo \"${w.name}\" excluído." } ?: "ERRO: fluxo não encontrado."
             else -> "ERRO: action inválida."
         }
-    }.getOrElse { "ERRO: ${it.message}" }
+    }.getOrElse { if (it is kotlinx.coroutines.CancellationException) throw it; "ERRO: ${it.message}" }
 
     /** Pasta do projeto que o exército deste chat está construindo (caminho do sandbox). */
     fun projectDirOf(sessionId: String): String? = squadProjectDir[sessionId]
