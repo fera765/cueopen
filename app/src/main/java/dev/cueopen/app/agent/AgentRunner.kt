@@ -1658,7 +1658,11 @@ class AgentRunner(
             if (s.sectionId != null || store.pagesIn(pageSpace(sessionId)).isNotEmpty()) ToolContextPlanner.load(sessionId, listOf("pages"))  // browser_js/network/console sempre à mão
         val (contextPlan, stepToolsPlanned) = toolContextPlan(sessionId, s, allTools)
             // Entrega final após "pare": só ler/escrever/enviar/encerrar.
-            val stepTools = if (sessionId in finalDelivery) kotlinx.serialization.json.JsonArray(allTools.filter { toolName(it) in FINAL_DELIVERY_TOOLS }) else stepToolsPlanned
+            val stepTools = if (sessionId in finalDelivery) kotlinx.serialization.json.JsonArray(allTools.filter { toolName(it) in FINAL_DELIVERY_TOOLS })
+                // Agente do exército: só o que constrói software (arquivos, terminal, pesquisa, leitura do preview). Antes ia o
+                // catálogo inteiro (~62 schemas, ~12 mil tokens por chamada: agenda, cofre, Pages, cards…) sem uso nenhum.
+                else if (s.squadParentId != null) kotlinx.serialization.json.JsonArray(stepToolsPlanned.filter { toolName(it) in SQUAD_WORKER_TOOLS })
+                else stepToolsPlanned
             // O schema enviado ao provider também é uma allowlist de execução para esta volta.
             val exposedToolNames = stepTools.mapNotNull(::toolName).toSet()
             ExecutionLedger.setAllowed(sessionId, exposedToolNames)
@@ -1678,7 +1682,8 @@ class AgentRunner(
                     store.editSession(sessionId) { it.copy(status = SessionStatus.DONE) }
                     return
                 }
-                safeOutput.coerceAtMost(2048L).toInt()
+                // 2048 cortava o file_write de um componente inteiro: os argumentos chegavam vazios ({}) ou sem content.
+                safeOutput.coerceAtMost(8192L).toInt()
             } ?: 8192
             var currentReplyTokenLimit = replyTokenLimit
             val replyRaw = run {
@@ -1768,7 +1773,7 @@ class AgentRunner(
                             if (resumeAt == null) store.editSession(sessionId) { it.copy(status = SessionStatus.WAITING_USER) }
                             return
                         }
-                        if (llmFailure.responseTruncated && tokenBudgetOverride == null) {
+                        if (llmFailure.responseTruncated) {
                             currentReplyTokenLimit = (currentReplyTokenLimit.toLong() * 2L).coerceAtMost(16_000L).toInt()
                         }
                         val delayMs = dev.cueopen.app.llm.LlmRecovery.withJitter(
@@ -1781,7 +1786,7 @@ class AgentRunner(
                 @Suppress("UNREACHABLE_CODE") return
             }
             // Nomes de ferramenta "de hábito" (grep, read_file, fetch…) viram a ferramenta real exposta.
-            val reply = replyRaw.copy(toolCalls = replyRaw.toolCalls.map { tc -> tc.copy(name = ToolAliases.resolve(tc.name, exposedToolNames)) })
+            val reply = replyRaw.copy(toolCalls = replyRaw.toolCalls.map { tc -> squadFixArgs(sessionId, tc.copy(name = ToolAliases.resolve(tc.name, exposedToolNames))) })
             val modelId = stepModel(agent)
             dev.cueopen.app.llm.UsageLedger.record(ctx, store.agent(store.session(sessionId)?.agentId)?.name ?: "Sem agent", modelId,
                 dev.cueopen.app.llm.ProviderCatalog.activeId(store.settings), reply.usage.prompt.toLong(), reply.usage.completion.toLong())
@@ -1956,6 +1961,8 @@ class AgentRunner(
                     ToolResult("RECUSADO: a ferramenta '${call.name}' não foi disponibilizada neste passo. Nenhuma ação foi executada; continue somente com ferramentas expostas ou carregue a capacidade autorizada.")
                 } else if (gate != null) {
                     gate
+                } else if (toolArgsGuard(call) != null) {
+                    ToolResult(toolArgsGuard(call)!!)
                 } else if (blockedSnapshotReuse) {
                     ToolResult("ERRO: Snapshot ausente ou invalidado; nenhuma ação foi executada com o ID já recusado. Use somente IDs da releitura atual:\n${blockedSnapshotRead.orEmpty()}")
                 } else try {
@@ -5800,11 +5807,48 @@ class AgentRunner(
 
     private data class SquadTask(val id: String, val role: String, val task: String, val target: String, val deps: List<String>, val file: String = "")
 
+    /**
+     * Chamada de arquivo incompleta (resposta cortada pelo limite de saída do modelo): NÃO executa. Antes, file_write sem
+     * content gravava o arquivo VAZIO (ex.: Footer.jsx sem export default derrubou a página) e "{}" repetia em loop.
+     */
+    private fun toolArgsGuard(call: ToolCall): String? {
+        if (call.name != "file_write" && call.name != "file_edit") return null
+        val o = runCatching { org.json.JSONObject(call.argsJson.ifBlank { "{}" }) }.getOrNull()
+        val cut = "Sua resposta foi cortada pelo limite de saída antes de terminar os argumentos; NADA foi gravado. " +
+            "Escreva arquivos grandes em partes: file_write com a 1ª parte (path + content) e depois file_write com append=true para as seguintes " +
+            "(cada parte com até ~150 linhas). Não repita a mesma chamada inteira."
+        return when {
+            o == null || o.length() == 0 -> "ERRO: argumentos vazios. $cut"
+            o.optString("path").isBlank() -> "ERRO: informe path. $cut"
+            call.name == "file_write" && !o.has("content") -> "ERRO: content ausente — o arquivo NÃO foi gravado (gravá-lo vazio quebraria o projeto). $cut"
+            call.name == "file_edit" && (!o.has("old_text") || !o.has("new_text")) -> "ERRO: file_edit precisa de old_text e new_text. $cut"
+            else -> null
+        }
+    }
+
+    /** Agente do exército: caminho relativo ("src/…") vira o caminho na pasta do projeto do time, antes de executar. */
+    private fun squadFixArgs(sessionId: String, tc: ToolCall): ToolCall {
+        if (tc.name !in setOf("file_read", "file_write", "file_edit", "file_list", "file_search", "show_file")) return tc
+        val parent = store.session(sessionId)?.squadParentId ?: return tc
+        val proj = squadProjectDir[parent]?.trimEnd('/') ?: return tc
+        val o = runCatching { org.json.JSONObject(tc.argsJson) }.getOrNull() ?: return tc
+        val p = o.optString("path").trim()
+        if (p.isBlank() || p.startsWith("/")) return tc
+        val root = sandbox.workspaceFor(sessionId)
+        if (File(root, p).exists() || p.startsWith(proj.substringAfterLast('/') + "/")) return tc
+        o.put("path", proj + "/" + p.removePrefix("./"))
+        return tc.copy(argsJson = o.toString())
+    }
+
     /** Pasta do projeto que o exército deste chat está construindo (caminho do sandbox). */
     fun projectDirOf(sessionId: String): String? = squadProjectDir[sessionId]
 
     /** Schemas de TODAS as ferramentas (como o modelo as recebe), para o arquivo "Dados" das Configurações. */
     fun toolSchemasForExport(): String = tools(null, allowMultiAgent = true).toString()
+
+    private val SQUAD_WORKER_TOOLS = setOf("file_read", "file_write", "file_edit", "file_list", "file_search", "shell", "web_search", "web_fetch",
+        "browser_navigate", "browser_read", "browser_snapshot", "browser_scroll", "browser_wait_for", "browser_console", "browser_js",
+        "update_plan", "notes_write", "finish", "complete_step", "tools_load")
 
     /** Chat excluído: derruba o servidor de desenvolvimento do exército e esquece o estado dele. */
     fun releaseSession(sessionId: String) {
@@ -5864,6 +5908,23 @@ class AgentRunner(
                     else "export default over\n"))
             wrapper.name
         }.getOrNull()
+    }
+
+    /** Imports default do App (./components/X) que apontam para arquivo ausente, vazio ou sem export default. */
+    private fun brokenImports(dir: File): List<String> {
+        val app = listOf("src/App.tsx", "src/App.jsx", "src/App.js").map { File(dir, it) }.firstOrNull { it.isFile } ?: return emptyList()
+        val text = app.readText()
+        return Regex("""import\s+([A-Z]\w*)\s+from\s+['"](\.{1,2}/[^'"]+)['"]""").findAll(text).mapNotNull { m ->
+            val rel = m.groupValues[2]
+            val base = File(app.parentFile, rel).normalize()
+            val f = listOf("", ".jsx", ".tsx", ".js", ".ts", "/index.jsx", "/index.tsx", "/index.js").map { File(base.path + it) }.firstOrNull { it.isFile }
+            when {
+                f == null -> "${m.groupValues[1]} ($rel: arquivo não existe)"
+                f.length() == 0L -> "${m.groupValues[1]} (${f.name}: arquivo vazio)"
+                !Regex("""export\s+default\b""").containsMatchIn(f.readText()) -> "${m.groupValues[1]} (${f.name}: sem export default)"
+                else -> null
+            }
+        }.toList()
     }
 
     /** Âncoras internas (href="#x") sem elemento com id="x" no código do projeto. Devolve (quebradas, ids existentes). */
@@ -5933,12 +5994,13 @@ class AgentRunner(
      * sendo construída no lugar dela desde o primeiro salvamento — sem isso a tela ficava branca até o App ser editado no fim.
      * Devolve tarefa → caminho do arquivo do componente (no sandbox).
      */
-    private fun wireComponents(dir: File, guestDir: String, tasks: List<SquadTask>, log: (String) -> Unit): Map<String, String> {
+    private fun wireComponents(dir: File, guestDir: String, tasks: List<SquadTask>, log: (String) -> Unit): Map<String, Pair<String, String>> {
         val pkg = runCatching { File(dir, "package.json").readText() }.getOrDefault("")
         if (!pkg.contains("\"react\"")) return emptyMap()
         val ts = File(dir, "src/main.tsx").isFile || File(dir, "src/App.tsx").isFile
         val ext = if (ts) "tsx" else "jsx"
         val out = linkedMapOf<String, Pair<String, File>>()  // taskId → (Nome, arquivo)
+        val ids = mutableMapOf<String, String>()  // Nome → id da seção (o do alvo do líder, ex.: #inicio; senão o nome)
         tasks.forEach { t ->
             val fromFile = Regex("""(?:^|/)(?:components|sections|pages)/([A-Za-z][A-Za-z0-9]*)\.(?:jsx|tsx|js|ts)$""").find(t.file)?.groupValues?.get(1)
             val name = fromFile ?: t.target.trim().split(Regex("\\s+")).firstOrNull()?.takeIf { it.startsWith("#") || it.startsWith(".") }?.let { pascal(it.drop(1)) }.orEmpty()
@@ -5948,13 +6010,26 @@ class AgentRunner(
                 t.file.isNotBlank() -> File(dir, t.file.removePrefix("./"))
                 else -> File(dir, "src/components/$name.$ext")
             }
-            if (out.values.none { it.first == name }) out[t.id] = name to f
+            if (out.values.none { it.first == name }) {
+                out[t.id] = name to f
+                ids[name] = t.target.trim().split(Regex("\\s+")).firstOrNull()?.takeIf { it.startsWith("#") && it.length > 1 }
+                    ?.drop(1)?.takeIf { Regex("^[A-Za-z][\\w-]*$").matches(it) } ?: kebab(name)
+            }
         }
         if (out.isEmpty()) return emptyMap()
+        // Ordem natural da página: menu/cabeçalho em cima, rodapé/contato final embaixo (antes o Footer podia cair no meio).
+        fun rank(n: String) = when {
+            Regex("(?i)^(nav|navbar|header|cabecalho|menu|topbar)").containsMatchIn(n) -> 0
+            Regex("(?i)(footer|rodape)").containsMatchIn(n) -> 2
+            else -> 1
+        }
+        val ordered = out.entries.sortedBy { rank(it.value.first) }.associate { it.key to it.value }
+        out.clear(); out.putAll(ordered)
         out.values.forEach { (name, f) ->
             if (!f.exists()) {
                 f.parentFile?.mkdirs()
-                f.writeText("export default function $name() {\n  return (\n    <section id=\"${kebab(name)}\" className=\"${kebab(name)} fluwy-placeholder\"\n" +
+                val sid = ids[name] ?: kebab(name)
+                f.writeText("export default function $name() {\n  return (\n    <section id=\"$sid\" className=\"${kebab(name)} fluwy-placeholder\"\n" +
                     "      style={{ padding: '40px 24px', margin: '12px', border: '2px dashed #c9c9c9', borderRadius: 12, textAlign: 'center', color: '#888', fontFamily: 'system-ui' }}>\n" +
                     "      $name · em construção…\n    </section>\n  )\n}\n")
             }
@@ -5972,7 +6047,7 @@ class AgentRunner(
                 out.values.joinToString("") { "      <${it.first} />\n" } + "    </div>\n  )\n}\n")
             log("App ligado a ${out.size} componentes antes do time entrar (cada seção aparece no lugar dela).")
         } else if (wired < out.size) log("O App já importa $wired de ${out.size} componentes; os demais precisam ser ligados pelo líder.")
-        return out.mapValues { (_, v) -> guestDir.trimEnd('/') + "/" + v.second.relativeTo(dir).path }
+        return out.mapValues { (_, v) -> (guestDir.trimEnd('/') + "/" + v.second.relativeTo(dir).path) to (ids[v.first] ?: kebab(v.first)) }
     }
 
     /** Projeto React + Vite em branco que já roda (o time constrói em cima dele). */
@@ -6291,7 +6366,7 @@ class AgentRunner(
         // (Antes cada agente só sabia o nome dos colegas e inventava ids, âncoras e nomes diferentes.)
         val squadPlanText = buildString {
             if (contract.isNotBlank()) { appendLine("Contrato do projeto (vale para todos, use exatamente):"); appendLine(contract); appendLine() }
-            val secs = tasks.mapNotNull { t -> componentFiles[t.id]?.let { f -> BuildSquad.hintFromPath(f).takeIf { it.isNotBlank() }?.let { it to f } } }
+            val secs = componentFiles.values.map { (f, id) -> id to f }
             if (secs.isNotEmpty()) {
                 appendLine("Seções da página, nesta ordem (id do elemento raiz = alvo dos links do menu):")
                 secs.forEach { (id, f) -> appendLine("- #$id → ${f.substringAfterLast('/')}") }
@@ -6300,22 +6375,23 @@ class AgentRunner(
             }
             appendLine("Quem faz o quê:")
             tasks.forEachIndexed { n, t ->
-                appendLine("- ${personas[n].name} (${personas[n].role}): ${BuildSquad.shortLabel(t.task)}" + (componentFiles[t.id]?.let { " — ${it.substringAfterLast('/')}" } ?: ""))
+                appendLine("- ${personas[n].name} (${personas[n].role}): ${t.task.lineSequence().first().take(140)}" + (componentFiles[t.id]?.let { " — ${it.first.substringAfterLast('/')} (#${it.second})" } ?: ""))
             }
         }.take(6_000)
         squadProjectDir[sessionId]?.let { g -> runCatching { File(sandbox.hostFile(g, sessionId), ".fluwy/TIME.md").apply { parentFile?.mkdirs() }.writeText("# Plano do time\n\nObjetivo: $goal\n\n$squadPlanText") } }
         val workers = tasks.mapIndexed { n, t ->
             val p = personas[n]
             val label = BuildSquad.shortLabel(t.task)
-            val compFile = componentFiles[t.id]
-            val myId = compFile?.let { BuildSquad.hintFromPath(it) }
-            val taskText = t.task + (compFile?.let { "\n\nSeu arquivo: $it — já existe com um esqueleto e JÁ está importado e renderizado no App. Substitua o conteúdo dele pela seção pronta; não edite o App." } ?: "")
+            val compFile = componentFiles[t.id]?.first
+            val myId = componentFiles[t.id]?.second
+            val taskText = t.task + (compFile?.let { "\n\nSeu arquivo: $it — já existe com um esqueleto e JÁ está importado (default) e renderizado no App. " +
+                "Substitua o conteúdo pela seção pronta mantendo `export default function`, e o elemento raiz com id=\"$myId\" (alvo dos links). Não edite o App." } ?: "")
             val child = Session(title = "[Worker ${n + 1}] ${p.name} · $label", agentId = parent?.agentId, squadParentId = sessionId,
                 status = SessionStatus.RUNNING,
                 llm = listOf(LlmMessage("user", PromptContextPolicy.squadTask(p.name, p.role, goal, taskText, t.target.ifBlank { myId?.let { "#$it" }.orEmpty() },
                     teamLine, parentRequest, previewUrl, squadProjectDir[sessionId], wantTailwind, squadPlanText))))
             store.upsertSession(child)
-            BuildSquad.Worker(n, p, t.task, label, child.id, t.target, hint = compFile?.let { BuildSquad.hintFromPath(it) }.orEmpty())
+            BuildSquad.Worker(n, p, t.task, label, child.id, t.target.ifBlank { myId?.let { "#$it" }.orEmpty() }, hint = compFile?.let { BuildSquad.hintFromPath(it) }.orEmpty())
         }
         BuildSquad.edit(squadId) { it.copy(preview = previewUrl, workers = workers, notice = "") }
 
@@ -6341,12 +6417,26 @@ class AgentRunner(
                     sem.withPermit {
                         BuildSquad.editWorker(squadId, n) { it.copy(status = BuildSquad.St.RUNNING, doing = "começando") }
                         loop(w.sessionId, maxStepsOverride = 30, tokenBudgetOverride = budget)
+                        // Limite de passos: o orquestrador manda continuar (até 2x) em vez de deixar o agente esperando o usuário.
+                        var rounds = 0
+                        while (rounds < 2 && store.session(w.sessionId)?.let { ss -> ss.status == SessionStatus.WAITING_USER &&
+                                (ss.items.lastOrNull() as? ChatItem.Error)?.text?.startsWith("Limite de") == true } == true) {
+                            rounds++
+                            BuildSquad.editWorker(squadId, n) { it.copy(doing = "continuando (orquestrador)") }
+                            store.editSession(w.sessionId) { it.copy(status = SessionStatus.RUNNING, llm = it.llm + LlmMessage("user",
+                                "[Orquestrador] Você atingiu o limite de passos. Continue de onde parou e FINALIZE em poucos passos: termine o que falta da SUA tarefa e responda com o resumo (o que fez e quais arquivos).")) }
+                            loop(w.sessionId, maxStepsOverride = 30, tokenBudgetOverride = budget)
+                        }
                         val fin = store.session(w.sessionId)
                         val st = fin?.status
                         // Parou no limite de tokens/passos sem resposta final: NÃO é concluído (antes aparecia ✓ com trabalho pela metade).
                         val lastIsAnswer = fin?.llm?.lastOrNull()?.let { it.role == "assistant" && it.toolCallsJson.isNullOrBlank() && !it.content.isNullOrBlank() } == true
                         val cut = fin?.items?.any { it is ChatItem.Assistant && it.text.startsWith("Progresso parcial preservado") } == true
                         ok = (st == SessionStatus.DONE || st == SessionStatus.IDLE) && lastIsAnswer && !cut
+                        // Componente da tarefa precisa continuar exportando default (o App importa assim).
+                        val compBroken = componentFiles[t.id]?.first?.let { g -> runCatching { sandbox.hostFile(g, sessionId).readText() }.getOrNull() }
+                            ?.let { !Regex("""export\s+default\b""").containsMatchIn(it) } == true
+                        if (ok && compBroken) { ok = false; BuildSquad.editWorker(squadId, n) { it.copy(doing = "componente sem export default") } }
                         if (!ok && (st == SessionStatus.DONE || st == SessionStatus.IDLE))
                             BuildSquad.editWorker(squadId, n) { it.copy(doing = "parou antes de terminar (limite)") }
                     }
@@ -6360,7 +6450,7 @@ class AgentRunner(
                     store.editSession(w.sessionId) { it.copy(status = SessionStatus.ERROR) }
                 }
                 BuildSquad.editWorker(squadId, n) { it.copy(status = if (ok) BuildSquad.St.DONE else BuildSquad.St.FAILED,
-                    doing = if (ok) "pronto" else it.doing.takeIf { d -> d.startsWith("parou") } ?: "falhou") }
+                    doing = if (ok) "pronto" else it.doing.takeIf { d -> d.startsWith("parou") || d.startsWith("componente") } ?: "falhou") }
                 BuildSquad.edit(squadId) { it.copy(log = (it.log + "${w.persona.name}|${w.label}|${if (ok) "ok" else "erro"}").takeLast(60)) }
                 finished[t.id]?.complete(ok)
                 runCatching { terminals.close(w.sessionId) }
@@ -6495,9 +6585,21 @@ class AgentRunner(
             // Espera todos, inclusive os "Doc" chamados no meio; no fim, confere uma última vez se o preview está sem erro.
             var finalChecks = 0
             var anchorsChecked = false
+            var importsChecked = false
             while (true) {
                 val active = synchronized(jobs) { jobs.filter { it.isActive } }
                 if (active.isNotEmpty()) { active.joinAll(); continue }
+                // Todo componente importado pelo App existe e exporta default (arquivo vazio ou export nomeado derrubava a página).
+                if (!importsChecked && projectGuest != null && sessionId !in squadApi) {
+                    importsChecked = true
+                    val bad = runCatching { brokenImports(sandbox.hostFile(projectGuest, sessionId)) }.getOrDefault(emptyList())
+                    if (bad.isNotEmpty()) {
+                        handlePreviewError("Imports quebrados: " + bad.joinToString(),
+                            "O App não consegue carregar estes componentes: " + bad.joinToString("; ") + ". Corrija cada um para existir e ter `export default function <Nome>()` " +
+                                "com a seção completa (mantenha o id do elemento raiz do plano). Se o arquivo estiver vazio, reconstrua a seção conforme o plano do time. Não mexa no resto.")
+                        continue
+                    }
+                }
                 // Coerência entre os agentes: todo link interno (#id) precisa ter a seção com esse id.
                 if (!anchorsChecked && projectGuest != null && sessionId !in squadApi) {
                     anchorsChecked = true
