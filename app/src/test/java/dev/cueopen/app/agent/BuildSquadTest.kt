@@ -59,4 +59,11 @@ class BuildSquadTest {
         assertEquals("footer", BuildSquad.hintFromPath("/root/workspace/app/src/components/Footer.tsx"))
         assertEquals("", BuildSquad.hintFromPath("src/App.jsx"))
     }
+
+    @Test fun docCorrigeEOverlayMarcaUltimaMudanca() {
+        assertEquals("Doc", BuildSquad.FIXER.name)
+        val js = BuildSquad.overlayScript(null)
+        assertTrue(js.contains("S.lastMut=Date.now()"))
+        assertTrue(js.contains("huge"))
+    }
 }

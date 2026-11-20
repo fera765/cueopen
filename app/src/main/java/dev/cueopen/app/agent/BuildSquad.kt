@@ -43,6 +43,9 @@ object BuildSquad {
         Persona("Cora", "Formulários", "octo", 0xFFE84393, listOf("formulário", "formulario", "form", "input", "newsletter", "contato")),
     )
 
+    /** Agente que o orquestrador chama sozinho quando o preview quebra (erro de compilação, import, tela de erro). */
+    val FIXER = Persona("Doc", "Correções", "bot", 0xFFE53935, listOf("corrig", "erro", "fix"))
+
     /** Cada tarefa ganha um agente: primeiro por afinidade com o papel/texto, depois quem ainda não trabalhou. */
     fun assign(tasks: List<Pair<String, String>>): List<Persona> {
         val used = mutableMapOf<String, Int>()
@@ -170,7 +173,8 @@ if(!w.__fluwySquad){
     if(o.x<0){o.x=tx;o.y=ty;}o.x+=(tx-o.x)*0.35;o.y+=(ty-o.y)*0.35;
     o.c.style.transform='translate('+o.x.toFixed(1)+'px,'+o.y.toFixed(1)+'px)';o.c.style.opacity=x.d?'.6':'1';
     var bt=Math.max(r.top-3,2);o.b.style.left=Math.max(r.left-3,2)+'px';o.b.style.top=bt+'px';o.b.style.width=Math.min(r.width+6,innerWidth-4)+'px';o.b.style.height=Math.max(Math.min(r.height+6,innerHeight-bt-2),12)+'px';
-    o.b.firstChild.style.top=(bt<20?'2px':'-18px');o.b.style.display=(x.d||!e)?'none':'block';});}
+    var huge=r.width>innerWidth*0.9&&r.height>innerHeight*0.8;
+    o.b.firstChild.style.top=(bt<20?'2px':'-18px');o.b.style.display=(x.d||!e||huge)?'none':'block';});}
    Object.keys(self.els).forEach(function(k){if(!seen[k]){var o=self.els[k];o.c.remove();o.b.remove();delete self.els[k];}});
    requestAnimationFrame(function(){self.frame();});}};
  // Elemento sendo construído: o que entra ou muda no DOM aparece com animação e atrai o cursor de quem está trabalhando.
@@ -180,7 +184,7 @@ if(!w.__fluwySquad){
   if(!add.length)return;var col=(S.data&&S.data.w&&S.data.w.filter(function(x){return!x.d;})[0]||{}).c||'#7c5cff';
   add.slice(0,12).forEach(function(el){if(el===document.body||el===document.documentElement)return;el.style.setProperty('--fs',col);el.classList.remove('fs-new');void el.offsetWidth;el.classList.add('fs-new');
    setTimeout(function(){el.classList.remove('fs-new');},800);});
-  S.recent=add.concat(S.recent).filter(function(e){return e.isConnected&&e!==document.body;}).slice(0,12);
+  S.lastMut=Date.now();S.recent=add.concat(S.recent).filter(function(e){return e.isConnected&&e!==document.body;}).slice(0,12);
  }).observe(document.body||document.documentElement,{childList:true,subtree:true,characterData:true});}catch(_){}
  requestAnimationFrame(function(){S.frame();});
 }

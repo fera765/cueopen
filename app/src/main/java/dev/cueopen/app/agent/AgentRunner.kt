@@ -3670,12 +3670,13 @@ class AgentRunner(
             "(Layout, Copy, Design, Frontend, Backend, API, Banco de dados, QA, SEO, Visuals…) trabalham AO MESMO TEMPO no mesmo projeto (/root/workspace compartilhado), até 6 de cada vez. " +
             "No front-end o usuário assiste aos agentes trabalhando ao vivo no browser (cursor e caixa de cada um sobre o elemento que edita). " +
             "Fluxo obrigatório no front-end: em preview passe a PASTA do projeto (pode estar vazia). O app ANTES cria o projeto React + Vite em branco se não houver um, instala as dependências, sobe o servidor de desenvolvimento e confere que o app abriu e desenhou no browser; só então o time entra. Se o app não ficar de pé, nenhum agente começa e você recebe o log para corrigir. " +
-            "No back-end, crie a estrutura de pastas da API antes. Cada edição do time aparece na hora (HMR), com o elemento sendo construído e o cursor do agente sobre ele. " +
+            "API Node (Express, Fastify…): crie package.json com a dependência e um server.js que escuta process.env.PORT, e passe a pasta em preview: o app instala, sobe e confere que responde antes do time entrar. " +
+            "Cada edição do time aparece na hora (HMR), com o elemento sendo construído e o cursor do agente sobre ele. Se o preview quebrar, o app corrige sozinho: instala pacote que faltou ou chama o agente Doc para consertar. " +
             "Divida em 8 a 40 tarefas pequenas, uma por agente, cada uma num elemento ou arquivo diferente; use depends_on só quando uma parte precisa da outra. " +
             "Bloqueia até o time terminar e devolve o relatório; depois teste, corrija o que faltar e mostre o resultado ao usuário.", buildJsonObject {
             put("goal", str("Objetivo do time em uma frase"))
             put("tasks_json", str("Array JSON de objetos {id, role, task, target, depends_on:[ids]}. target (front-end): seletor CSS do elemento que o agente edita, ex.: \"#hero h1\", \".pricing\""))
-            put("preview", str("Front-end: pasta do projeto (ex.: /root/workspace/app; com package.json o app sobe o dev server sozinho) ou URL de um servidor já rodando (http://127.0.0.1:PORTA). Vazio no back-end"))
+            put("preview", str("Pasta do projeto (ex.: /root/workspace/app): front-end React/Vite/Next ou API Node; o app instala, sobe e confere antes do time entrar. Ou a URL de um servidor já rodando (http://127.0.0.1:PORTA)"))
             put("max_parallel", int("Agentes trabalhando ao mesmo tempo (1-8; padrão 6)"))
             put("budget_tokens", int("Orçamento de tokens por agente (8000-80000; padrão 30000)"))
         }, listOf("goal", "tasks_json")))
@@ -5802,6 +5803,8 @@ class AgentRunner(
     private val squadDevServers = java.util.concurrent.ConcurrentHashMap<String, Pair<Int, Process>>()
     /** Falhas seguidas de preview por chat: (quantas, assinatura da falha). */
     private val squadPreviewFails = java.util.concurrent.ConcurrentHashMap<String, Pair<Int, String>>()
+    /** Chats cujo preview é uma API (sem página para desenhar). */
+    private val squadApi = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
     /** Pasta do projeto (caminho do sandbox) que o time está construindo, por chat. */
     private val squadProjectDir = java.util.concurrent.ConcurrentHashMap<String, String>()
 
@@ -5820,6 +5823,24 @@ class AgentRunner(
         java.net.Socket().use { it.connect(java.net.InetSocketAddress("127.0.0.1", port), 500); true }
     }.getOrDefault(false)
 
+    /**
+     * Config do Vite que herda a do projeto e liga o polling do watcher (HMR ao vivo no proot), sem mexer no arquivo
+     * do usuário. Vite empacota a config (e o import da original, inclusive .ts) antes de rodar. null = usa a do projeto.
+     */
+    private fun viteWatchConfig(dir: File): String? {
+        val base = listOf("vite.config.ts", "vite.config.mts", "vite.config.js", "vite.config.mjs", "vite.config.cjs").firstOrNull { File(dir, it).isFile }
+            ?: return null  // sem config: o CHOKIDAR_USEPOLLING do ambiente já liga o polling
+        val wrapper = File(dir, ".fluwy.vite.config.mjs")
+        val importBase = base?.let { "import base from './$it'\n" } ?: ""
+        return runCatching {
+            wrapper.writeText(importBase + "import { mergeConfig } from 'vite'\n" +
+                "const over = { server: { host: '127.0.0.1', watch: { usePolling: true, interval: 250 } } }\n" +
+                (if (base != null) "export default async (env) => mergeConfig(typeof base === 'function' ? await base(env) : (base || {}), over)\n"
+                    else "export default over\n"))
+            wrapper.name
+        }.getOrNull()
+    }
+
     /** Projeto React + Vite em branco que já roda (o time constrói em cima dele). */
     private fun scaffoldReactVite(dir: File) {
         dir.mkdirs()
@@ -5835,7 +5856,7 @@ class AgentRunner(
         w("vite.config.js", """
             import { defineConfig } from 'vite'
             import react from '@vitejs/plugin-react'
-            export default defineConfig({ plugins: [react()], server: { host: '127.0.0.1' } })
+            export default defineConfig({ plugins: [react()], server: { host: '127.0.0.1', watch: { usePolling: true, interval: 250 } } })
         """)
         w("index.html", """
             <!doctype html>
@@ -5924,21 +5945,34 @@ class AgentRunner(
             if (r.exitCode != 0 || !File(dir, "node_modules").isDirectory) { log("npm install falhou: " + r.output.takeLast(600)); return null }
         }
         // 2) Servidor de desenvolvimento.
+        // API Node (Express, Fastify, Koa, Hono, Nest…) sem front-end: sobe com PORT e vale qualquer resposta HTTP.
+        val isApi = !Regex("\"(vite|next|react-scripts)\"").containsMatchIn(text) &&
+            Regex("\"(express|fastify|koa|hono|@nestjs/core|@hapi/hapi|restify|polka)\"").containsMatchIn(text)
+        if (isApi) squadApi.add(sessionId) else squadApi.remove(sessionId)
+        val scripts = runCatching { org.json.JSONObject(text).optJSONObject("scripts") }.getOrNull()
+        val main = runCatching { org.json.JSONObject(text).optString("main") }.getOrDefault("").ifBlank {
+            listOf("server.js", "index.js", "src/server.js", "src/index.js", "app.js", "src/app.js").firstOrNull { File(dir, it).isFile } ?: "index.js" }
         val run = when {
+            isApi && scripts?.has("dev") == true -> "PORT=$port HOST=127.0.0.1 npm run dev"
+            isApi && scripts?.has("start") == true -> "PORT=$port HOST=127.0.0.1 npm start"
+            isApi -> "PORT=$port HOST=127.0.0.1 node $main"
             text.contains("\"next\"") -> "npx next dev -p $port -H 127.0.0.1"
-            text.contains("\"vite\"") -> "npx vite --host 127.0.0.1 --port $port --strictPort"
+            text.contains("\"vite\"") -> "npx vite --host 127.0.0.1 --port $port --strictPort" + (viteWatchConfig(dir)?.let { " --config $it" } ?: "")
             text.contains("react-scripts") -> "BROWSER=none HOST=127.0.0.1 PORT=$port npx react-scripts start"
             else -> "HOST=127.0.0.1 PORT=$port npm run dev -- --host 127.0.0.1 --port $port"
         }
         log("Subindo o app na porta $port…")
         val logFile = File(sandbox.workspaceFor(sessionId), ".cue/devserver.log").apply { parentFile?.mkdirs(); delete() }
-        val proc = sandbox.spawn("cd $q && exec $run < /dev/null", logFile, sessionId = sessionId)
+        // Polling: no Linux do app (proot) o watcher de arquivos do Vite/Next/CRA não vê as edições, e o HMR não atualiza a tela.
+        val proc = sandbox.spawn("cd $q && exec $run < /dev/null", logFile, sessionId = sessionId,
+            extraEnv = mapOf("CHOKIDAR_USEPOLLING" to "true", "CHOKIDAR_INTERVAL" to "250", "WATCHPACK_POLLING" to "true", "BROWSER" to "none"))
         squadDevServers[sessionId] = port to proc
         val url = "http://127.0.0.1:$port/"
         val deadline = System.currentTimeMillis() + 4 * 60_000L
-        while (System.currentTimeMillis() < deadline && proc.isAlive && previewStatus(url).first != 200) kotlinx.coroutines.delay(1_000)
+        fun up(c: Int) = if (isApi) c in 100..499 else c == 200
+        while (System.currentTimeMillis() < deadline && proc.isAlive && !up(previewStatus(url).first)) kotlinx.coroutines.delay(1_000)
         val (code, body) = previewStatus(url)
-        if (code != 200) {
+        if (!up(code)) {
             log("O app não respondeu 200 (HTTP $code) ${body.take(200)}\nLog do servidor: " + runCatching { logFile.readText().takeLast(600) }.getOrDefault(""))
             return null
         }
@@ -5957,6 +5991,7 @@ class AgentRunner(
     private suspend fun appAliveInBrowser(sessionId: String, url: String, log: (String) -> Unit): Boolean {
         val browser = browserFor(sessionId)
         runCatching { browser.navigate(url) }
+        if (sessionId in squadApi) return previewStatus(url).first in 100..499  // API: responder já basta
         val deadline = System.currentTimeMillis() + 45_000
         var last = ""
         while (System.currentTimeMillis() < deadline) {
@@ -6046,67 +6081,21 @@ class AgentRunner(
         BuildSquad.edit(squadId) { it.copy(preview = previewUrl, workers = workers, notice = "") }
 
         val browser = if (previewUrl != null) browserFor(sessionId) else null
-        // Preview ao vivo: abre a página assim que ela existe, recarrega quando os arquivos mudam e redesenha os cursores.
-        val watchers = mutableListOf<Job>()
-        if (browser != null) {
-            watchers += scope.launch {
-                BuildSquad.squads.map { it[squadId] }.distinctUntilChanged().collect { sq ->
-                    if (sq != null) browser.pushSquadOverlay(BuildSquad.overlayJson(sq))
-                }
-            }
-            watchers += scope.launch {
-                val root = sandbox.workspaceFor(sessionId)
-                val pageFile = previewUrl!!.takeIf { it.startsWith("file://") }?.let { File(it.removePrefix("file://")) }
-                var opened = previewUrl.startsWith("http")  // já aberto e conferido em appAliveInBrowser
-                var lastSig = ""
-                var previewBad = false
-                var badSince = 0L
-                while (isActive) {
-                    if (!opened && (pageFile == null || pageFile.exists())) {
-                        opened = true
-                        runCatching { browser.navigate(previewUrl) }
-                        BuildSquad.get(squadId)?.let { browser.pushSquadOverlay(BuildSquad.overlayJson(it)) }
-                    } else if (opened) {
-                        val sig = runCatching {
-                            root.walkTopDown().maxDepth(5).onEnter { it.name != "node_modules" && !it.name.startsWith(".") }
-                                .filter { it.isFile && it.extension.lowercase() in setOf("html", "htm", "css", "js", "mjs", "svg", "json", "png", "jpg", "jpeg", "webp") }
-                                .take(600).fold(0L) { acc, f -> acc * 31 + f.lastModified() + f.length() }.toString()
-                        }.getOrDefault("")
-                        if (lastSig.isNotEmpty() && sig != lastSig && previewUrl.startsWith("file://")) browser.softReload()
-                        // Dev server: se a página caiu em erro (servidor subindo, erro de compilação), recarrega quando voltar a responder.
-                        if (previewUrl.startsWith("http")) {
-                            val (code, body) = previewStatus(previewUrl)
-                            val okNow = code in 200..399
-                            if (okNow && previewBad) { browser.softReload(); BuildSquad.edit(squadId) { it.copy(notice = "") } }
-                            if (!okNow) {
-                                if (badSince == 0L) badSince = System.currentTimeMillis()
-                                if (System.currentTimeMillis() - badSince > 10_000) {
-                                    val devLog = runCatching { File(sandbox.workspaceFor(sessionId), ".cue/devserver.log").readText().takeLast(300) }.getOrDefault("")
-                                    val msg = (if (code == 0) "O servidor do preview não responde" else "O servidor do preview respondeu HTTP $code") +
-                                        (body.trim().takeIf { it.isNotEmpty() }?.let { ": " + it.replace(Regex("\\s+"), " ").take(160) } ?: "")
-                                    BuildSquad.edit(squadId) { it.copy(notice = msg) }
-                                    if (previewNotes.indexOf(msg) < 0) previewNotes.appendLine(msg + (if (devLog.isNotBlank()) "\nLog do servidor: " + devLog.trim() else ""))
-                                }
-                            } else badSince = 0L
-                            previewBad = !okNow
-                        }
-                        lastSig = sig
-                    }
-                    kotlinx.coroutines.delay(1_500)
-                }
-            }
-        }
-
+        val projectGuest = squadProjectDir[sessionId]
         val sem = kotlinx.coroutines.sync.Semaphore(parallel)
-        val finished = tasks.associate { it.id to CompletableDeferred<Boolean>() }
-        val jobs = workers.mapIndexed { n, w ->
-            scope.launch {
-                val t = tasks[n]
-                val depsOk = t.deps.filter { it in ids && it != t.id }.map { finished.getValue(it).await() }.all { it }
+        val finished = java.util.concurrent.ConcurrentHashMap<String, CompletableDeferred<Boolean>>().apply { tasks.forEach { put(it.id, CompletableDeferred()) } }
+        val jobs = java.util.Collections.synchronizedList(mutableListOf<Job>())
+        val fixes = java.util.concurrent.atomic.AtomicInteger(0)
+        val fixedErrors = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+
+        /** Põe um agente para trabalhar (inicial ou chamado no meio, como o "Doc" que corrige erros). */
+        fun launch(n: Int, t: SquadTask, w: BuildSquad.Worker) {
+            val job = scope.launch {
+                val depsOk = t.deps.filter { it in ids && it != t.id }.map { finished[it]?.await() ?: true }.all { it }
                 if (!depsOk) {
                     BuildSquad.editWorker(squadId, n) { it.copy(status = BuildSquad.St.FAILED, doing = "dependência falhou") }
                     store.editSession(w.sessionId) { it.copy(status = SessionStatus.STOPPED) }
-                    finished.getValue(t.id).complete(false); return@launch
+                    finished[t.id]?.complete(false); return@launch
                 }
                 var ok = false
                 try {
@@ -6119,7 +6108,7 @@ class AgentRunner(
                 } catch (c: kotlinx.coroutines.CancellationException) {
                     store.editSession(w.sessionId) { it.copy(status = SessionStatus.STOPPED) }
                     BuildSquad.editWorker(squadId, n) { it.copy(status = BuildSquad.St.FAILED, doing = "parado") }
-                    finished.getValue(t.id).complete(false)
+                    finished[t.id]?.complete(false)
                     throw c
                 } catch (e: Throwable) {
                     store.addItem(w.sessionId, ChatItem.Error(text = "Agente falhou: " + (e.message ?: e.toString()).take(300)))
@@ -6127,12 +6116,148 @@ class AgentRunner(
                 }
                 BuildSquad.editWorker(squadId, n) { it.copy(status = if (ok) BuildSquad.St.DONE else BuildSquad.St.FAILED, doing = if (ok) "pronto" else "falhou") }
                 BuildSquad.edit(squadId) { it.copy(log = (it.log + "${w.persona.name}|${w.label}|${if (ok) "ok" else "erro"}").takeLast(60)) }
-                finished.getValue(t.id).complete(ok)
+                finished[t.id]?.complete(ok)
                 runCatching { terminals.close(w.sessionId) }
             }
+            jobs += job
+            synchronized(childJobsByParent) { childJobsByParent.getOrPut(sessionId) { mutableListOf() }.add(job) }
         }
-        synchronized(childJobsByParent) { childJobsByParent[sessionId] = jobs.toMutableList() }
-        try { jobs.joinAll() } finally {
+
+        /**
+         * Erro no preview (overlay do Vite, falha de import, página quebrada): pacote ausente é instalado na hora;
+         * o resto vira tarefa de um agente "Doc" que corrige com edição mínima. Mesma mensagem não é atacada duas vezes.
+         */
+        suspend fun handlePreviewError(err: String) {
+            val key = err.replace(Regex("\\d+"), "#").replace(Regex("\\s+"), " ").take(200)
+            if (!fixedErrors.add(key)) return
+            BuildSquad.edit(squadId) { it.copy(notice = "Erro no preview: " + err.lineSequence().first().take(140)) }
+            BuildSquad.edit(squadId) { it.copy(log = (it.log + "Orquestrador|erro detectado: ${err.lineSequence().first().take(60)}|erro").takeLast(60)) }
+            val pkg = Regex("""(?:Failed to resolve import|Cannot find (?:module|package)|Could not resolve)\s+["']([^"'./][^"']*)["']""").find(err)?.groupValues?.get(1)
+                ?.let { p -> if (p.startsWith("@")) p.split('/').take(2).joinToString("/") else p.substringBefore('/') }
+            if (pkg != null && projectGuest != null && Regex("^[@a-z0-9][a-z0-9._/-]{0,80}$").matches(pkg)) {
+                BuildSquad.edit(squadId) { it.copy(notice = "Instalando o pacote que faltou: $pkg…") }
+                val r = sandbox.exec(dev.cueopen.app.sandbox.InteractivePrompts.ENV + " && npm install --no-audit --no-fund --loglevel=error '$pkg' < /dev/null",
+                    cwd = projectGuest, timeoutSec = 300, idleTimeoutSec = 180, sessionId = sessionId)
+                BuildSquad.edit(squadId) { it.copy(log = (it.log + "Orquestrador|npm install $pkg|${if (r.exitCode == 0) "ok" else "erro"}").takeLast(60)) }
+                if (r.exitCode == 0) { browser?.softReload(); BuildSquad.edit(squadId) { it.copy(notice = "") }; return }
+            }
+            if (fixes.get() >= 6) return
+            fixes.incrementAndGet()
+            val doc = BuildSquad.FIXER.copy(name = if (fixes.get() == 1) BuildSquad.FIXER.name else "${BuildSquad.FIXER.name} ${fixes.get()}")
+            val fixTask = "O preview do projeto QUEBROU com este erro (detectado pelo app no browser):\n" + err.take(1_500) +
+                "\n\nEncontre a causa (arquivo e linha costumam estar na mensagem), corrija com a MENOR edição possível e confira que o preview volta " +
+                "(curl do arquivo editado = 200). Pacote ausente: npm install <pacote> na pasta do projeto. Não reescreva nem refatore o resto."
+            val n = BuildSquad.get(squadId)?.workers?.size ?: return
+            val id = "fix${fixes.get()}"
+            finished[id] = CompletableDeferred()
+            val child = Session(title = "[Worker ${n + 1}] ${doc.name} · Corrigir erro", agentId = parent?.agentId, squadParentId = sessionId,
+                status = SessionStatus.RUNNING,
+                llm = listOf(LlmMessage("user", PromptContextPolicy.squadTask(doc.name, doc.role, goal, fixTask, "", teamLine, parentRequest, previewUrl, projectGuest))))
+            store.upsertSession(child)
+            val w = BuildSquad.Worker(n, doc, fixTask, "Corrigir erro", child.id)
+            BuildSquad.edit(squadId) { it.copy(workers = it.workers + w) }
+            launch(n, SquadTask(id, doc.role, fixTask, "", emptyList()), w)
+        }
+
+        /** Lê o estado da página: erro visível (overlay do Vite/Next, tela de erro) e há quanto tempo o DOM mudou. */
+        suspend fun pageState(): Pair<String?, Long> {
+            val raw = runCatching { browser!!.runJs("(function(){var e='';var o=document.querySelector('vite-error-overlay');" +
+                "if(o){var r=o.shadowRoot;e=(r&&(r.querySelector('.message-body')||r.querySelector('.message'))||o).textContent||'';var f=r&&r.querySelector('.file');if(f)e+='\\n'+f.textContent;}" +
+                "if(!e){var n=document.querySelector('nextjs-portal');if(n&&n.shadowRoot)e=(n.shadowRoot.textContent||'').slice(0,1500);}" +
+                "var s=window.__fluwySquad;return JSON.stringify({e:e.trim().slice(0,1500),m:s&&s.lastMut?Date.now()-s.lastMut:-1});})()") }.getOrDefault("")
+            return runCatching {
+                val o = org.json.JSONObject(raw)
+                o.optString("e").ifBlank { null } to o.optLong("m", -1)
+            }.getOrDefault(null to -1L)
+        }
+
+        // Preview ao vivo: abre a página, mostra cada edição (HMR; se o HMR não refletir, recarrega), redesenha os cursores
+        // e vigia erros para corrigir na hora.
+        val watchers = mutableListOf<Job>()
+        if (browser != null) {
+            watchers += scope.launch {
+                BuildSquad.squads.map { it[squadId] }.distinctUntilChanged().collect { sq ->
+                    if (sq != null) browser.pushSquadOverlay(BuildSquad.overlayJson(sq))
+                }
+            }
+            watchers += scope.launch {
+                val root = projectGuest?.let { sandbox.hostFile(it, sessionId) } ?: sandbox.workspaceFor(sessionId)
+                val pageFile = previewUrl!!.takeIf { it.startsWith("file://") }?.let { File(it.removePrefix("file://")) }
+                val dev = previewUrl.startsWith("http")
+                var opened = dev  // já aberto e conferido em appAliveInBrowser
+                var lastSig = ""
+                var changedAt = 0L
+                var lastReload = 0L
+                var previewBad = false
+                var badSince = 0L
+                var errSince = 0L
+                var lastErr: String? = null
+                val exts = setOf("html", "htm", "css", "scss", "js", "jsx", "ts", "tsx", "mjs", "vue", "svelte", "svg", "json", "png", "jpg", "jpeg", "webp")
+                while (isActive) {
+                    if (!opened && (pageFile == null || pageFile.exists())) {
+                        opened = true
+                        runCatching { browser.navigate(previewUrl) }
+                        BuildSquad.get(squadId)?.let { browser.pushSquadOverlay(BuildSquad.overlayJson(it)) }
+                    } else if (opened) {
+                        val now = System.currentTimeMillis()
+                        val sig = runCatching {
+                            root.walkTopDown().maxDepth(6).onEnter { it.name != "node_modules" && it.name != "dist" && !it.name.startsWith(".") }
+                                .filter { it.isFile && it.extension.lowercase() in exts }
+                                .take(800).fold(0L) { acc, f -> acc * 31 + f.lastModified() + f.length() }.toString()
+                        }.getOrDefault("")
+                        if (lastSig.isNotEmpty() && sig != lastSig) {
+                            changedAt = now
+                            if (!dev) browser.softReload()
+                        }
+                        lastSig = sig
+                        if (dev) {
+                            val (code, body) = previewStatus(previewUrl)
+                            val okNow = if (sessionId in squadApi) code in 100..499 else code in 200..399
+                            if (okNow && previewBad) { browser.softReload(); lastReload = now; BuildSquad.edit(squadId) { it.copy(notice = "") } }
+                            if (!okNow) {
+                                if (badSince == 0L) badSince = now
+                                if (now - badSince > 10_000) {
+                                    val devLog = runCatching { File(sandbox.workspaceFor(sessionId), ".cue/devserver.log").readText().takeLast(300) }.getOrDefault("")
+                                    val msg = (if (code == 0) "O servidor do preview não responde" else "O servidor do preview respondeu HTTP $code") +
+                                        (body.trim().takeIf { it.isNotEmpty() }?.let { ": " + it.replace(Regex("\\s+"), " ").take(160) } ?: "")
+                                    BuildSquad.edit(squadId) { it.copy(notice = msg) }
+                                    if (previewNotes.indexOf(msg) < 0) previewNotes.appendLine(msg + (if (devLog.isNotBlank()) "\nLog do servidor: " + devLog.trim() else ""))
+                                }
+                            } else {
+                                badSince = 0L
+                                val (err, sinceMut) = if (sessionId in squadApi) (null to -1L) else pageState()
+                                // Arquivo mudou e a página não mexeu em 2,5 s: o HMR não pegou (watcher do proot); recarrega.
+                                if (err == null && changedAt > 0 && now - changedAt in 2_500..20_000 && (sinceMut < 0 || sinceMut > now - changedAt) && now - lastReload > 3_000) {
+                                    browser.softReload(); lastReload = now; changedAt = 0
+                                } else if (sinceMut in 0..(now - changedAt)) changedAt = 0
+                                if (err != null) {
+                                    if (err != lastErr) { lastErr = err; errSince = now }
+                                    // Erro que persiste 4 s (não é só um salvamento no meio do caminho): orquestrador age.
+                                    else if (now - errSince >= 4_000) handlePreviewError(err)
+                                } else { lastErr = null; errSince = 0 }
+                            }
+                            previewBad = !okNow
+                        }
+                    }
+                    kotlinx.coroutines.delay(1_200)
+                }
+            }
+        }
+
+        workers.forEachIndexed { n, w -> launch(n, tasks[n], w) }
+        try {
+            // Espera todos, inclusive os "Doc" chamados no meio; no fim, confere uma última vez se o preview está sem erro.
+            var finalChecks = 0
+            while (true) {
+                val active = synchronized(jobs) { jobs.filter { it.isActive } }
+                if (active.isNotEmpty()) { active.joinAll(); continue }
+                if (browser == null || !previewUrl!!.startsWith("http") || finalChecks++ >= 2) break
+                kotlinx.coroutines.delay(2_500)
+                val err = pageState().first ?: break
+                handlePreviewError(err)
+                if (synchronized(jobs) { jobs.none { it.isActive } }) break
+            }
+        } finally {
             synchronized(childJobsByParent) { childJobsByParent.remove(sessionId) }
             watchers.forEach { it.cancel() }
             BuildSquad.edit(squadId) { it.copy(running = false) }
