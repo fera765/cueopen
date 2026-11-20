@@ -43,7 +43,7 @@ object WfLogic {
     fun label(n: WfNode) = n.label.ifBlank { WfCatalog.of(n.type).title }
 
     // ───────── Templates {{…}} ─────────
-    private val TOKEN = Regex("""\{\{\s*([^{}]+?)\s*}}""")
+    private val TOKEN = Regex("""\{\{\s*([^\{\}]+?)\s*\}\}""")
 
     /**
      * Troca {{prev}}, {{trigger.time}}, {{<id>}}, {{<id>.campo.sub}} e {{<rótulo do nó>}} pelos valores da execução.
