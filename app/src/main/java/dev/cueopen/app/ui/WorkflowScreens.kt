@@ -27,6 +27,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.scale
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
@@ -72,6 +73,8 @@ private fun nodeIcon(type: String): ImageVector = when (WfCatalog.of(type).icon)
     "timer" -> Icons.Rounded.Timer
     "approval" -> Icons.Rounded.ThumbUp
     "notify" -> Icons.Rounded.Notifications
+    "ai" -> Icons.Rounded.AutoAwesome
+    "new" -> Icons.Rounded.FiberNew
     else -> Icons.Rounded.Circle
 }
 
@@ -80,35 +83,89 @@ private fun statusColor(status: String?, c: dev.cueopen.app.ui.theme.CueColors):
     "ok" -> c.ok
     "error" -> c.err
     "waiting" -> c.warn
+    "paused" -> c.warn
     else -> null
 }
 
 private val timeFmt = SimpleDateFormat("dd/MM HH:mm", Locale("pt", "BR"))
 
-/** Modelos prontos para começar rápido. */
-private fun templates(): List<Pair<String, () -> Workflow>> = listOf(
-    "Em branco (manual)" to { Workflow(name = "Novo fluxo", nodes = listOf(WfNode(type = "trigger_manual", label = "Início", x = 60f, y = 160f))) },
-    "Resumo diário com IA" to {
-        val t = WfNode(type = "trigger_schedule", label = "Todo dia 8h", x = 40f, y = 160f, config = mapOf("mode" to "daily", "time" to "08:00"))
-        val a = WfNode(type = "agent", label = "Pesquisar", x = 320f, y = 160f, config = mapOf("prompt" to "Pesquise as 5 notícias mais importantes de hoje sobre tecnologia e resuma cada uma em uma linha, com o link."))
-        val n = WfNode(type = "notify", label = "Avisar", x = 600f, y = 160f, config = mapOf("title" to "Resumo do dia", "text" to "{{prev}}"))
-        Workflow(name = "Resumo diário com IA", nodes = listOf(t, a, n), edges = listOf(WfEdge(from = t.id, to = a.id), WfEdge(from = a.id, to = n.id)))
+/** Modelo pronto: título, descrição e montagem (ids curtos e legíveis; layout automático). */
+private data class WfTemplate(val title: String, val description: String, val icon: String, val make: () -> Workflow)
+
+private fun flow(name: String, nodes: List<WfNode>, vararg edges: WfEdge) = WfLogic.layout(Workflow(name = name, nodes = nodes, edges = edges.toList()), NODE_W, NODE_H)
+
+private fun templates(): List<WfTemplate> = listOf(
+    WfTemplate("Em branco", "Comece só com um gatilho manual.", "play") {
+        Workflow(name = "Novo fluxo", nodes = listOf(WfNode(type = "trigger_manual", label = "Início", x = 60f, y = 200f)))
     },
-    "Monitorar site" to {
-        val t = WfNode(type = "trigger_schedule", label = "A cada 30 min", x = 40f, y = 200f, config = mapOf("mode" to "interval", "minutes" to "30"))
-        val h = WfNode(type = "http", label = "Baixar página", x = 320f, y = 200f, config = mapOf("method" to "GET", "url" to "https://example.com", "timeout" to "20", "onError" to "continue"))
-        val i = WfNode(type = "if", label = "Está no ar?", x = 600f, y = 200f, config = mapOf("left" to "{{prev.status}}", "op" to "equals", "right" to "200"))
-        val ok = WfNode(type = "notify", label = "Site no ar", x = 900f, y = 100f, config = mapOf("title" to "✅ Site no ar", "text" to "Status {{${h.id}.status}} em {{trigger.time}}"))
-        val bad = WfNode(type = "notify", label = "Site com problema", x = 900f, y = 300f, config = mapOf("title" to "⚠ Site com problema", "text" to "Status {{${h.id}.status}} em {{trigger.time}}"))
-        Workflow(name = "Monitorar site", nodes = listOf(t, h, i, ok, bad), edges = listOf(WfEdge(from = t.id, to = h.id), WfEdge(from = h.id, to = i.id),
-            WfEdge(from = i.id, to = ok.id, port = "true"), WfEdge(from = i.id, to = bad.id, port = "false")))
+    WfTemplate("Novo e-mail → aviso com o e-mail", "A cada 30 min olha o último e-mail do Gmail; se for novo, notifica e o toque abre o e-mail num quadro.", "notify") {
+        val id = WfIds.new().take(4)
+        val t = WfNode(id = "t$id", type = "trigger_schedule", label = "A cada 30 min", config = mapOf("mode" to "interval", "minutes" to "30"))
+        val g = WfNode(id = "g$id", type = "connector", label = "Último e-mail", config = mapOf("source" to "hub", "conector" to "gmail", "acao" to "gmail_search_email",
+            "campos" to "{\n  \"max_results\": 1\n}"))
+        val n0 = WfNode(id = "n$id", type = "if_new", label = "É novo?", config = mapOf("key" to "{{${g.id}.data.results.messages.0.id}}", "first" to "new"))
+        val a = WfNode(id = "a$id", type = "ai", label = "Formatar e-mail", config = mapOf("maxTokens" to "1200", "prompt" to
+            "Formate este e-mail para leitura no celular, em português, sem cabeçalhos técnicos. Primeira linha: De: <remetente>. Segunda: Assunto: <assunto>. Terceira: Data: <data>. Depois uma linha em branco e o texto do e-mail (resuma se passar de 25 linhas).\n\n{{${g.id}.data.results.messages.0}}"))
+        val nt = WfNode(id = "m$id", type = "notify", label = "Avisar", config = mapOf("title" to "📬 Novo e-mail", "text" to "{{${g.id}.data.results.messages.0.subject}}",
+            "detail" to "{{${a.id}}}", "open" to "modal"))
+        flow("Novo e-mail → aviso", listOf(t, g, n0, a, nt), WfEdge(from = t.id, to = g.id), WfEdge(from = g.id, to = n0.id),
+            WfEdge(from = n0.id, to = a.id, port = "true"), WfEdge(from = a.id, to = nt.id))
     },
-    "Agente + aprovação + app" to {
-        val t = WfNode(type = "trigger_manual", label = "Início", x = 40f, y = 160f)
-        val a = WfNode(type = "agent", label = "Escrever e-mail", x = 320f, y = 160f, config = mapOf("prompt" to "Escreva um e-mail curto de follow-up para um cliente que pediu orçamento ontem."))
-        val ap = WfNode(type = "approval", label = "Aprovar envio", x = 600f, y = 160f, config = mapOf("question" to "Enviar este e-mail?\n\n{{prev}}"))
-        val g = WfNode(type = "connector", label = "Enviar (Gmail)", x = 900f, y = 100f, config = mapOf("conector" to "gmail", "acao" to "send_email", "campos" to "{\"body\":\"{{${a.id}}}\"}"))
-        Workflow(name = "E-mail com aprovação", nodes = listOf(t, a, ap, g), edges = listOf(WfEdge(from = t.id, to = a.id), WfEdge(from = a.id, to = ap.id), WfEdge(from = ap.id, to = g.id, port = "true")))
+    WfTemplate("Resumo de site por e-mail", "A cada 30 min lê uma página, resume com IA e envia por e-mail (Gmail).", "apps") {
+        val id = WfIds.new().take(4)
+        val t = WfNode(id = "t$id", type = "trigger_schedule", label = "A cada 30 min", config = mapOf("mode" to "interval", "minutes" to "30"))
+        val h = WfNode(id = "h$id", type = "http", label = "Ler site", config = mapOf("method" to "GET", "url" to "https://example.com", "timeout" to "30"))
+        val a = WfNode(id = "a$id", type = "ai", label = "Resumir", config = mapOf("maxTokens" to "800", "prompt" to "Resuma o conteúdo desta página em até 8 tópicos curtos, em português:\n\n{{${h.id}.text}}"))
+        val g = WfNode(id = "g$id", type = "connector", label = "Enviar e-mail", config = mapOf("source" to "hub", "conector" to "gmail", "acao" to "send_email",
+            "campos" to "{\n  \"receiver\": [\"seu@email.com\"],\n  \"subject\": \"Resumo do site · {{trigger.time}}\",\n  \"body_text\": \"{{${a.id}}}\"\n}"))
+        flow("Resumo de site por e-mail", listOf(t, h, a, g), WfEdge(from = t.id, to = h.id), WfEdge(from = h.id, to = a.id), WfEdge(from = a.id, to = g.id))
+    },
+    WfTemplate("Monitorar site", "A cada 30 min confere se o site responde; avisa nos dois casos.", "http") {
+        val id = WfIds.new().take(4)
+        val t = WfNode(id = "t$id", type = "trigger_schedule", label = "A cada 30 min", config = mapOf("mode" to "interval", "minutes" to "30"))
+        val h = WfNode(id = "h$id", type = "http", label = "Baixar página", config = mapOf("method" to "GET", "url" to "https://example.com", "timeout" to "20", "onError" to "continue"))
+        val i = WfNode(id = "i$id", type = "if", label = "Está no ar?", config = mapOf("left" to "{{${h.id}.status}}", "op" to "equals", "right" to "200"))
+        val ok = WfNode(id = "o$id", type = "notify", label = "Site no ar", config = mapOf("title" to "✅ Site no ar", "text" to "Status {{${h.id}.status}} em {{trigger.time}}", "open" to "flow"))
+        val bad = WfNode(id = "b$id", type = "notify", label = "Site com problema", config = mapOf("title" to "⚠ Site com problema", "text" to "Status {{${h.id}.status}} em {{trigger.time}}",
+            "detail" to "Status: {{${h.id}.status}}\nErro: {{${h.id}.error}}\nHora: {{trigger.time}}", "open" to "modal"))
+        flow("Monitorar site", listOf(t, h, i, ok, bad), WfEdge(from = t.id, to = h.id), WfEdge(from = h.id, to = i.id),
+            WfEdge(from = i.id, to = ok.id, port = "true"), WfEdge(from = i.id, to = bad.id, port = "false"))
+    },
+    WfTemplate("Cotação do dólar", "Todo dia às 9h avisa a cotação USD → BRL.", "schedule") {
+        val id = WfIds.new().take(4)
+        val t = WfNode(id = "t$id", type = "trigger_schedule", label = "Todo dia 9h", config = mapOf("mode" to "daily", "time" to "09:00"))
+        val h = WfNode(id = "h$id", type = "http", label = "Cotação", config = mapOf("method" to "GET", "url" to "https://economia.awesomeapi.com.br/json/last/USD-BRL", "timeout" to "20"))
+        val n = WfNode(id = "n$id", type = "notify", label = "Avisar", config = mapOf("title" to "💵 Dólar: R$ {{${h.id}.data.USDBRL.bid}}",
+            "text" to "Máx {{${h.id}.data.USDBRL.high}} · mín {{${h.id}.data.USDBRL.low}} · variação {{${h.id}.data.USDBRL.pctChange}}%", "open" to "flow"))
+        flow("Cotação do dólar", listOf(t, h, n), WfEdge(from = t.id, to = h.id), WfEdge(from = h.id, to = n.id))
+    },
+    WfTemplate("Clima da manhã", "Todo dia às 7h: previsão de São Paulo explicada pela IA.", "schedule") {
+        val id = WfIds.new().take(4)
+        val t = WfNode(id = "t$id", type = "trigger_schedule", label = "Todo dia 7h", config = mapOf("mode" to "daily", "time" to "07:00"))
+        val h = WfNode(id = "h$id", type = "http", label = "Previsão", config = mapOf("method" to "GET", "timeout" to "20",
+            "url" to "https://api.open-meteo.com/v1/forecast?latitude=-23.55&longitude=-46.63&daily=temperature_2m_max,temperature_2m_min,precipitation_probability_max&timezone=America%2FSao_Paulo&forecast_days=1"))
+        val a = WfNode(id = "a$id", type = "ai", label = "Explicar", config = mapOf("maxTokens" to "300", "prompt" to
+            "Em 2 frases curtas em português, diga como será o tempo hoje (máxima, mínima e chance de chuva) e se vale levar guarda-chuva:\n\n{{${h.id}.data.daily}}"))
+        val n = WfNode(id = "n$id", type = "notify", label = "Avisar", config = mapOf("title" to "🌤 Clima de hoje", "text" to "{{${a.id}}}", "open" to "modal"))
+        flow("Clima da manhã", listOf(t, h, a, n), WfEdge(from = t.id, to = h.id), WfEdge(from = h.id, to = a.id), WfEdge(from = a.id, to = n.id))
+    },
+    WfTemplate("Notícias do dia com IA", "Todo dia às 8h um agente pesquisa as principais notícias; o toque abre a lista completa.", "agent") {
+        val id = WfIds.new().take(4)
+        val t = WfNode(id = "t$id", type = "trigger_schedule", label = "Todo dia 8h", config = mapOf("mode" to "daily", "time" to "08:00"))
+        val a = WfNode(id = "a$id", type = "agent", label = "Pesquisar", config = mapOf("timeout" to "10", "prompt" to
+            "Pesquise na web as 5 notícias mais importantes de hoje sobre tecnologia. Responda com uma lista numerada: título, uma linha de resumo e o link."))
+        val n = WfNode(id = "n$id", type = "notify", label = "Avisar", config = mapOf("title" to "📰 Notícias do dia", "text" to "As 5 principais de hoje — toque para ler", "detail" to "{{${a.id}}}", "open" to "modal"))
+        flow("Notícias do dia", listOf(t, a, n), WfEdge(from = t.id, to = a.id), WfEdge(from = a.id, to = n.id))
+    },
+    WfTemplate("E-mail com aprovação", "A IA escreve um e-mail, você aprova e só então ele é enviado pelo Gmail.", "approval") {
+        val id = WfIds.new().take(4)
+        val t = WfNode(id = "t$id", type = "trigger_manual", label = "Início")
+        val a = WfNode(id = "a$id", type = "ai", label = "Escrever e-mail", config = mapOf("maxTokens" to "600", "prompt" to "Escreva um e-mail curto e cordial de follow-up para um cliente que pediu orçamento ontem. Responda só com o corpo do e-mail."))
+        val ap = WfNode(id = "p$id", type = "approval", label = "Aprovar envio", config = mapOf("question" to "Enviar este e-mail?\n\n{{${a.id}}}"))
+        val g = WfNode(id = "g$id", type = "connector", label = "Enviar (Gmail)", config = mapOf("source" to "hub", "conector" to "gmail", "acao" to "send_email",
+            "campos" to "{\n  \"receiver\": [\"cliente@email.com\"],\n  \"subject\": \"Seu orçamento\",\n  \"body_text\": \"{{${a.id}}}\"\n}"))
+        val n = WfNode(id = "n$id", type = "notify", label = "Enviado", config = mapOf("title" to "✉ E-mail enviado", "text" to "O follow-up foi enviado.", "open" to "flow"))
+        flow("E-mail com aprovação", listOf(t, a, ap, g, n), WfEdge(from = t.id, to = a.id), WfEdge(from = a.id, to = ap.id), WfEdge(from = ap.id, to = g.id, port = "true"), WfEdge(from = g.id, to = n.id))
     },
 )
 
@@ -132,23 +189,68 @@ fun WorkflowsScreen(nav: NavController) {
                 "Monte automações ligando nós no canvas: gatilho por horário, agentes de IA, apps conectados, HTTP, condições e notificações.")
         } else LazyColumn(Modifier.padding(pad).fillMaxSize(), contentPadding = PaddingValues(16.dp, 8.dp, 16.dp, 96.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             items(flows.sortedByDescending { it.updatedAt }, key = { it.id }) { w ->
-                val last = runs.filter { it.workflowId == w.id }.maxByOrNull { it.startedAt }
+                val mine = runs.filter { it.workflowId == w.id }
+                val last = mine.maxByOrNull { it.startedAt }
+                val active = mine.filter { WorkflowEngine.isActive(it.status) }.maxByOrNull { it.startedAt }
                 val sched = w.nodes.firstOrNull { it.type == "trigger_schedule" }
+                val accent = statusColor(active?.status, c) ?: c.accent
                 CueCard(onClick = { nav.navigate("workflow/${w.id}") }) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Box(Modifier.size(40.dp).clip(RoundedCornerShape(12.dp)).background(c.accent.copy(alpha = .14f)), contentAlignment = Alignment.Center) {
-                            Icon(Icons.Rounded.AccountTree, null, tint = c.accent)
+                    Column {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Box(Modifier.size(42.dp).clip(RoundedCornerShape(12.dp)).background(accent.copy(alpha = .14f)), contentAlignment = Alignment.Center) {
+                                if (active?.status == "running") CircularProgressIndicator(Modifier.size(22.dp), color = accent, strokeWidth = 2.5.dp)
+                                else Icon(Icons.Rounded.AccountTree, null, tint = accent)
+                            }
+                            Spacer(Modifier.width(12.dp))
+                            Column(Modifier.weight(1f)) {
+                                Text(w.name, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                Text("${w.nodes.size} nós · " + (sched?.let { WfLogic.scheduleLabel(it.config) + if (w.enabled) " · ativo" else " · desligado" } ?: "manual"),
+                                    fontSize = 12.sp, color = c.ink3, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                if (active == null && last != null) Text(runLabel(last), fontSize = 12.sp, color = statusColor(last.status, c) ?: c.ink3, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            }
+                            // Start / pausa / continuar / parar direto da lista.
+                            when {
+                                active == null -> FilledIconButton({
+                                    WorkflowEngine.start(w.id).onFailure { nav.navigate("workflow/${w.id}") }
+                                }, colors = IconButtonDefaults.filledIconButtonColors(containerColor = c.accent)) { Icon(Icons.Rounded.PlayArrow, "Executar", tint = Color.White) }
+                                active.status == "waiting" -> FilledTonalIconButton({ nav.navigate("workflow/${w.id}") }) { Icon(Icons.Rounded.HourglassTop, "Responder aprovação", tint = c.warn) }
+                                else -> Row {
+                                    FilledTonalIconButton({ if (active.status == "paused") WorkflowEngine.resume(active.id) else WorkflowEngine.pause(active.id) }) {
+                                        Icon(if (active.status == "paused") Icons.Rounded.PlayArrow else Icons.Rounded.Pause, if (active.status == "paused") "Continuar" else "Pausar")
+                                    }
+                                    IconButton({ WorkflowEngine.cancel(active.id) }) { Icon(Icons.Rounded.Stop, "Parar", tint = c.err) }
+                                }
+                            }
                         }
-                        Spacer(Modifier.width(12.dp))
-                        Column(Modifier.weight(1f)) {
-                            Text(w.name, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                            Text("${w.nodes.size} nós · " + (sched?.let { WfLogic.scheduleLabel(it.config) } ?: "manual"), fontSize = 12.sp, color = c.ink3)
-                            if (last != null) Text(runLabel(last), fontSize = 12.sp, color = statusColor(last.status, c) ?: c.ink3, maxLines = 1)
+                        // Execução ao vivo: nó atual e progresso (o editor abre herdando este estado).
+                        if (active != null) {
+                            val done = active.steps.count { it.status == "ok" }
+                            val cur = active.steps.lastOrNull()
+                            Spacer(Modifier.height(10.dp))
+                            LinearProgressIndicator(progress = { (done.toFloat() / w.nodes.size.coerceAtLeast(1)).coerceIn(0.03f, 1f) },
+                                modifier = Modifier.fillMaxWidth().height(5.dp).clip(RoundedCornerShape(3.dp)), color = accent, trackColor = c.line)
+                            Spacer(Modifier.height(6.dp))
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                cur?.let { Icon(nodeIcon(it.type), null, Modifier.size(14.dp), tint = accent); Spacer(Modifier.width(6.dp)) }
+                                Text(when (active.status) {
+                                    "paused" -> "Pausado"
+                                    "waiting" -> "Aguardando aprovação"
+                                    else -> "Executando"
+                                } + (cur?.let { " · ${it.label}" } ?: "") + " · $done de ${w.nodes.size}", fontSize = 12.sp, color = accent, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.weight(1f))
+                                Text("Ver ao vivo ›", fontSize = 12.sp, color = c.ink3)
+                            }
                         }
-                        if (sched != null) Switch(checked = w.enabled, onCheckedChange = { on ->
-                            if (on && WfLogic.problems(w).any { !it.contains("não está ligado") }) nav.navigate("workflow/${w.id}")
-                            else { val v = WorkflowStore.upsert(w.copy(enabled = on)); WorkflowScheduler.sync(ctx, v) }
-                        })
+                        if (sched != null) {
+                            Spacer(Modifier.height(6.dp))
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text("Agendamento", fontSize = 12.sp, color = c.ink3, modifier = Modifier.weight(1f))
+                                Switch(checked = w.enabled, onCheckedChange = { on ->
+                                    if (on && WfLogic.problems(w).any { !it.contains("não está ligado") }) nav.navigate("workflow/${w.id}")
+                                    else { val v = WorkflowStore.upsert(w.copy(enabled = on)); WorkflowScheduler.sync(ctx, v) }
+                                }, modifier = Modifier.scale(0.85f))
+                            }
+                        }
                     }
                 }
             }
@@ -157,12 +259,27 @@ fun WorkflowsScreen(nav: NavController) {
     if (newSheet) ModalBottomSheet(onDismissRequest = { newSheet = false }, containerColor = c.surface) {
         Column(Modifier.padding(16.dp, 0.dp, 16.dp, 32.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text("Começar de", fontWeight = FontWeight.SemiBold, fontSize = 16.sp)
-            templates().forEach { (title, make) ->
-                CueCard(onClick = {
-                    val w = WorkflowStore.upsert(make())
-                    newSheet = false
-                    nav.navigate("workflow/${w.id}")
-                }) { Text(title, fontWeight = FontWeight.Medium) }
+            Text("Modelos prontos, já ligados e validados — ajuste os campos e toque em Executar.", fontSize = 12.sp, color = c.ink3)
+            Column(Modifier.heightIn(max = 560.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                templates().forEach { tp ->
+                    CueCard(onClick = {
+                        val w = WorkflowStore.upsert(tp.make())
+                        newSheet = false
+                        nav.navigate("workflow/${w.id}")
+                    }) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Box(Modifier.size(38.dp).clip(RoundedCornerShape(11.dp)).background(c.accent.copy(alpha = .14f)), contentAlignment = Alignment.Center) {
+                                Icon(when (tp.icon) { "notify" -> Icons.Rounded.Notifications; "apps" -> Icons.Rounded.Apps; "http" -> Icons.Rounded.Http
+                                    "schedule" -> Icons.Rounded.Schedule; "agent" -> Icons.Rounded.SmartToy; "approval" -> Icons.Rounded.ThumbUp; else -> Icons.Rounded.PlayArrow }, null, tint = c.accent)
+                            }
+                            Spacer(Modifier.width(12.dp))
+                            Column(Modifier.weight(1f)) {
+                                Text(tp.title, fontWeight = FontWeight.Medium)
+                                Text(tp.description, fontSize = 12.sp, color = c.ink3)
+                            }
+                        }
+                    }
+                }
             }
         }
     }
@@ -170,6 +287,7 @@ fun WorkflowsScreen(nav: NavController) {
 
 private fun runLabel(r: WfRun): String = when (r.status) {
     "running" -> "Executando agora…"
+    "paused" -> "Pausado"
     "waiting" -> "Aguardando sua aprovação"
     "ok" -> "Última execução ok · ${timeFmt.format(Date(r.startedAt))}"
     "error" -> "Falhou · ${timeFmt.format(Date(r.startedAt))} · ${r.error.take(60)}"
@@ -227,7 +345,7 @@ fun WorkflowEditorScreen(nav: NavController, id: String) {
     var result by remember { mutableStateOf<WfRun?>(null) }
     val problems = remember(w) { WfLogic.problems(w) }
     val myRuns = runs.filter { it.workflowId == w.id }.sortedByDescending { it.startedAt }
-    val active = myRuns.firstOrNull { it.status == "running" || it.status == "waiting" }
+    val active = myRuns.firstOrNull { WorkflowEngine.isActive(it.status) }
     val shown = active ?: myRuns.firstOrNull()
     val nodeStatus = shown?.steps?.associate { it.nodeId to it.status }.orEmpty()
 
@@ -235,7 +353,7 @@ fun WorkflowEditorScreen(nav: NavController, id: String) {
     // Execução disparada daqui terminou: mostra o resultado na tela.
     LaunchedEffect(myRuns.firstOrNull { it.id == watchRun }?.status) {
         val r = myRuns.firstOrNull { it.id == watchRun } ?: return@LaunchedEffect
-        if (r.status != "running" && r.status != "waiting") { result = r; watchRun = null }
+        if (!WorkflowEngine.isActive(r.status)) { result = r; watchRun = null }
     }
 
     fun pos(n: WfNode): Offset { val p = pending[n.id] ?: Offset(n.x, n.y); val d = dragOff[n.id] ?: Offset.Zero; return Offset(p.x + d.x, p.y + d.y) }
@@ -292,6 +410,7 @@ fun WorkflowEditorScreen(nav: NavController, id: String) {
                     val done = active?.steps?.count { it.status == "ok" } ?: 0
                     Text(when {
                         active?.status == "waiting" -> "Aguardando sua aprovação"
+                        active?.status == "paused" -> "Pausado · $done de ${w.nodes.size} nós"
                         active != null -> "Executando · $done de ${w.nodes.size} nós"
                         next != null -> "Ativo · próxima ${timeFmt.format(Date(next))}"
                         w.nodes.any { it.type == "trigger_schedule" } -> "Agendamento desligado"
@@ -444,8 +563,13 @@ fun WorkflowEditorScreen(nav: NavController, id: String) {
                 IconButton({ scale = (scale * 1.25f).coerceAtMost(2.2f) }) { Icon(Icons.Rounded.Add, "Aumentar") }
                 IconButton({ fit() }) { Icon(Icons.Rounded.FitScreen, "Ajustar à tela") }
                 Spacer(Modifier.width(2.dp))
-                FilledTonalButton({ palette = true }, contentPadding = PaddingValues(horizontal = 12.dp)) { Icon(Icons.Rounded.AddBox, null, Modifier.size(18.dp)); Spacer(Modifier.width(4.dp)); Text("Nó") }
+                if (active == null) FilledTonalButton({ palette = true }, contentPadding = PaddingValues(horizontal = 12.dp)) { Icon(Icons.Rounded.AddBox, null, Modifier.size(18.dp)); Spacer(Modifier.width(4.dp)); Text("Nó") }
                 Spacer(Modifier.width(6.dp))
+                if (active != null && active.status != "waiting") {
+                    IconButton({ if (active.status == "paused") WorkflowEngine.resume(active.id) else WorkflowEngine.pause(active.id) }) {
+                        Icon(if (active.status == "paused") Icons.Rounded.PlayArrow else Icons.Rounded.Pause, if (active.status == "paused") "Continuar" else "Pausar", tint = c.warn)
+                    }
+                }
                 if (active != null) Button({ WorkflowEngine.cancel(active.id) }, colors = ButtonDefaults.buttonColors(containerColor = c.err), contentPadding = PaddingValues(horizontal = 14.dp)) {
                     Icon(Icons.Rounded.Stop, null, Modifier.size(18.dp)); Spacer(Modifier.width(4.dp)); Text("Parar")
                 } else Button({ runNow() }, colors = ButtonDefaults.buttonColors(containerColor = c.accent), contentPadding = PaddingValues(horizontal = 14.dp)) {
@@ -616,7 +740,8 @@ private fun NodeCard(n: WfNode, status: String?, selected: Boolean, targetable: 
 private fun subtitle(n: WfNode): String = when (n.type) {
     "trigger_schedule" -> WfLogic.scheduleLabel(n.config)
     "trigger_manual" -> "Toque em Executar"
-    "agent" -> n.config["prompt"].orEmpty().ifBlank { "Defina a instrução" }
+    "agent", "ai" -> n.config["prompt"].orEmpty().replace(Regex("\\s+"), " ").ifBlank { "Defina a instrução" }
+    "if_new" -> n.config["key"].orEmpty().ifBlank { "Defina a chave" }
     "connector" -> listOf(n.config["conector"].orEmpty(), n.config["acao"].orEmpty()).filter { it.isNotBlank() }.joinToString(" · ").ifBlank { "Escolha conector e ação" }
     "mcp" -> n.config["tool"].orEmpty().ifBlank { "Escolha a ferramenta" }
     "http" -> "${n.config["method"] ?: "GET"} ${n.config["url"].orEmpty()}".trim()
@@ -798,6 +923,7 @@ private fun ConnectorConfig(node: WfNode, cfg: Map<String, String>, upstream: Li
     var raw by remember(node.id) { mutableStateOf(false) }
     var focus by remember(node.id) { mutableStateOf<String?>(null) }
     var pickAction by remember { mutableStateOf(false) }
+    val openGroups = remember { mutableStateMapOf<String, Boolean>() }
     fun value(k: String): String = campos?.get(k)?.let { (it as? kotlinx.serialization.json.JsonPrimitive)?.takeIf { p -> p.isString }?.content ?: it.toString() }.orEmpty()
     fun setValue(k: String, v: String) {
         val base = campos ?: kotlinx.serialization.json.JsonObject(emptyMap())
@@ -815,27 +941,39 @@ private fun ConnectorConfig(node: WfNode, cfg: Map<String, String>, upstream: Li
             val current = list.firstOrNull { it.kind == kind && (it.id.equals(id, true) || it.name.equals(id, true)) && (cfg["conexao"].isNullOrBlank() || it.connection.isBlank() || it.connection == cfg["conexao"]) }
             if (id.isNotBlank() && current == null)
                 Text("\"$id\" não está conectado. Escolha um conector ativo abaixo (ou conecte-o em Conectores).", fontSize = 12.sp, color = c.warn)
+            // Grupos colapsáveis (MCP pode ter dezenas de servidores): lista com rolagem própria, carregada sob demanda.
             list.groupBy { it.kind }.forEach { (k, items) ->
-                Text(WfConnectors.kindLabel(k), fontSize = 11.sp, color = c.ink3, fontWeight = FontWeight.Medium)
-                items.forEach { s ->
-                    val sel = s == current
-                    Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(if (sel) c.accent.copy(alpha = .10f) else c.surface2)
-                        .border(1.dp, if (sel) c.accent else c.line, RoundedCornerShape(14.dp))
-                        .clickable {
-                            if (!sel) onCfg(cfg + mapOf("source" to s.kind, "conector" to s.id, "conexao" to s.connection) +
-                                (if (s.kind != kind || !s.id.equals(id, true)) mapOf("acao" to "", "campos" to "{}") else emptyMap()))
-                        }.padding(10.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Box(Modifier.size(34.dp).clip(RoundedCornerShape(10.dp)).background(Color(0xFF2FBF71).copy(alpha = .16f)), contentAlignment = Alignment.Center) {
-                            Text(s.name.take(1).uppercase(), fontWeight = FontWeight.Bold, color = Color(0xFF2FBF71))
+                val isOpen = openGroups[k] ?: (current?.kind == k || (current == null && k != WfConnectors.MCP && items.size <= 8))
+                Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).clickable { openGroups[k] = !isOpen }.padding(vertical = 8.dp, horizontal = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically) {
+                    Text(WfConnectors.kindLabel(k), fontSize = 13.sp, color = c.ink2, fontWeight = FontWeight.Medium)
+                    Spacer(Modifier.width(6.dp))
+                    Text("${items.size} ativo" + if (items.size == 1) "" else "s", fontSize = 11.sp, color = c.ink3, modifier = Modifier.clip(RoundedCornerShape(6.dp))
+                        .background(c.surface2).padding(horizontal = 6.dp, vertical = 1.dp))
+                    Spacer(Modifier.weight(1f))
+                    if (!isOpen && current?.kind == k) Text(current?.name.orEmpty(), fontSize = 12.sp, color = c.accent, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.widthIn(max = 140.dp))
+                    Icon(if (isOpen) Icons.Rounded.ExpandLess else Icons.Rounded.ExpandMore, null, tint = c.ink3)
+                }
+                if (isOpen) LazyColumn(Modifier.fillMaxWidth().heightIn(max = 300.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    items(items, key = { it.kind + it.id + it.connection }) { s ->
+                        val sel = s == current
+                        Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(if (sel) c.accent.copy(alpha = .10f) else c.surface2)
+                            .border(1.dp, if (sel) c.accent else c.line, RoundedCornerShape(14.dp))
+                            .clickable {
+                                if (!sel) onCfg(cfg + mapOf("source" to s.kind, "conector" to s.id, "conexao" to s.connection) +
+                                    (if (s.kind != kind || !s.id.equals(id, true)) mapOf("acao" to "", "campos" to "{}") else emptyMap()))
+                            }.padding(10.dp), verticalAlignment = Alignment.CenterVertically) {
+                            Box(Modifier.size(34.dp).clip(RoundedCornerShape(10.dp)).background(Color(0xFF2FBF71).copy(alpha = .16f)), contentAlignment = Alignment.Center) {
+                                Text(s.name.take(1).uppercase(), fontWeight = FontWeight.Bold, color = Color(0xFF2FBF71))
+                            }
+                            Spacer(Modifier.width(10.dp))
+                            Column(Modifier.weight(1f)) {
+                                Text(s.name, fontWeight = FontWeight.Medium, fontSize = 14.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                Text(s.detail + if (!s.ready) " · precisa reconectar" else "", fontSize = 11.sp, color = if (s.ready) c.ink3 else c.warn, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            }
+                            if (sel) Icon(Icons.Rounded.CheckCircle, null, tint = c.accent, modifier = Modifier.size(20.dp))
                         }
-                        Spacer(Modifier.width(10.dp))
-                        Column(Modifier.weight(1f)) {
-                            Text(s.name, fontWeight = FontWeight.Medium, fontSize = 14.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                            Text(s.detail + if (!s.ready) " · precisa reconectar" else "", fontSize = 11.sp, color = if (s.ready) c.ink3 else c.warn, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        }
-                        if (sel) Icon(Icons.Rounded.CheckCircle, null, tint = c.accent, modifier = Modifier.size(20.dp))
                     }
-                    Spacer(Modifier.height(6.dp))
                 }
             }
             TextButton({ sources = null; reload++ }) { Icon(Icons.Rounded.Refresh, null, Modifier.size(16.dp)); Spacer(Modifier.width(4.dp)); Text("Atualizar lista") }
@@ -996,7 +1134,7 @@ private fun RunsPanel(w: Workflow, runs: List<WfRun>, nav: NavController, onClos
                     }
                     r.finishedAt?.let { Text("Duração: ${((it - r.startedAt) / 1000).coerceAtLeast(0)} s", fontSize = 11.sp, color = c.ink3) }
                     if (r.error.isNotBlank()) Text(r.error.take(400), fontSize = 12.sp, color = c.err)
-                    if (r.status == "running" || r.status == "waiting") TextButton({ WorkflowEngine.cancel(r.id) }) { Text("Parar execução", color = c.err) }
+                    if (WorkflowEngine.isActive(r.status)) TextButton({ WorkflowEngine.cancel(r.id) }) { Text("Parar execução", color = c.err) }
                     if (open == r.id) r.steps.forEach { s ->
                         Spacer(Modifier.height(6.dp))
                         Row(verticalAlignment = Alignment.CenterVertically) {

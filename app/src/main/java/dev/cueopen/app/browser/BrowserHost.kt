@@ -590,6 +590,7 @@ class BrowserHost(private val appCtx: Context, private val sessionId: String = "
             override fun onRenderProcessGone(view: WebView, detail: android.webkit.RenderProcessGoneDetail): Boolean {
                 // O processo do Chromium morreu (memória/crash). Sem tratar, o Android encerra o app inteiro.
                 val crashed = if (android.os.Build.VERSION.SDK_INT >= 26) detail.didCrash() else true
+                synchronized(rendererCrashes) { rendererCrashes.add(System.currentTimeMillis()); while (rendererCrashes.size > 10) rendererCrashes.removeAt(0) }
                 tab.diag.add("processo do renderer encerrado (" + (if (crashed) "crash" else "falta de memória") + ")")
                 runCatching { dev.cueopen.app.diag.ErrorLog.log("browser", "Renderer do WebView encerrado (" + (if (crashed) "crash" else "memória") + ") na aba ${tab.id}; a aba será recriada.\n" + tab.diag.lines().joinToString("\n")) }
                 tab.pageDone?.complete("ERROR: o motor do browser foi encerrado pelo Android (" + (if (crashed) "falha" else "memória") + "). A aba será recriada; abra a página de novo uma vez.")
@@ -1212,7 +1213,13 @@ class BrowserHost(private val appCtx: Context, private val sessionId: String = "
     private val mainHandler = android.os.Handler(android.os.Looper.getMainLooper())
 
     /** Atualiza (ou remove) os cursores dos agentes na aba ativa, sem esperar resposta. */
+    private val rendererCrashes = mutableListOf<Long>()
+
+    /** O motor caiu 2+ vezes nos últimos 5 min: modo leve (sem cursores/animações do time) para não derrubar de novo. */
+    fun liteMode(): Boolean = synchronized(rendererCrashes) { rendererCrashes.count { System.currentTimeMillis() - it < 5 * 60_000L } >= 2 }
+
     fun pushSquadOverlay(json: String?) {
+        if (json != null && liteMode()) { if (squadOverlay != null) { squadOverlay = null; mainHandler.post { runCatching { activeTab()?.webView?.evaluateJavascript("(function(){var r=document.getElementById('__fluwy_squad');if(r)r.remove();window.__fluwySquad=null;})();", null) } } }; return }
         squadOverlay = json
         mainHandler.post {
             runCatching {

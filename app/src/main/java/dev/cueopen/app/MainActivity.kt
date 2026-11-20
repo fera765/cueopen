@@ -44,6 +44,7 @@ class MainActivity : ComponentActivity() {
     private val pendingSession = mutableStateOf<String?>(null)
     private val sharedText = mutableStateOf<String?>(null)
     private val pendingRoute = mutableStateOf<String?>(null)
+    private val pendingEntry = mutableStateOf<Long?>(null)
     private val pendingMicrophonePermission = mutableStateOf(false)
     private val microphonePermissionRequest = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         android.widget.Toast.makeText(
@@ -98,6 +99,7 @@ class MainActivity : ComponentActivity() {
                     val nav = rememberNavController()
                     CueNav(nav, startOnboarding = startOnboarding)
                     BrowserPermissionHost()
+                    dev.cueopen.app.ui.NotificationOverlay(nav, pendingEntry)
                     if (splash) SplashScreen(onDone = { splash = false })
                     val ps = pendingSession.value
                     LaunchedEffect(ps) {
@@ -166,6 +168,7 @@ class MainActivity : ComponentActivity() {
                 i.removeExtra(dev.cueopen.app.assistant.AssistantRoutingPolicy.EXTRA_TRANSCRIPT)  // não repete ao recriar a tela
             }
         }
+        i.getLongExtra(dev.cueopen.app.notify.NotificationCenter.EXTRA_ENTRY, -1L).takeIf { it > 0 }?.let { pendingEntry.value = it; i.removeExtra(dev.cueopen.app.notify.NotificationCenter.EXTRA_ENTRY) }
         val extraId = i.getStringExtra(SessionNotificationRouting.EXTRA_SESSION_ID)
             ?: i.getStringExtra(SessionNotificationRouting.EXTRA_SESSION)
         val deepLinkId = i.data?.takeIf { it.scheme == "cueopen" && it.host == "chat" }

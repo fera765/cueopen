@@ -37,7 +37,22 @@ object WorkflowEngine {
     private val approvals = ConcurrentHashMap<String, CompletableDeferred<Boolean>>()
     private const val MAX_STEPS = 200
 
-    fun isRunning(workflowId: String) = WorkflowStore.runs.value.any { it.workflowId == workflowId && (it.status == "running" || it.status == "waiting") }
+    private val pauses = ConcurrentHashMap.newKeySet<String>()
+
+    fun isActive(status: String) = status == "running" || status == "waiting" || status == "paused"
+    fun isRunning(workflowId: String) = WorkflowStore.runs.value.any { it.workflowId == workflowId && isActive(it.status) }
+    fun activeRun(workflowId: String): WfRun? = WorkflowStore.runs.value.filter { it.workflowId == workflowId && isActive(it.status) }.maxByOrNull { it.startedAt }
+
+    /** Pausa entre um nó e o próximo (o nó que está rodando termina). */
+    fun pause(runId: String) {
+        pauses.add(runId)
+        WorkflowStore.runs.value.firstOrNull { it.id == runId }?.takeIf { it.status == "running" }?.let { WorkflowStore.putRun(it.copy(status = "paused")) }
+    }
+    fun resume(runId: String) {
+        pauses.remove(runId)
+        WorkflowStore.runs.value.firstOrNull { it.id == runId }?.takeIf { it.status == "paused" }?.let { WorkflowStore.putRun(it.copy(status = "running")) }
+    }
+    fun isPaused(runId: String) = runId in pauses
 
     /** Dispara uma execução (manual ou pelo agendamento). Devolve o id da execução, ou um erro de validação. */
     fun start(workflowId: String, trigger: String = "manual", triggerNodeId: String? = null): Result<String> {
@@ -53,9 +68,10 @@ object WorkflowEngine {
     }
 
     fun cancel(runId: String) {
+        pauses.remove(runId)
         jobs.remove(runId)?.cancel()
         approvals.keys.filter { it.startsWith("$runId|") }.forEach { approvals.remove(it)?.complete(false) }
-        WorkflowStore.runs.value.firstOrNull { it.id == runId }?.takeIf { it.status == "running" || it.status == "waiting" }?.let {
+        WorkflowStore.runs.value.firstOrNull { it.id == runId }?.takeIf { isActive(it.status) }?.let {
             WorkflowStore.putRun(it.copy(status = "cancelled", finishedAt = System.currentTimeMillis(), error = "Parada pelo usuário."))
         }
     }
@@ -95,7 +111,7 @@ object WorkflowEngine {
 
     private suspend fun execute(w: Workflow, run0: WfRun, triggerNodeId: String?) {
         var run = run0
-        fun save(r: WfRun) { run = r; WorkflowStore.putRun(r) }
+        fun save(r: WfRun) { run = if (r.status == "running" && r.id in pauses) r.copy(status = "paused") else r; WorkflowStore.putRun(run) }
         val outputs = linkedMapOf<String, String>()
         val labels = w.nodes.associate { it.id to WfLogic.label(it) }
         val start = w.nodes.firstOrNull { it.id == triggerNodeId }
@@ -109,6 +125,7 @@ object WorkflowEngine {
             while (queue.isNotEmpty()) {
                 val (node, prev) = queue.removeFirst()
                 if (!done.add(node.id)) continue
+                if (run.id in pauses) { save(run.copy(status = "paused")); while (run.id in pauses) delay(400); save(run.copy(status = "running")) }
                 if (++steps > MAX_STEPS) throw IllegalStateException("Mais de $MAX_STEPS passos: verifique se o fluxo não tem um ciclo.")
                 val t0 = System.currentTimeMillis()
                 save(run.copy(steps = run.steps + WfStep(node.id, labels.getValue(node.id), node.type, "running", t0)))
@@ -132,11 +149,13 @@ object WorkflowEngine {
             // Versão testada com sucesso (vale para publicar enquanto ninguém alterar nós/ligações).
             WorkflowStore.get(w.id)?.let { cur -> val sig = WfLogic.signature(w); if (WfLogic.signature(cur) == sig && cur.testedSig != sig) WorkflowStore.upsert(cur.copy(testedSig = sig)) }
         } catch (c: kotlinx.coroutines.CancellationException) {
-            if (run.status == "running" || run.status == "waiting") save(run.copy(status = "cancelled", finishedAt = System.currentTimeMillis(), error = "Parada pelo usuário."))
+            pauses.remove(run.id)
+            if (isActive(run.status)) save(run.copy(status = "cancelled", finishedAt = System.currentTimeMillis(), error = "Parada pelo usuário."))
         } catch (e: Throwable) {
             save(run.copy(status = "error", finishedAt = System.currentTimeMillis(), error = (e.message ?: e.javaClass.simpleName).take(1_000)))
             notifyResult(w, run)
         } finally {
+            pauses.remove(run.id)
             jobs.remove(run.id)
         }
     }
@@ -145,7 +164,8 @@ object WorkflowEngine {
         if (run.trigger == "manual" || run.trigger == "test") return
         runCatching {
             dev.cueopen.app.notify.NotificationCenter.post("Fluxo \"${w.name}\" falhou", run.error.take(200),
-                dev.cueopen.app.notify.NotificationCenter.Priority.HIGH, dev.cueopen.app.notify.NotificationCenter.Category.FAILURE)
+                dev.cueopen.app.notify.NotificationCenter.Priority.HIGH, dev.cueopen.app.notify.NotificationCenter.Category.FAILURE,
+                agent = "Fluxo · ${w.name}", detail = run.error.take(4_000), route = "workflow/${w.id}", routeLabel = "Abrir fluxo")
         }
     }
 
@@ -168,7 +188,8 @@ object WorkflowEngine {
                 val session = Session(title = "[Workflow] ${w.name} · ${WfLogic.label(node)}", agentId = agent?.id)
                 app.store.upsertSession(session)
                 val timeoutMin = (r("timeout").toIntOrNull() ?: 15).coerceIn(1, 120)
-                app.agent.send(session.id, "[Fluxo automático \"${w.name}\" — ninguém está acompanhando agora; execute e responda com o resultado final, sem perguntas.]\n\n$prompt").join()
+                app.agent.send(session.id, "[Fluxo automático \"${w.name}\" — ninguém está acompanhando agora; execute e responda com o resultado final, sem perguntas. " +
+                    "Os dados que vieram dos nós anteriores já estão nesta mensagem: use-os direto, não busque de novo nos conectores.]\n\n$prompt").join()
                 val finished = withTimeoutOrNull(timeoutMin * 60_000L) { while (app.agent.isRunning(session.id)) delay(1_000); true }
                 if (finished == null) { app.agent.stop(session.id); return NodeResult(error = "O agente passou de $timeoutMin min.", sessionId = session.id) }
                 val s = app.store.session(session.id)
@@ -232,7 +253,8 @@ object WorkflowEngine {
                 setStatus("waiting")
                 runCatching {
                     dev.cueopen.app.notify.NotificationCenter.post("Aprovar fluxo \"${w.name}\"?", q.take(200),
-                        dev.cueopen.app.notify.NotificationCenter.Priority.HIGH, dev.cueopen.app.notify.NotificationCenter.Category.APPROVAL, needsAction = true)
+                        dev.cueopen.app.notify.NotificationCenter.Priority.HIGH, dev.cueopen.app.notify.NotificationCenter.Category.APPROVAL, needsAction = true,
+                        agent = "Fluxo · ${w.name}", detail = q.take(4_000), route = "workflow/${w.id}", routeLabel = "Responder no fluxo")
                 }
                 val hours = (r("hours").toLongOrNull() ?: 24L).coerceIn(1, 168)
                 val ok = withTimeoutOrNull(TimeUnit.HOURS.toMillis(hours)) { d.await() } ?: false
@@ -242,10 +264,42 @@ object WorkflowEngine {
             }
 
             "notify" -> {
-                dev.cueopen.app.notify.NotificationCenter.post(r("title").ifBlank { w.name }.take(80), r("text").ifBlank { "Fluxo concluído." }.take(900),
+                val title = r("title").ifBlank { w.name }.take(80)
+                val text = r("text").ifBlank { "Fluxo concluído." }
+                val open = node.config["open"] ?: "modal"
+                val detail = if (open == "modal") r("detail").ifBlank { text } else ""
+                dev.cueopen.app.notify.NotificationCenter.post(title, text.take(900),
                     dev.cueopen.app.notify.NotificationCenter.Priority.NORMAL, dev.cueopen.app.notify.NotificationCenter.Category.DONE,
-                    dedupeKey = "wf|${run.id}|${node.id}")
-                NodeResult(prev)
+                    agent = "Fluxo · ${w.name}", dedupeKey = "wf|${run.id}|${node.id}",
+                    detail = detail, route = if (open == "none") null else "workflow/${w.id}", routeLabel = "Abrir fluxo")
+                NodeResult(buildJsonObject { put("title", title); put("text", text.take(4_000)); if (detail.isNotEmpty()) put("detail", detail.take(4_000)) }.toString())
+            }
+
+            "ai" -> {
+                val prompt = r("prompt").trim()
+                if (prompt.isBlank()) return NodeResult(error = "Instrução vazia.")
+                if (prompt.length > 120_000) return NodeResult(error = "Os dados ficaram grandes demais para a IA (${prompt.length / 1000} mil caracteres). Use um caminho mais específico, ex.: {{id.data.campo}}.")
+                val max = (r("maxTokens").toIntOrNull() ?: 800).coerceIn(50, 8_000)
+                val out = app.llm.quick(prompt, maxTokens = max).trim()
+                if (out.isBlank()) NodeResult(error = "O modelo não respondeu.") else NodeResult(out)
+            }
+
+            "if_new" -> {
+                val key = r("key").trim()
+                if (key.isBlank()) return NodeResult(error = "A chave ficou vazia: confira o caminho em {{…}} (o nó anterior não trouxe esse campo).")
+                val slot = "${w.id}|${node.id}"
+                val seen = WorkflowStore.seen(slot)
+                val isNew = key !in seen
+                when {
+                    run.trigger == "test" -> NodeResult(buildJsonObject { put("key", key); put("new", isNew); put("note", "teste: segue por \"sim\" para testar o resto; nada foi memorizado") }.toString(), port = "true")
+                    seen.isEmpty() && !WorkflowStore.seenInitialized(slot) && (node.config["first"] ?: "skip") == "skip" -> {
+                        WorkflowStore.remember(slot, key); NodeResult(buildJsonObject { put("key", key); put("new", false); put("note", "primeira execução: memorizado") }.toString(), port = "false")
+                    }
+                    else -> {
+                        if (isNew) WorkflowStore.remember(slot, key)
+                        NodeResult(buildJsonObject { put("key", key); put("new", isNew) }.toString(), port = if (isNew) "true" else "false")
+                    }
+                }
             }
 
             else -> NodeResult(error = "Tipo de nó desconhecido: ${node.type}")

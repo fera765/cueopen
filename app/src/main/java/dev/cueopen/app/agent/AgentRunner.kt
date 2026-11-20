@@ -3696,11 +3696,13 @@ class AgentRunner(
             "Actions: list | get | create | update | validate | test | status | publish | run | disable | delete. " +
             "workflow_json = {name, nodes:[{id, type, label, config}], edges:[{from, to, port}]} (ids curtos como t1, h1, a1; layout é automático). Tipos e config (valores em texto): " +
             "trigger_manual; trigger_schedule (mode=interval|daily|weekly, minutes, time HH:mm, weekday 1-7); " +
-            "agent (prompt, agent, timeout min) — IA para resumir/classificar/escrever; a resposta vira o texto da saída; " +
+            "ai (prompt, maxTokens) — chamada direta ao modelo SEM ferramentas: use para resumir/formatar/classificar/extrair dados (rápido; prefira a agent); " +
+            "agent (prompt, agent=nome existente ou vazio, timeout min) — agente completo com ferramentas/browser, só quando precisa agir/pesquisar; " +
+            "if_new (key=valor que identifica o item ex. {{g1.data.results.messages.0.id}}, first=skip|new; ports true=novo/false=já visto; lembra entre execuções) — para \"só se for novo\"; " +
             "connector (source=hub|mcp|app, conector=<id do app ex. gmail | id do servidor MCP | id do conector do app>, acao=<nome técnico>, campos=objeto JSON com os campos da ação, conexao=<conta, opcional>) — saída {status, connector, action, summary, data, text}; " +
             "http (method, url, headers, body, onError=stop|continue) — saída {status, body, data (se JSON), text (texto limpo se HTML)}; shell (command); set (values: linhas nome = valor); " +
-            "if (left, op=contains|not_contains|equals|not_equals|gt|lt|empty|not_empty|regex, right; edges com port true/false); delay (seconds); approval (question; port true/false); notify (title, text). " +
-            "Dados entre nós: {{prev}} (saída anterior), {{<id>}}, {{<id>.campo.sub}} (JSON), {{trigger.time}}. Ex.: site → resumo → e-mail: trigger_schedule(interval 30) → http GET → agent prompt \"Resuma: {{h1.text}}\" → connector gmail send_email campos {\"receiver\":[\"x@y.com\"],\"subject\":\"Resumo\",\"body_text\":\"{{a1}}\"}.", buildJsonObject {
+            "if (left, op=contains|not_contains|equals|not_equals|gt|lt|empty|not_empty|regex, right; edges com port true/false); delay (seconds); approval (question; port true/false); notify (title, text curto, detail=conteúdo completo que abre num quadro ao tocar, open=modal|flow|none). " +
+            "Dados entre nós: {{prev}} (saída anterior), {{<id>}}, {{<id>.campo.sub}} (JSON), {{trigger.time}}. Ex.: site → resumo → e-mail: trigger_schedule(interval 30) → http GET → ai prompt \"Resuma: {{h1.text}}\" → connector gmail send_email campos {\"receiver\":[\"x@y.com\"],\"subject\":\"Resumo\",\"body_text\":\"{{a1}}\"}. Ex.: e-mail novo → aviso: trigger_schedule(interval 30) → connector g1 gmail gmail_search_email campos {\"max_results\":1} → if_new key {{g1.data.results.messages.0.id}} → (port true) notify title \"Novo e-mail\", text {{g1.data.results.messages.0.subject}}, detail com remetente, assunto e corpo. Depois do test use os \"caminhos\" do relatório para acertar os {{id.campo}}; campo vazio = corrija e teste de novo.", buildJsonObject {
             put("action", str("list | get | create | update | validate | test | status | publish | run | disable | delete"))
             put("id", str("Id ou nome do fluxo"))
             put("workflow_json", str("JSON do fluxo para create/update"))
@@ -5829,6 +5831,8 @@ class AgentRunner(
      * Chamada de arquivo incompleta (resposta cortada pelo limite de saída do modelo): NÃO executa. Antes, file_write sem
      * content gravava o arquivo VAZIO (ex.: Footer.jsx sem export default derrubou a página) e "{}" repetia em loop.
      */
+    private val SQUAD_FATAL_CONSOLE = Regex("Uncaught|SyntaxError|does not provide an export named|Failed to resolve import|Failed to fetch dynamically imported module|is not defined")
+
     private fun toolArgsGuard(call: ToolCall): String? {
         if (call.name != "file_write" && call.name != "file_edit") return null
         val o = runCatching { org.json.JSONObject(call.argsJson.ifBlank { "{}" }) }.getOrNull()
@@ -5873,7 +5877,12 @@ class AgentRunner(
             logic.problems(w).filterNot { it.contains("não está ligado a nada") } +
                 w.nodes.flatMap { dev.cueopen.app.workflow.WfConnectors.validate(store, it) }
         fun report(r: dev.cueopen.app.workflow.WfRun) = "Status: ${r.status}" + (if (r.error.isNotBlank()) " — ${r.error.take(600)}" else "") + "\n" +
-            r.steps.joinToString("\n") { s -> "- ${s.label} [${s.type}] ${s.status}" + (if (s.error.isNotBlank()) ": ${s.error.take(400)}" else if (s.output.isNotBlank()) " → " + s.output.replace(Regex("\\s+"), " ").take(350) else "") }
+            r.steps.joinToString("\n") { s -> "- ${s.label} [${s.type}, id ${s.nodeId}] ${s.status}" + (if (s.error.isNotBlank()) ": ${s.error.take(400)}" else if (s.output.isNotBlank()) " → " + s.output.replace(Regex("\\s+"), " ").take(350) +
+                logic.paths(s.output).takeIf { it.isNotEmpty() }?.let { p -> "\n    caminhos: " + p.take(30).joinToString { "{{${s.nodeId}.$it}}" } }.orEmpty() else "") }
+        suspend fun stopActive(w: dev.cueopen.app.workflow.Workflow) {
+            st.runsOf(w.id).filter { engine.isActive(it.status) }.forEach { engine.cancel(it.id) }
+            repeat(25) { if (engine.isRunning(w.id)) kotlinx.coroutines.delay(200) }
+        }
         when (val action = o.optString("action").trim().lowercase()) {
             "list" -> st.flows.value.joinToString("\n") { "- " + describe(it) }.ifBlank { "Nenhum fluxo ainda." }
             "get" -> find()?.let { kotlinx.serialization.json.Json.encodeToString(dev.cueopen.app.workflow.Workflow.serializer(), it) } ?: "ERRO: fluxo não encontrado."
@@ -5904,6 +5913,7 @@ class AgentRunner(
                     nodes = finalNodes, edges = if (edges.isEmpty() && base != null) base.edges else edges, enabled = false)
                 w = logic.layout(w)
                 if (base != null && base.enabled) dev.cueopen.app.workflow.WorkflowScheduler.cancel(ctx, base.id)
+                if (base != null) stopActive(base)  // a versão antiga não continua rodando depois da edição
                 val saved = st.upsert(w)
                 val v = validation(saved)
                 "OK: rascunho salvo — " + describe(saved) + "\n" + (if (v.isEmpty()) "Validação: ok. Próximo passo: action=test id=${saved.id}."
@@ -5914,12 +5924,19 @@ class AgentRunner(
                 val w = find() ?: return@runCatching "ERRO: fluxo não encontrado."
                 val v = validation(w)
                 if (v.isNotEmpty()) return@runCatching "ERRO: corrija antes de testar:\n" + v.joinToString("\n") { "• $it" }
+                stopActive(w)  // execução antiga (ou teste anterior travado) não impede o novo teste
                 val runId = engine.start(w.id, trigger = "test").getOrElse { return@runCatching "ERRO: ${it.message}" }
                 val r = engine.awaitRun(runId, 5 * 60_000L) ?: return@runCatching "O teste ainda está rodando (id $runId). Consulte com action=status id=${w.id}."
                 if (r.status == "waiting") "O teste está aguardando a aprovação do usuário (nó Aprovação). Peça para ele aprovar em Fluxos › ${w.name} › Execuções; depois consulte action=status."
                 else "Teste concluído.\n" + report(r) + if (r.status == "ok") "\nTudo certo: publique com action=publish id=${w.id}." else "\nCorrija com action=update e teste de novo."
             }
-            "status" -> find()?.let { w -> st.runsOf(w.id).firstOrNull()?.let { "Última execução (${it.trigger}):\n" + report(it) } ?: "Nenhuma execução ainda." } ?: "ERRO: fluxo não encontrado."
+            "status" -> {
+                val w = find() ?: return@runCatching "ERRO: fluxo não encontrado."
+                var last = st.runsOf(w.id).firstOrNull() ?: return@runCatching "Nenhuma execução ainda."
+                // Ainda rodando: espera até 90 s aqui (não fique chamando status em sequência).
+                if (last.status == "running") last = engine.awaitRun(last.id, 90_000L) ?: last
+                "Última execução (${last.trigger}):\n" + report(last) + if (last.status == "running") "\nAinda rodando. Se um nó demora demais, cancele com action=update corrigindo-o (ex.: troque agent por ai)." else ""
+            }
             "publish" -> {
                 val w = find() ?: return@runCatching "ERRO: fluxo não encontrado."
                 val v = validation(w)
@@ -6602,10 +6619,15 @@ class AgentRunner(
                 "if(o){var r=o.shadowRoot;e=(r&&(r.querySelector('.message-body')||r.querySelector('.message'))||o).textContent||'';var f=r&&r.querySelector('.file');if(f)e+='\\n'+f.textContent;}" +
                 "if(!e){var n=document.querySelector('nextjs-portal');if(n&&n.shadowRoot)e=(n.shadowRoot.textContent||'').slice(0,1500);}" +
                 "var s=window.__fluwySquad;return JSON.stringify({e:e.trim().slice(0,1500),m:s&&s.lastMut?Date.now()-s.lastMut:-1});})()") }.getOrDefault("")
+            // Erros que não abrem o overlay do Vite (ex.: "does not provide an export named 'default'") só aparecem no console.
+            val now = System.currentTimeMillis()
+            val consoleErr = runCatching { browser!!.console.value }.getOrDefault(emptyList())
+                .lastOrNull { it.level == "error" && now - it.time < 8_000 && SQUAD_FATAL_CONSOLE.containsMatchIn(it.message) }
+                ?.let { "${it.message.take(600)} (${it.source})" }
             return runCatching {
                 val o = org.json.JSONObject(raw)
-                o.optString("e").ifBlank { null } to o.optLong("m", -1)
-            }.getOrDefault(null to -1L)
+                (o.optString("e").ifBlank { null } ?: consoleErr) to o.optLong("m", -1)
+            }.getOrDefault(consoleErr to -1L)
         }
 
         // Preview ao vivo: abre a página, mostra cada edição (HMR; se o HMR não refletir, recarrega), redesenha os cursores
@@ -6664,7 +6686,7 @@ class AgentRunner(
                             } else {
                                 badSince = 0L
                                 // A cada 2 voltas (~2,4 s): ler a página pesa no WebView do celular (o renderer chegou a travar).
-                                val skip = sessionId in squadApi || (++tick % 2 == 1 && changedAt == 0L)
+                                val skip = sessionId in squadApi || (++tick % (if (browser.liteMode()) 4 else 2) != 0 && changedAt == 0L)
                                 val (err, sinceMut) = if (skip) (null to -1L) else pageState()
                                 // Arquivo mudou e a página não mexeu em 2,5 s: o HMR não pegou (watcher do proot); recarrega.
                                 if (err == null && changedAt > 0 && now - changedAt in 2_500..20_000 && (sinceMut < 0 || sinceMut > now - changedAt) && now - lastReload > 3_000) {

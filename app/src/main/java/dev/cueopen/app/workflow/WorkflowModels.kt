@@ -111,6 +111,11 @@ object WfCatalog {
                 WfField("time", "Horário (HH:mm)", WfField.Kind.TIME, default = "09:00"),
                 WfField("weekday", "Dia da semana", WfField.Kind.SELECT, options = listOf("1" to "Segunda", "2" to "Terça", "3" to "Quarta", "4" to "Quinta", "5" to "Sexta", "6" to "Sábado", "7" to "Domingo"), default = "1"),
             )),
+        WfNodeType("ai", "IA (texto)", CAT_AI, "Uma chamada rápida ao modelo, sem ferramentas: resumir, traduzir, classificar, formatar ou extrair dados do que veio antes.", 0xFF9B7BFF, "ai",
+            fields = listOf(
+                WfField("prompt", "Instrução", WfField.Kind.MULTILINE, "Inclua os dados com {{prev}} ou {{id.campo}}. $TEMPLATE_HINT", required = true),
+                WfField("maxTokens", "Tamanho máximo da resposta (tokens)", WfField.Kind.NUMBER, default = "800"),
+            )),
         WfNodeType("agent", "Agente IA", CAT_AI, "Um agente do app executa a instrução (com ferramentas, browser, terminal e conectores) e devolve a resposta.", 0xFF7C5CFF, "agent",
             fields = listOf(
                 WfField("prompt", "Instrução", WfField.Kind.MULTILINE, TEMPLATE_HINT, required = true),
@@ -155,6 +160,12 @@ object WfCatalog {
                 WfField("right", "Comparar com", WfField.Kind.TEXT),
             ),
             ports = listOf("true", "false")),
+        WfNodeType("if_new", "Se for novo", CAT_LOGIC, "Lembra o que já viu entre execuções: segue por \"sim\" só quando a chave (ex.: id do último e-mail) ainda não apareceu.", 0xFFFFB020, "new",
+            fields = listOf(
+                WfField("key", "Chave que identifica o item", WfField.Kind.TEXT, "Ex.: {{g1.data.results.messages.0.id}}", required = true),
+                WfField("first", "Na primeira execução", WfField.Kind.SELECT, options = listOf("new" to "Tratar como novo", "skip" to "Só memorizar"), default = "skip"),
+            ),
+            ports = listOf("true", "false")),
         WfNodeType("delay", "Esperar", CAT_LOGIC, "Pausa o fluxo por um tempo.", 0xFF56CCF2, "timer",
             fields = listOf(WfField("seconds", "Segundos", WfField.Kind.NUMBER, default = "10"))),
         WfNodeType("approval", "Aprovação", CAT_LOGIC, "Pausa até você aprovar ou recusar (notificação + tela de execuções).", 0xFFFFC53D, "approval",
@@ -167,6 +178,8 @@ object WfCatalog {
             fields = listOf(
                 WfField("title", "Título", WfField.Kind.TEXT, default = "Fluxo"),
                 WfField("text", "Texto", WfField.Kind.MULTILINE, TEMPLATE_HINT, default = "{{prev}}"),
+                WfField("detail", "Conteúdo completo (abre num quadro ao tocar)", WfField.Kind.MULTILINE, "Vazio = mostra o texto. $TEMPLATE_HINT"),
+                WfField("open", "Ao tocar na notificação", WfField.Kind.SELECT, options = listOf("modal" to "Abrir quadro com o conteúdo", "flow" to "Abrir o fluxo", "none" to "Só abrir o app"), default = "modal"),
             )),
     )
 
@@ -180,14 +193,14 @@ object WfCatalog {
         WfPreset("Toda segunda às 9h", CAT_TRIGGER, "trigger_schedule", "Roda toda segunda-feira às 09:00.", mapOf("mode" to "weekly", "weekday" to "1", "time" to "09:00")),
         WfPreset("Toda hora", CAT_TRIGGER, "trigger_schedule", "Roda a cada 60 minutos.", mapOf("mode" to "interval", "minutes" to "60")),
         // IA
-        WfPreset("Resumir texto", CAT_AI, "agent", "Resume a saída anterior em tópicos curtos.", mapOf("prompt" to "Resuma em até 5 tópicos curtos, em português:\n\n{{prev}}")),
-        WfPreset("Traduzir para inglês", CAT_AI, "agent", "Traduz a saída anterior.", mapOf("prompt" to "Traduza para o inglês, mantendo o tom, e responda só com a tradução:\n\n{{prev}}")),
-        WfPreset("Classificar sentimento", CAT_AI, "agent", "Responde positivo, negativo ou neutro.", mapOf("prompt" to "Classifique o sentimento do texto abaixo. Responda só com uma palavra: positivo, negativo ou neutro.\n\n{{prev}}")),
+        WfPreset("Resumir texto", CAT_AI, "ai", "Resume a saída anterior em tópicos curtos.", mapOf("prompt" to "Resuma em até 5 tópicos curtos, em português:\n\n{{prev}}")),
+        WfPreset("Traduzir para inglês", CAT_AI, "ai", "Traduz a saída anterior.", mapOf("prompt" to "Traduza para o inglês, mantendo o tom, e responda só com a tradução:\n\n{{prev}}")),
+        WfPreset("Classificar sentimento", CAT_AI, "ai", "Responde positivo, negativo ou neutro.", mapOf("prompt" to "Classifique o sentimento do texto abaixo. Responda só com uma palavra: positivo, negativo ou neutro.\n\n{{prev}}")),
         WfPreset("Pesquisar na web", CAT_AI, "agent", "Pesquisa um tema e traz as fontes.", mapOf("prompt" to "Pesquise na web as novidades mais recentes sobre: inteligência artificial. Traga 5 itens, cada um com uma linha e o link.")),
         WfPreset("Notícias do dia", CAT_AI, "agent", "As notícias mais importantes de hoje, resumidas.", mapOf("prompt" to "Liste as 5 notícias mais importantes de hoje no Brasil, uma linha cada, com o link da fonte.")),
-        WfPreset("Post para redes sociais", CAT_AI, "agent", "Escreve um post a partir da saída anterior.", mapOf("prompt" to "Escreva um post curto e envolvente para Instagram (com 3 hashtags) a partir disto:\n\n{{prev}}")),
-        WfPreset("Extrair dados (JSON)", CAT_AI, "agent", "Transforma texto em JSON estruturado.", mapOf("prompt" to "Extraia nome, e-mail, telefone e assunto do texto abaixo e responda APENAS com um JSON válido com essas chaves:\n\n{{prev}}")),
-        WfPreset("Responder e-mail", CAT_AI, "agent", "Rascunha uma resposta educada.", mapOf("prompt" to "Escreva uma resposta curta, cordial e profissional para esta mensagem:\n\n{{prev}}")),
+        WfPreset("Post para redes sociais", CAT_AI, "ai", "Escreve um post a partir da saída anterior.", mapOf("prompt" to "Escreva um post curto e envolvente para Instagram (com 3 hashtags) a partir disto:\n\n{{prev}}")),
+        WfPreset("Extrair dados (JSON)", CAT_AI, "ai", "Transforma texto em JSON estruturado.", mapOf("prompt" to "Extraia nome, e-mail, telefone e assunto do texto abaixo e responda APENAS com um JSON válido com essas chaves:\n\n{{prev}}")),
+        WfPreset("Responder e-mail", CAT_AI, "ai", "Rascunha uma resposta educada.", mapOf("prompt" to "Escreva uma resposta curta, cordial e profissional para esta mensagem:\n\n{{prev}}")),
         // Apps (hub de conectores / APIs)
         WfPreset("Gmail · enviar e-mail", CAT_APPS, "connector", "Envia um e-mail pelo Gmail conectado.", mapOf("source" to "hub", "conector" to "gmail", "acao" to "send_email",
             "campos" to "{\"receiver\": [\"email@exemplo.com\"], \"subject\": \"Resumo\", \"body_text\": \"{{prev}}\"}")),
@@ -216,6 +229,7 @@ object WfCatalog {
         WfPreset("Se número maior que", CAT_LOGIC, "if", "Compara números (ex.: preço).", mapOf("left" to "{{prev}}", "op" to "gt", "right" to "100")),
         WfPreset("Se está vazio", CAT_LOGIC, "if", "Sim quando a saída anterior veio vazia.", mapOf("left" to "{{prev}}", "op" to "empty")),
         WfPreset("Esperar 1 minuto", CAT_LOGIC, "delay", "Pausa 60 segundos.", mapOf("seconds" to "60")),
+        WfPreset("Só se for novo", CAT_LOGIC, "if_new", "Continua só quando o item (ex.: último e-mail) ainda não foi visto.", mapOf("key" to "{{prev}}", "first" to "skip")),
         WfPreset("Pedir aprovação", CAT_LOGIC, "approval", "Você aprova antes de continuar.", mapOf("question" to "Posso continuar com isto?\n\n{{prev}}")),
         WfPreset("Montar mensagem", CAT_LOGIC, "set", "Cria campos a partir das saídas.", mapOf("values" to "titulo = Resultado de {{trigger.time}}\ntexto = {{prev}}")),
         // Saídas

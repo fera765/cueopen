@@ -30,6 +30,15 @@ object WfLogic {
                 // Só valida JSON sem templates (com {{…}} o texto final só existe na execução).
                 if (v.isNotEmpty() && !v.contains("{{") && runCatching { Json.parseToJsonElement(v) }.isFailure) out += "${label(n)}: \"${f.label}\" não é um JSON válido."
             }
+            // {{x}} / {{x.campo}} precisa apontar para um nó que existe (senão vira texto vazio na execução).
+            val byLabel = w.nodes.associate { label(it).lowercase() to it.id }
+            n.config.values.flatMap { v -> TOKEN.findAll(v).map { it.groupValues[1].trim() }.toList() }.distinct().forEach { expr ->
+                val head = expr.substringBefore('.')
+                if (head == "prev" || head == "trigger" || head == "workflow") return@forEach
+                val target = if (head in ids) head else byLabel[head.lowercase()]
+                if (target == null) out += "${label(n)}: {{$expr}} não aponta para nenhum nó (ids: ${w.nodes.filter { it.id != n.id }.joinToString { it.id }})."
+                else if (target == n.id) out += "${label(n)}: {{$expr}} usa a saída do próprio nó."
+            }
             if (n.type == "trigger_schedule") {
                 val mode = n.config["mode"] ?: "daily"
                 if (mode == "interval" && (n.config["minutes"]?.toIntOrNull() ?: 0) < 1) out += "${label(n)}: intervalo mínimo é 1 minuto."

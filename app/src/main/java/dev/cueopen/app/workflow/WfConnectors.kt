@@ -188,6 +188,13 @@ Use {{$id.data.<campo>}} · {{$id.text}} · {{$id}} (tudo)"""
 
     /** Checagem do nó antes de testar/publicar: conector ativo, ação existente, obrigatórios preenchidos. */
     suspend fun validate(store: Store, n: WfNode): List<String> {
+        if (n.type == "agent") {
+            val a = n.config["agent"].orEmpty().trim()
+            val agents = store.state.value.agents
+            return if (a.isNotBlank() && agents.none { it.name.equals(a, true) })
+                listOf("${WfLogic.label(n)}: o agente \"$a\" não existe (agentes: ${agents.joinToString { it.name }.ifBlank { "nenhum" }}). Deixe vazio para o padrão — ou use um nó \"ai\" para só formatar/resumir.")
+            else emptyList()
+        }
         if (n.type != "connector") return emptyList()
         val kind = n.config["source"].orEmpty().ifBlank { HUB }
         val id = n.config["conector"].orEmpty(); val action = n.config["acao"].orEmpty()

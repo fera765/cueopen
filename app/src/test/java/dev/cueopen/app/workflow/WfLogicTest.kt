@@ -85,4 +85,21 @@ class WfLogicTest {
         assertEquals(WfLogic.signature(w), WfLogic.signature(w.copy(name = "outro")))
         assertFalse(WfLogic.signature(w) == WfLogic.signature(w.copy(nodes = listOf(a.copy(config = mapOf("title" to "y"))))))
     }
+
+    @Test fun problemsFlagUnknownTemplateRefs() {
+        val t = WfNode(id = "t1", type = "trigger_manual")
+        val n = WfNode(id = "n1", type = "notify", config = mapOf("title" to "x", "text" to "{{g1.data.subject}} {{t1}} {{prev}} {{trigger.time}}"))
+        val w = Workflow(nodes = listOf(t, n), edges = listOf(WfEdge(from = t.id, to = n.id)))
+        val p = WfLogic.problems(w)
+        assertTrue(p.any { it.contains("g1.data.subject") })
+        assertFalse(p.any { it.contains("{{t1}}") || it.contains("{{prev}}") || it.contains("trigger.time") })
+    }
+
+    @Test fun compactKeepsValidJson() {
+        val big = buildString { append("{\"data\":{\"messages\":["); repeat(60) { i -> if (i > 0) append(','); append("{\"id\":\"$i\",\"headers\":{"); repeat(20) { h -> if (h > 0) append(','); append("\"x-h$h\":\"${"v".repeat(400)}\"") }; append(",\"subject\":\"s$i\"},\"body\":\"${"b".repeat(3000)}\"}") }; append("]}}") }
+        val out = JsonCompact.shrinkText(big, 30_000)
+        assertTrue(out.length <= 40_000)
+        val el = kotlinx.serialization.json.Json.parseToJsonElement(out)  // continua JSON válido
+        assertEquals("s0", WfLogic.pick(el.toString(), "data.messages.0.headers.subject"))
+    }
 }

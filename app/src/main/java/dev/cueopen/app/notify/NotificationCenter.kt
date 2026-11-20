@@ -31,7 +31,19 @@ object NotificationCenter {
 
     @Serializable
     data class Entry(val id: Long, val at: Long, val title: String, val text: String, val priority: String, val category: String,
-                     val sessionId: String? = null, val agent: String = "", val needsAction: Boolean = false, val read: Boolean = false)
+                     val sessionId: String? = null, val agent: String = "", val needsAction: Boolean = false, val read: Boolean = false,
+                     /** Conteúdo completo mostrado num quadro ao tocar (ex.: o e-mail inteiro). */
+                     val detail: String = "",
+                     /** Rota do app aberta pelo botão do quadro (ex.: "workflow/<id>"); com [detail] vazio, tocar vai direto para ela. */
+                     val route: String? = null,
+                     val routeLabel: String = "")
+
+    const val EXTRA_ENTRY = "notif_entry"
+    private val _live = kotlinx.coroutines.flow.MutableSharedFlow<Entry>(extraBufferCapacity = 8)
+    /** Notificações com quadro/rota publicadas agora (o app aberto mostra um aviso no topo). */
+    val live: kotlinx.coroutines.flow.SharedFlow<Entry> = _live
+    fun entry(id: Long): Entry? = _history.value.firstOrNull { it.id == id }
+    fun markEntryRead(id: Long) { _history.value = _history.value.map { if (it.id == id) it.copy(read = true) else it }.also { save(it) } }
 
     const val CH_ATTENTION = "attention"
     const val CH_ALERTS = "alerts"
@@ -94,22 +106,31 @@ object NotificationCenter {
      */
     @Synchronized
     fun post(title: String, text: String, priority: Priority, category: Category, sessionId: String? = null, agent: String = "",
-             dedupeKey: String = "$category|$sessionId|${text.take(80)}", needsAction: Boolean = priority >= Priority.HIGH) {
+             dedupeKey: String = "$category|$sessionId|${text.take(80)}", needsAction: Boolean = priority >= Priority.HIGH,
+             detail: String = "", route: String? = null, routeLabel: String = "") {
         if (!::app.isInitialized) return
         val now = System.currentTimeMillis()
         val (record, show) = decide(priority, foreground, lastByKey[dedupeKey], sessionId?.let { lastBySession[it] }, now)
         if (!record) return
         lastByKey[dedupeKey] = now
         if (lastByKey.size > 500) lastByKey.entries.removeIf { now - it.value > DEDUPE_MS }
-        val entry = Entry(now, now, title.take(120), plain(text).take(600), priority.name, category.name, sessionId, agent, needsAction)
+        val id = if (_history.value.any { it.id == now }) now + 1 else now
+        val entry = Entry(id, now, title.take(120), plain(text).take(600), priority.name, category.name, sessionId, agent, needsAction,
+            detail = detail.take(8_000), route = route, routeLabel = routeLabel)
         _history.value = (listOf(entry) + _history.value).take(MAX_HISTORY).also { save(it) }
-        if (!show) return
+        val rich = detail.isNotBlank() || route != null
+        if (rich) _live.tryEmit(entry)
+        // Com quadro/rota: sempre vai para o sistema (o aviso dentro do app não fica no histórico do Android).
+        if (!show && !(rich && priority != Priority.SILENT)) return
         sessionId?.let { lastBySession[it] = now }
         val nm = app.getSystemService(NotificationManager::class.java)
         val channel = when (priority) { Priority.HIGH, Priority.CRITICAL -> CH_ATTENTION; Priority.NORMAL -> CH_ALERTS; else -> CH_SILENT }
         val key = sessionId ?: "app:$category"
-        val stableId = SessionNotificationRouting.stableId("$key|$category")
+        // Cada notificação com quadro tem id próprio (uma não substitui a outra e o toque abre a certa).
+        val stableId = if (rich) SessionNotificationRouting.stableId("entry|$id") else SessionNotificationRouting.stableId("$key|$category")
         val intent = Intent(app, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+        if (rich) intent.setAction("dev.cueopen.OPEN_NOTIFICATION_$id").putExtra(EXTRA_ENTRY, id)
+        else
         SessionNotificationRouting.validSessionId(sessionId)?.let {
             intent.setAction(SessionNotificationRouting.ACTION_OPEN_SESSION)
                 .putExtra(SessionNotificationRouting.EXTRA_SESSION, it).putExtra(SessionNotificationRouting.EXTRA_SESSION_ID, it)

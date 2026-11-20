@@ -179,7 +179,8 @@ object HubConnectors {
             put("status", "ok"); put("connector", appName(piece)); put("action", r.s("action")); r["output"]?.let { put("data", it) }
         }
         val text = pretty.encodeToString(JsonObject.serializer(), result)
-        return if (text.length <= MAX_OUT) text else text.take(MAX_OUT) + "\n…[cortado em ${MAX_OUT / 1000} KB]"
+        // Grande demais: encolhe mantendo JSON válido (antes o corte no meio quebrava o JSON).
+        return if (text.length <= 8_000) text else dev.cueopen.app.workflow.JsonCompact.shrinkText(text, MAX_OUT)
     }
 
     private const val MAX_OUT = 30_000
