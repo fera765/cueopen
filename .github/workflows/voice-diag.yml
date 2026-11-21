@@ -6,18 +6,13 @@ on:
 permissions:
   contents: read
 jobs:
-  ab:
+  phon:
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        voice: [cadu, faber, lessac, ryan]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/checkout@v4
         with: { ref: voices, path: tools/voice_diag/pk }
       - uses: actions/setup-python@v5
         with: { python-version: "3.11" }
-      - run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg >/dev/null
-      - run: pip install -q numpy soundfile faster-whisper num2words huggingface_hub "sherpa-onnx==1.10.46"
-      - run: cd tools/voice_diag && python ab.py ${{ matrix.voice }} sherpa
+      - run: pip install -q piper-tts huggingface_hub "sherpa-onnx==1.10.46"
+      - run: cd tools/voice_diag && python phon.py && python phon_sherpa.py 2>&1 | grep -viE "^\s*$" | head -200

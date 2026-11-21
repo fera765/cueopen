@@ -26,13 +26,14 @@ object AppVoice {
     data class Spec(val id: String, val name: String, val lang: String, val gender: String, val desc: String,
                     val ns: Float, val nw: Float, val ls: Float, val fullMb: Int, val liteMb: Int)
     val CATALOG = listOf(
-        Spec("cadu", "Cadu", "pt", "masculina", "Português do Brasil · natural e clara", 0.4f, 0.5f, 1.0f, 59, 14),
-        Spec("faber", "Faber", "pt", "masculina", "Português do Brasil · grave e calma", 0.4f, 0.8f, 1.0f, 59, 14),
-        Spec("lessac", "Lessac", "en", "feminina", "Inglês americano · narração", 0.8f, 0.8f, 1.0f, 59, 14),
-        Spec("ryan", "Ryan", "en", "masculina", "Inglês americano · firme", 0.8f, 0.5f, 1.0f, 59, 14),
+        Spec("cadu", "Cadu", "pt", "masculina", "Português do Brasil · natural e clara", 0.667f, 0.5f, 1.15f, 59, 14),
+        Spec("faber", "Faber", "pt", "masculina", "Português do Brasil · grave e calma", 0.5f, 0.8f, 1.08f, 59, 14),
+        Spec("lessac", "Lessac", "en", "feminina", "Inglês americano · narração", 0.5f, 0.5f, 1.08f, 59, 14),
+        Spec("ryan", "Ryan", "en", "masculina", "Inglês americano · firme", 0.5f, 0.8f, 1.0f, 59, 14),
     )
     enum class Variant(val tag: String, val label: String) { FULL("fp32", "Padrão"), LITE("int8", "Leve") }
-    private const val BASE = "https://github.com/fera765/cueopen/releases/download/voices-v2/"
+    /** Pacotes leves v3 (PAD após o início inserido no modelo: corrige o 1º som de cada frase no sherpa-onnx 1.10.46). */
+    private const val BASE = "https://github.com/fera765/cueopen/raw/voices/"
 
     sealed class State {
         data object Idle : State()
@@ -53,7 +54,7 @@ object AppVoice {
 
     private fun prefs(ctx: Context) = ctx.getSharedPreferences("app_voice", Context.MODE_PRIVATE)
     fun spec(id: String?) = CATALOG.firstOrNull { it.id == id }
-    private fun key(id: String, v: Variant) = "piper-$id-${v.tag}"
+    private fun key(id: String, v: Variant) = "piper2-$id-${v.tag}"
     private fun dir(ctx: Context, id: String, v: Variant) = File(ctx.filesDir, "voices/${key(id, v)}")
     /**
      * Dados de pronúncia (espeak) numa pasta ÚNICA que nunca é apagada: o motor carrega o espeak uma vez por processo,
@@ -91,9 +92,11 @@ object AppVoice {
             val root = File(ctx.filesDir, "voices")
             root.listFiles()?.filter { it.name.contains("dii") || it.name.endsWith("-fp32") }?.forEach { it.deleteRecursively() }
             // Migração: espeak que veio dentro de cada voz → pasta única.
-            root.listFiles()?.filter { it.isDirectory && it.name.startsWith("piper-") }?.forEach { v ->
+            // Pacotes antigos (sem a correção do 1º som) saem; o espeak deles vira a pasta única se ainda não houver.
+            root.listFiles()?.filter { it.isDirectory && (it.name.startsWith("piper-") || it.name.startsWith("piper2-")) }?.forEach { v ->
                 val own = File(v, "espeak-ng-data")
                 if (own.isDirectory) { if (!File(espeakDir(ctx), "phontab").isFile) own.renameTo(espeakDir(ctx)) else own.deleteRecursively() }
+                if (v.name.startsWith("piper-")) v.deleteRecursively()
             }
             ctx.getSharedPreferences("dii_voice", Context.MODE_PRIVATE).edit().clear().apply()
             preload(ctx, "pt")
