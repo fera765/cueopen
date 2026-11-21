@@ -26,10 +26,10 @@ object AppVoice {
     data class Spec(val id: String, val name: String, val lang: String, val gender: String, val desc: String,
                     val ns: Float, val nw: Float, val ls: Float, val fullMb: Int, val liteMb: Int)
     val CATALOG = listOf(
-        Spec("cadu", "Cadu", "pt", "masculina", "Português do Brasil · natural e clara", 0.667f, 0.5f, 1.15f, 59, 14),
-        Spec("faber", "Faber", "pt", "masculina", "Português do Brasil · grave e calma", 0.5f, 0.8f, 1.08f, 59, 14),
-        Spec("lessac", "Lessac", "en", "feminina", "Inglês americano · narração", 0.5f, 0.5f, 1.08f, 59, 14),
-        Spec("ryan", "Ryan", "en", "masculina", "Inglês americano · firme", 0.5f, 0.8f, 1.0f, 59, 14),
+        Spec("cadu", "Cadu", "pt", "masculina", "Português do Brasil · natural e clara", 0.5f, 0.5f, 1.08f, 59, 14),
+        Spec("faber", "Faber", "pt", "masculina", "Português do Brasil · grave e calma", 0.333f, 0.5f, 1.08f, 59, 14),
+        Spec("lessac", "Lessac", "en", "feminina", "Inglês americano · narração", 0.333f, 0.8f, 1.0f, 59, 14),
+        Spec("ryan", "Ryan", "en", "masculina", "Inglês americano · firme", 0.333f, 0.8f, 1.15f, 59, 14),
     )
     enum class Variant(val tag: String, val label: String) { FULL("fp32", "Padrão"), LITE("int8", "Leve") }
     /**

@@ -7,17 +7,12 @@ from normalize_pt import normalize
 from faster_whisper import WhisperModel
 VID = sys.argv[1]; PT = VID in ("cadu", "faber")
 P = {"cadu": (0.5, 0.5, 1.08), "faber": (0.333, 0.5, 1.08), "lessac": (0.333, 0.8, 1.0), "ryan": (0.333, 0.8, 1.15)}[VID]
-TESTS_PT = {  # palavra-alvo: (frases com {w}, variantes)
+TESTS_PT = {
     "criei": (["Prontinho, {w} o fluxo que vai monitorar os seus e-mails.", "{w} uma automação para você.", "Eu {w} a tarefa agora mesmo."],
-              ["criei", "criêi", "criiêi", "cri-ei", "criei mesmo"]),
-    "recibo": (["O recibo já está no seu e-mail.".replace("recibo", "{w}"), "Enviei o {w} do pagamento.", "Guarde o {w}, por favor."],
-               ["recibo", "recíbo", "rressíbo", "recibu"]),
-    "lembre": (["{w}-se de tomar água.", "Por favor, {w}-se da reunião.", "{w}-se de mim amanhã."], ["Lembre", "Lêmbre", "Lémbre"]),
-    "tarde": (["Já liguei o lembrete para as quatro e meia da {w}.", "Boa {w}! Tudo certo?", "Vou fazer isso à {w}."], ["tarde", "tárde", "tardi"]),
+              ["criei", "criéi", "kriêi", "crii-éi", "criêí", "eu criei"]),
 }
 TESTS_EN = {
-    "tasks": (["You have two pending {w} for today.", "I finished all the {w}.", "These {w} are done."], ["tasks", "tahsks", "task s"]),
-    "saved": (["I saved the result in the folder.".replace("saved", "{w}"), "I {w} your file.", "Everything was {w}."], ["saved", "saaved", "save'd"]),
+    "tasks": (["You have two pending {w} for today.", "I finished all the {w}.", "These {w} are done."], ["tasks", "taskss", "tasques", "task-s"]),
 }
 TESTS = TESTS_PT if PT else TESTS_EN
 pkg = f"piper2-{VID}-int8"; zipfile.ZipFile(f"pk/{pkg}.zip").extractall("ex"); d = f"ex/{pkg}"
