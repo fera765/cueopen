@@ -74,6 +74,8 @@ private fun nodeIcon(type: String): ImageVector = when (WfCatalog.of(type).icon)
     "approval" -> Icons.Rounded.ThumbUp
     "notify" -> Icons.Rounded.Notifications
     "ai" -> Icons.Rounded.AutoAwesome
+    "decide" -> Icons.Rounded.Psychology
+    "review" -> Icons.Rounded.RateReview
     "new" -> Icons.Rounded.FiberNew
     else -> Icons.Rounded.Circle
 }
@@ -111,6 +113,25 @@ private fun templates(): List<WfTemplate> = listOf(
             "detail" to "{{${a.id}}}", "open" to "modal"))
         flow("Novo e-mail → aviso", listOf(t, g, n0, a, nt), WfEdge(from = t.id, to = g.id), WfEdge(from = g.id, to = n0.id),
             WfEdge(from = n0.id, to = a.id, port = "true"), WfEdge(from = a.id, to = nt.id))
+    },
+    WfTemplate("Responder e-mails importantes (com aprovação)", "A cada 15 min: e-mail novo → a IA decide se precisa de resposta → escreve o rascunho → você revisa (com fotos e anexos), edita e aprova → envia.", "review") {
+        val id = WfIds.new().take(4)
+        val t = WfNode(id = "t$id", type = "trigger_schedule", label = "A cada 15 min", config = mapOf("mode" to "interval", "minutes" to "15"))
+        val g = WfNode(id = "g$id", type = "connector", label = "Último e-mail", config = mapOf("source" to "hub", "conector" to "gmail", "acao" to "gmail_search_email",
+            "campos" to "{\n  \"max_results\": 1\n}"))
+        val nw = WfNode(id = "n$id", type = "if_new", label = "É novo?", config = mapOf("key" to "{{${g.id}.data.results.messages.0.id}}", "first" to "new"))
+        val d = WfNode(id = "d$id", type = "ai_decide", label = "Precisa de resposta?", config = mapOf("input" to "{{${g.id}}}", "criteria" to
+            "É um e-mail importante que precisa da minha resposta? Considere importantes: clientes, propostas comerciais, atendimento/suporte, pessoas que escrevem direto para mim. Não responda: propaganda, newsletters, notificações automáticas, avisos de sistema e no-reply."))
+        val a = WfNode(id = "a$id", type = "ai", label = "Escrever rascunho", config = mapOf("maxTokens" to "700", "prompt" to
+            "Escreva a resposta para o e-mail abaixo, em português, cordial e objetiva, no tom de quem recebeu. Não invente fatos, preços ou prazos: se faltar informação, diga que vai verificar. Responda SÓ com o corpo do e-mail (sem assunto).\n\nE-MAIL:\n{{${g.id}.data.results.messages.0 | text}}"))
+        val rv = WfNode(id = "r$id", type = "review", label = "Revisar resposta", config = mapOf("title" to "Responder: {{${g.id}.data.results.messages.0.subject}}",
+            "item" to "{{${g.id}}}", "draft" to "{{${a.id}}}", "mode" to "ask", "hours" to "24"))
+        val sd = WfNode(id = "s$id", type = "connector", label = "Enviar resposta", config = mapOf("source" to "hub", "conector" to "gmail", "acao" to "send_email",
+            "campos" to "{\n  \"receiver\": [\"{{${g.id}.data.results.messages.0.from | email}}\"],\n  \"subject\": \"Re: {{${g.id}.data.results.messages.0.subject}}\",\n  \"body_text\": \"{{${rv.id}.draft}}\"\n}"))
+        val nt = WfNode(id = "m$id", type = "notify", label = "Avisar", config = mapOf("title" to "✉ Resposta enviada", "text" to "Re: {{${g.id}.data.results.messages.0.subject}}", "detail" to "{{${rv.id}.draft}}", "open" to "modal", "layout" to "markdown"))
+        flow("Responder e-mails importantes", listOf(t, g, nw, d, a, rv, sd, nt), WfEdge(from = t.id, to = g.id), WfEdge(from = g.id, to = nw.id),
+            WfEdge(from = nw.id, to = d.id, port = "true"), WfEdge(from = d.id, to = a.id, port = "true"), WfEdge(from = a.id, to = rv.id),
+            WfEdge(from = rv.id, to = sd.id, port = "true"), WfEdge(from = sd.id, to = nt.id))
     },
     WfTemplate("Resumo de site por e-mail", "A cada 30 min lê uma página, resume com IA e envia por e-mail (Gmail).", "apps") {
         val id = WfIds.new().take(4)
@@ -214,7 +235,10 @@ fun WorkflowsScreen(nav: NavController) {
                                 active == null -> FilledIconButton({
                                     WorkflowEngine.start(w.id).onFailure { nav.navigate("workflow/${w.id}") }
                                 }, colors = IconButtonDefaults.filledIconButtonColors(containerColor = c.accent)) { Icon(Icons.Rounded.PlayArrow, "Executar", tint = Color.White) }
-                                active.status == "waiting" -> FilledTonalIconButton({ nav.navigate("workflow/${w.id}") }) { Icon(Icons.Rounded.HourglassTop, "Responder aprovação", tint = c.warn) }
+                                active.status == "waiting" -> FilledTonalIconButton({
+                                    val rv = WorkflowEngine.pendingReviewOf(w.id)
+                                    nav.navigate(if (rv != null) "review/${rv.runId}/${rv.nodeId}" else "workflow/${w.id}")
+                                }) { Icon(Icons.Rounded.HourglassTop, "Responder", tint = c.warn) }
                                 else -> Row {
                                     FilledTonalIconButton({ if (active.status == "paused") WorkflowEngine.resume(active.id) else WorkflowEngine.pause(active.id) }) {
                                         Icon(if (active.status == "paused") Icons.Rounded.PlayArrow else Icons.Rounded.Pause, if (active.status == "paused") "Continuar" else "Pausar")
@@ -272,7 +296,7 @@ fun WorkflowsScreen(nav: NavController) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Box(Modifier.size(38.dp).clip(RoundedCornerShape(11.dp)).background(c.accent.copy(alpha = .14f)), contentAlignment = Alignment.Center) {
                                 Icon(when (tp.icon) { "notify" -> Icons.Rounded.Notifications; "apps" -> Icons.Rounded.Apps; "http" -> Icons.Rounded.Http
-                                    "schedule" -> Icons.Rounded.Schedule; "agent" -> Icons.Rounded.SmartToy; "approval" -> Icons.Rounded.ThumbUp; else -> Icons.Rounded.PlayArrow }, null, tint = c.accent)
+                                    "schedule" -> Icons.Rounded.Schedule; "agent" -> Icons.Rounded.SmartToy; "approval" -> Icons.Rounded.ThumbUp; "review" -> Icons.Rounded.RateReview; else -> Icons.Rounded.PlayArrow }, null, tint = c.accent)
                             }
                             Spacer(Modifier.width(12.dp))
                             Column(Modifier.weight(1f)) {
@@ -342,6 +366,7 @@ fun WorkflowEditorScreen(nav: NavController, id: String) {
     var problemsOpen by remember { mutableStateOf(false) }
     var menu by remember { mutableStateOf(false) }
     var confirmDelete by remember { mutableStateOf(false) }
+    var confirmAuto by remember { mutableStateOf(false) }
     var toast by remember { mutableStateOf<String?>(null) }
     var watchRun by remember { mutableStateOf<String?>(null) }
     var result by remember { mutableStateOf<WfRun?>(null) }
@@ -432,6 +457,10 @@ fun WorkflowEditorScreen(nav: NavController, id: String) {
                     IconButton({ menu = true }) { Icon(Icons.Rounded.MoreVert, "Mais") }
                     DropdownMenu(menu, { menu = false }) {
                         DropdownMenuItem({ Text("Renomear") }, { menu = false; rename = true }, leadingIcon = { Icon(Icons.Rounded.Edit, null) })
+                        if (w.nodes.any { it.type == "review" }) DropdownMenuItem({ Text(if (w.autonomous) "Desligar autonomia total" else "Autonomia total…") }, {
+                            menu = false
+                            if (w.autonomous) { save(w.copy(autonomous = false)); toast = "Revisões voltam a pedir sua aprovação" } else confirmAuto = true
+                        }, leadingIcon = { Icon(Icons.Rounded.Bolt, null) })
                         DropdownMenuItem({ Text("Organizar nós") }, {
                             menu = false
                             save(WfLogic.layout(w, NODE_W, NODE_H)); fitted = false
@@ -536,7 +565,11 @@ fun WorkflowEditorScreen(nav: NavController, id: String) {
             // Avisos.
             Column(Modifier.align(Alignment.TopCenter).padding(10.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 if (connectFrom != null) Banner("Toque no nó de destino · toque no fundo para cancelar", c.accent) { connectFrom = null }
-                else if (active?.status == "waiting") Banner("Aguardando sua aprovação — toque para responder", c.warn) { history = true }
+                else if (active?.status == "waiting") Banner("Aguardando sua aprovação — toque para responder", c.warn) {
+                    val rv = WorkflowEngine.pendingReviewOf(w.id)
+                    if (rv != null) nav.navigate("review/${rv.runId}/${rv.nodeId}") else history = true
+                }
+                else if (w.autonomous) Banner("Autonomia total: revisões seguem sozinhas", c.accent) { menu = true }
                 else if (problems.isNotEmpty()) Banner("${problems.size} ajuste(s) pendente(s)", c.warn) { problemsOpen = true }
             }
             // Resultado da execução disparada aqui.
@@ -621,6 +654,11 @@ fun WorkflowEditorScreen(nav: NavController, id: String) {
         title = { Text(if (problems.isEmpty()) "Tudo certo" else "Ajustes pendentes") },
         text = { Text(if (problems.isEmpty()) "O fluxo está pronto para rodar." else problems.joinToString("\n") { "• $it" }, fontSize = 14.sp) },
         confirmButton = { TextButton({ problemsOpen = false }) { Text("Ok") } })
+    if (confirmAuto) AlertDialog(onDismissRequest = { confirmAuto = false }, containerColor = c.surface,
+        title = { Text("Autonomia total?") },
+        text = { Text("Os nós \"Revisar e aprovar\" deste fluxo vão seguir sozinhos com o rascunho da IA — por exemplo, responder e-mails sem você ver antes. Você pode desligar a qualquer momento.") },
+        confirmButton = { TextButton({ confirmAuto = false; save(w.copy(autonomous = true)); toast = "Autonomia total ligada" }) { Text("Ligar") } },
+        dismissButton = { TextButton({ confirmAuto = false }) { Text("Cancelar") } })
     if (confirmDelete) AlertDialog(onDismissRequest = { confirmDelete = false }, containerColor = c.surface,
         title = { Text("Excluir \"${w.name}\"?") }, text = { Text("O fluxo, o agendamento e o histórico de execuções serão apagados.") },
         confirmButton = { TextButton({
@@ -744,6 +782,8 @@ private fun subtitle(n: WfNode): String = when (n.type) {
     "trigger_manual" -> "Toque em Executar"
     "agent", "ai" -> n.config["prompt"].orEmpty().replace(Regex("\\s+"), " ").ifBlank { "Defina a instrução" }
     "if_new" -> n.config["key"].orEmpty().ifBlank { "Defina a chave" }
+    "ai_decide" -> n.config["criteria"].orEmpty().replace(Regex("\\s+"), " ").ifBlank { "Defina o critério" }
+    "review" -> if (n.config["mode"] == "auto") "Automático (sem perguntar)" else "Pede sua aprovação"
     "connector" -> listOf(n.config["conector"].orEmpty(), n.config["acao"].orEmpty()).filter { it.isNotBlank() }.joinToString(" · ").ifBlank { "Escolha conector e ação" }
     "mcp" -> n.config["tool"].orEmpty().ifBlank { "Escolha a ferramenta" }
     "http" -> "${n.config["method"] ?: "GET"} ${n.config["url"].orEmpty()}".trim()
@@ -1164,6 +1204,10 @@ private fun RunsPanel(w: Workflow, runs: List<WfRun>, nav: NavController, onClos
                                 Modifier.padding(start = 22.dp, top = 2.dp), fontSize = 12.sp, color = c.ink3)
                             else Box(Modifier.fillMaxWidth().padding(start = 22.dp, top = 2.dp)) { CueMarkdown(WfFormat.readable(s.output, maxItems = 10).take(2_000)) }
                         }
+                        if (r.status == "waiting" && s.status == "running" && s.type == "review" && WorkflowEngine.review(r.id, s.nodeId) != null)
+                            Button({ onClose(); nav.navigate("review/${r.id}/${s.nodeId}") }, Modifier.padding(start = 22.dp), colors = ButtonDefaults.buttonColors(containerColor = c.accent)) {
+                                Icon(Icons.Rounded.RateReview, null, Modifier.size(16.dp)); Spacer(Modifier.width(6.dp)); Text("Revisar e aprovar")
+                            }
                         if (r.status == "waiting" && s.status == "running" && s.type == "approval" && WorkflowEngine.pendingApproval(r.id, s.nodeId)) Row(Modifier.padding(start = 22.dp)) {
                             Button({ WorkflowEngine.approve(r.id, s.nodeId, true) }, colors = ButtonDefaults.buttonColors(containerColor = c.ok)) { Text("Aprovar") }
                             Spacer(Modifier.width(8.dp))

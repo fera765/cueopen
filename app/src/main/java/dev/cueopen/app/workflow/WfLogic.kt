@@ -32,7 +32,7 @@ object WfLogic {
             }
             // {{x}} / {{x.campo}} precisa apontar para um nó que existe (senão vira texto vazio na execução).
             val byLabel = w.nodes.associate { label(it).lowercase() to it.id }
-            n.config.values.flatMap { v -> TOKEN.findAll(v).map { it.groupValues[1].trim() }.toList() }.distinct().forEach { expr ->
+            n.config.values.flatMap { v -> TOKEN.findAll(v).map { it.groupValues[1].substringBefore('|').trim() }.toList() }.distinct().forEach { expr ->
                 val head = expr.substringBefore('.')
                 if (head == "prev" || head == "trigger" || head == "workflow") return@forEach
                 val target = if (head in ids) head else byLabel[head.lowercase()]
@@ -64,6 +64,9 @@ object WfLogic {
             val v = render(m.value, outputs, labels, prev, vars)
             if (WfFormat.isJson(v)) humanize(v) else v
         } else TOKEN.replace(template) { m ->
+            // Filtros: {{g1.data.from | email}} · | name · | text · | oneline · | lower · | upper · | trim · | default:valor
+            val parts = m.groupValues[1].split('|').map { it.trim() }
+            if (parts.size > 1) return@replace applyFilters(render("{{" + parts[0] + "}}", outputs, labels, prev, vars), parts.drop(1))
             val expr = m.groupValues[1]
             val head = expr.substringBefore('.')
             val path = if (expr.contains('.')) expr.substringAfter('.') else ""
@@ -75,6 +78,25 @@ object WfLogic {
             }
             if (base == null) "" else if (path.isEmpty()) base else pick(base, path)
         }
+
+    private val EMAIL = Regex("[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}")
+
+    fun applyFilters(value: String, filters: List<String>): String = filters.fold(value) { v, f ->
+        val name = f.substringBefore(':').trim().lowercase(); val arg = f.substringAfter(':', "").trim()
+        when (name) {
+            "email" -> EMAIL.find(v)?.value.orEmpty()
+            "name" -> WfFormat.person(kotlinx.serialization.json.JsonPrimitive(v)).orEmpty()
+            "text", "readable" -> WfFormat.readable(v).replace("**", "")
+            "oneline" -> WfFormat.oneLine(v)
+            "lower" -> v.lowercase()
+            "upper" -> v.uppercase()
+            "trim" -> v.trim()
+            "first" -> v.lineSequence().firstOrNull { it.isNotBlank() }.orEmpty()
+            "default" -> v.ifBlank { arg }
+            "json" -> kotlinx.serialization.json.JsonPrimitive(v).toString().removeSurrounding("\"")
+            else -> v
+        }
+    }
 
     /** Navega num JSON por "a.b.0.c"; texto que não é JSON não tem campos. */
     fun pick(raw: String, path: String): String {

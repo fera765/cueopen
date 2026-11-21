@@ -148,4 +148,24 @@ class WfLogicTest {
         assertEquals("\"Resumo hoje\"", b[0]["title"].toString())
         assertEquals("\"list\"", b[1]["type"].toString())
     }
+
+    @Test fun filtersExtractEmailAndDefault() {
+        val out = mapOf("g1" to "{\"from\":\"\\\"Ana Souza\\\" <ana@x.com>\",\"subject\":\"Oi\"}")
+        assertEquals("ana@x.com", WfLogic.render("{{g1.from | email}}", out, emptyMap(), ""))
+        assertEquals("Ana Souza", WfLogic.render("{{g1.from | name}}", out, emptyMap(), ""))
+        assertEquals("n/d", WfLogic.render("{{g1.nada | default:n/d}}", out, emptyMap(), ""))
+        val w = Workflow(nodes = listOf(WfNode(id = "t1", type = "trigger_manual"), WfNode(id = "n1", type = "notify", config = mapOf("text" to "{{t1.time | upper}}"))),
+            edges = listOf(WfEdge(from = "t1", to = "n1")))
+        assertFalse(WfLogic.problems(w).any { it.contains("não aponta") })
+    }
+
+    @Test fun reviewShowsSingleMailInDetail() {
+        val raw = """{"status":"ok","connector":"Gmail","data":{"results":{"messages":[{"id":"1","subject":"Proposta","from":"Bia <bia@y.com>","body_text":"Segue a proposta **anexa**.",
+            "attachments":[{"fileName":"proposta.pdf","mimeType":"application/pdf"},{"fileName":"foto.jpg","mimeType":"image/jpeg","data":"http://127.0.0.1:1/f.jpg"}]}]}}}"""
+        val blocks = WfView.itemBlocks(raw)
+        val types = blocks.map { it["type"].toString().trim('"') }
+        assertEquals(listOf("header", "card", "image", "chips", "text"), types)
+        assertTrue(blocks[1]["subtitle"].toString().contains("bia@y.com"))
+        assertTrue(blocks[4]["text"].toString().contains("\\\\*\\\\*anexa"))
+    }
 }

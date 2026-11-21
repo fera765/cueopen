@@ -242,6 +242,7 @@ fun CueNav(nav: NavHostController, startOnboarding: Boolean) {
         composable("scheduled") { ScheduledScreen(nav) }
         composable("workflows") { dev.cueopen.app.ui.WorkflowsScreen(nav) }
         composable("workflow/{id}") { e -> dev.cueopen.app.ui.WorkflowEditorScreen(nav, e.arguments!!.getString("id")!!) }
+        composable("review/{run}/{node}") { e -> dev.cueopen.app.ui.ReviewScreen(nav, e.arguments!!.getString("run")!!, e.arguments!!.getString("node")!!) }
         composable("notif/{id}") { e -> dev.cueopen.app.ui.NotificationPageScreen(nav, e.arguments!!.getString("id")!!.toLongOrNull() ?: 0L) }
         composable("scheduled/{id}") { e -> ScheduledEditScreen(nav, e.arguments!!.getString("id")!!) }
         composable("knowledge") { KnowledgeScreen(nav) }

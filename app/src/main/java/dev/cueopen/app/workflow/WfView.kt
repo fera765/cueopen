@@ -96,6 +96,36 @@ object WfView {
             (if (total > max) listOf(block("text", "text" to "… e mais ${total - max}")) else emptyList())
     }
 
+    /** Um e-mail inteiro para revisar: cabeçalho, remetente, imagens, anexos e o texto completo. */
+    fun mailDetailBlocks(o: JsonObject): List<JsonObject> {
+        val out = mutableListOf<JsonObject>()
+        val subject = WfFormat.titleOf(o)?.let { WfFormat.cleanText(it, 200) } ?: "(sem assunto)"
+        val from = WfFormat.fromOf(o)
+        val fromAddr = Regex("[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}").find((o["from"] ?: (o["headers"] as? JsonObject)?.get("from") ?: JsonNull).toString())?.value
+        out += block("header", "title" to subject, "subtitle" to listOfNotNull(WfFormat.dateOf(o)).joinToString(" · "))
+        out += block("card", "title" to (from ?: "Remetente"), "subtitle" to fromAddr, "avatar" to (from ?: "?"))
+        val imgs = (o["attachments"] as? JsonArray).orEmpty().filterIsInstance<JsonObject>()
+            .filter { (it["mimeType"]?.s() ?: it["contentType"]?.s()).orEmpty().startsWith("image/") }
+            .mapNotNull { (it["data"]?.s() ?: it["url"]?.s())?.takeIf { u -> u.startsWith("http") } }
+        if (imgs.size == 1) out += block("image", "url" to imgs[0]) else if (imgs.size > 1) out += block("gallery", "images" to imgs.take(12))
+        val files = WfFormat.attachmentsOf(o)
+        if (files.isNotEmpty()) out += block("chips", "items" to files.take(12).map { "📎 $it" })
+        val body = listOf("body_text", "bodyText", "text", "body_plain", "plain", "body", "snippet", "content").firstNotNullOfOrNull { k -> o[k]?.s() }
+            ?.let { WfFormat.cleanText(it, 12_000) }
+        out += block("text", "text" to (body?.let { WfFormat.esc(it) } ?: "_(sem texto)_"))
+        return out
+    }
+
+    /** Blocos para revisar UM item (e-mail completo, ou o item formatado). */
+    fun itemBlocks(raw: String): List<JsonObject> {
+        val root = WfFormat.parseJson(raw) ?: return listOf(block("text", "text" to raw.trim().ifBlank { "(sem conteúdo)" }))
+        var e = WfFormat.unwrapData(root)
+        // Lista com um item só (ex.: busca com max_results 1): mostra o item.
+        WfFormat.listIn(e)?.let { if (it.size == 1) e = it[0] }
+        val o = e as? JsonObject
+        return if (o != null && WfFormat.isMail(o)) mailDetailBlocks(o) else autoBlocks(raw)
+    }
+
     /** Blocos a partir de qualquer saída de nó (JSON de conector, HTTP, texto). */
     fun autoBlocks(raw: String): List<JsonObject> {
         if (isView(raw)) return blocksOf(raw)

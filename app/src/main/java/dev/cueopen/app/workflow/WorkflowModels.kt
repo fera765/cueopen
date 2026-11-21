@@ -14,6 +14,8 @@ data class Workflow(
     val updatedAt: Long = System.currentTimeMillis(),
     /** Assinatura (WfLogic.signature) da versão que passou no último teste completo; vazio = nunca testado. */
     val testedSig: String = "",
+    /** Autonomia total: nós "Revisar e aprovar" seguem sozinhos (sem esperar o usuário). */
+    val autonomous: Boolean = false,
 )
 
 @Serializable
@@ -116,6 +118,12 @@ object WfCatalog {
                 WfField("prompt", "Instrução", WfField.Kind.MULTILINE, "Inclua os dados com {{prev}} ou {{id.campo}}. $TEMPLATE_HINT", required = true),
                 WfField("maxTokens", "Tamanho máximo da resposta (tokens)", WfField.Kind.NUMBER, default = "800"),
             )),
+        WfNodeType("ai_decide", "Decisão por IA", CAT_AI, "A IA julga o item pelos seus critérios (ex.: \"precisa de resposta?\", \"é comercial?\") e segue por sim ou não, com o motivo.", 0xFFB06BFF, "decide",
+            fields = listOf(
+                WfField("criteria", "Critério (pergunta de sim/não)", WfField.Kind.MULTILINE, "Ex.: É um e-mail importante que precisa da minha resposta (cliente, comercial, atendimento, fulano@…)? Ignore propaganda e notificações automáticas.", required = true),
+                WfField("input", "Item a julgar", WfField.Kind.TEXT, TEMPLATE_HINT, default = "{{prev}}"),
+            ),
+            ports = listOf("true", "false")),
         WfNodeType("agent", "Agente IA", CAT_AI, "Um agente do app executa a instrução (com ferramentas, browser, terminal e conectores) e devolve a resposta.", 0xFF7C5CFF, "agent",
             fields = listOf(
                 WfField("prompt", "Instrução", WfField.Kind.MULTILINE, TEMPLATE_HINT, required = true),
@@ -166,6 +174,15 @@ object WfCatalog {
             fields = listOf(
                 WfField("key", "Chave que identifica o item", WfField.Kind.TEXT, "Ex.: {{g1.data.results.messages.0.id}}", required = true),
                 WfField("first", "Na primeira execução", WfField.Kind.SELECT, options = listOf("new" to "Tratar como novo", "skip" to "Só memorizar"), default = "skip"),
+            ),
+            ports = listOf("true", "false")),
+        WfNodeType("review", "Revisar e aprovar", CAT_LOGIC, "Mostra o item (e-mail com fotos e anexos) e um rascunho editável numa página; você aprova (segue por sim com o texto final) ou recusa. Em modo automático segue sozinho.", 0xFF2FBF71, "review",
+            fields = listOf(
+                WfField("title", "Título", WfField.Kind.TEXT, default = "Revisar resposta"),
+                WfField("item", "Item a mostrar", WfField.Kind.TEXT, "Ex.: {{g1}} (o e-mail). $TEMPLATE_HINT", default = "{{prev}}"),
+                WfField("draft", "Rascunho (você pode editar antes de aprovar)", WfField.Kind.MULTILINE, "Ex.: {{a1}} (resposta escrita pela IA)"),
+                WfField("mode", "Aprovação", WfField.Kind.SELECT, options = listOf("ask" to "Pedir minha aprovação", "auto" to "Automático (sem perguntar)"), default = "ask"),
+                WfField("hours", "Esperar até (horas)", WfField.Kind.NUMBER, default = "24"),
             ),
             ports = listOf("true", "false")),
         WfNodeType("delay", "Esperar", CAT_LOGIC, "Pausa o fluxo por um tempo.", 0xFF56CCF2, "timer",

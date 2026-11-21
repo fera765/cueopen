@@ -35,6 +35,20 @@ object WorkflowEngine {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val jobs = ConcurrentHashMap<String, Job>()
     private val approvals = ConcurrentHashMap<String, CompletableDeferred<Boolean>>()
+
+    /** Pedido de revisão aberto (nó "Revisar e aprovar"): o que a página mostra. */
+    data class Review(val runId: String, val nodeId: String, val workflowId: String, val workflowName: String, val title: String,
+                      val view: String, val draft: String, val createdAt: Long = System.currentTimeMillis())
+    data class ReviewDecision(val approved: Boolean, val draft: String)
+    private val reviewWaits = ConcurrentHashMap<String, CompletableDeferred<ReviewDecision>>()
+    private val _reviews = kotlinx.coroutines.flow.MutableStateFlow<Map<String, Review>>(emptyMap())
+    val reviews: kotlinx.coroutines.flow.StateFlow<Map<String, Review>> = _reviews
+    fun review(runId: String, nodeId: String): Review? = _reviews.value["$runId|$nodeId"]
+    fun pendingReviewOf(workflowId: String): Review? = _reviews.value.values.firstOrNull { it.workflowId == workflowId }
+    /** Resposta do usuário na página de revisão (texto final, possivelmente editado). */
+    fun decideReview(runId: String, nodeId: String, approved: Boolean, draft: String) {
+        reviewWaits.remove("$runId|$nodeId")?.complete(ReviewDecision(approved, draft))
+    }
     private const val MAX_STEPS = 200
 
     private val pauses = ConcurrentHashMap.newKeySet<String>()
@@ -90,6 +104,7 @@ object WorkflowEngine {
         pauses.remove(runId)
         jobs.remove(runId)?.cancel()
         approvals.keys.filter { it.startsWith("$runId|") }.forEach { approvals.remove(it)?.complete(false) }
+        reviewWaits.keys.filter { it.startsWith("$runId|") }.forEach { reviewWaits.remove(it)?.complete(ReviewDecision(false, "")) }
         WorkflowStore.runs.value.firstOrNull { it.id == runId }?.takeIf { isActive(it.status) }?.let {
             WorkflowStore.putRun(it.copy(status = "cancelled", finishedAt = System.currentTimeMillis(), error = "Parada pelo usuário."))
         }
@@ -232,8 +247,21 @@ object WorkflowEngine {
             }
 
             "connector" -> {
-                val camposText = r("campos").ifBlank { "{}" }
-                val campos = runCatching { Json.parseToJsonElement(camposText) as JsonObject }.getOrElse { return NodeResult(error = "Campos não são um objeto JSON válido depois de preencher os valores: ${camposText.take(300)}") }
+                // Preenche os {{…}} DENTRO de cada valor do JSON (texto com aspas/quebras de linha — ex.: um rascunho de e-mail —
+                // não quebra mais o JSON). Modelo que não é JSON válido cai no preenchimento de texto antigo.
+                val tpl = node.config["campos"].orEmpty().ifBlank { "{}" }
+                val parsedTpl = runCatching { Json.parseToJsonElement(tpl) as JsonObject }.getOrNull()
+                val campos = if (parsedTpl != null) {
+                    fun walk(e: kotlinx.serialization.json.JsonElement): kotlinx.serialization.json.JsonElement = when (e) {
+                        is kotlinx.serialization.json.JsonPrimitive -> if (e.isString && e.content.contains("{{")) kotlinx.serialization.json.JsonPrimitive(rt(e.content, 0)) else e
+                        is kotlinx.serialization.json.JsonArray -> kotlinx.serialization.json.JsonArray(e.map { walk(it) })
+                        is JsonObject -> JsonObject(e.mapValues { walk(it.value) })
+                    }
+                    walk(parsedTpl) as JsonObject
+                } else {
+                    val camposText = r("campos").ifBlank { "{}" }
+                    runCatching { Json.parseToJsonElement(camposText) as JsonObject }.getOrElse { return NodeResult(error = "Campos não são um objeto JSON válido depois de preencher os valores: ${camposText.take(300)}") }
+                }
                 val o = WfConnectors.run(app.store, node.config["source"].orEmpty().ifBlank { WfConnectors.HUB }, r("conector").trim(), r("acao").trim(), campos, r("conexao").trim())
                 NodeResult(o.output, error = o.error)
             }
@@ -290,6 +318,61 @@ object WorkflowEngine {
                 approvals.remove("${run.id}|${node.id}")
                 setStatus("running")
                 NodeResult(if (ok) "aprovado" else "recusado", port = if (ok) "true" else "false")
+            }
+
+            "ai_decide" -> {
+                val criteria = r("criteria").trim()
+                if (criteria.isBlank()) return NodeResult(error = "Defina o critério da decisão.")
+                val item = rh("input", false).ifBlank { prev }.take(14_000)
+                if (item.isBlank()) return NodeResult(error = "Nada para julgar: o item chegou vazio (confira o campo \"Item a julgar\").")
+                val ask = "Você é um classificador rigoroso. Decida se o ITEM atende ao CRITÉRIO.\n\nCRITÉRIO:\n$criteria\n\nITEM:\n$item\n\n" +
+                    "Responda SOMENTE com JSON, sem texto fora dele: {\"decisao\": true ou false, \"motivo\": \"frase curta em português\", \"categoria\": \"uma palavra\", \"confianca\": 0 a 1}"
+                val raw = app.llm.quick(ask, maxTokens = 300, conversationId = "workflow-${w.id}-${node.id}").trim()
+                val obj = Regex("\\{[\\s\\S]*\\}").find(raw)?.value?.let { runCatching { Json.parseToJsonElement(it) as JsonObject }.getOrNull() }
+                    ?: return NodeResult(error = "A IA não devolveu uma decisão válida: ${raw.take(200)}")
+                val d = obj["decisao"] ?: obj["decision"]
+                val yes = (d as? kotlinx.serialization.json.JsonPrimitive)?.content?.trim()?.lowercase() in setOf("true", "sim", "yes", "1")
+                NodeResult(buildJsonObject {
+                    put("decision", yes)
+                    put("reason", (obj["motivo"] ?: obj["reason"])?.let { (it as? kotlinx.serialization.json.JsonPrimitive)?.content }.orEmpty())
+                    put("category", (obj["categoria"] ?: obj["category"])?.let { (it as? kotlinx.serialization.json.JsonPrimitive)?.content }.orEmpty())
+                    put("confidence", (obj["confianca"] ?: obj["confidence"])?.let { (it as? kotlinx.serialization.json.JsonPrimitive)?.content?.toDoubleOrNull() } ?: 0.0)
+                }.toString(), port = if (yes) "true" else "false")
+            }
+
+            "review" -> {
+                val title = WfFormat.oneLine(rh("title", true)).ifBlank { "Revisar" }
+                val itemRaw = r("item").ifBlank { prev }
+                val draft = rh("draft", false).trim()
+                val auto = (node.config["mode"] ?: "ask") == "auto" || w.autonomous
+                fun out(ok: Boolean, text: String, how: String) = NodeResult(buildJsonObject {
+                    put("approved", ok); put("draft", text); put("decided_by", how); put("edited", text != draft)
+                }.toString(), port = if (ok) "true" else "false")
+                when {
+                    // Teste nunca dispara o envio de verdade (ex.: responder um cliente): segue por "não".
+                    run.trigger == "test" -> NodeResult(buildJsonObject { put("approved", false); put("draft", draft); put("decided_by", "teste")
+                        put("note", "teste: nada foi enviado; em execução real " + (if (auto) "segue sozinho (automático)" else "espera a sua aprovação na página de revisão")) }.toString(), port = "false")
+                    auto -> out(true, draft, "automático")
+                    else -> {
+                        val key = "${run.id}|${node.id}"
+                        val view = WfView.view(WfView.itemBlocks(itemRaw))
+                        val wait = CompletableDeferred<ReviewDecision>()
+                        reviewWaits[key] = wait
+                        _reviews.value = _reviews.value + (key to Review(run.id, node.id, w.id, w.name, title, view, draft))
+                        setStatus("waiting")
+                        runCatching {
+                            dev.cueopen.app.notify.NotificationCenter.post("✍ $title", WfView.plainText(view).lineSequence().firstOrNull { it.isNotBlank() }.orEmpty().take(160),
+                                dev.cueopen.app.notify.NotificationCenter.Priority.HIGH, dev.cueopen.app.notify.NotificationCenter.Category.APPROVAL, needsAction = true,
+                                agent = "Fluxo · ${w.name}", dedupeKey = "review|$key", route = "review/${run.id}/${node.id}", routeLabel = "Revisar")
+                        }
+                        val hours = (r("hours").toLongOrNull() ?: 24L).coerceIn(1, 168)
+                        val dec = try { withTimeoutOrNull(TimeUnit.HOURS.toMillis(hours)) { wait.await() } } finally {
+                            reviewWaits.remove(key); _reviews.value = _reviews.value - key
+                        }
+                        setStatus("running")
+                        if (dec == null) out(false, draft, "tempo esgotado") else out(dec.approved, dec.draft.ifBlank { draft }, "você")
+                    }
+                }
             }
 
             "notify" -> {
