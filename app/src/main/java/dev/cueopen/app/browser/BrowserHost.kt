@@ -1219,11 +1219,11 @@ class BrowserHost(private val appCtx: Context, private val sessionId: String = "
     fun liteMode(): Boolean = synchronized(rendererCrashes) { rendererCrashes.count { System.currentTimeMillis() - it < 5 * 60_000L } >= 2 }
 
     fun pushSquadOverlay(json: String?) {
-        if (json != null && liteMode()) { if (squadOverlay != null) { squadOverlay = null; mainHandler.post { runCatching { activeTab()?.webView?.evaluateJavascript("(function(){var r=document.getElementById('__fluwy_squad');if(r)r.remove();window.__fluwySquad=null;})();", null) } } }; return }
+        if (json != null && liteMode()) { if (squadOverlay != null) { squadOverlay = null; mainHandler.post { runCatching { activeTab()?.webView?.evaluateJavascript("(function(){var S=window.__fluwySquad;if(S){S.stop=true;try{S.mo&&S.mo.disconnect();}catch(e){}}var r=document.getElementById('__fluwy_squad');if(r)r.remove();window.__fluwySquad=null;})();", null) } } }; return }
         squadOverlay = json
         mainHandler.post {
             runCatching {
-                val js = if (json == null) "(function(){var r=document.getElementById('__fluwy_squad');if(r)r.remove();window.__fluwySquad=null;})();"
+                val js = if (json == null) "(function(){var S=window.__fluwySquad;if(S){S.stop=true;try{S.mo&&S.mo.disconnect();}catch(e){}}var r=document.getElementById('__fluwy_squad');if(r)r.remove();window.__fluwySquad=null;})();"
                     else dev.cueopen.app.agent.BuildSquad.overlayScript(json)
                 val tab = activeTab()
                 if (json == null || tab?.id !in failedTabs) tab?.webView?.evaluateJavascript(js, null)
