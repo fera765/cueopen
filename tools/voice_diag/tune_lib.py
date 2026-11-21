@@ -2,7 +2,7 @@
 Para cada combinação de parâmetros, gera frases típicas do assistente, transcreve e mede o erro por palavra (WER)
 contra o texto enviado. Escolhe a combinação com menos erros e lista as palavras que ainda saem erradas."""
 import json, os, re, sys, zipfile, subprocess
-import numpy as np, soundfile as sf, sherpa_onnx
+import numpy as np, soundfile as sf
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "voice_lab3"))
 from normalize_pt import normalize
 from faster_whisper import WhisperModel
