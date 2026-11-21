@@ -43,3 +43,15 @@ json.dump(r, open(f"out/ab_{VID}_{ENGINE}_{ver}.json", "w"), indent=2, ensure_as
 import subprocess
 full = np.concatenate(allaudio); full = full / max(1e-6, float(np.abs(full).max())) * 0.95
 sf.write("full.wav", full, sr); subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", "full.wav", "-b:a", "96k", f"out/amostra-{VID}.mp3"])
+
+# Prévia curta (tela de vozes) e amostra longa: impressas no log em base64 (releases/artefatos indisponíveis daqui).
+import base64
+if ENGINE == "sherpa":
+    PREV = {True: "Oi! Eu sou a sua assistente de voz. Posso ler suas mensagens, organizar sua agenda e responder o que você precisar, a qualquer hora.",
+            False: "Hi! I'm your voice assistant. I can read your messages, organize your schedule, and answer anything you need, any time."}[t.PT]
+    a, sr = synth(t.normalize(PREV) if t.PT else PREV)
+    a = np.concatenate([np.zeros(int(sr * 0.15), dtype=np.float32), a]); a = a / max(1e-6, float(np.abs(a).max())) * 0.95
+    sf.write("prev.wav", a, sr); subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", "prev.wav", "-ac", "1", "-b:a", "48k", f"out/preview-{VID}.mp3"])
+    subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", "full.wav", "-ac", "1", "-b:a", "48k", "full48.mp3"])
+    for tag, path in (("PREVIEW", f"out/preview-{VID}.mp3"), ("AMOSTRA", "full48.mp3")):
+        print(f"=={tag}-{VID}-BEGIN=="); print(base64.b64encode(open(path, "rb").read()).decode()); print(f"=={tag}-{VID}-END==")
