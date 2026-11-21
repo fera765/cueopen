@@ -32,10 +32,12 @@ from onnxruntime.quantization import quantize_dynamic, QuantType
 import onnxruntime as ort
 
 # Voz Piper oficial já convertida pelo sherpa-onnx: copia o formato EXATO dos metadados e o espeak-ng-data compatível.
-REF = "vits-piper-pt_PT-tugão-medium"
-if not os.path.isdir(REF):
-    import urllib.parse
-    subprocess.run(["bash", "-c", "curl -sSL -o ref.tar.bz2 'https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/" + urllib.parse.quote(REF) + ".tar.bz2' && tar xjf ref.tar.bz2"], check=True)
+REF = None
+for cand in ["vits-piper-pt_BR-faber-medium", "vits-piper-pt_PT-tugao-medium", "vits-piper-en_US-amy-low"]:
+    r = subprocess.run(["bash", "-c", f"curl -fsSL -o ref.tar.bz2 'https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/{cand}.tar.bz2' && tar xjf ref.tar.bz2"])
+    if r.returncode == 0 and os.path.isdir(cand): REF = cand; break
+assert REF, "nenhuma voz de referência do sherpa-onnx baixou"
+log("referência:", REF)
 ref_onnx = glob.glob(f"{REF}/*.onnx")[0]
 REF_META = {p.key: p.value for p in onnx.load(ref_onnx).metadata_props}
 log("metadados da referência:", REF_META)
@@ -103,7 +105,7 @@ def bench(model, name, threads=2, ns=0.667, nw=0.8, ls=1.0, tokens="variants/tok
     if r.returncode != 0: log(r.stderr[-3000:]); return None
     j = json.loads(r.stdout.strip().splitlines()[-1]); j["size_mb"] = round(os.path.getsize(model) / 1e6, 1); log(json.dumps(j)); return j
 
-results = [bench(ref_onnx, "ref_tugao_medium", tokens=f"{REF}/tokens.txt"), bench(fp32, "fp32"), bench(int8, "int8"), bench(opt, "int8opt"), bench(opt, "int8opt_1thread", threads=1),
+results = [bench(ref_onnx, "ref_" + REF.replace("vits-piper-", ""), tokens=f"{REF}/tokens.txt"), bench(fp32, "fp32"), bench(int8, "int8"), bench(opt, "int8opt"), bench(opt, "int8opt_1thread", threads=1),
            bench(opt, "int8opt_natural", ns=0.6, nw=0.7, ls=1.05)]
 
 # ---------- 4) Qualidade: distância espectral log-mel vs. original ----------
