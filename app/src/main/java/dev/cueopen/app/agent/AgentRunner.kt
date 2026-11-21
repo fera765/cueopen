@@ -3690,7 +3690,7 @@ class AgentRunner(
             "Projeto novo: divida em 8 a 40 tarefas pequenas, uma por agente, cada uma num elemento ou arquivo diferente; use depends_on só quando uma parte precisa da outra. " +
             "NÃO crie tarefa de revisão geral (\"QA/revisar o app inteiro\"): o app já confere compilação, imports, export default e âncoras no fim e chama o agente Doc para cada falha; revisão, se precisar, é por seção e objetiva. " +
             "EDIÇÕES DEPOIS: projeto já feito pelo time = toda mudança seguinte também vai pelo time (o app recusa edição direta do orquestrador). Para ajustes, 1 a 3 tarefas pequenas com file do componente existente " +
-            "(o app não recria a base nem duplica seções) e o mesmo preview; leia antes a seção \"## Entregas\" de .fluwy/TIME.md para dividir certo. Orçamento menor para ajustes (budget_tokens 200000). " +
+            "(o app não recria a base nem duplica seções) e o mesmo preview; leia antes a seção \"## Entregas\" de .fluwy/TIME.md para dividir certo. Não reduza budget_tokens (o app garante no mínimo 800 mil por agente e amplia o teto quando a tarefa precisa). " +
             "No fim o app ainda roda o build de produção e chama o Doc se falhar. " +
             "Bloqueia até o time terminar e devolve o relatório; depois teste, corrija o que faltar e mostre o resultado ao usuário.", buildJsonObject {
             put("goal", str("Objetivo do time em uma frase"))
@@ -3698,7 +3698,7 @@ class AgentRunner(
             put("preview", str("Pasta do projeto (ex.: /root/workspace/app): front-end React/Vite/Next ou API Node; o app instala, sobe e confere antes do time entrar. Ou a URL de um servidor já rodando (http://127.0.0.1:PORTA)"))
             put("contract", str("Contrato compartilhado por TODOS os agentes: nome da marca, paleta (cores Tailwind/hex), fontes, tom de voz, dados reais (endereço, telefone, preços), ids/âncoras e rotas. Evita que cada agente invente nomes e links diferentes"))
             put("max_parallel", int("Agentes trabalhando ao mesmo tempo (1-8; padrão 6)"))
-            put("budget_tokens", int("Orçamento de tokens por agente, contando o prompt de cada chamada (150000-2000000; padrão 600000)"))
+            put("budget_tokens", int("Orçamento de tokens por agente, contando o prompt de cada chamada (padrão 1500000; mínimo aplicado 800000; o app amplia se precisar)"))
         }, listOf("goal", "tasks_json")))
         if (allowMultiAgent) add(tool("workflow_manage", "Fluxos (automação estilo n8n; página Fluxos na barra lateral). Use SÓ quando o usuário pedir claramente para criar/alterar um fluxo ou automação recorrente. " +
             "Roteiro obrigatório: 1) descubra os conectores ativos (conectores_listar; ações e campos com conector_acoes); 2) action=create (salva RASCUNHO e valida); " +
@@ -6077,14 +6077,14 @@ class AgentRunner(
      */
     private fun viteWatchConfig(dir: File, addTailwind: Boolean = false): String? {
         val base = listOf("vite.config.ts", "vite.config.mts", "vite.config.js", "vite.config.mjs", "vite.config.cjs").firstOrNull { File(dir, it).isFile }
-            ?: return null  // sem config: o CHOKIDAR_USEPOLLING do ambiente já liga o polling
         val wrapper = File(dir, ".fluwy.vite.config.mjs")
         val importBase = base?.let { "import base from './$it'\n" } ?: ""
         return runCatching {
             wrapper.writeText(importBase + "import { mergeConfig } from 'vite'\n" +
                 (if (addTailwind) "import tailwindcss from '@tailwindcss/vite'\n" else "") +
                 "const over = { " + (if (addTailwind) "plugins: [tailwindcss()], " else "") +
-                "server: { host: '127.0.0.1', watch: { usePolling: true, interval: 250 } } }\n" +
+                // .fluwy/ (plano do time, build de verificação) fora do watcher: gravar ali recarregava a página em loop.
+                "server: { host: '127.0.0.1', watch: { usePolling: true, interval: 250, ignored: ['**/.fluwy/**', '**/.fluwy.vite.config.mjs', '**/node_modules/**', '**/.git/**'] } } }\n" +
                 (if (base != null) "export default async (env) => mergeConfig(typeof base === 'function' ? await base(env) : (base || {}), over)\n"
                     else "export default over\n"))
             wrapper.name
@@ -6184,8 +6184,12 @@ class AgentRunner(
         val ids = mutableMapOf<String, String>()  // Nome → id da seção (o do alvo do líder, ex.: #inicio; senão o nome)
         tasks.forEach { t ->
             val fromFile = Regex("""(?:^|/)(?:components|sections|pages)/([A-Za-z][A-Za-z0-9]*)\.(?:jsx|tsx|js|ts)$""").find(t.file)?.groupValues?.get(1)
+            // Só tarefas que SÃO um componente: arquivo em components/sections/pages, ou sem arquivo mas com alvo #id.
+            // (Antes um arquivo de dados como src/data/news.js com alvo #noticias virava "componente" e a tarefa era
+            // reprovada por não ter export default; tarefas com alvo #root ganhavam um Root.jsx fantasma.)
+            if (t.file.isNotBlank() && fromFile == null) return@forEach
             val name = fromFile ?: t.target.trim().split(Regex("\\s+")).firstOrNull()?.takeIf { it.startsWith("#") || it.startsWith(".") }?.let { pascal(it.drop(1)) }.orEmpty()
-            if (name.isBlank() || name == "App" || name == "Main") return@forEach
+            if (name.isBlank() || name in setOf("App", "Main", "Root", "Body", "Html", "Index")) return@forEach
             val f = when {
                 t.file.startsWith("/") -> File(dir, t.file.substringAfter(guestDir.trimEnd('/') + "/", "src/components/$name.$ext"))
                 t.file.isNotBlank() -> File(dir, t.file.removePrefix("./"))
@@ -6516,7 +6520,8 @@ class AgentRunner(
         val tasksJson = o.opt("tasks_json")?.toString().orEmpty()
         val preview = o.optString("preview")
         // Cada chamada reenvia o prompt de sistema (~10 mil tokens): 30 mil davam só 2–3 passos e o agente "concluía" no meio.
-        val budgetArg = o.optInt("budget_tokens", 600_000)
+        // Agentes não podem morrer no meio por teto: mínimo 800 mil por agente (o líder às vezes pedia 200 mil em ajustes).
+        val budgetArg = o.optInt("budget_tokens", 1_500_000).coerceAtLeast(800_000)
         val parallelArg = o.optInt("max_parallel", BuildSquad.PARALLEL)
         val contract = o.optString("contract").trim().take(3_000)
         val arr = runCatching { org.json.JSONArray(tasksJson.trim()) }.getOrElse { return "ERRO: tasks_json deve ser um array JSON de objetos {id, role, task, target, depends_on}." }
@@ -6564,9 +6569,15 @@ class AgentRunner(
             runCatching { wireComponents(sandbox.hostFile(g, sessionId), g, tasks, note) }.getOrDefault(emptyMap())
         }.orEmpty()
         // Regra: o time só entra com o app VIVO no browser. Sem isso, nenhum agente começa.
-        val alive = previewUrl != null && (!previewUrl.startsWith("http") ||
+        var alive = previewUrl != null && (!previewUrl.startsWith("http") ||
             (kotlinx.coroutines.withTimeoutOrNull(240_000) { appAliveInBrowser(sessionId, previewUrl, note) }
                 ?: (previewStatus(previewUrl, 15_000).first == 200).also { if (it) note("Checagem do browser passou do tempo, mas o servidor responde; o time vai começar.") }))
+        // Servidor morreu durante a checagem (porta fechada): religa uma vez e confere de novo antes de desistir.
+        if (!alive && previewUrl?.startsWith("http") == true && previewStatus(previewUrl).first == 0) {
+            note("O servidor caiu durante a checagem; religando…")
+            if (runCatching { squadPreviewUrl(sessionId, preview, note, wantTailwind) }.getOrNull() != null)
+                alive = previewStatus(previewUrl, 15_000).first == 200 || (kotlinx.coroutines.withTimeoutOrNull(180_000) { appAliveInBrowser(sessionId, previewUrl, note) } == true)
+        }
         if (preview.isNotBlank() && !alive) {
             BuildSquad.edit(squadId) { it.copy(running = false) }
             store.replaceItem(sessionId, card.copy(result = "O app não ficou de pé; o time não começou.", status = StepStatus.ERROR))
@@ -6639,16 +6650,24 @@ class AgentRunner(
                 try {
                     sem.withPermit {
                         BuildSquad.editWorker(squadId, n) { it.copy(status = BuildSquad.St.RUNNING, doing = "começando") }
-                        loop(w.sessionId, maxStepsOverride = 30, tokenBudgetOverride = budget)
-                        // Limite de passos: o orquestrador manda continuar (até 2x) em vez de deixar o agente esperando o usuário.
+                        var myBudget = budget
+                        loop(w.sessionId, maxStepsOverride = 60, tokenBudgetOverride = myBudget)
+                        // Parou por teto (passos OU tokens) sem terminar: o orquestrador amplia o teto e manda continuar (até 4x).
+                        // Antes: 2 voltas só por passos; no teto de tokens a tarefa era reprovada pela metade e as dependentes paravam.
+                        fun stoppedByLimit(): Boolean = store.session(w.sessionId)?.let { ss ->
+                            val lastErr = ss.items.lastOrNull() as? ChatItem.Error
+                            val lastAns = ss.items.lastOrNull { it is ChatItem.Assistant } as? ChatItem.Assistant
+                            (ss.status == SessionStatus.WAITING_USER && lastErr?.text?.startsWith("Limite de") == true) ||
+                                (lastAns?.text?.startsWith("Progresso parcial preservado") == true && ss.items.lastOrNull() === lastAns)
+                        } == true
                         var rounds = 0
-                        while (rounds < 2 && store.session(w.sessionId)?.let { ss -> ss.status == SessionStatus.WAITING_USER &&
-                                (ss.items.lastOrNull() as? ChatItem.Error)?.text?.startsWith("Limite de") == true } == true) {
+                        while (rounds < 4 && stoppedByLimit()) {
                             rounds++
-                            BuildSquad.editWorker(squadId, n) { it.copy(doing = "continuando (orquestrador)") }
+                            myBudget += budget / 2
+                            BuildSquad.editWorker(squadId, n) { it.copy(doing = "continuando (orquestrador, rodada ${rounds + 1})") }
                             store.editSession(w.sessionId) { it.copy(status = SessionStatus.RUNNING, llm = it.llm + LlmMessage("user",
-                                "[Orquestrador] Você atingiu o limite de passos. Continue de onde parou e FINALIZE em poucos passos: termine o que falta da SUA tarefa e responda com o resumo (o que fez e quais arquivos).")) }
-                            loop(w.sessionId, maxStepsOverride = 30, tokenBudgetOverride = budget)
+                                "[Orquestrador] Você chegou ao teto desta rodada; o teto foi ampliado. Continue de onde parou (não refaça o que já está nos arquivos) e FINALIZE: termine o que falta da SUA tarefa e responda com o resumo (o que fez e quais arquivos).")) }
+                            loop(w.sessionId, maxStepsOverride = 60, tokenBudgetOverride = myBudget)
                         }
                         val fin = store.session(w.sessionId)
                         val st = fin?.status
@@ -6658,10 +6677,11 @@ class AgentRunner(
                         val lastIsAnswer = fin?.llm?.lastOrNull()?.let { it.role == "assistant" && it.toolCallsJson.isNullOrBlank() && !it.content.isNullOrBlank() } == true ||
                             fin?.llm?.lastOrNull()?.let { it.role == "tool" && (it.name == "finish" || it.name == "complete_step") } == true ||
                             (fin?.items?.lastOrNull { it is ChatItem.Assistant } as? ChatItem.Assistant)?.final == true
-                        val cut = fin?.items?.any { it is ChatItem.Assistant && it.text.startsWith("Progresso parcial preservado") } == true
+                        // Só conta como cortado se a ÚLTIMA resposta é a de corte (uma rodada seguinte pode ter concluído).
+                        val cut = (fin?.items?.lastOrNull { it is ChatItem.Assistant } as? ChatItem.Assistant)?.text?.startsWith("Progresso parcial preservado") == true
                         ok = (st == SessionStatus.DONE || st == SessionStatus.IDLE) && lastIsAnswer && !cut
                         // Componente da tarefa precisa continuar exportando default (o App importa assim).
-                        val compBroken = componentFiles[t.id]?.first?.let { g -> runCatching { sandbox.hostFile(g, sessionId).readText() }.getOrNull() }
+                        val compBroken = componentFiles[t.id]?.first?.takeIf { Regex("""\.(jsx|tsx)$""").containsMatchIn(it) }?.let { g -> runCatching { sandbox.hostFile(g, sessionId).readText() }.getOrNull() }
                             ?.let { !Regex("""export\s+default\b""").containsMatchIn(it) } == true
                         if (ok && compBroken) { ok = false; BuildSquad.editWorker(squadId, n) { it.copy(doing = "componente sem export default") } }
                         if (!ok && (st == SessionStatus.DONE || st == SessionStatus.IDLE))
@@ -6770,6 +6790,7 @@ class AgentRunner(
                 var changedAt = 0L
                 var lastReload = 0L
                 var previewBad = false
+                var serverRestarts = 0
                 var badSince = 0L
                 var errSince = 0L
                 var lastErr: String? = null
@@ -6804,6 +6825,13 @@ class AgentRunner(
                                         (body.trim().takeIf { it.isNotEmpty() }?.let { ": " + it.replace(Regex("\\s+"), " ").take(160) } ?: "")
                                     BuildSquad.edit(squadId) { it.copy(notice = msg) }
                                     if (previewNotes.indexOf(msg) < 0) previewNotes.appendLine(msg + (if (devLog.isNotBlank()) "\nLog do servidor: " + devLog.trim() else ""))
+                                }
+                                // Servidor caiu (porta fechada) no meio do trabalho: o app religa sozinho (até 3x), sem gastar um agente nisso.
+                                if (code == 0 && now - badSince > 15_000 && serverRestarts < 3 && sessionId !in squadApi) {
+                                    serverRestarts++
+                                    BuildSquad.edit(squadId) { it.copy(notice = "O servidor do preview caiu; religando (tentativa $serverRestarts)…") }
+                                    val back = runCatching { squadPreviewUrl(sessionId, preview, note, wantTailwind) }.getOrNull()
+                                    if (back != null) { badSince = 0L; browser.softReload(); lastReload = System.currentTimeMillis(); BuildSquad.edit(squadId) { it.copy(notice = "Servidor religado.") } }
                                 }
                             } else {
                                 badSince = 0L
@@ -7005,7 +7033,7 @@ class AgentRunner(
                 val initialTokens = initial?.let { it.tokensIn + it.tokensOut } ?: 0L
                 try {
                     store.replaceItem(sessionId, parentStep.copy(args = "Executando", result = "Agente em execução no workspace isolado."))
-                    loop(child.id, maxStepsOverride = 6, tokenBudgetOverride = budget)
+                    loop(child.id, maxStepsOverride = 30, tokenBudgetOverride = budget)
                     val finished = store.session(child.id)
                     val assistant = finished?.items?.lastOrNull { it is ChatItem.Assistant } as? ChatItem.Assistant
                     val errors = finished?.items?.filterIsInstance<ChatItem.Error>()?.map { it.text }.orEmpty()
