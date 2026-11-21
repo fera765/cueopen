@@ -34,6 +34,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import androidx.navigation.NavController
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.cueopen.app.CueApp
 import dev.cueopen.app.assistant.SpeechRecognizers
 import dev.cueopen.app.assistant.VoiceReplies
@@ -60,7 +61,7 @@ fun LiveVoiceScreen(nav: NavController) {
     var level by remember { mutableFloatStateOf(0f) }
     var useAgent by remember { mutableStateOf(false) }
     var active by remember { mutableStateOf(false) }
-    val voiceState by DiiVoice.state.collectAsStateWithLifecycleCompat()
+    val voiceState by DiiVoice.state.collectAsStateWithLifecycle()
     val hasVoice = remember(voiceState) { DiiVoice.enabled(ctx) }
     var granted by remember { mutableStateOf(ContextCompat.checkSelfPermission(ctx, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) }
     val perm = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted = it }
@@ -181,6 +182,3 @@ fun LiveVoiceScreen(nav: NavController) {
         }
     }
 }
-
-@Composable
-private fun <T> kotlinx.coroutines.flow.StateFlow<T>.collectAsStateWithLifecycleCompat(): State<T> = androidx.lifecycle.compose.collectAsStateWithLifecycle(this)
