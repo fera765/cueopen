@@ -32,7 +32,10 @@ object AppVoice {
         Spec("ryan", "Ryan", "en", "masculina", "Inglês americano · firme", 0.5f, 0.8f, 1.0f, 59, 14),
     )
     enum class Variant(val tag: String, val label: String) { FULL("fp32", "Padrão"), LITE("int8", "Leve") }
-    /** Pacotes leves v3 (PAD após o início inserido no modelo: corrige o 1º som de cada frase no sherpa-onnx 1.10.46). */
+    /**
+     * Pacotes leves v3 (branch "voices"): o modelo traz embutidos o PAD após o início e os ditongos como no Piper, e os dados de
+     * pronúncia são os do espeak-ng do Piper. Validado por Whisper no motor do app: erros 0,7–2% (antes 8–9%).
+     */
     private const val BASE = "https://github.com/fera765/cueopen/raw/voices/"
 
     sealed class State {
@@ -60,7 +63,7 @@ object AppVoice {
      * Dados de pronúncia (espeak) numa pasta ÚNICA que nunca é apagada: o motor carrega o espeak uma vez por processo,
      * a partir do primeiro caminho usado. Se essa pasta sumisse (trocar/remover voz), ele passava a gerar ~1 s de chiado.
      */
-    private fun espeakDir(ctx: Context) = File(ctx.filesDir, "voices/espeak-ng-data")
+    private fun espeakDir(ctx: Context) = File(ctx.filesDir, "voices/espeak3")  // v3: dados de pronúncia do espeak-ng do Piper
     fun isInstalled(ctx: Context, id: String, v: Variant) = File(dir(ctx, id, v), "model.onnx").isFile && File(espeakDir(ctx), "phontab").isFile
     /** Só a versão leve é oferecida (validada por Whisper no laboratório). */
     fun installedVariant(ctx: Context, id: String): Variant? = Variant.LITE.takeIf { isInstalled(ctx, id, it) }
@@ -90,7 +93,7 @@ object AppVoice {
     fun prewarm(ctx: Context) {
         scope.launch(Dispatchers.IO) {
             val root = File(ctx.filesDir, "voices")
-            root.listFiles()?.filter { it.name.contains("dii") || it.name.endsWith("-fp32") }?.forEach { it.deleteRecursively() }
+            root.listFiles()?.filter { it.name.contains("dii") || it.name.endsWith("-fp32") || it.name == "espeak-ng-data" }?.forEach { it.deleteRecursively() }
             // Migração: espeak que veio dentro de cada voz → pasta única.
             // Pacotes antigos (sem a correção do 1º som) saem; o espeak deles vira a pasta única se ainda não houver.
             root.listFiles()?.filter { it.isDirectory && (it.name.startsWith("piper-") || it.name.startsWith("piper2-")) }?.forEach { v ->
