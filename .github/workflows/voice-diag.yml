@@ -11,7 +11,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        voice: [cadu, faber, lessac, ryan]
+        voice: [cadu, faber]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/checkout@v4
@@ -19,5 +19,5 @@ jobs:
       - uses: actions/setup-python@v5
         with: { python-version: "3.11" }
       - run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg >/dev/null
-      - run: pip install -q numpy soundfile faster-whisper num2words huggingface_hub "sherpa-onnx==1.10.46"
-      - run: cd tools/voice_diag && python ab.py ${{ matrix.voice }} sherpa
+      - run: pip install -q numpy soundfile faster-whisper num2words huggingface_hub "sherpa-onnx==1.10.46" piper-tts
+      - run: cd tools/voice_diag && ESPEAK=piper python ab.py ${{ matrix.voice }} sherpa

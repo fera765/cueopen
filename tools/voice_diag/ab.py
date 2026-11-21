@@ -11,8 +11,12 @@ ns, nw, ls = P
 if ENGINE == "sherpa":
     import sherpa_onnx
     d = f"ex/piper2-{VID}-int8"; zipfile.ZipFile(f"pk/piper2-{VID}-int8.zip").extractall("ex")
+    DATA = f"{d}/espeak-ng-data"
+    if os.environ.get("ESPEAK") == "piper":  # dados de pronúncia do Piper (espeak-ng mais novo)
+        import glob as _g, piper as _p
+        DATA = _g.glob(os.path.join(os.path.dirname(_p.__file__), "**", "espeak-ng-data"), recursive=True)[0]; print("espeak do piper:", DATA, flush=True)
     tts = sherpa_onnx.OfflineTts(sherpa_onnx.OfflineTtsConfig(model=sherpa_onnx.OfflineTtsModelConfig(
-        vits=sherpa_onnx.OfflineTtsVitsModelConfig(model=f"{d}/model.onnx", lexicon="", tokens=f"{d}/tokens.txt", data_dir=f"{d}/espeak-ng-data",
+        vits=sherpa_onnx.OfflineTtsVitsModelConfig(model=f"{d}/model.onnx", lexicon="", tokens=f"{d}/tokens.txt", data_dir=DATA,
                                                    noise_scale=ns, noise_scale_w=nw, length_scale=ls), num_threads=4), max_num_sentences=1))
     def synth(text):
         g = tts.generate(text, sid=0, speed=1.0); return np.array(g.samples, dtype=np.float32), g.sample_rate
@@ -35,7 +39,7 @@ for s in t.SENT:
     hyp = " ".join(x.text for x in t.asr.transcribe("tmp.wav", language="pt" if t.PT else "en", beam_size=5)[0]).strip()
     e, n = t.wer(s, hyp); errs += e; tot += n
     if e: bad.append({"enviado": s, "whisper": hyp})
-ver = __import__("sherpa_onnx").__version__ if ENGINE == "sherpa" else "piper"
+ver = (__import__("sherpa_onnx").__version__ + ("-espeakpiper" if os.environ.get("ESPEAK") == "piper" else "")) if ENGINE == "sherpa" else "piper"
 os.makedirs("out", exist_ok=True)
 r = {"voice": VID, "engine": ENGINE, "version": ver, "wer": round(errs / tot, 4), "errors": bad}
 json.dump(r, open(f"out/ab_{VID}_{ENGINE}_{ver}.json", "w"), indent=2, ensure_ascii=False); print(json.dumps(r, ensure_ascii=False, indent=1))
