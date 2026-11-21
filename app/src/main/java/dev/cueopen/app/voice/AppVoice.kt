@@ -183,10 +183,24 @@ object AppVoice {
         }
     }
 
-    /** Prepara o texto para falar: tira markdown e, em português, escreve números/valores por extenso. */
-    fun prepare(text: String, lang: String): String {
+    /**
+     * Dicionário de pronúncia por voz: grafias que a voz fala certo (testadas com Whisper medium, 9/9 acertos).
+     * Só muda o texto enviado à voz; o que aparece na tela continua igual.
+     */
+    private val LEX: Map<String, List<Pair<Regex, String>>> = mapOf(
+        "cadu" to listOf(Regex("(?<![\\p{L}])criei(?![\\p{L}])", RegexOption.IGNORE_CASE) to "criiêi"),
+        "faber" to listOf(Regex("(?<![\\p{L}])(?<!eu )criei(?![\\p{L}])", RegexOption.IGNORE_CASE) to "eu criei"),
+        "ryan" to listOf(Regex("(?<![\\p{L}])saved(?![\\p{L}])", RegexOption.IGNORE_CASE) to "save'd"),
+    )
+
+    /** Prepara o texto para falar: tira markdown, em português escreve números/valores por extenso e aplica o dicionário da voz. */
+    fun prepare(text: String, voice: Spec): String {
         val plain = text.replace(Regex("```[\\s\\S]*?```"), " ").replace(Regex("!?\\[([^\\]]*)]\\([^)]*\\)"), "$1")
-        return if (lang == "pt") NormalizePt.normalize(plain) else plain.replace(Regex("[*_#`>|]+"), " ").trim()
+        var t = if (voice.lang == "pt") NormalizePt.normalize(plain) else plain.replace(Regex("[*_#`>|]+"), " ").trim()
+        LEX[voice.id]?.forEach { (re, say) ->
+            t = t.replace(re) { m -> if (m.value[0].isUpperCase()) say.replaceFirstChar { it.uppercase() } else say }
+        }
+        return t
     }
 
     /** Corta em pedaços curtos para o 1º áudio sair logo (frases; frases longas também nas vírgulas). */
@@ -251,7 +265,7 @@ object AppVoice {
             tr.write(FloatArray(sr / 5), 0, sr / 5, AudioTrack.WRITE_BLOCKING)
             val gen = launch(Dispatchers.Default) {
                 for (text in q) {
-                    for (piece in chunks(prepare(text, s.lang))) {
+                    for (piece in chunks(prepare(text, s))) {
                         if (!isActive) break
                         // generate() por pedaço: o generateWithCallback derrubava o app (o JNI procura um invoke que lambdas do Kotlin 2 não têm).
                         val samples = synchronized(engineLock) { runCatching { t.generate(piece, 0, speed).samples }.getOrNull() } ?: continue
@@ -315,7 +329,7 @@ object AppVoice {
         val sr = t.sampleRate()
         val all = ArrayList<FloatArray>()
         all += FloatArray(sr / 5)  // silêncio inicial: o player não corta a 1ª sílaba
-        synchronized(engineLock) { chunks(prepare(text, s.lang)).forEach { p -> all += t.generate(p, 0, speed(ctx)).samples; gap(p, sr)?.let { all += it } } }
+        synchronized(engineLock) { chunks(prepare(text, s)).forEach { p -> all += t.generate(p, 0, speed(ctx)).samples; gap(p, sr)?.let { all += it } } }
         val n = all.sumOf { it.size }
         if (n == 0) return null
         out.parentFile?.mkdirs()
