@@ -17,5 +17,5 @@ jobs:
       - env: { GH_TOKEN: "${{ github.token }}" }
         run: |
           ls -la tools/voice_pack/dist
-          gh release delete voices-v2 -R "$GITHUB_REPOSITORY" -y --cleanup-tag || true
-          gh release create voices-v2 -R "$GITHUB_REPOSITORY" --prerelease --title "Vozes v2 (Piper ajustadas)" --notes "Cadu, Faber, Amy, Lessac, Ryan — fp32 e int8" --target "$GITHUB_SHA" tools/voice_pack/dist/*
+          gh release delete voices-v3 -R "$GITHUB_REPOSITORY" -y --cleanup-tag || true
+          gh release create voices-v3 -R "$GITHUB_REPOSITORY" --prerelease --title "Vozes v3 (leves, PAD corrigido)" --notes "Cadu, Faber, Lessac, Ryan — int8 com PAD após o início" --target "$GITHUB_SHA" tools/voice_pack/dist/*
