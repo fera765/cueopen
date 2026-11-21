@@ -104,19 +104,45 @@ fun LiveVoiceScreen(nav: NavController) {
                 if (voice == null || spoken.isEmpty()) { if (active) listen() else phase = "pronto" }
                 return@launch
             }
+            // Modo rápido em STREAMING: a IA manda o texto aos poucos e cada trecho já vai sendo falado.
+            val history = turns.takeLast(10).joinToString("\n") { (if (it.me) "Usuário: " else "Assistente: ") + it.text }
+            val prompt = "Você é a assistente de voz do app, numa ligação em tempo real em português do Brasil (responda em inglês só se o usuário falar em inglês). " +
+                "Responda como fala natural de telefone: curto (1 a 3 frases), direto, sem markdown, listas, emojis ou links. Comece pela resposta, sem rodeios. " +
+                "Se precisar de uma ação no celular ou na internet, diga em uma frase que pode fazer no modo Agente.\n\nConversa até agora:\n$history\n\nAssistente:"
+            val voice = if (active) AppVoice.startStream(ctx, AppVoice.detectLang(text)) { scope.launch { if (active && phase == "falando") listen() } } else null
+            val idx = turns.size; turns += Turn(false, "…")
+            val buf = StringBuilder(); val shown = StringBuilder(); var pieces = 0
+            fun send(piece: String) {
+                val say = VoiceReplies.speakable(piece).trim(); if (say.isEmpty()) return
+                pieces++; voice?.trySend(say)
+                if (voice != null) scope.launch { phase = "falando" }
+            }
+            fun flush(force: Boolean) {
+                while (true) {
+                    val str = buf.toString()
+                    var cut = str.indexOfFirst { it in ".!?…\n" }
+                    if (cut < 0 && pieces == 0) cut = str.indexOf(',').takeIf { it >= 18 } ?: -1          // 1º trecho: já na vírgula
+                    if (cut < 0 && str.length > 140) cut = str.lastIndexOf(' ').takeIf { it > 60 } ?: -1   // trecho longo sem pontuação
+                    if (cut < 0) break
+                    send(str.substring(0, cut + 1)); buf.delete(0, cut + 1)
+                }
+                if (force && buf.isNotBlank()) { send(buf.toString()); buf.setLength(0) }
+            }
             val reply = runCatching {
-                val history = turns.takeLast(10).joinToString("\n") { (if (it.me) "Usuário: " else "Assistente: ") + it.text }
-                app.llm.quick("Você é a assistente de voz do app, numa ligação em tempo real em português do Brasil. " +
-                    "Responda como fala natural de telefone: curto (1 a 3 frases), direto, sem markdown, listas, emojis ou links. " +
-                    "Se precisar de uma ação no celular ou na internet, diga em uma frase que pode fazer no modo Agente.\n\nConversa até agora:\n$history\n\nAssistente:",
-                    maxTokens = 220, conversationId = sessionId)
-            }.getOrElse { "Desculpe, não consegui responder agora: ${it.message ?: "erro"}." }
-            val say = VoiceReplies.speakable(reply).ifBlank { "Não tenho uma resposta para isso." }
-            turns += Turn(false, say)
-            if (!active) { phase = "pronto"; return@launch }
-            phase = "falando"
-            val ok = AppVoice.speak(ctx, say) { scope.launch { if (active && phase == "falando") listen() } }
-            if (!ok) { phase = "pronto"; turns += Turn(false, "(Baixe uma voz em Configurações › Voz do app para ouvir as respostas.)") }
+                app.llm.quickStream(prompt, maxTokens = 220, conversationId = sessionId) { d ->
+                    buf.append(d); shown.append(d)
+                    val txt = VoiceReplies.speakable(shown.toString())
+                    scope.launch { if (idx < turns.size) turns[idx] = Turn(false, txt) }
+                    flush(false)
+                }
+            }.getOrElse { val e = "Desculpe, não consegui responder agora: ${it.message ?: "erro"}."; buf.setLength(0); buf.append(e); e }
+            flush(true); voice?.close()
+            val finalText = VoiceReplies.speakable(reply).ifBlank { "Não tenho uma resposta para isso." }
+            if (idx < turns.size) turns[idx] = Turn(false, finalText)
+            if (voice == null) {
+                phase = "pronto"
+                if (active) turns += Turn(false, "(Baixe uma voz em Configurações › Voz do app para ouvir as respostas.)")
+            } else if (pieces == 0 && active) listen()
         }
     }
 

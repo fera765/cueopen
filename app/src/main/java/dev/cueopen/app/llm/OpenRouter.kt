@@ -358,6 +358,53 @@ class OpenRouter(private val settings: () -> Settings) {
         }
     }
 
+    /**
+     * Como [quick], mas em streaming: [onDelta] recebe o texto aos poucos (SSE, "stream": true) para a voz começar a falar
+     * antes da resposta terminar. Se o provedor não aceitar streaming, cai no [quick] e entrega tudo de uma vez.
+     */
+    suspend fun quickStream(prompt: String, maxTokens: Int = 220, conversationId: String? = null, onDelta: (String) -> Unit): String = withContext(Dispatchers.IO) {
+        val primary = settings().fastModel
+        val model = ModelFallback.resolve(primary, ProviderChain.fallback(settings(), fast = true))
+        val all = StringBuilder()
+        val streamed = runCatching {
+            settings().let { base -> OAuthRefresh.ensureFresh(ProviderRoute.split(model ?: base.model).first ?: ProviderCatalog.activeId(base)) }
+            val (s, mdl) = settings().let { base -> ProviderRoute.route(base, model ?: base.model) }
+            val openRouter = isOpenRouter(s.baseUrl)
+            val body = buildJsonObject {
+                put("model", mdl); put("max_tokens", maxTokens); put("temperature", 0.4); put("stream", true)
+                put("messages", buildJsonArray { add(LlmMessage("user", prompt).toJson()) })
+                if (openRouter && s.disableThinking) put("reasoning", buildJsonObject { put("enabled", false); put("exclude", true) })
+            }
+            val req = Request.Builder().url(endpoint(s.baseUrl, "chat/completions"))
+                .apply {
+                    if (s.apiKey.isNotBlank()) header("Authorization", "Bearer ${KeyPool.current(s.apiKey)}")
+                    if (openRouter) header("HTTP-Referer", "https://github.com/cueopen").header("X-Title", "CueOpen")
+                    OpenCodeProtocol.sessionHeader(s.baseUrl, conversationId)?.let { header("x-opencode-session", it) }
+                    OpenCodeProtocol.userAgent(s.baseUrl)?.let { header("User-Agent", it) }
+                    header("Accept", "text/event-stream")
+                }
+                .post(body.toString().toRequestBody("application/json".toMediaType())).build()
+            http().newCall(req).execute().use { resp ->
+                if (!resp.isSuccessful) throw IOException("HTTP ${resp.code}")
+                val src = resp.body?.source() ?: throw IOException("sem corpo")
+                while (true) {
+                    val line = src.readUtf8Line() ?: break
+                    if (!line.startsWith("data:")) continue
+                    val data = line.removePrefix("data:").trim()
+                    if (data == "[DONE]") break
+                    val delta = runCatching {
+                        json.parseToJsonElement(data).jsonObject["choices"]?.jsonArray?.firstOrNull()?.jsonObject
+                            ?.get("delta")?.jsonObject?.get("content")?.jsonPrimitive?.contentOrNull
+                    }.getOrNull()
+                    if (!delta.isNullOrEmpty()) { all.append(delta); onDelta(delta) }
+                }
+            }
+            all.toString().trim().ifBlank { throw IOException("stream vazio") }
+        }
+        // Caiu no meio: fica com o que já foi falado (não repete). Nada chegou: pede do jeito normal.
+        streamed.getOrElse { if (all.isNotBlank()) all.toString().trim() else quick(prompt, maxTokens, conversationId).also(onDelta) }
+    }
+
     private fun LlmMessage.toJson(): JsonElement = buildJsonObject {
         put("role", role)
         if (content != null) put("content", content) else put("content", "")
