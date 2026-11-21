@@ -4,7 +4,7 @@ on:
     paths: ["tools/voice_lab2/**", ".github/workflows/voice-lab2.yml"]
   workflow_dispatch:
 permissions:
-  contents: read
+  contents: write
 jobs:
   lab:
     runs-on: ubuntu-latest
@@ -33,3 +33,14 @@ jobs:
         with:
           name: amostras-${{ matrix.engine }}
           path: tools/voice_lab2/out/
+  publish:
+    needs: lab
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { path: amostras, pattern: "amostras-*", merge-multiple: true }
+      - env: { GH_TOKEN: "${{ github.token }}" }
+        run: |
+          ls -la amostras
+          gh release delete voice-lab2 -R "$GITHUB_REPOSITORY" -y --cleanup-tag || true
+          gh release create voice-lab2 -R "$GITHUB_REPOSITORY" --prerelease --title "Laboratório de voz 2 (amostras)" --notes "Amostras para avaliação" --target "$GITHUB_SHA" amostras/*
