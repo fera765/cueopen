@@ -20,4 +20,4 @@ jobs:
       - uses: actions/setup-python@v5
         with: { python-version: "3.11" }
       - run: pip install -q numpy soundfile faster-whisper num2words "sherpa-onnx==1.10.46"
-      - run: cd tools/voice_diag && python tune.py ${{ matrix.voice }}
+      - run: cd tools/voice_diag && python variants.py ${{ matrix.voice }}
