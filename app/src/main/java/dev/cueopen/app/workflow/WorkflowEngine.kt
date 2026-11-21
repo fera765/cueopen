@@ -213,9 +213,13 @@ object WorkflowEngine {
                 val session = Session(title = "[Workflow] ${w.name} · ${WfLogic.label(node)}", agentId = agent?.id)
                 app.store.upsertSession(session)
                 val timeoutMin = (r("timeout").toIntOrNull() ?: 15).coerceIn(1, 120)
-                app.agent.send(session.id, "[Fluxo automático \"${w.name}\" — ninguém está acompanhando agora; execute e responda com o resultado final, sem perguntas. " +
-                    "Os dados que vieram dos nós anteriores já estão nesta mensagem: use-os direto, não busque de novo nos conectores.]\n\n$prompt").join()
-                val finished = withTimeoutOrNull(timeoutMin * 60_000L) { while (app.agent.isRunning(session.id)) delay(1_000); true }
+                val msg = "[Fluxo automático \"${w.name}\" — ninguém está acompanhando agora; execute e responda com o resultado final, sem perguntas. " +
+                    "Os dados que vieram dos nós anteriores já estão nesta mensagem: use-os direto, não busque de novo nos conectores. " +
+                    "Seja econômico: prefira web_search e web_fetch (no máximo ~6 consultas); só use o navegador se for indispensável. " +
+                    "Links: use o endereço direto da fonte (nunca links de redirecionamento como news.google.com/read).]\n\n$prompt"
+                val maxSteps = (r("maxSteps").toIntOrNull() ?: 14).coerceIn(3, 40)
+                val budget = (r("budget").toLongOrNull() ?: 200_000L).coerceIn(30_000L, 1_500_000L)
+                val finished = withTimeoutOrNull(timeoutMin * 60_000L) { app.agent.runBudgeted(session.id, msg, maxSteps, budget); true }
                 if (finished == null) { app.agent.stop(session.id); return NodeResult(error = "O agente passou de $timeoutMin min.", sessionId = session.id) }
                 val s = app.store.session(session.id)
                 val answer = (s?.items?.lastOrNull { it is ChatItem.Assistant } as? ChatItem.Assistant)?.text.orEmpty()

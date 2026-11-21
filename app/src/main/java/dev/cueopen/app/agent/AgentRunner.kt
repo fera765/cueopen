@@ -5395,7 +5395,8 @@ class AgentRunner(
                 "browser_click" -> browserFor(sessionId).click(i("index") ?: -1)
                 "browser_type" -> browserFor(sessionId).type(i("index") ?: -1, SecretVault.resolve(sessionId, s("text")), b("submit"))
                 "browser_scroll" -> browserFor(sessionId).scroll(s("direction") != "up")
-                "browser_back" -> { browserFor(sessionId).back(); "ok" }
+                // Voltar invalida os índices: já devolve a leitura nova (antes o agente clicava no índice velho e errava em sequência).
+                "browser_back" -> { browserFor(sessionId).back(); "ok: voltou. Página atual (use estes índices):\n" + browserReadTool(sessionId, 6000, model) }
                 "browser_js" -> browserFor(sessionId).runJs(SecretVault.resolve(sessionId, s("code")))
                 "device_notifications" -> dev.cueopen.app.device.NotifStore.recent(s("filter"), (i("limit") ?: 30).coerceIn(1, 100))
                     .joinToString("\n") { n ->
@@ -6009,6 +6010,16 @@ class AgentRunner(
         }
     }.getOrElse { if (it is kotlinx.coroutines.CancellationException) throw it; "ERRO: ${it.message}" }
 
+    /**
+     * Tarefa avulsa com teto de passos e de tokens (nó Agente dos fluxos). Antes o nó usava um chat comum sem limite:
+     * uma "Notícias do dia" chegou a 28 chamadas e 680 mil tokens navegando no Google Notícias.
+     */
+    suspend fun runBudgeted(sessionId: String, text: String, maxSteps: Int, budgetTokens: Long) {
+        store.addItem(sessionId, ChatItem.User(text = text))
+        store.editSession(sessionId) { it.copy(status = SessionStatus.RUNNING, llm = it.llm + LlmMessage("user", text)) }
+        loop(sessionId, maxStepsOverride = maxSteps, tokenBudgetOverride = budgetTokens)
+    }
+
     /** Pasta do projeto que o exército deste chat está construindo (caminho do sandbox). */
     fun projectDirOf(sessionId: String): String? = squadProjectDir[sessionId] ?: store.session(sessionId)?.squadProject?.also { squadProjectDir[sessionId] = it }
 
@@ -6050,7 +6061,8 @@ class AgentRunner(
         c.connectTimeout = 1_500; c.readTimeout = readTimeoutMs; c.instanceFollowRedirects = true
         try {
             val code = c.responseCode
-            val body = runCatching { (if (code >= 400) c.errorStream else c.inputStream)?.bufferedReader()?.use { it.readText().take(400) } }.getOrNull().orEmpty()
+            // Só os primeiros 400 caracteres (readText() baixava o módulo inteiro e podia levar minutos).
+            val body = runCatching { (if (code >= 400) c.errorStream else c.inputStream)?.bufferedReader()?.use { rd -> val b = CharArray(400); val n = rd.read(b); if (n > 0) String(b, 0, n) else "" } }.getOrNull().orEmpty()
             code to body
         } finally { c.disconnect() }
     }.getOrDefault(0 to "")
@@ -6408,23 +6420,30 @@ class AgentRunner(
             val path = queue.removeFirst().substringBefore('?')
             if (!seen.add(path)) continue
             if (seen.size % 5 == 0) progress(seen.size)
-            val body = runCatching {
-                (java.net.URL(base + path).openConnection() as java.net.HttpURLConnection).run {
-                    connectTimeout = 1_500; readTimeout = minOf(25_000, left)
-                    try { if (responseCode == 200) inputStream.bufferedReader().use { it.readText() } else "" } finally { disconnect() }
-                }
-            }.getOrDefault("")
+            val body = readCapped(base + path, minOf(25_000, left), deadline)
             Regex("""(?:from\s*|import\s*\(?\s*)["'](/(?:src|node_modules/\.vite/deps)/[^"'?]+)""").findAll(body).forEach { queue.add(it.groupValues[1]) }
         }
     }
 
-    /** GET com tempo limite (nunca trava): corpo ou "" em erro. */
-    private fun fetchText(url: String, readMs: Int): String = runCatching {
+    /**
+     * GET que nunca trava: além do readTimeout (que é por leitura e reinicia a cada pedaço — um servidor que "pinga" bytes
+     * devagar segurava a leitura por minutos), lê em blocos e para no [deadline] ou em 3 MB.
+     */
+    private fun readCapped(url: String, readMs: Int, deadline: Long): String = runCatching {
         (java.net.URL(url).openConnection() as java.net.HttpURLConnection).run {
-            connectTimeout = 1_500; readTimeout = readMs
-            try { if (responseCode in 200..299) inputStream.bufferedReader().use { it.readText() } else "" } finally { disconnect() }
+            connectTimeout = 1_500; readTimeout = readMs.coerceAtLeast(500)
+            try {
+                if (responseCode !in 200..299) return@run ""
+                val sb = StringBuilder(); val buf = CharArray(16_384)
+                inputStream.bufferedReader().use { rd ->
+                    while (System.currentTimeMillis() < deadline && sb.length < 3_000_000) { val n = rd.read(buf); if (n < 0) break; sb.append(buf, 0, n) }
+                }
+                sb.toString()
+            } finally { disconnect() }
         }
     }.getOrDefault("")
+
+    private fun fetchText(url: String, readMs: Int): String = readCapped(url, readMs, System.currentTimeMillis() + readMs)
 
     /** O App compila no dev server? (Vite: GET /src/App.jsx|tsx = 200). null = não dá para saber. */
     private fun appModuleOk(url: String): Boolean? {
@@ -6442,11 +6461,17 @@ class AgentRunner(
         val browser = browserFor(sessionId)
         if (sessionId !in squadApi) runCatching {
             log("Aquecendo o app (pré-carregando React e componentes)…")
-            kotlinx.coroutines.withTimeoutOrNull(90_000) {
-                kotlinx.coroutines.withContext(Dispatchers.IO) {
-                    warmDevServer(url, fetchText(url, 20_000)) { n -> log("Aquecendo o app… $n módulos prontos") }
-                }
+            // Em paralelo e com espera limitada: mesmo que uma leitura bloqueie, o time segue em até 90 s.
+            val warm = kotlinx.coroutines.CoroutineScope(Dispatchers.IO + kotlinx.coroutines.SupervisorJob()).async {
+                warmDevServer(url, fetchText(url, 20_000)) { n -> log("Aquecendo o app… $n módulos prontos") }
             }
+            if (kotlinx.coroutines.withTimeoutOrNull(90_000) { warm.await() } == null) { warm.cancel(); log("Aquecimento passou de 90 s; seguindo para abrir o app.") }
+        }
+        // Motor do browser caiu 2+ vezes há pouco: não insiste em carregar/inspecionar (isso derrubava de novo); servidor OK basta.
+        if (sessionId !in squadApi && browser.liteMode() && previewStatus(url, 15_000).first == 200 && appModuleOk(url) != false) {
+            log("O browser do celular está instável (encerrado pelo Android há pouco); o time começa com o app no ar e a prévia abre quando o browser estabilizar.")
+            kotlinx.coroutines.withTimeoutOrNull(20_000) { runCatching { browser.navigate(url) } }
+            return true
         }
         // Navegar nunca pode prender o time: o WebView do celular às vezes trava/renasce (renderer encerrado).
         kotlinx.coroutines.withTimeoutOrNull(40_000) { runCatching { browser.navigate(url) } }

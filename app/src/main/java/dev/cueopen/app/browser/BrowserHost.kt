@@ -1418,7 +1418,7 @@ class BrowserHost(private val appCtx: Context, private val sessionId: String = "
 
     suspend fun click(index: Int): String {
         val tab = onMain { activeTab()?.takeIf { lastReadTabId == it.id } }
-            ?: return staleRefRecovery(index, "a aba ativa mudou desde a última leitura")
+            ?: return staleRefRecovery(index, "a página ou a aba mudou desde a última leitura")
         val r = eval("""(function(){var e=document.querySelector('[data-cue="$index"]');if(!e)return 'elemento $index não encontrado: referência obsoleta; execute browser_read novamente, escolha um índice novo e não repita este';e.scrollIntoView({block:'center'});e.click();return 'ok: clicou em '+(e.innerText||e.value||e.tagName).slice(0,60);})()""", tab = tab)
         if (r.contains("não encontrado")) return staleRefRecovery(index, "a página mudou e o elemento sumiu")
         awaitLoadIfNavigating(tab)
@@ -1445,7 +1445,7 @@ class BrowserHost(private val appCtx: Context, private val sessionId: String = "
 
     suspend fun type(index: Int, text: String, submit: Boolean): String {
         val tab = onMain { activeTab()?.takeIf { lastReadTabId == it.id } }
-            ?: return staleRefRecovery(index, "a aba ativa mudou desde a última leitura")
+            ?: return staleRefRecovery(index, "a página ou a aba mudou desde a última leitura")
         val t = JSONObject.quote(text)
         val r = eval("""
             (function(){var e=document.querySelector('[data-cue="$index"]');if(!e)return 'elemento $index não encontrado';

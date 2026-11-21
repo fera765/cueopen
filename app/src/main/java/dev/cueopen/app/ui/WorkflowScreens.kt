@@ -154,7 +154,7 @@ private fun templates(): List<WfTemplate> = listOf(
         val id = WfIds.new().take(4)
         val t = WfNode(id = "t$id", type = "trigger_schedule", label = "Todo dia 8h", config = mapOf("mode" to "daily", "time" to "08:00"))
         val a = WfNode(id = "a$id", type = "agent", label = "Pesquisar", config = mapOf("timeout" to "10", "prompt" to
-            "Pesquise na web as 5 notícias mais importantes de hoje sobre tecnologia. Responda com uma lista numerada: título, uma linha de resumo e o link."))
+            "Use web_search (sem abrir o navegador) para achar as 5 notícias mais importantes de hoje sobre tecnologia. Responda com uma lista numerada: título, uma linha de resumo e o link direto da fonte."))
         val n = WfNode(id = "n$id", type = "notify", label = "Avisar", config = mapOf("title" to "📰 Notícias do dia", "text" to "As 5 principais de hoje — toque para ler", "detail" to "{{${a.id}}}", "open" to "modal"))
         flow("Notícias do dia", listOf(t, a, n), WfEdge(from = t.id, to = a.id), WfEdge(from = a.id, to = n.id))
     },

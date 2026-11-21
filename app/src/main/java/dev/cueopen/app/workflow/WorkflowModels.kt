@@ -121,6 +121,8 @@ object WfCatalog {
                 WfField("prompt", "Instrução", WfField.Kind.MULTILINE, TEMPLATE_HINT, required = true),
                 WfField("agent", "Agente (nome; vazio = padrão)", WfField.Kind.TEXT),
                 WfField("timeout", "Tempo máximo (minutos)", WfField.Kind.NUMBER, default = "15"),
+                WfField("maxSteps", "Máximo de passos", WfField.Kind.NUMBER, "Teto de ações do agente (economiza tokens)", default = "14"),
+                WfField("budget", "Orçamento de tokens", WfField.Kind.NUMBER, "Ao chegar no teto, o agente entrega o que tem", default = "200000"),
             )),
         WfNodeType("connector", "Conector", CAT_APPS, "Usa qualquer conector ativo — apps (Gmail, Sheets, Slack, Notion…), servidores MCP ou conectores do app: escolha o conector, a ação e preencha os campos.", 0xFF2FBF71, "apps",
             fields = listOf(
