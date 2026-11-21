@@ -1,0 +1,35 @@
+name: voice-lab2
+on:
+  push:
+    paths: ["tools/voice_lab2/**", ".github/workflows/voice-lab2.yml"]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  lab:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        engine: [kokoro, piper, pocket, phonon]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      - run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg espeak-ng >/dev/null
+      - name: deps
+        run: |
+          pip install -q numpy soundfile huggingface_hub onnxruntime onnx
+          case ${{ matrix.engine }} in
+            kokoro) pip install -q kokoro-onnx ;;
+            piper) pip install -q piper-tts ;;
+            pocket) pip install -q torch --index-url https://download.pytorch.org/whl/cpu && pip install -q pocket-tts ;;
+            phonon) pip install -q ptts ;;
+          esac
+      - name: lab (2 núcleos)
+        env: { HF_TOKEN: "${{ secrets.HF_TOKEN }}", OMP_NUM_THREADS: "2" }
+        run: cd tools/voice_lab2 && taskset -c 0,1 python lab2.py ${{ matrix.engine }} || true
+      - uses: actions/upload-artifact@v4
+        with:
+          name: amostras-${{ matrix.engine }}
+          path: tools/voice_lab2/out/
