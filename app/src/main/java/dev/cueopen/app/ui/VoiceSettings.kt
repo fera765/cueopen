@@ -40,12 +40,12 @@ fun VoiceSettingsSection() {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
                     Text(v.label, fontWeight = FontWeight.Medium)
-                    Text(if (v == DiiVoice.Variant.FAST) "Mais rápida; recomendada." else "Ocupa menos espaço; um pouco mais lenta.", fontSize = 11.sp, color = c.ink3)
+                    Text(if (v == DiiVoice.Variant.FAST) "Mais rápida; baixa do Hugging Face." else "Já vem no app, sem download; um pouco mais lenta.", fontSize = 11.sp, color = c.ink3)
                 }
                 if (has) {
                     if (installed == v) Text("em uso", fontSize = 12.sp, color = c.ok) else TextButton({ DiiVoice.install(ctx, v); tick++ }) { Text("Usar") }
                     TextButton({ DiiVoice.uninstall(ctx, v); tick++ }) { Text("Remover", color = c.err) }
-                } else OutlinedButton({ DiiVoice.install(ctx, v) }, enabled = st !is DiiVoice.State.Downloading) { Text("Baixar") }
+                } else OutlinedButton({ DiiVoice.install(ctx, v) }, enabled = st !is DiiVoice.State.Downloading) { Text(if (v == DiiVoice.Variant.LITE) "Ativar" else "Baixar") }
             }
         }
         if (installed != null) {

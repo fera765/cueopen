@@ -31,7 +31,8 @@ class SandboxService : Service() {
             stopForeground(STOP_FOREGROUND_REMOVE); stopSelf()
             return START_NOT_STICKY
         }
-        val text = intent?.getStringExtra("text") ?: "Terminal ativo"
+        // Texto fixo: a notificação só indica que o app está rodando (nada de execuções antigas presas nela).
+        val text = "Rodando"
         val nm = getSystemService(NotificationManager::class.java)
         nm.createNotificationChannel(NotificationChannel(CH, "Terminal e agente", NotificationManager.IMPORTANCE_LOW))
         val open = PendingIntent.getActivity(this, 0, Intent(this, MainActivity::class.java)

@@ -55,6 +55,17 @@ jobs:
           curl -fsSL -o app/libs/sherpa-onnx-1.10.46.aar https://github.com/k2-fsa/sherpa-onnx/releases/download/v1.10.46/sherpa-onnx-1.10.46.aar
           unzip -l app/libs/sherpa-onnx-1.10.46.aar | grep -E "jni/(arm64|x86_64)" | head
 
+      - name: Voz Dii leve embutida (release voice-dii-v1)
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release download voice-dii-v1 -R "$GITHUB_REPOSITORY" -p 'vits-piper-pt_PT-dii-int8.zip' -D /tmp/voz
+          unzip -q -o /tmp/voz/*.zip -d /tmp/voz
+          cp /tmp/voz/vits-piper-pt_PT-dii-int8/model.onnx app/src/main/assets/voice/dii-int8.onnx
+          ls -la app/src/main/assets/voice
+
       - name: Run JVM unit tests and assemble debug APK
         run: gradle testDebugUnitTest assembleDebug --stacktrace
 
