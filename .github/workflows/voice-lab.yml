@@ -7,6 +7,8 @@ on:
       repo:
         description: Repositório da voz no Hugging Face
         default: OpenVoiceOS/pipertts_pt-PT_dii
+permissions:
+  contents: write
 jobs:
   lab:
     runs-on: ubuntu-latest
@@ -21,10 +23,18 @@ jobs:
         run: |
           V=$(python -c "import sherpa_onnx;print(sherpa_onnx.__version__)")
           gh release view "v$V" -R k2-fsa/sherpa-onnx --json assets -q '.assets[].name' | grep -iE "aar|android" | head -20 || true
+          gh release download "v$V" -R k2-fsa/sherpa-onnx -p "sherpa-onnx-$V.aar" -D /tmp/aar
+          cd /tmp/aar && unzip -oq sherpa-onnx-$V.aar -d x && ls x x/jni && du -sh x/jni/* && unzip -oq x/classes.jar -d cls
+          for c in $(find cls -name 'OfflineTts*.class' -o -name 'GeneratedAudio.class'); do javap -cp cls "$(echo ${c#cls/} | sed 's/\.class$//; s#/#.#g')"; done
       - name: Lab
         working-directory: tools/voice_lab
         env: { VOICE_REPO: "${{ inputs.repo || 'OpenVoiceOS/pipertts_pt-PT_dii' }}" }
         run: python lab.py
+      - name: Publicar a voz para o app (release voice-dii-v1)
+        env: { GH_TOKEN: "${{ github.token }}" }
+        run: |
+          gh release view voice-dii-v1 >/dev/null 2>&1 || gh release create voice-dii-v1 --prerelease --title "Voz Dii (Piper/OpenVoiceOS) para o app" --notes "Pacotes sherpa-onnx da voz Dii (OpenVoiceOS/pipertts_pt-PT_dii): fp32 (rápido) e int8 (leve)."
+          gh release upload voice-dii-v1 tools/voice_lab/out/*.zip tools/voice_lab/out/report.json --clobber
       - uses: actions/upload-artifact@v4
         with:
           name: voice-lab

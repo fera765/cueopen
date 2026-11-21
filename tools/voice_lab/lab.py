@@ -140,9 +140,10 @@ for tag, path in [("fp32", fp32), ("int8", int8)]:
     os.makedirs(f"{OUT}/{pkg}", exist_ok=True)
     shutil.copy(path, f"{OUT}/{pkg}/model.onnx"); shutil.copy("variants/tokens.txt", f"{OUT}/{pkg}/tokens.txt")
     shutil.copytree("espeak-ng-data", f"{OUT}/{pkg}/espeak-ng-data", dirs_exist_ok=True)
-    with tarfile.open(f"{OUT}/{pkg}.tar.bz2", "w:bz2") as t: t.add(f"{OUT}/{pkg}", arcname=pkg)
+    # zip (o Android descompacta com java.util.zip, sem biblioteca extra)
+    shutil.make_archive(f"{OUT}/{pkg}", "zip", OUT, pkg)
     shutil.rmtree(f"{OUT}/{pkg}")
-    pkgs[tag] = round(os.path.getsize(f"{OUT}/{pkg}.tar.bz2") / 1e6, 1)
+    pkgs[tag] = round(os.path.getsize(f"{OUT}/{pkg}.zip") / 1e6, 1)
 report = {"repo": REPO, "sample_rate": SR, "espeak_voice": cfg.get("espeak", {}).get("voice"), "results": [r for r in results if r], "quality": quality,
           "packages_mb": pkgs}
 json.dump(report, open(f"{OUT}/report.json", "w"), indent=2)
