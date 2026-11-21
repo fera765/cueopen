@@ -116,7 +116,15 @@ fun ChatScreen(nav: NavController, sessionId: String, onMenu: () -> Unit = {}) {
         if (list.isScrollInProgress) follow = atBottom   // gesto do usuário decide
         else if (atBottom) follow = true
     }
-    val visibleItems = remember(session.items) { AskTools.visibleTimelineItems(session.items) }
+    val visibleItems = remember(session.items, session.voiceReplies) {
+        // Resposta em áudio: o texto já vai dentro do card do áudio, então a bolha de texto some (e some já durante a geração).
+        val all = session.items
+        val voiced = all.filterIsInstance<ChatItem.Audio>().map { it.sourceItemId }.filter { it.isNotEmpty() }.toSet()
+        val generating = all.withIndex().filter { (_, it) -> it is ChatItem.Step && it.tool == "reply_audio" && it.status == StepStatus.RUNNING }.map { it.index }
+        AskTools.visibleTimelineItems(all.filterIndexed { i, it ->
+            !(it is ChatItem.Assistant && (it.id in voiced || (session.voiceReplies && it.final && generating.any { g -> g > i })))
+        })
+    }
     val lastItem = session.items.lastOrNull()
     // Evita hashCode() no objeto inteiro (que pode conter milhares de caracteres) em cada atualização.
     val lastItemKey = when (lastItem) {

@@ -60,15 +60,14 @@ fun VoiceSettingsSection() {
                         }
                         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             if (has != null) {
-                                Text("Instalada (${has.label.lowercase()})", fontSize = 12.sp, color = c.ok, modifier = Modifier.weight(1f))
+                                Text("Instalada", fontSize = 12.sp, color = c.ok, modifier = Modifier.weight(1f))
                                 if (chosen == v.id) Text("em uso", fontSize = 12.sp, color = c.ok)
                                 else TextButton({ AppVoice.choose(ctx, v.id); tick++ }) { Text("Usar") }
                                 TextButton({ AppVoice.uninstall(ctx, v.id); tick++ }) { Text("Remover", color = c.err) }
                             } else {
                                 Spacer(Modifier.weight(1f))
                                 val busy = st is AppVoice.State.Downloading
-                                OutlinedButton({ AppVoice.install(ctx, v.id, AppVoice.Variant.FULL) }, enabled = !busy) { Text("Baixar ${v.fullMb} MB") }
-                                TextButton({ AppVoice.install(ctx, v.id, AppVoice.Variant.LITE) }, enabled = !busy) { Text("Leve ${v.liteMb} MB") }
+                                OutlinedButton({ AppVoice.install(ctx, v.id, AppVoice.Variant.LITE) }, enabled = !busy) { Text("Baixar ${v.liteMb} MB") }
                             }
                         }
                     }

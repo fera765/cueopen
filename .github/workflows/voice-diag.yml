@@ -16,7 +16,7 @@ jobs:
       - uses: actions/setup-python@v5
         with: { python-version: "3.11" }
       - run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg >/dev/null
-      - run: pip install -q "sherpa-onnx==1.10.46" numpy soundfile faster-whisper
+      - run: pip install -q "sherpa-onnx==1.10.46" numpy soundfile faster-whisper num2words
       - env: { GH_TOKEN: "${{ github.token }}" }
         run: cd tools/voice_diag && mkdir -p pk && gh release download voices-v2 -R "$GITHUB_REPOSITORY" -p "piper-${{ matrix.voice }}-int8.zip" -D pk && python tune.py ${{ matrix.voice }}
       - uses: actions/upload-artifact@v4

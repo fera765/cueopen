@@ -1858,7 +1858,10 @@ class AgentRunner(
                 // igual a esta, substitui em vez de empilhar outra igual ("Vou aguardar e verificar…" repetido).
                 val lastA = store.session(sessionId)?.items?.lastOrNull { it is ChatItem.Assistant } as? ChatItem.Assistant
                 val collapse = lastA != null && !lastA.final && !isFinal && txt.length > 20 && similar(txt, lastA.text.trim())
-                if (collapse) store.replaceItem(sessionId, lastA!!.copy(text = txt))
+                // Acabou de responder em áudio (reply_audio): não repete um texto de fecho ("Prontinho!") depois do áudio.
+                val afterAudio = isFinal && store.session(sessionId)?.items?.lastOrNull { it !is ChatItem.Step } is ChatItem.Audio
+                if (afterAudio) Unit
+                else if (collapse) store.replaceItem(sessionId, lastA!!.copy(text = txt))
                 else store.addItem(sessionId, ChatItem.Assistant(text = txt, final = isFinal))
             }
             if (reply.toolCalls.isEmpty()) {
@@ -2701,7 +2704,7 @@ class AgentRunner(
                 if (s("text").isBlank()) return if (store.session(sessionId)?.voiceReplies == true) "Modo áudio ligado: as próximas respostas finais virão em áudio automaticamente." else "Modo áudio desligado."
                 val audio = dev.cueopen.app.assistant.VoiceReplies.synthesize(ctx, java.io.File(sandbox.workspaceFor(sessionId), "audio"), s("text"))
                 if (audio == null) "ERRO: o motor de voz do aparelho não está disponível (sem voz pt-BR instalada). Responda em texto e avise o usuário."
-                else { store.addItem(sessionId, audio); "Áudio enviado no chat (${audio.durationMs / 1000}s). Não repita o mesmo conteúdo em texto longo." }
+                else { store.addItem(sessionId, audio); "Áudio enviado no chat (${audio.durationMs / 1000}s). Encerre sem escrever mais nada: o usuário já recebeu a resposta em áudio." }
             }
             "notify" -> {
                 val p = runCatching { dev.cueopen.app.notify.NotificationCenter.Priority.valueOf(s("priority").uppercase()) }.getOrDefault(dev.cueopen.app.notify.NotificationCenter.Priority.NORMAL)

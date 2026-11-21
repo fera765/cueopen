@@ -24,8 +24,13 @@ SENT = SENT_PT if PT else SENT_EN
 pkg = f"piper-{VID}-int8"; zipfile.ZipFile(f"pk/{pkg}.zip").extractall("ex"); d = f"ex/{pkg}"
 asr = WhisperModel("small", device="cpu", compute_type="int8", cpu_threads=4)
 
+from num2words import num2words
 def words(s):
-    s = normalize(s).lower() if PT else s.lower()
+    if PT: s = normalize(s).lower()
+    else:
+        s = s.replace("$", " dollars ").replace(",", "")
+        s = re.sub(r"(\d+)[.:](\d+)", lambda m: num2words(int(m.group(1))) + " " + num2words(int(m.group(2))), s)
+        s = re.sub(r"\d+", lambda m: num2words(int(m.group(0))), s).replace("-", " ").lower()
     s = s.replace("e-mails", "i-meils").replace("emails", "i-meils")
     return re.findall(r"[a-záéíóúâêôãõçà0-9]+", s)
 
@@ -41,10 +46,11 @@ def engine(ns, nw, ls):
         vits=sherpa_onnx.OfflineTtsVitsModelConfig(model=f"{d}/model.onnx", lexicon="", tokens=f"{d}/tokens.txt", data_dir=f"{d}/espeak-ng-data",
                                                    noise_scale=ns, noise_scale_w=nw, length_scale=ls), num_threads=4), max_num_sentences=1))
 
+PREFIX = ""
 def run(ns, nw, ls, keep=False):
     t = engine(ns, nw, ls); errs = tot = 0; bad = []; audio = []
     for s in SENT:
-        g = t.generate(normalize(s) if PT else s, sid=0, speed=1.0)
+        g = t.generate(PREFIX + (normalize(s) if PT else s), sid=0, speed=1.0)
         a = np.array(g.samples, dtype=np.float32); sf.write("tmp.wav", a, g.sample_rate)
         hyp = " ".join(x.text for x in asr.transcribe("tmp.wav", language="pt" if PT else "en", beam_size=5)[0]).strip()
         e, n = wer(s, hyp); errs += e; tot += n
@@ -56,8 +62,13 @@ grid = []
 for ls in (1.0, 1.08, 1.15):
     for ns in (0.33, 0.5, 0.667):
         for nw in (0.5, 0.8):
-            w, bad, _ = run(ns, nw, ls); grid.append({"ns": ns, "nw": nw, "ls": ls, "wer": round(w, 4)}); print(VID, grid[-1], flush=True)
+            w, bad, _ = run(ns, nw, ls); grid.append({"ns": ns, "nw": nw, "ls": ls, "prefix": "", "wer": round(w, 4)}); print(VID, grid[-1], flush=True)
+top = sorted(grid, key=lambda g: g["wer"])[:3]
+for g0 in top:
+    for pf in (", ", "… ", "- "):
+        PREFIX = pf; w, bad, _ = run(g0["ns"], g0["nw"], g0["ls"]); grid.append({**g0, "prefix": pf, "wer": round(w, 4)}); print(VID, grid[-1], flush=True)
 best = min(grid, key=lambda g: (g["wer"], abs(g["ls"] - 1.05)))
+PREFIX = best["prefix"]
 w, bad, (a, sr) = run(best["ns"], best["nw"], best["ls"], keep=True)
 os.makedirs("out", exist_ok=True)
 a = a / max(1e-6, float(np.abs(a).max())) * 0.95; sf.write(f"out/{VID}.wav", a, sr)

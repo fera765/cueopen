@@ -56,8 +56,14 @@ object AppVoice {
     fun spec(id: String?) = CATALOG.firstOrNull { it.id == id }
     private fun key(id: String, v: Variant) = "piper-$id-${v.tag}"
     private fun dir(ctx: Context, id: String, v: Variant) = File(ctx.filesDir, "voices/${key(id, v)}")
-    fun isInstalled(ctx: Context, id: String, v: Variant) = File(dir(ctx, id, v), "model.onnx").isFile && File(dir(ctx, id, v), "espeak-ng-data/phontab").isFile
-    fun installedVariant(ctx: Context, id: String): Variant? = Variant.entries.firstOrNull { isInstalled(ctx, id, it) }
+    /**
+     * Dados de pronúncia (espeak) numa pasta ÚNICA que nunca é apagada: o motor carrega o espeak uma vez por processo,
+     * a partir do primeiro caminho usado. Se essa pasta sumisse (trocar/remover voz), ele passava a gerar ~1 s de chiado.
+     */
+    private fun espeakDir(ctx: Context) = File(ctx.filesDir, "voices/espeak-ng-data")
+    fun isInstalled(ctx: Context, id: String, v: Variant) = File(dir(ctx, id, v), "model.onnx").isFile && File(espeakDir(ctx), "phontab").isFile
+    /** Só a versão leve é oferecida (validada por Whisper no laboratório). */
+    fun installedVariant(ctx: Context, id: String): Variant? = Variant.LITE.takeIf { isInstalled(ctx, id, it) }
 
     /** Voz escolhida para um idioma (pt/en); cai para qualquer voz instalada daquele idioma. */
     fun chosen(ctx: Context, lang: String): Spec? {
@@ -83,7 +89,13 @@ object AppVoice {
     /** Ao abrir o app: remove a voz antiga (Dii) e já carrega a voz em português, se houver. */
     fun prewarm(ctx: Context) {
         scope.launch(Dispatchers.IO) {
-            File(ctx.filesDir, "voices").listFiles()?.filter { it.name.contains("dii") }?.forEach { it.deleteRecursively() }
+            val root = File(ctx.filesDir, "voices")
+            root.listFiles()?.filter { it.name.contains("dii") || it.name.endsWith("-fp32") }?.forEach { it.deleteRecursively() }
+            // Migração: espeak que veio dentro de cada voz → pasta única.
+            root.listFiles()?.filter { it.isDirectory && it.name.startsWith("piper-") }?.forEach { v ->
+                val own = File(v, "espeak-ng-data")
+                if (own.isDirectory) { if (!File(espeakDir(ctx), "phontab").isFile) own.renameTo(espeakDir(ctx)) else own.deleteRecursively() }
+            }
             ctx.getSharedPreferences("dii_voice", Context.MODE_PRIVATE).edit().clear().apply()
             preload(ctx, "pt")
         }
@@ -118,8 +130,8 @@ object AppVoice {
                     }
                 }
                 tmp.delete()
-                // Só uma variante por voz no aparelho (economiza espaço).
-                Variant.entries.filter { it != v }.forEach { dir(app, id, it).deleteRecursively() }
+                val own = File(dir(app, id, v), "espeak-ng-data")
+                if (!File(espeakDir(app), "phontab").isFile) { espeakDir(app).deleteRecursively(); own.renameTo(espeakDir(app)) } else own.deleteRecursively()
                 spec(id)?.let { s -> if (prefs(app).getString("voice_${s.lang}", null) == null) prefs(app).edit().putString("voice_${s.lang}", id).apply() }
                 prefs(app).edit().putBoolean("enabled", true).apply()
                 release()
@@ -147,12 +159,18 @@ object AppVoice {
             val cfg = OfflineTtsConfig(
                 model = OfflineTtsModelConfig(
                     vits = OfflineTtsVitsModelConfig(model = File(d, "model.onnx").absolutePath, lexicon = "", tokens = File(d, "tokens.txt").absolutePath,
-                        dataDir = File(d, "espeak-ng-data").absolutePath, dictDir = "", noiseScale = s.ns, noiseScaleW = s.nw, lengthScale = s.ls),
+                        dataDir = espeakDir(ctx).absolutePath, dictDir = "", noiseScale = s.ns, noiseScaleW = s.nw, lengthScale = s.ls),
                     numThreads = 2, debug = false, provider = "cpu"),
                 maxNumSentences = 1)
             val t = OfflineTts(assetManager = null, config = cfg)
+            // Aquece e confere: "Olá, tudo bem?" precisa render ~1 s de fala; se vier curto, a pronúncia não carregou.
+            val probe = runCatching { t.generate(if (s.lang == "pt") "Olá, tudo bem com você?" else "Hello, how are you today?", 0, 1.0f).samples.size }.getOrDefault(0)
+            if (probe < t.sampleRate() * 0.6) {
+                runCatching { t.release() }
+                _state.value = State.Failed("A voz não carregou direito (dados de pronúncia). Feche e abra o app; se continuar, remova e baixe a voz de novo.")
+                return null
+            }
             tts = t; loadedKey = k; _state.value = State.Ready
-            runCatching { t.generate(if (s.lang == "pt") "Oi." else "Hi.", 0, 1.0f) }  // aquece: o 1º pedido real já sai rápido
             t to s
         } catch (e: Throwable) {
             _state.value = State.Failed("A voz não carregou neste aparelho (${e.javaClass.simpleName}); usando a voz do Android.")
