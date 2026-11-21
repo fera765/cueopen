@@ -58,8 +58,12 @@ object WfLogic {
      * Troca {{prev}}, {{trigger.time}}, {{<id>}}, {{<id>.campo.sub}} e {{<rótulo do nó>}} pelos valores da execução.
      * Saída que é JSON vira objeto navegável; texto puro só existe inteiro. Referência desconhecida vira texto vazio.
      */
-    fun render(template: String, outputs: Map<String, String>, labels: Map<String, String>, prev: String, vars: Map<String, String> = emptyMap()): String =
-        TOKEN.replace(template) { m ->
+    fun render(template: String, outputs: Map<String, String>, labels: Map<String, String>, prev: String, vars: Map<String, String> = emptyMap(),
+               humanize: ((String) -> String)? = null): String =
+        if (humanize != null) TOKEN.replace(template) { m ->
+            val v = render(m.value, outputs, labels, prev, vars)
+            if (WfFormat.isJson(v)) humanize(v) else v
+        } else TOKEN.replace(template) { m ->
             val expr = m.groupValues[1]
             val head = expr.substringBefore('.')
             val path = if (expr.contains('.')) expr.substringAfter('.') else ""

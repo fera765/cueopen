@@ -102,4 +102,20 @@ class WfLogicTest {
         val el = kotlinx.serialization.json.Json.parseToJsonElement(out)  // continua JSON válido
         assertEquals("s0", WfLogic.pick(el.toString(), "data.messages.0.headers.subject"))
     }
+
+    @Test fun readableFormatsEmailListWithoutJson() {
+        val raw = """{"status":"ok","connector":"Gmail","action":"gmail_search_email","data":{"found":true,"results":{"messages":[
+            {"id":"a1","headers":{"subject":"Pedido enviado","from":"Loja <loja@x.com>","date":"Fri, 20 Nov"},"subject":"Pedido enviado","from":"Loja <loja@x.com>","date":"Fri, 20 Nov"},
+            {"id":"a2","headers":{"subject":"Reunião","from":"Ana <ana@y.com>","date":"Thu, 19 Nov"}}]}}}"""
+        val r = WfFormat.readable(raw)
+        assertTrue(r.contains("Pedido enviado")); assertTrue(r.contains("Reunião")); assertTrue(r.contains("Ana"))
+        assertFalse(r.contains("{")); assertFalse(r.contains("\"id\""))
+        assertEquals("2 e-mails · Pedido enviado", WfFormat.oneLine(raw))
+    }
+
+    @Test fun renderHumanizesJsonValues() {
+        val out = mapOf("g1" to "{\"data\":{\"items\":[{\"title\":\"A\"},{\"title\":\"B\"}]},\"status\":\"ok\",\"connector\":\"x\"}")
+        val r = WfLogic.render("Novos: {{g1}}", out, emptyMap(), "", humanize = WfFormat::oneLine)
+        assertEquals("Novos: 2 itens · A", r)
+    }
 }

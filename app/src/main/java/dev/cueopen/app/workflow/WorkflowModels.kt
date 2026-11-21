@@ -178,8 +178,8 @@ object WfCatalog {
             fields = listOf(
                 WfField("title", "Título", WfField.Kind.TEXT, default = "Fluxo"),
                 WfField("text", "Texto", WfField.Kind.MULTILINE, TEMPLATE_HINT, default = "{{prev}}"),
-                WfField("detail", "Conteúdo completo (abre num quadro ao tocar)", WfField.Kind.MULTILINE, "Vazio = mostra o texto. $TEMPLATE_HINT"),
-                WfField("open", "Ao tocar na notificação", WfField.Kind.SELECT, options = listOf("modal" to "Abrir quadro com o conteúdo", "flow" to "Abrir o fluxo", "none" to "Só abrir o app"), default = "modal"),
+                WfField("detail", "Conteúdo completo (quadro/página ao tocar)", WfField.Kind.MULTILINE, "Vazio = o texto + os dados do nó anterior já formatados. Dados {{…}} viram texto claro automaticamente. $TEMPLATE_HINT"),
+                WfField("open", "Ao tocar na notificação", WfField.Kind.SELECT, options = listOf("modal" to "Quadro com o conteúdo", "page" to "Página com o conteúdo", "flow" to "Abrir o fluxo", "none" to "Só abrir o app"), default = "modal"),
             )),
     )
 

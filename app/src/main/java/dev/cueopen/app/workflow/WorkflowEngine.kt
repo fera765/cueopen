@@ -98,9 +98,11 @@ object WorkflowEngine {
         val vars = mapOf("trigger.time" to java.text.SimpleDateFormat("yyyy-MM-dd HH:mm", java.util.Locale.US).format(java.util.Date()),
             "trigger.type" to "test", "workflow.name" to w.name)
         fun r(key: String) = WfLogic.render(node.config[key] ?: WfCatalog.of(node.type).fields.firstOrNull { it.key == key }?.default.orEmpty(), outputs, labels, prev, vars)
+        fun rh(key: String, short: Boolean) = WfLogic.render(node.config[key] ?: WfCatalog.of(node.type).fields.firstOrNull { it.key == key }?.default.orEmpty(), outputs, labels, prev, vars,
+            humanize = { v: String -> if (short) WfFormat.oneLine(v) else WfFormat.readable(v) })
         if (node.type == "delay") return NodeResult(prev)
         val run = WfRun(workflowId = w.id, workflowName = w.name, trigger = "test")
-        return try { runNode(w, run, node, prev, ::r) { } } catch (c: kotlinx.coroutines.CancellationException) { throw c } catch (e: Throwable) {
+        return try { runNode(w, run, node, prev, ::r, ::rh) { } } catch (c: kotlinx.coroutines.CancellationException) { throw c } catch (e: Throwable) {
             NodeResult(error = (e.message ?: e.javaClass.simpleName).take(1_500))
         }
     }
@@ -130,8 +132,10 @@ object WorkflowEngine {
                 val t0 = System.currentTimeMillis()
                 save(run.copy(steps = run.steps + WfStep(node.id, labels.getValue(node.id), node.type, "running", t0)))
                 fun r(key: String) = WfLogic.render(node.config[key] ?: WfCatalog.of(node.type).fields.firstOrNull { it.key == key }?.default.orEmpty(), outputs, labels, prev, vars)
+                fun rh(key: String, short: Boolean) = WfLogic.render(node.config[key] ?: WfCatalog.of(node.type).fields.firstOrNull { it.key == key }?.default.orEmpty(), outputs, labels, prev, vars,
+                    humanize = { v: String -> if (short) WfFormat.oneLine(v) else WfFormat.readable(v) })
                 val res = try {
-                    runNode(w, run, node, prev, ::r) { status -> save(run.copy(status = status)) }
+                    runNode(w, run, node, prev, ::r, ::rh) { status -> save(run.copy(status = status)) }
                 } catch (c: kotlinx.coroutines.CancellationException) { throw c } catch (e: Throwable) {
                     NodeResult(error = (e.message ?: e.javaClass.simpleName).take(1_500))
                 }
@@ -171,7 +175,7 @@ object WorkflowEngine {
 
     data class NodeResult(val output: String = "", val port: String? = null, val error: String? = null, val sessionId: String? = null)
 
-    private suspend fun runNode(w: Workflow, run: WfRun, node: WfNode, prev: String, r: (String) -> String, setStatus: (String) -> Unit): NodeResult {
+    private suspend fun runNode(w: Workflow, run: WfRun, node: WfNode, prev: String, r: (String) -> String, rh: (String, Boolean) -> String, setStatus: (String) -> Unit): NodeResult {
         val app = CueApp.instance
         return when (node.type) {
             "trigger_manual", "trigger_schedule" -> NodeResult(buildJsonObject {
@@ -264,14 +268,22 @@ object WorkflowEngine {
             }
 
             "notify" -> {
-                val title = r("title").ifBlank { w.name }.take(80)
-                val text = r("text").ifBlank { "Fluxo concluído." }
+                // Nada de JSON para o usuário: valores {{…}} que são dados viram texto claro (lista de e-mails, campos legíveis).
+                val title = WfFormat.oneLine(rh("title", true)).ifBlank { w.name }.take(80)
+                val text = rh("text", true).ifBlank { "Fluxo concluído." }
                 val open = node.config["open"] ?: "modal"
-                val detail = if (open == "modal") r("detail").ifBlank { text } else ""
-                dev.cueopen.app.notify.NotificationCenter.post(title, text.take(900),
+                val prevIsData = prev.isNotBlank() && !(WfFormat.isJson(prev) && Regex("\"trigger\"\\s*:").containsMatchIn(prev.take(200)))
+                val detail = when {
+                    open == "none" || open == "flow" -> ""
+                    !node.config["detail"].isNullOrBlank() -> rh("detail", false)
+                    // Sem conteúdo definido: mostra os dados que chegaram (formatados) logo abaixo do texto.
+                    prevIsData && !text.contains(WfFormat.oneLine(prev).take(30)) -> text + "\n\n" + WfFormat.readable(prev)
+                    else -> text
+                }
+                dev.cueopen.app.notify.NotificationCenter.post(title, text.replace("**", "").take(300),
                     dev.cueopen.app.notify.NotificationCenter.Priority.NORMAL, dev.cueopen.app.notify.NotificationCenter.Category.DONE,
                     agent = "Fluxo · ${w.name}", dedupeKey = "wf|${run.id}|${node.id}",
-                    detail = detail, route = if (open == "none") null else "workflow/${w.id}", routeLabel = "Abrir fluxo")
+                    detail = detail, route = if (open == "none") null else "workflow/${w.id}", routeLabel = "Abrir fluxo", page = open == "page")
                 NodeResult(buildJsonObject { put("title", title); put("text", text.take(4_000)); if (detail.isNotEmpty()) put("detail", detail.take(4_000)) }.toString())
             }
 

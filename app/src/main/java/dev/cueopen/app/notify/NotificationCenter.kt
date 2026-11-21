@@ -36,7 +36,9 @@ object NotificationCenter {
                      val detail: String = "",
                      /** Rota do app aberta pelo botão do quadro (ex.: "workflow/<id>"); com [detail] vazio, tocar vai direto para ela. */
                      val route: String? = null,
-                     val routeLabel: String = "")
+                     val routeLabel: String = "",
+                     /** Tocar abre uma página inteira (em vez do quadro) com o conteúdo formatado. */
+                     val page: Boolean = false)
 
     const val EXTRA_ENTRY = "notif_entry"
     private val _live = kotlinx.coroutines.flow.MutableSharedFlow<Entry>(extraBufferCapacity = 8)
@@ -107,7 +109,7 @@ object NotificationCenter {
     @Synchronized
     fun post(title: String, text: String, priority: Priority, category: Category, sessionId: String? = null, agent: String = "",
              dedupeKey: String = "$category|$sessionId|${text.take(80)}", needsAction: Boolean = priority >= Priority.HIGH,
-             detail: String = "", route: String? = null, routeLabel: String = "") {
+             detail: String = "", route: String? = null, routeLabel: String = "", page: Boolean = false) {
         if (!::app.isInitialized) return
         val now = System.currentTimeMillis()
         val (record, show) = decide(priority, foreground, lastByKey[dedupeKey], sessionId?.let { lastBySession[it] }, now)
@@ -116,7 +118,7 @@ object NotificationCenter {
         if (lastByKey.size > 500) lastByKey.entries.removeIf { now - it.value > DEDUPE_MS }
         val id = if (_history.value.any { it.id == now }) now + 1 else now
         val entry = Entry(id, now, title.take(120), plain(text).take(600), priority.name, category.name, sessionId, agent, needsAction,
-            detail = detail.take(8_000), route = route, routeLabel = routeLabel)
+            detail = detail.take(8_000), route = route, routeLabel = routeLabel, page = page && detail.isNotBlank())
         _history.value = (listOf(entry) + _history.value).take(MAX_HISTORY).also { save(it) }
         val rich = detail.isNotBlank() || route != null
         if (rich) _live.tryEmit(entry)

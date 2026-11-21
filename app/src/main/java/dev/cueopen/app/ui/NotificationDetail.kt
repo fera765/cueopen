@@ -46,7 +46,7 @@ fun NotificationOverlay(nav: NavController, pendingEntry: MutableState<Long?>) {
         pendingEntry.value = null
         val e = NotificationCenter.entry(id) ?: return@LaunchedEffect
         NotificationCenter.markEntryRead(id)
-        if (e.detail.isBlank() && e.route != null) nav.navigate(e.route) { launchSingleTop = true } else open = e
+        openEntry(e, nav) { open = it }
     }
     LaunchedEffect(Unit) { NotificationCenter.live.collect { banner = it } }
     LaunchedEffect(banner) { if (banner != null) { delay(6_000); banner = null } }
@@ -56,7 +56,7 @@ fun NotificationOverlay(nav: NavController, pendingEntry: MutableState<Long?>) {
             enter = slideInVertically { -it }, exit = slideOutVertically { -it }) {
             val b = banner
             if (b != null) Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(18.dp)).background(c.surface).border(1.dp, c.accent.copy(alpha = .5f), RoundedCornerShape(18.dp))
-                .clickable { banner = null; NotificationCenter.markEntryRead(b.id); if (b.detail.isBlank() && b.route != null) nav.navigate(b.route) { launchSingleTop = true } else open = b }
+                .clickable { banner = null; NotificationCenter.markEntryRead(b.id); openEntry(b, nav) { open = it } }
                 .padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
                 Icon(Icons.Rounded.Notifications, null, tint = c.accent)
                 Spacer(Modifier.width(10.dp))
@@ -79,8 +79,8 @@ fun NotificationOverlay(nav: NavController, pendingEntry: MutableState<Long?>) {
                 }
             },
             text = {
-                SelectionContainer {
-                    Text(e.detail.ifBlank { e.text }, Modifier.heightIn(max = 460.dp).verticalScroll(rememberScrollState()), fontSize = 14.sp, color = c.ink2)
+                Column(Modifier.heightIn(max = 460.dp).verticalScroll(rememberScrollState())) {
+                    SelectionContainer { CueMarkdown(e.detail.ifBlank { e.text }) }
                 }
             },
             confirmButton = {
@@ -89,5 +89,33 @@ fun NotificationOverlay(nav: NavController, pendingEntry: MutableState<Long?>) {
                     ?: TextButton({ open = null }) { Text("Fechar") }
             },
             dismissButton = { if (e.route != null || e.sessionId != null) TextButton({ open = null }) { Text("Fechar") } })
+    }
+}
+
+/** Toque numa notificação: página inteira, quadro, ou direto para a rota (sem conteúdo). */
+private fun openEntry(e: NotificationCenter.Entry, nav: NavController, showModal: (NotificationCenter.Entry) -> Unit) {
+    when {
+        e.page -> nav.navigate("notif/${e.id}") { launchSingleTop = true }
+        e.detail.isBlank() && e.route != null -> nav.navigate(e.route) { launchSingleTop = true }
+        else -> showModal(e)
+    }
+}
+
+/** Página de uma notificação: conteúdo completo formatado, com atalho para o fluxo/chat de origem. */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun NotificationPageScreen(nav: NavController, id: Long) {
+    val c = Cue.c
+    val e = remember(id) { NotificationCenter.entry(id) }
+    Scaffold(containerColor = c.bg, topBar = { CueTopBar(e?.title ?: "Notificação", { nav.popBackStack() }) }) { pad ->
+        if (e == null) Box(Modifier.padding(pad).fillMaxSize(), contentAlignment = Alignment.Center) { Text("Notificação não encontrada.", color = c.ink3) }
+        else Column(Modifier.padding(pad).fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Text(SimpleDateFormat("dd/MM/yyyy HH:mm", Locale("pt", "BR")).format(Date(e.at)) + (e.agent.takeIf { it.isNotBlank() }?.let { " · $it" } ?: ""),
+                fontSize = 12.sp, color = c.ink3)
+            Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(18.dp)).background(c.surface).border(1.dp, c.line, RoundedCornerShape(18.dp)).padding(16.dp)) {
+                SelectionContainer { CueMarkdown(e.detail.ifBlank { e.text }) }
+            }
+            e.route?.let { r -> OutlinedButton({ nav.navigate(r) { launchSingleTop = true } }) { Text(e.routeLabel.ifBlank { "Abrir" }) } }
+        }
     }
 }

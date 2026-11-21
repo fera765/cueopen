@@ -547,7 +547,7 @@ fun WorkflowEditorScreen(nav: NavController, id: String) {
                     Spacer(Modifier.width(10.dp))
                     Column(Modifier.weight(1f)) {
                         Text(when (r.status) { "ok" -> "Execução concluída"; "error" -> "A execução falhou"; else -> "Execução parada" }, fontWeight = FontWeight.SemiBold)
-                        val lastOut = r.steps.lastOrNull { it.status == "ok" }?.output.orEmpty()
+                        val lastOut = r.steps.lastOrNull { it.status == "ok" && !it.type.startsWith("trigger") }?.output.orEmpty().let { WfFormat.oneLine(it) }
                         Text((if (r.status == "error") r.error else "${r.steps.size} passos · ${(((r.finishedAt ?: r.startedAt) - r.startedAt) / 100) / 10.0} s" +
                             (lastOut.takeIf { it.isNotBlank() }?.let { " · " + it.replace(Regex("\\s+"), " ").take(70) } ?: "")),
                             fontSize = 12.sp, color = if (r.status == "error") c.err else c.ink3, maxLines = 2, overflow = TextOverflow.Ellipsis)
@@ -1078,6 +1078,7 @@ private fun NodeTester(w: Workflow, node: WfNode, lastStep: WfStep?) {
     var busy by remember(node.id) { mutableStateOf(false) }
     var res by remember(node.id) { mutableStateOf<WorkflowEngine.NodeResult?>(null) }
     var copied by remember { mutableStateOf<String?>(null) }
+    var showRaw by remember(node.id) { mutableStateOf(false) }
     SectionLabel("Testar este nó")
     Text("Roda só este nó agora, com os dados da última execução como entrada. Ações reais (enviar e-mail, postar) acontecem de verdade.", fontSize = 11.sp, color = c.ink3)
     Button({ busy = true; res = null; scope.launch { res = WorkflowEngine.testNode(w, node.id); busy = false } }, enabled = !busy,
@@ -1090,9 +1091,13 @@ private fun NodeTester(w: Workflow, node: WfNode, lastStep: WfStep?) {
         Text("Erro: $e", Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(c.err.copy(alpha = .08f)).padding(10.dp), fontSize = 12.sp, color = c.err)
     }
     if (out != null) {
-        Text(if (res != null) "Resposta do teste" else "Resposta da última execução", fontSize = 12.sp, color = c.ink2)
-        Text(prettyOut(out).take(4_000), Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(c.surface2).padding(10.dp),
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(if (res != null) "Resultado do teste" else "Resultado da última execução", fontSize = 12.sp, color = c.ink2, modifier = Modifier.weight(1f))
+            if (WfFormat.isJson(out)) TextButton({ showRaw = !showRaw }) { Text(if (showRaw) "Ver leitura clara" else "Dados técnicos", fontSize = 12.sp) }
+        }
+        if (showRaw) Text(prettyOut(out).take(4_000), Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(c.surface2).padding(10.dp),
             fontSize = 11.sp, fontFamily = FontFamily.Monospace, color = c.ink2)
+        else Box(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(c.surface2).padding(12.dp)) { CueMarkdown(WfFormat.readable(out, maxItems = 10).take(3_000)) }
         val paths = WfLogic.paths(out)
         if (paths.isNotEmpty()) {
             Text("Use em outros nós (toque para copiar)" + (copied?.let { " · copiado $it" } ?: ""), fontSize = 12.sp, color = c.ink2)
@@ -1115,6 +1120,7 @@ private fun Modifier.horizontalScrollIfNeeded(): Modifier = this.then(Modifier.h
 private fun RunsPanel(w: Workflow, runs: List<WfRun>, nav: NavController, onClose: () -> Unit) {
     val c = Cue.c
     var open by remember { mutableStateOf(runs.firstOrNull()?.id) }
+    var raw by remember { mutableStateOf(false) }
     Column(Modifier.padding(16.dp, 0.dp, 16.dp, 28.dp).heightIn(max = 640.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text("Execuções", fontWeight = FontWeight.SemiBold, fontSize = 16.sp, modifier = Modifier.weight(1f))
@@ -1128,13 +1134,17 @@ private fun RunsPanel(w: Workflow, runs: List<WfRun>, nav: NavController, onClos
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Box(Modifier.size(10.dp).clip(CircleShape).background(col))
                         Spacer(Modifier.width(8.dp))
-                        Text(when (r.status) { "ok" -> "Concluída"; "error" -> "Falhou"; "running" -> "Executando"; "waiting" -> "Aguardando aprovação"; else -> "Parada" },
+                        Text(when (r.status) { "ok" -> "Concluída"; "error" -> "Falhou"; "running" -> "Executando"; "waiting" -> "Aguardando aprovação"; "paused" -> "Pausada"; else -> "Parada" },
                             fontWeight = FontWeight.SemiBold, color = col, modifier = Modifier.weight(1f))
-                        Text("${if (r.trigger == "schedule") "agendada" else "manual"} · ${timeFmt.format(Date(r.startedAt))}", fontSize = 11.sp, color = c.ink3)
+                        Text("${when (r.trigger) { "schedule" -> "agendada"; "test" -> "teste"; else -> "manual" }} · ${timeFmt.format(Date(r.startedAt))}", fontSize = 11.sp, color = c.ink3)
                     }
                     r.finishedAt?.let { Text("Duração: ${((it - r.startedAt) / 1000).coerceAtLeast(0)} s", fontSize = 11.sp, color = c.ink3) }
                     if (r.error.isNotBlank()) Text(r.error.take(400), fontSize = 12.sp, color = c.err)
                     if (WorkflowEngine.isActive(r.status)) TextButton({ WorkflowEngine.cancel(r.id) }) { Text("Parar execução", color = c.err) }
+                    if (open == r.id && r.steps.isNotEmpty()) Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("Dados técnicos", fontSize = 12.sp, color = c.ink3, modifier = Modifier.weight(1f))
+                        Switch(checked = raw, onCheckedChange = { raw = it }, modifier = Modifier.scale(0.8f))
+                    }
                     if (open == r.id) r.steps.forEach { s ->
                         Spacer(Modifier.height(6.dp))
                         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -1143,9 +1153,15 @@ private fun RunsPanel(w: Workflow, runs: List<WfRun>, nav: NavController, onClos
                             Text(s.label, fontSize = 13.sp, fontWeight = FontWeight.Medium, modifier = Modifier.weight(1f))
                             s.finishedAt?.let { Text("${((it - s.startedAt) / 100) / 10.0} s", fontSize = 11.sp, color = c.ink3) }
                         }
-                        val body = if (s.status == "error") s.error else s.output
-                        if (body.isNotBlank()) Text(body.take(1_200), Modifier.fillMaxWidth().padding(start = 22.dp, top = 2.dp), fontSize = 11.sp,
-                            fontFamily = FontFamily.Monospace, color = if (s.status == "error") c.err else c.ink2)
+                        // Leitura clara por padrão; os dados técnicos (JSON) só quando o usuário pede.
+                        if (s.status == "error") Text(s.error.take(800), Modifier.fillMaxWidth().padding(start = 22.dp, top = 2.dp), fontSize = 12.sp, color = c.err)
+                        else if (s.output.isNotBlank()) {
+                            if (raw) Text(prettyOut(s.output).take(3_000), Modifier.fillMaxWidth().padding(start = 22.dp, top = 2.dp), fontSize = 11.sp,
+                                fontFamily = FontFamily.Monospace, color = c.ink3)
+                            else if (s.type.startsWith("trigger")) Text(if (r.trigger == "schedule") "Disparado pelo agendamento" else if (r.trigger == "test") "Teste" else "Disparado por você",
+                                Modifier.padding(start = 22.dp, top = 2.dp), fontSize = 12.sp, color = c.ink3)
+                            else Box(Modifier.fillMaxWidth().padding(start = 22.dp, top = 2.dp)) { CueMarkdown(WfFormat.readable(s.output, maxItems = 10).take(2_000)) }
+                        }
                         if (r.status == "waiting" && s.status == "running" && s.type == "approval" && WorkflowEngine.pendingApproval(r.id, s.nodeId)) Row(Modifier.padding(start = 22.dp)) {
                             Button({ WorkflowEngine.approve(r.id, s.nodeId, true) }, colors = ButtonDefaults.buttonColors(containerColor = c.ok)) { Text("Aprovar") }
                             Spacer(Modifier.width(8.dp))
