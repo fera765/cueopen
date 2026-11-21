@@ -45,7 +45,9 @@ for vid, (path, lang, ns, nw, ls) in VOICES.items():
             add_meta(m, f"{d}/tmp.onnx"); quantize_dynamic(f"{d}/tmp.onnx", f"{d}/model.onnx", weight_type=QuantType.QUInt8)
             os.remove(f"{d}/tmp.onnx"); add_meta(f"{d}/model.onnx", f"{d}/model.onnx")
         with open(f"{d}/tokens.txt", "w") as f:
-            for sym, ids in cfg["phoneme_id_map"].items(): f.write(f"{sym} {ids[0]}\n")
+            for sym, ids in cfg["phoneme_id_map"].items():
+                if len(sym) != 1: print(vid, "ignora token combinado", repr(sym)); continue  # o motor do app lê 1 símbolo por linha
+                f.write(f"{sym} {ids[0]}\n")
         shutil.copytree(ESPEAK, f"{d}/espeak-ng-data", dirs_exist_ok=True)
         # valida no motor do app
         tts = sherpa_onnx.OfflineTts(sherpa_onnx.OfflineTtsConfig(model=sherpa_onnx.OfflineTtsModelConfig(
