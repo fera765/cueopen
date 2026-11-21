@@ -70,6 +70,12 @@ object VoiceReplies {
     suspend fun synthesize(ctx: Context, dir: File, text: String, sourceItemId: String = ""): ChatItem.Audio? = mutex.withLock {
         val say = speakable(text)
         if (say.isBlank()) return null
+        // Voz Dii no aparelho (rápida, sem internet) quando instalada e ligada; senão a voz do Android.
+        if (dev.cueopen.app.voice.DiiVoice.enabled(ctx)) {
+            val f = File(dir, "voz_${System.currentTimeMillis()}.wav")
+            val ms = runCatching { kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) { dev.cueopen.app.voice.DiiVoice.synthesizeToWav(ctx, say, f) } }.getOrNull()
+            if (ms != null) return ChatItem.Audio(path = f.absolutePath, text = say, durationMs = ms, sourceItemId = sourceItemId)
+        }
         val t = engine(ctx) ?: return null
         dir.mkdirs()
         val f = File(dir, "voz_${System.currentTimeMillis()}.wav")

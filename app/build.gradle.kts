@@ -61,7 +61,13 @@ android {
             if (cueopenSigningStore != null) signingConfig = signingConfigs.getByName("cueopen")
         }
     }
-    packaging { jniLibs { useLegacyPackaging = true } } // extrai .so para nativeLibraryDir
+    packaging {
+        jniLibs {
+            useLegacyPackaging = true  // extrai .so para nativeLibraryDir
+            // Motor de voz só nos celulares ARM (x86_64 é emulador): -26 MB no APK; lá o app usa a voz do Android.
+            excludes += listOf("lib/x86_64/libonnxruntime.so", "lib/x86_64/libsherpa-onnx-jni.so")
+        }
+    }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
@@ -118,6 +124,9 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.3")
     implementation("org.yaml:snakeyaml:2.2")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
+    // Voz Dii no aparelho (Piper/VITS via sherpa-onnx 1.10.46, a mesma versão validada em tools/voice_lab).
+    // O AAR é baixado pelo CI (debug-apk.yml) da release oficial do k2-fsa/sherpa-onnx.
+    implementation(files("libs/sherpa-onnx-1.10.46.aar"))
     testImplementation("junit:junit:4.13.2")
     androidTestImplementation("androidx.test.ext:junit:1.2.1")
     androidTestImplementation("androidx.test:runner:1.6.2")

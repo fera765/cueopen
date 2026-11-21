@@ -748,6 +748,7 @@ private fun SessionDrawer(nav: NavController, sessions: List<Session>, agents: L
             DrawerShortcut(Icons.Rounded.LibraryBooks, "Knowledge", tint = 0xFF0FA3B1) { go("knowledge") },
             DrawerShortcut(Icons.Rounded.Language, "Browser", tint = 0xFF3B82F6) { go("browserhub") },
             DrawerShortcut(Icons.Rounded.AccountTree, "Fluxos", tint = 0xFF2FBF71) { go("workflows") },
+            DrawerShortcut(Icons.Rounded.RecordVoiceOver, "Conversa por voz", tint = 0xFF9B7BFF) { go("live") },
             DrawerShortcut(Icons.Rounded.Computer, "Linux", tint = 0xFF64748B) { go("sandbox") },
             DrawerShortcut(Icons.Rounded.AccountBalanceWallet, "Cofre", tint = 0xFF9945FF) { go("vault") },
         )

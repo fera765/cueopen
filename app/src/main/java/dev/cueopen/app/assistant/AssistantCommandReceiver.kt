@@ -71,6 +71,9 @@ class AssistantCommandReceiver : BroadcastReceiver() {
                     val finalText = session?.items?.filterIsInstance<ChatItem.Assistant>()
                         ?.lastOrNull { it.final }?.text.orEmpty()
                     val errorText = session?.items?.filterIsInstance<ChatItem.Error>()?.lastOrNull()?.text.orEmpty()
+                    // Assistente de voz responde falando (Dii no aparelho, sem esperar arquivo): começa em décimos de segundo.
+                    if (finalText.isNotBlank() && dev.cueopen.app.voice.DiiVoice.enabled(app))
+                        runCatching { dev.cueopen.app.voice.DiiVoice.speak(app, VoiceReplies.speakable(finalText)) }
                     val media = session?.items?.filterIsInstance<ChatItem.Media>()
                         ?.lastOrNull { it.time >= startedAt && it.caption.contains("captura", ignoreCase = true) }
                     val phase = when {

@@ -48,6 +48,13 @@ jobs:
           node tools/minihub/build-catalog.js app/src/main/assets/minihub/catalog.json out-minihub/report.json
           ls -lh app/src/main/assets/minihub/
 
+      - name: Motor de voz (sherpa-onnx 1.10.46 AAR)
+        run: |
+          set -euo pipefail
+          mkdir -p app/libs
+          curl -fsSL -o app/libs/sherpa-onnx-1.10.46.aar https://github.com/k2-fsa/sherpa-onnx/releases/download/v1.10.46/sherpa-onnx-1.10.46.aar
+          unzip -l app/libs/sherpa-onnx-1.10.46.aar | grep -E "jni/(arm64|x86_64)" | head
+
       - name: Run JVM unit tests and assemble debug APK
         run: gradle testDebugUnitTest assembleDebug --stacktrace
 

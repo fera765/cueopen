@@ -90,6 +90,8 @@ fun SettingsScreen(nav: NavController) {
             Text("O mercado funciona sem chave (com cache e limites automáticos). Se você bater em limite de requisições com frequência, crie uma chave Demo gratuita em coingecko.com e cole aqui para ter quota dedicada.", fontSize = 12.sp, color = Cue.c.ink2)
             SectionLabel("Assistente do Android")
             AssistantDefaultRoleLink(nav.context)
+            SectionLabel("Voz do app")
+            VoiceSettingsSection()
             SectionLabel("Aparência")
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 listOf(ThemeMode.SYSTEM to "Sistema", ThemeMode.LIGHT to "Claro", ThemeMode.DARK to "Escuro").forEach { (m, l) ->
