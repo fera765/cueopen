@@ -16,6 +16,11 @@ jobs:
       - uses: actions/setup-python@v5
         with: { python-version: "3.11" }
       - run: pip install --quiet onnx onnxruntime huggingface_hub numpy soundfile "sherpa-onnx<1.12" && python -c "import sherpa_onnx;print('sherpa', sherpa_onnx.__version__)"
+      - name: AAR do sherpa-onnx para Android (mesma versão testada)
+        env: { GH_TOKEN: "${{ github.token }}" }
+        run: |
+          V=$(python -c "import sherpa_onnx;print(sherpa_onnx.__version__)")
+          gh release view "v$V" -R k2-fsa/sherpa-onnx --json assets -q '.assets[].name' | grep -iE "aar|android" | head -20 || true
       - name: Lab
         working-directory: tools/voice_lab
         env: { VOICE_REPO: "${{ inputs.repo || 'OpenVoiceOS/pipertts_pt-PT_dii' }}" }

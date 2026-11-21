@@ -58,12 +58,6 @@ fp32 = "variants/dii.fp32.onnx"; add_meta(model, fp32)
 int8 = "variants/dii.int8.onnx"
 quantize_dynamic(fp32, int8, weight_type=QuantType.QUInt8)
 add_meta(int8, int8)
-# Grafo já otimizado pelo ORT (carrega mais rápido no celular).
-opt = "variants/dii.int8.opt.onnx"
-so = ort.SessionOptions(); so.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_EXTENDED; so.optimized_model_filepath = opt
-ort.InferenceSession(int8, so, providers=["CPUExecutionProvider"])
-add_meta(opt, opt)
-
 with open("variants/tokens.txt", "w") as f:
     for sym, ids in cfg["phoneme_id_map"].items():
         f.write(f"{sym} {ids[0]}\n")
@@ -75,7 +69,8 @@ assert os.path.isfile("espeak-ng-data/phontab"), "espeak-ng-data inválido"
 BENCH = r'''
 import sys, time, json, resource, numpy as np, sherpa_onnx, soundfile as sf
 model, name, threads, ns, nw, ls = sys.argv[1], sys.argv[2], int(sys.argv[3]), float(sys.argv[4]), float(sys.argv[5]), float(sys.argv[6])
-texts = json.loads(sys.argv[7]); tokens = sys.argv[8]
+texts = json.loads(sys.argv[7]); tokens = sys.argv[8]; chunk = sys.argv[9] == "1"
+import re
 t0 = time.time()
 cfg = sherpa_onnx.OfflineTtsConfig(model=sherpa_onnx.OfflineTtsModelConfig(vits=sherpa_onnx.OfflineTtsVitsModelConfig(
     model=model, lexicon="", tokens=tokens, data_dir="espeak-ng-data", noise_scale=ns, noise_scale_w=nw, length_scale=ls),
@@ -89,24 +84,32 @@ for i, t in enumerate(texts):
     def cb(samples, progress):
         if first[0] is None: first[0] = time.time() - s
         return 1
-    a = tts.generate(t, sid=0, speed=1.0, callback=cb)
+    # Modo "chunk" = como o app vai falar: corta em frases curtas (também em vírgulas) e toca a 1ª enquanto gera o resto.
+    parts = [p.strip() for p in re.split(r"(?<=[,;:.!?])\s+", t) if p.strip()] if chunk else [t]
+    allsamp = []; sr = 22050
+    for p in parts:
+        a = tts.generate(p, sid=0, speed=1.0, callback=cb)
+        if not a.samples: raise SystemExit("sem áudio para: " + p)
+        allsamp.extend(a.samples); sr = a.sample_rate
     total = time.time() - s
-    if not a.samples: raise SystemExit("sem áudio para: " + t)
-    dur = len(a.samples) / a.sample_rate
-    sf.write(f"out/{name}_{i}.wav", np.array(a.samples, dtype=np.float32), a.sample_rate)
+    dur = len(allsamp) / sr
+    sf.write(f"out/{name}_{i}.wav", np.array(allsamp, dtype=np.float32), sr)
     res.append({"first_audio_s": round(first[0] or total, 3), "total_s": round(total, 3), "audio_s": round(dur, 2), "rtf": round(total / max(dur, 1e-6), 3)})
 print(json.dumps({"name": name, "load_s": round(load, 2), "peak_rss_mb": round(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024, 1), "runs": res}))
 '''
 open("bench.py", "w").write(BENCH)
 
-def bench(model, name, threads=2, ns=0.667, nw=0.8, ls=1.0, tokens="variants/tokens.txt"):
-    r = subprocess.run(["taskset", "-c", "0,1", sys.executable, "bench.py", model, name, str(threads), str(ns), str(nw), str(ls), json.dumps(TEXTS), tokens],
+def bench(model, name, threads=2, ns=0.667, nw=0.8, ls=1.0, tokens="variants/tokens.txt", chunk=False):
+    r = subprocess.run(["taskset", "-c", "0,1", sys.executable, "bench.py", model, name, str(threads), str(ns), str(nw), str(ls), json.dumps(TEXTS), tokens, "1" if chunk else "0"],
                        capture_output=True, text=True)
     if r.returncode != 0: log(r.stderr[-3000:]); return None
     j = json.loads(r.stdout.strip().splitlines()[-1]); j["size_mb"] = round(os.path.getsize(model) / 1e6, 1); log(json.dumps(j)); return j
 
-results = [bench(ref_onnx, "ref_" + REF.replace("vits-piper-", ""), tokens=f"{REF}/tokens.txt"), bench(fp32, "fp32"), bench(int8, "int8"), bench(opt, "int8opt"), bench(opt, "int8opt_1thread", threads=1),
-           bench(opt, "int8opt_natural", ns=0.6, nw=0.7, ls=1.05)]
+results = [bench(ref_onnx, "ref_" + REF.replace("vits-piper-", ""), tokens=f"{REF}/tokens.txt"),
+           bench(fp32, "fp32"), bench(int8, "int8"),
+           bench(fp32, "fp32_chunk", chunk=True), bench(int8, "int8_chunk", chunk=True),
+           bench(fp32, "fp32_chunk_1thread", threads=1, chunk=True),
+           bench(fp32, "fp32_natural", ns=0.55, nw=0.7, ls=1.03, chunk=True)]
 
 # ---------- 4) Qualidade: distância espectral log-mel vs. original ----------
 def logmel(x, sr=SR, n=1024, hop=256, mels=80):
@@ -121,7 +124,7 @@ def logmel(x, sr=SR, n=1024, hop=256, mels=80):
 
 import soundfile as sf
 quality = {}
-for v in ["int8", "int8opt"]:
+for v in ["int8", "fp32_chunk", "fp32_natural"]:
     ds = []
     for i in range(len(TEXTS)):
         a, _ = sf.read(f"out/fp32_{i}.wav"); b, _ = sf.read(f"out/{v}_{i}.wav")
@@ -130,14 +133,17 @@ for v in ["int8", "int8opt"]:
     quality[v] = round(float(np.mean(ds)), 3)
 log("qualidade (log-mel L1 vs fp32; menor = mais igual):", quality)
 
-# ---------- 5) Pacote do app ----------
-pkg = "vits-piper-pt_PT-dii-int8"
-os.makedirs(f"{OUT}/{pkg}", exist_ok=True)
-shutil.copy(opt, f"{OUT}/{pkg}/model.onnx"); shutil.copy("variants/tokens.txt", f"{OUT}/{pkg}/tokens.txt")
-shutil.copytree("espeak-ng-data", f"{OUT}/{pkg}/espeak-ng-data", dirs_exist_ok=True)
-with tarfile.open(f"{OUT}/{pkg}.tar.bz2", "w:bz2") as t: t.add(f"{OUT}/{pkg}", arcname=pkg)
-shutil.rmtree(f"{OUT}/{pkg}")
+# ---------- 5) Pacotes do app: fp32 (mais rápido) e int8 (mais leve) ----------
+pkgs = {}
+for tag, path in [("fp32", fp32), ("int8", int8)]:
+    pkg = f"vits-piper-pt_PT-dii-{tag}"
+    os.makedirs(f"{OUT}/{pkg}", exist_ok=True)
+    shutil.copy(path, f"{OUT}/{pkg}/model.onnx"); shutil.copy("variants/tokens.txt", f"{OUT}/{pkg}/tokens.txt")
+    shutil.copytree("espeak-ng-data", f"{OUT}/{pkg}/espeak-ng-data", dirs_exist_ok=True)
+    with tarfile.open(f"{OUT}/{pkg}.tar.bz2", "w:bz2") as t: t.add(f"{OUT}/{pkg}", arcname=pkg)
+    shutil.rmtree(f"{OUT}/{pkg}")
+    pkgs[tag] = round(os.path.getsize(f"{OUT}/{pkg}.tar.bz2") / 1e6, 1)
 report = {"repo": REPO, "sample_rate": SR, "espeak_voice": cfg.get("espeak", {}).get("voice"), "results": [r for r in results if r], "quality": quality,
-          "package_mb": round(os.path.getsize(f"{OUT}/{pkg}.tar.bz2") / 1e6, 1)}
+          "packages_mb": pkgs}
 json.dump(report, open(f"{OUT}/report.json", "w"), indent=2)
 log(json.dumps(report, indent=2))
