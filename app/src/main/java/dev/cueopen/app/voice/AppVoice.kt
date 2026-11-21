@@ -28,7 +28,6 @@ object AppVoice {
     val CATALOG = listOf(
         Spec("cadu", "Cadu", "pt", "masculina", "Português do Brasil · natural e clara", 0.4f, 0.5f, 1.0f, 59, 14),
         Spec("faber", "Faber", "pt", "masculina", "Português do Brasil · grave e calma", 0.4f, 0.8f, 1.0f, 59, 14),
-        Spec("amy", "Amy", "en", "feminina", "Inglês americano · leve e simpática", 0.55f, 0.5f, 1.0f, 59, 14),
         Spec("lessac", "Lessac", "en", "feminina", "Inglês americano · narração", 0.8f, 0.8f, 1.0f, 59, 14),
         Spec("ryan", "Ryan", "en", "masculina", "Inglês americano · firme", 0.8f, 0.5f, 1.0f, 59, 14),
     )
@@ -242,6 +241,8 @@ object AppVoice {
         _speaking.value = true
         playJob = scope.launch {
             val tr = newTrack(sr).also { track = it; it.play() }
+            // ~200 ms de silêncio antes da 1ª sílaba: o alto-falante/Bluetooth "acorda" sem engolir o começo da palavra.
+            tr.write(FloatArray(sr / 5), 0, sr / 5, AudioTrack.WRITE_BLOCKING)
             val gen = launch(Dispatchers.Default) {
                 for (text in q) {
                     for (piece in chunks(prepare(text, s.lang))) {
@@ -250,6 +251,7 @@ object AppVoice {
                         val samples = synchronized(engineLock) { runCatching { t.generate(piece, 0, speed).samples }.getOrNull() } ?: continue
                         if (!isActive) break
                         audio.send(samples)
+                        gap(piece, sr)?.let { audio.send(it) }
                     }
                 }
                 audio.close()
@@ -267,6 +269,13 @@ object AppVoice {
             }
         }
         return q
+    }
+
+    /** Pausa natural entre frases (fim de frase ~250 ms, vírgula ~120 ms). */
+    private fun gap(piece: String, sr: Int): FloatArray? = when (piece.trimEnd().lastOrNull()) {
+        '.', '!', '?', '…' -> FloatArray(sr / 4)
+        ',', ';', ':' -> FloatArray(sr * 12 / 100)
+        else -> null
     }
 
     /** Para de falar na hora (interrupção). */
@@ -299,7 +308,8 @@ object AppVoice {
         val (t, s) = engine(ctx, lang) ?: return null
         val sr = t.sampleRate()
         val all = ArrayList<FloatArray>()
-        synchronized(engineLock) { chunks(prepare(text, s.lang)).forEach { p -> all += t.generate(p, 0, speed(ctx)).samples } }
+        all += FloatArray(sr / 5)  // silêncio inicial: o player não corta a 1ª sílaba
+        synchronized(engineLock) { chunks(prepare(text, s.lang)).forEach { p -> all += t.generate(p, 0, speed(ctx)).samples; gap(p, sr)?.let { all += it } } }
         val n = all.sumOf { it.size }
         if (n == 0) return null
         out.parentFile?.mkdirs()

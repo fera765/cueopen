@@ -1,35 +1,40 @@
 name: voice-diag
 on:
   push:
-    paths: ["tools/voice_diag/**", "tools/voice_lab3/normalize_pt.py", ".github/workflows/voice-diag.yml"]
+    paths: ["tools/voice_diag/**", ".github/workflows/voice-diag.yml"]
 permissions:
   contents: write
 jobs:
-  tune:
+  ab:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        voice: [cadu, faber, amy, lessac, ryan]
+        voice: [cadu, faber, lessac, ryan]
+        engine: ["sherpa-onnx==1.10.46", "sherpa-onnx", "piper"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with: { python-version: "3.11" }
-      - run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg >/dev/null
-      - run: pip install -q "sherpa-onnx==1.10.46" numpy soundfile faster-whisper num2words
+      - run: |
+          pip install -q numpy soundfile faster-whisper num2words huggingface_hub onnxruntime onnx
+          case "${{ matrix.engine }}" in piper) pip install -q piper-tts ;; *) pip install -q "${{ matrix.engine }}" ;; esac
       - env: { GH_TOKEN: "${{ github.token }}" }
-        run: cd tools/voice_diag && mkdir -p pk && gh release download voices-v2 -R "$GITHUB_REPOSITORY" -p "piper-${{ matrix.voice }}-int8.zip" -D pk && python tune.py ${{ matrix.voice }}
+        run: |
+          cd tools/voice_diag && mkdir -p pk && gh release download voices-v2 -R "$GITHUB_REPOSITORY" -p "piper-${{ matrix.voice }}-int8.zip" -D pk
+          E=sherpa; [ "${{ matrix.engine }}" = piper ] && E=piper
+          python ab.py ${{ matrix.voice }} $E
       - uses: actions/upload-artifact@v4
         if: always()
-        with: { name: "tune-${{ matrix.voice }}", path: tools/voice_diag/out/ }
+        with: { name: "ab-${{ matrix.voice }}-${{ strategy.job-index }}", path: tools/voice_diag/out/ }
   publish:
-    needs: tune
+    needs: ab
     if: always()
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
-        with: { path: out, pattern: "tune-*", merge-multiple: true }
+        with: { path: out, pattern: "ab-*", merge-multiple: true }
       - env: { GH_TOKEN: "${{ github.token }}" }
         run: |
           gh release delete voice-diag -R "$GITHUB_REPOSITORY" -y --cleanup-tag || true
-          gh release create voice-diag -R "$GITHUB_REPOSITORY" --prerelease --title "Ajuste por Whisper" --notes "tune" --target "$GITHUB_SHA" out/*
+          gh release create voice-diag -R "$GITHUB_REPOSITORY" --prerelease --title "A/B de motor" --notes "ab" --target "$GITHUB_SHA" out/*
