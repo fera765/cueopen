@@ -118,4 +118,34 @@ class WfLogicTest {
         val r = WfLogic.render("Novos: {{g1}}", out, emptyMap(), "", humanize = WfFormat::oneLine)
         assertEquals("Novos: 2 itens · A", r)
     }
+
+    @Test fun personAndDateAreHumanized() {
+        assertEquals("Humans at Magica", WfFormat.person(kotlinx.serialization.json.JsonPrimitive("\"Humans at Magica\" <humans@mail.galaxy.ai>")))
+        assertEquals("ana@x.com", WfFormat.person(kotlinx.serialization.json.JsonPrimitive("<ana@x.com>")))
+        val d = WfFormat.date("2020-03-04T10:20:00.000Z")!!
+        assertTrue(d.contains("/2020") || d.contains("04/03"))
+        assertFalse(WfFormat.date("Sat, 21 Nov 2026 00:24:07 +0000")!!.contains("+0000"))
+    }
+
+    @Test fun viewBuildsEmailCards() {
+        val raw = """{"status":"ok","connector":"Gmail","data":{"results":{"messages":[
+            {"id":"1","subject":"Oi","from":"\"Ana\" <ana@x.com>","date":"2020-03-04T10:20:00Z","snippet":"Tudo bem?","attachments":[{"fileName":"a.pdf","mimeType":"application/pdf"},{"fileName":"i.png","mimeType":"image/png","data":"http://127.0.0.1:1/i.png"}]}]}}}"""
+        val v = WfView.build("Novos e-mails", "Toque", null, raw, "hoje")
+        assertTrue(WfView.isView(v))
+        val blocks = WfView.blocksOf(v)
+        assertEquals("header", blocks[0]["type"].toString().trim('"'))
+        val card = (blocks[1]["items"] as kotlinx.serialization.json.JsonArray)[0] as kotlinx.serialization.json.JsonObject
+        assertEquals("\"Oi\"", card["title"].toString()); assertEquals("\"Ana\"", card["subtitle"].toString())
+        assertEquals("\"http://127.0.0.1:1/i.png\"", card["image"].toString())
+        assertTrue(card["chips"].toString().contains("a.pdf"))
+        assertTrue(blocks[0]["subtitle"].toString().contains("1 e-mail"))
+    }
+
+    @Test fun templateExpandsAutoBlocks() {
+        val tpl = """{"blocks":[{"type":"header","title":"Resumo {{x}}"},{"type":"auto","data":"{{g1}}"}]}"""
+        val v = WfView.fromTemplate(tpl, { it.replace("{{x}}", "hoje") }, { """{"data":{"items":[{"title":"A"},{"title":"B"}]}}""" })
+        val b = WfView.blocksOf(v)
+        assertEquals("\"Resumo hoje\"", b[0]["title"].toString())
+        assertEquals("\"list\"", b[1]["type"].toString())
+    }
 }

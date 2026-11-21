@@ -39,6 +39,89 @@ object WfFormat {
         return null
     }
 
+    /** "\"Ana Souza\" <ana@x.com>" → "Ana Souza"; objetos {name,address}/{value:[…]}/{text} também. */
+    internal fun person(v: JsonElement?): String? {
+        fun fromText(t: String): String? {
+            val s0 = t.trim()
+            val m = Regex("^\\s*\"?([^\"<]*?)\"?\\s*<([^>]+)>").find(s0)
+            val out = if (m != null) m.groupValues[1].trim().ifBlank { m.groupValues[2].trim() } else s0.trim('"', ' ')
+            return out.takeIf { it.isNotBlank() }
+        }
+        return when (v) {
+            null, JsonNull -> null
+            is JsonPrimitive -> v.contentOrNull?.let { fromText(it) }
+            is JsonArray -> v.mapNotNull { person(it) }.takeIf { it.isNotEmpty() }?.joinToString(", ")
+            is JsonObject -> (v["value"] as? JsonArray)?.let { person(it) }
+                ?: v["name"]?.str()?.let { fromText(it) } ?: v["address"]?.str() ?: v["email"]?.str() ?: v["text"]?.str()?.let { fromText(it) }
+        }
+    }
+
+    private val ptBR = java.util.Locale("pt", "BR")
+
+    /** ISO, RFC 2822 (e-mail) ou epoch → "hoje 21:24" / "ontem 08:10" / "21/11 00:24" / "21/11/2025". */
+    internal fun date(raw: String?): String? {
+        val t = raw?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+        val zone = java.time.ZoneId.systemDefault()
+        val inst: java.time.Instant? = runCatching { java.time.Instant.parse(t) }.getOrNull()
+            ?: runCatching { java.time.OffsetDateTime.parse(t).toInstant() }.getOrNull()
+            ?: runCatching { java.time.ZonedDateTime.parse(t.replace(Regex("\\s*\\([^)]*\\)$"), ""), java.time.format.DateTimeFormatter.RFC_1123_DATE_TIME).toInstant() }.getOrNull()
+            ?: t.toLongOrNull()?.let { n -> if (n > 100_000_000_000L) java.time.Instant.ofEpochMilli(n) else if (n > 1_000_000_000L) java.time.Instant.ofEpochSecond(n) else null }
+            ?: runCatching { java.time.LocalDate.parse(t.take(10)).atStartOfDay(zone).toInstant() }.getOrNull()
+        inst ?: return t.take(40)
+        val d = inst.atZone(zone)
+        val today = java.time.LocalDate.now(zone)
+        val hm = java.time.format.DateTimeFormatter.ofPattern("HH:mm", ptBR).format(d)
+        return when (d.toLocalDate()) {
+            today -> "hoje $hm"
+            today.minusDays(1) -> "ontem $hm"
+            else -> if (d.year == today.year) java.time.format.DateTimeFormatter.ofPattern("dd/MM HH:mm", ptBR).format(d)
+                else java.time.format.DateTimeFormatter.ofPattern("dd/MM/yyyy", ptBR).format(d)
+        }
+    }
+
+    internal fun JsonObject.raw(keys: List<String>): JsonElement? {
+        for (k in keys) entries.firstOrNull { it.key.equals(k, true) }?.value?.takeIf { it !is JsonNull }?.let { return it }
+        (this["headers"] as? JsonObject)?.let { h -> for (k in keys) h.entries.firstOrNull { it.key.equals(k, true) }?.value?.takeIf { it !is JsonNull }?.let { return it } }
+        return null
+    }
+
+    private fun isHttp(s: String?) = s != null && Regex("^https?://", RegexOption.IGNORE_CASE).containsMatchIn(s)
+    private val IMG_KEYS = listOf("image", "imageUrl", "image_url", "urlToImage", "thumbnail", "thumbnailUrl", "thumb", "picture", "photo", "cover", "avatar", "icon", "logo", "media")
+    private val URL_KEYS = listOf("url", "link", "href", "webLink", "web_link", "permalink", "htmlUrl", "html_url", "webViewLink")
+
+    /** Primeira imagem do item: campos de imagem ou anexos image/*. */
+    internal fun imageOf(o: JsonObject): String? {
+        o.raw(IMG_KEYS)?.let { v ->
+            (v.str() ?: (v as? JsonObject)?.let { it["url"]?.str() ?: it["src"]?.str() } ?: (v as? JsonArray)?.firstOrNull()?.let { it.str() ?: (it as? JsonObject)?.get("url")?.str() })
+                ?.takeIf { isHttp(it) }?.let { return it }
+        }
+        (o["attachments"] as? JsonArray)?.filterIsInstance<JsonObject>()?.firstOrNull { (it["mimeType"]?.str() ?: it["contentType"]?.str()).orEmpty().startsWith("image/") }
+            ?.let { a -> (a["data"]?.str() ?: a["url"]?.str())?.takeIf { isHttp(it) }?.let { return it } }
+        return null
+    }
+
+    internal fun urlOf(o: JsonObject): String? = o.raw(URL_KEYS)?.str()?.takeIf { isHttp(it) }
+
+    /** Nomes dos anexos que não são imagem. */
+    internal fun attachmentsOf(o: JsonObject): List<String> = (o["attachments"] as? JsonArray)?.filterIsInstance<JsonObject>()
+        ?.filterNot { (it["mimeType"]?.str() ?: it["contentType"]?.str()).orEmpty().startsWith("image/") }
+        ?.mapNotNull { it["fileName"]?.str() ?: it["filename"]?.str() ?: it["name"]?.str() }.orEmpty()
+
+    /** Texto vindo de fora não pode quebrar o Markdown (ex.: "** Delivery incomplete **"). */
+    internal fun esc(s: String) = s.replace(Regex("([*`\\[\\]])"), "\\\\$1")
+
+    internal fun titleOf(o: JsonObject) = o.field(TITLE_KEYS.filter { it != "text" }) ?: o.field(listOf("text"))
+    internal fun fromOf(o: JsonObject) = person(o.raw(FROM_KEYS))
+    internal fun dateOf(o: JsonObject) = date(o.field(DATE_KEYS))
+    internal fun bodyOf(o: JsonObject, max: Int) = o.field(BODY_KEYS)?.let { clean(it, max) }
+    internal fun isMail(o: JsonObject) = o.raw(FROM_KEYS) != null && o.field(listOf("subject", "assunto")) != null
+    internal fun unwrapData(e: JsonElement) = unwrap(e)
+    internal fun listIn(e: JsonElement) = findList(e)
+    internal fun parseJson(raw: String) = parse(raw)
+    internal fun cleanText(s: String, max: Int) = clean(s, max)
+    internal fun keyLabel(k: String) = humanKey(k)
+    internal fun isTech(k: String) = k.lowercase() in TECH
+
     /** Tira o envelope do nó (conector/HTTP/notificação) e devolve o que interessa. */
     private fun unwrap(e: JsonElement): JsonElement {
         val o = e as? JsonObject ?: return e
@@ -70,25 +153,25 @@ object WfFormat {
         .replaceFirstChar { it.uppercase() }
 
     private fun item(o: JsonObject, n: Int, withBody: Boolean): String {
-        val title = o.field(TITLE_KEYS.filter { it != "text" }) ?: o.field(listOf("text"))?.let { clean(it, 80) }
-        val from = o.field(FROM_KEYS)
-        val date = o.field(DATE_KEYS)
-        val body = if (withBody) o.field(BODY_KEYS)?.takeIf { it != title }?.let { clean(it, 220) } else null
+        val title = titleOf(o)?.let { clean(it, 120) }
+        val from = fromOf(o)
+        val date = dateOf(o)
+        val body = if (withBody) bodyOf(o, 220)?.takeIf { it != title } else null
         if (title == null && from == null) {
-            val pairs = o.entries.filter { it.key.lowercase() !in TECH }.mapNotNull { (k, v) -> v.str()?.let { "${humanKey(k)}: ${clean(it, 80)}" } }.take(4)
+            val pairs = o.entries.filter { it.key.lowercase() !in TECH }.mapNotNull { (k, v) -> v.str()?.let { "${humanKey(k)}: ${esc(clean(it, 80))}" } }.take(4)
             return "$n. " + pairs.joinToString(" · ").ifBlank { "(item)" }
         }
         return buildString {
-            append("$n. **").append(clean(title ?: "(sem assunto)", 120)).append("**")
-            val meta = listOfNotNull(from?.let { clean(it, 80) }, date?.let { clean(it, 40) }).joinToString(" · ")
-            if (meta.isNotBlank()) append("\n   ").append(meta)
-            if (!body.isNullOrBlank()) append("\n   ").append(body.replace("\n", " "))
+            append("$n. **").append(esc(title ?: "(sem assunto)")).append("**")
+            val meta = listOfNotNull(from?.let { esc(clean(it, 80)) }, date).joinToString(" · ")
+            if (meta.isNotBlank()) append("  \n   ").append(meta)
+            if (!body.isNullOrBlank()) append("  \n   ").append(esc(body.replace("\n", " ")))
         }
     }
 
     private fun obj(o: JsonObject, depth: Int): String = o.entries.filter { it.key.lowercase() !in TECH && it.value !is JsonNull }.mapNotNull { (k, v) ->
         when (v) {
-            is JsonPrimitive -> v.str()?.let { "**${humanKey(k)}:** ${clean(it, 400)}" }
+            is JsonPrimitive -> v.str()?.let { "**${humanKey(k)}:** ${esc(clean(it, 400))}" }
             is JsonArray -> if (v.all { it is JsonPrimitive }) v.mapNotNull { it.str() }.takeIf { it.isNotEmpty() }?.let { "**${humanKey(k)}:** ${it.take(15).joinToString(", ")}" }
                 else if (depth < 2) "**${humanKey(k)}:**\n" + v.filterIsInstance<JsonObject>().take(15).mapIndexed { i, it -> item(it, i + 1, false) }.joinToString("\n") else null
             is JsonObject -> if (depth < 2) obj(v, depth + 1).takeIf { it.isNotBlank() }?.let { "**${humanKey(k)}**\n$it" } else null

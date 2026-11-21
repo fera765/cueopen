@@ -70,17 +70,19 @@ fun NotificationOverlay(nav: NavController, pendingEntry: MutableState<Long?>) {
     }
 
     open?.let { e ->
-        AlertDialog(onDismissRequest = { open = null }, containerColor = c.surface,
-            title = {
+        AlertDialog(onDismissRequest = { open = null }, containerColor = c.bg,
+            properties = androidx.compose.ui.window.DialogProperties(usePlatformDefaultWidth = false), modifier = Modifier.padding(horizontal = 14.dp),
+            title = if (e.view.isNotBlank()) null else { {
                 Column {
                     Text(e.title, fontWeight = FontWeight.SemiBold)
                     Text(SimpleDateFormat("dd/MM HH:mm", Locale("pt", "BR")).format(Date(e.at)) + (e.agent.takeIf { it.isNotBlank() }?.let { " · $it" } ?: ""),
                         fontSize = 12.sp, color = c.ink3)
                 }
-            },
+            } },
             text = {
-                Column(Modifier.heightIn(max = 460.dp).verticalScroll(rememberScrollState())) {
-                    SelectionContainer { CueMarkdown(e.detail.ifBlank { e.text }) }
+                Column(Modifier.heightIn(max = 520.dp).verticalScroll(rememberScrollState())) {
+                    if (e.view.isNotBlank()) WfViewContent(e.view, compact = true) { r -> open = null; nav.navigate(r) { launchSingleTop = true } }
+                    else SelectionContainer { CueMarkdown(e.detail.ifBlank { e.text }) }
                 }
             },
             confirmButton = {
@@ -96,7 +98,7 @@ fun NotificationOverlay(nav: NavController, pendingEntry: MutableState<Long?>) {
 private fun openEntry(e: NotificationCenter.Entry, nav: NavController, showModal: (NotificationCenter.Entry) -> Unit) {
     when {
         e.page -> nav.navigate("notif/${e.id}") { launchSingleTop = true }
-        e.detail.isBlank() && e.route != null -> nav.navigate(e.route) { launchSingleTop = true }
+        e.detail.isBlank() && e.view.isBlank() && e.route != null -> nav.navigate(e.route) { launchSingleTop = true }
         else -> showModal(e)
     }
 }
@@ -107,12 +109,13 @@ private fun openEntry(e: NotificationCenter.Entry, nav: NavController, showModal
 fun NotificationPageScreen(nav: NavController, id: Long) {
     val c = Cue.c
     val e = remember(id) { NotificationCenter.entry(id) }
-    Scaffold(containerColor = c.bg, topBar = { CueTopBar(e?.title ?: "Notificação", { nav.popBackStack() }) }) { pad ->
+    Scaffold(containerColor = c.bg, topBar = { CueTopBar(if (e?.view?.isNotBlank() == true) (e.agent.removePrefix("Fluxo · ").ifBlank { "Notificação" }) else e?.title ?: "Notificação", { nav.popBackStack() }) }) { pad ->
         if (e == null) Box(Modifier.padding(pad).fillMaxSize(), contentAlignment = Alignment.Center) { Text("Notificação não encontrada.", color = c.ink3) }
         else Column(Modifier.padding(pad).fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Text(SimpleDateFormat("dd/MM/yyyy HH:mm", Locale("pt", "BR")).format(Date(e.at)) + (e.agent.takeIf { it.isNotBlank() }?.let { " · $it" } ?: ""),
                 fontSize = 12.sp, color = c.ink3)
-            Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(18.dp)).background(c.surface).border(1.dp, c.line, RoundedCornerShape(18.dp)).padding(16.dp)) {
+            if (e.view.isNotBlank()) WfViewContent(e.view) { r -> nav.navigate(r) { launchSingleTop = true } }
+            else Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(18.dp)).background(c.surface).border(1.dp, c.line, RoundedCornerShape(18.dp)).padding(16.dp)) {
                 SelectionContainer { CueMarkdown(e.detail.ifBlank { e.text }) }
             }
             e.route?.let { r -> OutlinedButton({ nav.navigate(r) { launchSingleTop = true } }) { Text(e.routeLabel.ifBlank { "Abrir" }) } }

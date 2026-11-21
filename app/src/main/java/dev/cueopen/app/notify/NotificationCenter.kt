@@ -38,7 +38,9 @@ object NotificationCenter {
                      val route: String? = null,
                      val routeLabel: String = "",
                      /** Tocar abre uma página inteira (em vez do quadro) com o conteúdo formatado. */
-                     val page: Boolean = false)
+                     val page: Boolean = false,
+                     /** UI kit (WfView: {"blocks":[…]}) renderizado no quadro/página; vazio = Markdown de [detail]. */
+                     val view: String = "")
 
     const val EXTRA_ENTRY = "notif_entry"
     private val _live = kotlinx.coroutines.flow.MutableSharedFlow<Entry>(extraBufferCapacity = 8)
@@ -109,7 +111,7 @@ object NotificationCenter {
     @Synchronized
     fun post(title: String, text: String, priority: Priority, category: Category, sessionId: String? = null, agent: String = "",
              dedupeKey: String = "$category|$sessionId|${text.take(80)}", needsAction: Boolean = priority >= Priority.HIGH,
-             detail: String = "", route: String? = null, routeLabel: String = "", page: Boolean = false) {
+             detail: String = "", route: String? = null, routeLabel: String = "", page: Boolean = false, view: String = "") {
         if (!::app.isInitialized) return
         val now = System.currentTimeMillis()
         val (record, show) = decide(priority, foreground, lastByKey[dedupeKey], sessionId?.let { lastBySession[it] }, now)
@@ -118,9 +120,11 @@ object NotificationCenter {
         if (lastByKey.size > 500) lastByKey.entries.removeIf { now - it.value > DEDUPE_MS }
         val id = if (_history.value.any { it.id == now }) now + 1 else now
         val entry = Entry(id, now, title.take(120), plain(text).take(600), priority.name, category.name, sessionId, agent, needsAction,
-            detail = detail.take(8_000), route = route, routeLabel = routeLabel, page = page && detail.isNotBlank())
-        _history.value = (listOf(entry) + _history.value).take(MAX_HISTORY).also { save(it) }
-        val rich = detail.isNotBlank() || route != null
+            detail = detail.take(8_000), route = route, routeLabel = routeLabel, page = page && (detail.isNotBlank() || view.isNotBlank()),
+            view = view.takeIf { it.length <= 120_000 }.orEmpty())
+        // Views são grandes: só as 40 mais recentes guardam o UI kit (as antigas ficam com o texto).
+        _history.value = (listOf(entry) + _history.value).take(MAX_HISTORY).mapIndexed { i, e -> if (i >= 40 && e.view.isNotEmpty()) e.copy(view = "") else e }.also { save(it) }
+        val rich = detail.isNotBlank() || view.isNotBlank() || route != null
         if (rich) _live.tryEmit(entry)
         // Com quadro/rota: sempre vai para o sistema (o aviso dentro do app não fica no histórico do Android).
         if (!show && !(rich && priority != Priority.SILENT)) return

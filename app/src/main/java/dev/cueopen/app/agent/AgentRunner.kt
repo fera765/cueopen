@@ -3705,6 +3705,10 @@ class AgentRunner(
             "NOTIFICAÇÕES: o usuário nunca vê JSON nem dados brutos. text = frase curta com o essencial (ex.: assunto do e-mail); detail = o conteúdo completo que aparece no quadro/página ao tocar. " +
             "Deixe detail vazio para mostrar o texto + os dados do nó anterior já formatados, ou use {{id}}/{{id.data…}} (dados viram texto claro automaticamente); para um formato próprio, passe por um nó ai antes. " +
             "NUNCA escreva \"abra o fluxo para ver\": a informação tem de estar no próprio quadro/página. " +
+            "UI KIT do quadro/página (layout=auto, padrão): com detail vazio ou detail={{id}} o app monta sozinho cartões a partir dos dados (e-mails viram cartões com avatar, remetente, assunto, data, prévia e anexos; notícias com imagem e link; objetos viram campos; listas planas viram tabela) — é o recomendado. " +
+            "Para um visual próprio, detail pode ser um modelo {\"blocks\":[…]} com blocos: header{title,subtitle,image}, text{text Markdown}, card{title,subtitle,meta,body,image,avatar,badge,url,chips[]}, list{title,items:[card]}, image{url,caption}, gallery{images[]}, kv{items:[{label,value}]}, " +
+            "stats{items:[{label,value,delta}]}, table{columns[],rows[[]]}, chips{items[]}, quote{text,author}, alert{tone info|ok|warn|err,title,text}, button{label,url}, section{title,blocks[]}, progress{label,value}, divider; " +
+            "{\"type\":\"auto\",\"data\":\"{{id}}\"} insere os cartões gerados dos dados. Um nó ai também pode devolver esse JSON e a notificação usa detail={{a1}}. layout=markdown = texto simples. " +
             "Dados entre nós: {{prev}} (saída anterior), {{<id>}}, {{<id>.campo.sub}} (JSON), {{trigger.time}}. Ex.: site → resumo → e-mail: trigger_schedule(interval 30) → http GET → ai prompt \"Resuma: {{h1.text}}\" → connector gmail send_email campos {\"receiver\":[\"x@y.com\"],\"subject\":\"Resumo\",\"body_text\":\"{{a1}}\"}. Ex.: e-mail novo → aviso: trigger_schedule(interval 30) → connector g1 gmail gmail_search_email campos {\"max_results\":1} → if_new key {{g1.data.results.messages.0.id}} → (port true) notify title \"Novo e-mail\", text {{g1.data.results.messages.0.subject}}, detail com remetente, assunto e corpo. Depois do test use os \"caminhos\" do relatório para acertar os {{id.campo}}; campo vazio = corrija e teste de novo.", buildJsonObject {
             put("action", str("list | get | create | update | validate | test | status | publish | run | disable | delete"))
             put("id", str("Id ou nome do fluxo"))
@@ -5909,11 +5913,19 @@ class AgentRunner(
                 val edgesJ = j.optJSONArray("edges") ?: org.json.JSONArray()
                 val edges = (0 until edgesJ.length()).map { i -> edgesJ.getJSONObject(i).let { e ->
                     dev.cueopen.app.workflow.WfEdge(from = e.optString("from"), to = e.optString("to"), port = e.optString("port").ifBlank { "main" }) } }
-                val finalNodes = if (nodes.isEmpty() && base != null) base.nodes else nodes
+                var finalNodes = if (nodes.isEmpty() && base != null) base.nodes else nodes
+                var autoEdges = emptyList<dev.cueopen.app.workflow.WfEdge>()
+                // Sem gatilho: entra um gatilho manual ligado aos nós que não recebem ligação (o usuário pode trocar por agendamento).
+                if (finalNodes.isNotEmpty() && finalNodes.none { dev.cueopen.app.workflow.WfCatalog.of(it.type).trigger }) {
+                    val t = dev.cueopen.app.workflow.WfNode(id = "t0", type = "trigger_manual", label = "Início")
+                    val targets = (if (edges.isEmpty() && base != null) base.edges else edges).map { it.to }.toSet()
+                    autoEdges = finalNodes.filter { it.id !in targets }.map { dev.cueopen.app.workflow.WfEdge(from = t.id, to = it.id) }
+                    finalNodes = listOf(t) + finalNodes
+                }
                 val ids = finalNodes.map { it.id }.toSet()
                 edges.firstOrNull { it.from !in ids || it.to !in ids }?.let { return@runCatching "ERRO: ligação ${it.from} → ${it.to} aponta para nó inexistente. Ids: ${ids.joinToString()}." }
                 var w = (base ?: dev.cueopen.app.workflow.Workflow()).copy(name = j.optString("name").ifBlank { base?.name ?: "Novo fluxo" },
-                    nodes = finalNodes, edges = if (edges.isEmpty() && base != null) base.edges else edges, enabled = false)
+                    nodes = finalNodes, edges = (if (edges.isEmpty() && base != null) base.edges else edges) + autoEdges, enabled = false)
                 w = logic.layout(w)
                 if (base != null && base.enabled) dev.cueopen.app.workflow.WorkflowScheduler.cancel(ctx, base.id)
                 if (base != null) stopActive(base)  // a versão antiga não continua rodando depois da edição
