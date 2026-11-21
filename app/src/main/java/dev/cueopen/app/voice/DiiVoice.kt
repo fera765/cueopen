@@ -14,6 +14,7 @@ import kotlinx.coroutines.channels.trySendBlocking
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import java.io.File
+import java.util.zip.ZipInputStream
 
 /**
  * Voz Dii (OpenVoiceOS, Piper/VITS) rodando no aparelho com sherpa-onnx — sem internet depois de baixar.
@@ -24,17 +25,11 @@ import java.io.File
  * direto num AudioTrack em streaming (sem arquivo no meio).
  */
 object DiiVoice {
-    /** FAST: Dii original baixada do Hugging Face (público). LITE: versão int8 que já vem dentro do APK. */
     enum class Variant(val pkg: String, val label: String, val sizeMb: Int) {
-        FAST("vits-piper-pt_PT-dii-fp32", "Dii rápida (64 MB)", 64),
-        LITE("vits-piper-pt_PT-dii-int8", "Dii leve (embutida)", 19),
+        FAST("vits-piper-pt_PT-dii-fp32", "Dii rápida (67 MB)", 67),
+        LITE("vits-piper-pt_PT-dii-int8", "Dii leve (22 MB)", 22),
     }
-    private const val HF_REPO = "OpenVoiceOS/pipertts_pt-PT_dii"
-    private const val LITE_ASSET = "voice/dii-int8.onnx"
-    /** Metadados que o motor (sherpa-onnx) exige no modelo Piper. */
-    private val META = linkedMapOf("model_type" to "vits", "comment" to "piper", "language" to "Portuguese", "voice" to "pt",
-        "version" to "1", "has_espeak" to "1", "has_g2pw" to "0", "n_speakers" to "1", "sample_rate" to "22050")
-    fun liteBundled(ctx: Context) = runCatching { ctx.assets.open(LITE_ASSET).close(); true }.getOrDefault(false)
+    private const val BASE = "https://github.com/fera765/cueopen/releases/download/voice-dii-v1/"
 
     sealed class State {
         data object NotInstalled : State()
@@ -72,79 +67,42 @@ object DiiVoice {
         scope.launch { runCatching { engine(ctx) } }
     }
 
-    /** Instala a variante: LITE copia do APK; FAST baixa do Hugging Face e completa o modelo no celular. */
+    /** Baixa e instala a variante (zip da release voice-dii-v1). */
     fun install(ctx: Context, v: Variant) {
         if (_state.value is State.Downloading) return
         scope.launch(Dispatchers.IO) {
             val app = ctx.applicationContext
             _state.value = State.Downloading(0f)
-            val d = dir(app, v); val tmp = File(d, "model.onnx.part")
+            val tmp = File(app.cacheDir, "${v.pkg}.zip")
             try {
-                d.deleteRecursively(); d.mkdirs()
-                copyAssetDir(app, "voice/espeak-ng-data", File(d, "espeak-ng-data"))
-                app.assets.open("voice/tokens.txt").use { i -> File(d, "tokens.txt").outputStream().use { i.copyTo(it) } }
-                if (v == Variant.LITE) {
-                    if (!liteBundled(app)) error("esta versão do app não trouxe a voz leve; use a rápida")
-                    app.assets.open(LITE_ASSET).use { i -> tmp.outputStream().use { i.copyTo(it) } }
-                } else {
-                    val name = runCatching {
-                        val js = org.json.JSONObject(httpGet("https://huggingface.co/api/models/$HF_REPO").readBytes().decodeToString())
-                        val sib = js.getJSONArray("siblings")
-                        (0 until sib.length()).map { sib.getJSONObject(it).getString("rfilename") }.first { it.endsWith(".onnx") }
-                    }.getOrDefault("dii_pt-PT.onnx")
-                    val c = open("https://huggingface.co/$HF_REPO/resolve/main/$name")
-                    val total = c.contentLengthLong.takeIf { it > 0 } ?: (v.sizeMb * 1_000_000L)
-                    c.inputStream.use { inp -> tmp.outputStream().use { out ->
-                        val buf = ByteArray(64 * 1024); var n: Int; var got = 0L
-                        while (inp.read(buf).also { n = it } >= 0) { out.write(buf, 0, n); got += n; _state.value = State.Downloading((got.toFloat() / total).coerceIn(0f, 0.99f)) }
-                    } }
-                    if (tmp.length() < 10_000_000) error("download incompleto")
-                    // O modelo original não traz os metadados do motor: anexa no fim do arquivo (campo 14 do protobuf ONNX).
-                    java.io.FileOutputStream(tmp, true).use { it.write(onnxMeta(META)) }
+                val c = (java.net.URL(BASE + v.pkg + ".zip").openConnection() as java.net.HttpURLConnection).apply {
+                    connectTimeout = 15_000; readTimeout = 60_000; instanceFollowRedirects = true
                 }
-                if (!tmp.renameTo(File(d, "model.onnx"))) error("não consegui salvar o modelo")
+                val total = c.contentLengthLong.takeIf { it > 0 } ?: (v.sizeMb * 1_000_000L)
+                c.inputStream.use { inp -> tmp.outputStream().use { out ->
+                    val buf = ByteArray(64 * 1024); var n: Int; var got = 0L
+                    while (inp.read(buf).also { n = it } >= 0) { out.write(buf, 0, n); got += n; _state.value = State.Downloading((got.toFloat() / total).coerceIn(0f, 1f)) }
+                } }
+                val root = File(app.filesDir, "voices").apply { mkdirs() }
+                File(root, v.pkg).deleteRecursively()
+                ZipInputStream(tmp.inputStream().buffered()).use { z ->
+                    var e = z.nextEntry
+                    while (e != null) {
+                        val f = File(root, e.name)
+                        if (!f.canonicalPath.startsWith(root.canonicalPath)) throw SecurityException("zip inválido")
+                        if (e.isDirectory) f.mkdirs() else { f.parentFile?.mkdirs(); f.outputStream().use { z.copyTo(it) } }
+                        e = z.nextEntry
+                    }
+                }
+                tmp.delete()
                 prefs(app).edit().putString("variant", v.name).putBoolean("enabled", true).apply()
                 release()
-                engine(app) ?: error("o motor de voz não carregou")
+                engine(app)
             } catch (t: Throwable) {
-                d.deleteRecursively()
-                _state.value = State.Failed("Não consegui instalar a voz: ${t.message ?: t.javaClass.simpleName}")
+                tmp.delete()
+                _state.value = State.Failed("Não consegui baixar a voz: ${t.message ?: t.javaClass.simpleName}")
             }
         }
-    }
-
-    private fun open(url: String): java.net.HttpURLConnection {
-        var u = url
-        repeat(6) {
-            val c = (java.net.URL(u).openConnection() as java.net.HttpURLConnection).apply {
-                connectTimeout = 15_000; readTimeout = 60_000; instanceFollowRedirects = false
-                setRequestProperty("User-Agent", "FluwyBot")
-            }
-            val code = c.responseCode
-            if (code in 300..399) { u = java.net.URL(java.net.URL(u), c.getHeaderField("Location")).toString(); c.disconnect(); return@repeat }
-            if (code != 200) { c.disconnect(); error("servidor respondeu $code") }
-            return c
-        }
-        error("redirecionamentos demais")
-    }
-    private fun httpGet(url: String) = open(url).inputStream
-
-    private fun copyAssetDir(ctx: Context, path: String, to: File) {
-        val kids = ctx.assets.list(path).orEmpty()
-        if (kids.isEmpty()) { to.parentFile?.mkdirs(); ctx.assets.open(path).use { i -> to.outputStream().use { i.copyTo(it) } }; return }
-        to.mkdirs(); kids.forEach { copyAssetDir(ctx, "$path/$it", File(to, it)) }
-    }
-
-    /** Codifica entradas metadata_props (ModelProto campo 14) em protobuf. */
-    internal fun onnxMeta(meta: Map<String, String>): ByteArray {
-        val out = java.io.ByteArrayOutputStream()
-        fun varint(o: java.io.ByteArrayOutputStream, x: Int) { var v = x; while (v >= 0x80) { o.write((v and 0x7f) or 0x80); v = v ushr 7 }; o.write(v) }
-        fun field(o: java.io.ByteArrayOutputStream, tag: Int, b: ByteArray) { varint(o, tag); varint(o, b.size); o.write(b) }
-        meta.forEach { (k, v) ->
-            val e = java.io.ByteArrayOutputStream(); field(e, 0x0a, k.toByteArray()); field(e, 0x12, v.toByteArray())
-            field(out, 0x72, e.toByteArray())
-        }
-        return out.toByteArray()
     }
 
     fun uninstall(ctx: Context, v: Variant) { release(); dir(ctx, v).deleteRecursively(); _state.value = if (installedVariant(ctx) != null) State.Ready else State.NotInstalled }
@@ -241,9 +199,10 @@ object DiiVoice {
                 for (piece in q) {
                     if (!isActive) break
                     val txt = piece.trim(); if (txt.isEmpty()) continue
-                    synchronized(engineLock) {
-                        t.generateWithCallback(txt, 0, speed) { samples -> if (isActive) { audio.trySendBlocking(samples.copyOf()); 1 } else 0 }
-                    }
+                    // generate() por pedaço: o generateWithCallback derrubava o app (o JNI procura um invoke que lambdas do Kotlin 2 não têm).
+                    val samples = synchronized(engineLock) { runCatching { t.generate(txt, 0, speed).samples }.getOrNull() } ?: continue
+                    if (!isActive) break
+                    audio.send(samples)
                 }
                 audio.close()
             }

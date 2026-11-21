@@ -10,4 +10,3 @@ app/src/main/assets/md/*.js
 app/src/main/assets/md/*.css
 app/src/main/assets/minihub/catalog.json
 app/libs/sherpa-onnx-*.aar
-app/src/main/assets/voice/dii-int8.onnx
