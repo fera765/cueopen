@@ -84,6 +84,7 @@ private fun statusColor(status: String?, c: dev.cueopen.app.ui.theme.CueColors):
     "error" -> c.err
     "waiting" -> c.warn
     "paused" -> c.warn
+    "queued" -> c.ink3
     else -> null
 }
 
@@ -234,6 +235,7 @@ fun WorkflowsScreen(nav: NavController) {
                                 cur?.let { Icon(nodeIcon(it.type), null, Modifier.size(14.dp), tint = accent); Spacer(Modifier.width(6.dp)) }
                                 Text(when (active.status) {
                                     "paused" -> "Pausado"
+    "queued" -> "Na fila (outros fluxos rodando)"
                                     "waiting" -> "Aguardando aprovação"
                                     else -> "Executando"
                                 } + (cur?.let { " · ${it.label}" } ?: "") + " · $done de ${w.nodes.size}", fontSize = 12.sp, color = accent, maxLines = 1, overflow = TextOverflow.Ellipsis,
@@ -1134,7 +1136,7 @@ private fun RunsPanel(w: Workflow, runs: List<WfRun>, nav: NavController, onClos
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Box(Modifier.size(10.dp).clip(CircleShape).background(col))
                         Spacer(Modifier.width(8.dp))
-                        Text(when (r.status) { "ok" -> "Concluída"; "error" -> "Falhou"; "running" -> "Executando"; "waiting" -> "Aguardando aprovação"; "paused" -> "Pausada"; else -> "Parada" },
+                        Text(when (r.status) { "ok" -> "Concluída"; "error" -> "Falhou"; "running" -> "Executando"; "waiting" -> "Aguardando aprovação"; "paused" -> "Pausada"; "queued" -> "Na fila"; else -> "Parada" },
                             fontWeight = FontWeight.SemiBold, color = col, modifier = Modifier.weight(1f))
                         Text("${when (r.trigger) { "schedule" -> "agendada"; "test" -> "teste"; else -> "manual" }} · ${timeFmt.format(Date(r.startedAt))}", fontSize = 11.sp, color = c.ink3)
                     }

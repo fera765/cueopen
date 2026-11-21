@@ -3,6 +3,7 @@ package dev.cueopen.app.workflow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.launch
 import kotlinx.serialization.builtins.ListSerializer
 import kotlinx.serialization.builtins.serializer
 import kotlinx.serialization.json.Json
@@ -26,7 +27,7 @@ object WorkflowStore {
         _flows.value = read(File(d, "workflows.json"), ListSerializer(Workflow.serializer()))
         // Execução que estava rodando quando o app foi encerrado não volta sozinha: fica registrada como interrompida.
         _runs.value = read(File(d, "runs.json"), ListSerializer(WfRun.serializer())).map {
-            if (it.status == "running" || it.status == "waiting" || it.status == "paused") it.copy(status = "cancelled", finishedAt = it.finishedAt ?: System.currentTimeMillis(),
+            if (it.status == "running" || it.status == "waiting" || it.status == "paused" || it.status == "queued") it.copy(status = "cancelled", finishedAt = it.finishedAt ?: System.currentTimeMillis(),
                 error = it.error.ifBlank { "Interrompida: o app foi encerrado durante a execução." }) else it
         }
         seenMap.putAll(runCatching { json.decodeFromString(SEEN_SER, File(d, "seen.json").readText()) }.getOrDefault(emptyMap()))
@@ -51,7 +52,7 @@ object WorkflowStore {
     private fun <T> read(f: File, s: kotlinx.serialization.KSerializer<List<T>>): List<T> =
         runCatching { if (f.isFile) json.decodeFromString(s, f.readText()) else emptyList() }.getOrDefault(emptyList())
 
-    private fun <T> write(name: String, s: kotlinx.serialization.KSerializer<List<T>>, v: List<T>) {
+    @Synchronized private fun <T> write(name: String, s: kotlinx.serialization.KSerializer<List<T>>, v: List<T>) {
         val d = dir ?: return
         runCatching {
             val tmp = File(d, "$name.tmp")
@@ -77,15 +78,33 @@ object WorkflowStore {
         write("runs.json", ListSerializer(WfRun.serializer()), _runs.value)
     }
 
-    @Synchronized fun putRun(r: WfRun) {
-        _runs.update { list -> (if (list.any { it.id == r.id }) list.map { if (it.id == r.id) r else it } else list + r).takeLast(MAX_RUNS) }
-        write("runs.json", ListSerializer(WfRun.serializer()), _runs.value)
+    /** Histórico por fluxo (dezenas de fluxos não apagam o histórico uns dos outros). */
+    private const val RUNS_PER_FLOW = 25
+
+    @Synchronized fun putRun(r0: WfRun) {
+        // Saída de cada passo guardada com teto (o arquivo não cresce sem limite com fluxos que rodam o dia todo).
+        val r = r0.copy(steps = r0.steps.map { if (it.output.length > 12_000) it.copy(output = it.output.take(12_000)) else it })
+        _runs.update { list ->
+            val merged = if (list.any { it.id == r.id }) list.map { if (it.id == r.id) r else it } else list + r
+            val keep = merged.groupBy { it.workflowId }.flatMap { (_, rs) -> rs.sortedByDescending { it.startedAt }.take(RUNS_PER_FLOW) }.map { it.id }.toSet()
+            merged.filter { it.id in keep || it.status == "running" }.takeLast(MAX_RUNS)
+        }
+        scheduleRunsWrite(immediate = r.status != "running")
+    }
+
+    // Grava runs.json no máximo a cada 700 ms enquanto um fluxo roda (antes: o arquivo inteiro a cada passo).
+    private val writeScope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob() + kotlinx.coroutines.Dispatchers.IO)
+    @Volatile private var pendingWrite: kotlinx.coroutines.Job? = null
+    private fun scheduleRunsWrite(immediate: Boolean) {
+        if (immediate) { pendingWrite?.cancel(); pendingWrite = null; write("runs.json", ListSerializer(WfRun.serializer()), _runs.value); return }
+        if (pendingWrite?.isActive == true) return
+        pendingWrite = writeScope.launch { kotlinx.coroutines.delay(700); write("runs.json", ListSerializer(WfRun.serializer()), _runs.value) }
     }
 
     fun runsOf(workflowId: String): List<WfRun> = _runs.value.filter { it.workflowId == workflowId }.sortedByDescending { it.startedAt }
 
     @Synchronized fun clearRuns(workflowId: String) {
-        _runs.update { it.filterNot { r -> r.workflowId == workflowId && r.status != "running" && r.status != "waiting" && r.status != "paused" } }
+        _runs.update { it.filterNot { r -> r.workflowId == workflowId && r.status != "running" && r.status != "waiting" && r.status != "paused" && r.status != "queued" } }
         write("runs.json", ListSerializer(WfRun.serializer()), _runs.value)
     }
 }

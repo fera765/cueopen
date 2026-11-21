@@ -39,7 +39,13 @@ object WorkflowEngine {
 
     private val pauses = ConcurrentHashMap.newKeySet<String>()
 
-    fun isActive(status: String) = status == "running" || status == "waiting" || status == "paused"
+    fun isActive(status: String) = status == "running" || status == "waiting" || status == "paused" || status == "queued"
+
+    /** Quantos fluxos rodam ao mesmo tempo; os demais esperam na fila (com dezenas de fluxos agendados o celular não engasga). */
+    const val MAX_CONCURRENT = 3
+    /** Teto de uma execução inteira: nada fica "rodando" para sempre. */
+    const val MAX_RUN_MS = 60 * 60_000L
+    private val slots = kotlinx.coroutines.sync.Semaphore(MAX_CONCURRENT)
     fun isRunning(workflowId: String) = WorkflowStore.runs.value.any { it.workflowId == workflowId && isActive(it.status) }
     fun activeRun(workflowId: String): WfRun? = WorkflowStore.runs.value.filter { it.workflowId == workflowId && isActive(it.status) }.maxByOrNull { it.startedAt }
 
@@ -60,10 +66,23 @@ object WorkflowEngine {
         val blocking = WfLogic.problems(w).filterNot { it.contains("não está ligado a nada") }
         if (blocking.isNotEmpty()) return Result.failure(IllegalStateException(blocking.joinToString("\n")))
         if (isRunning(workflowId)) return Result.failure(IllegalStateException("Este fluxo já está em execução."))
-        val run = WfRun(workflowId = w.id, workflowName = w.name, trigger = trigger)
+        val busy = WorkflowStore.runs.value.count { it.status == "running" || it.status == "paused" }
+        val run = WfRun(workflowId = w.id, workflowName = w.name, trigger = trigger, status = if (busy >= MAX_CONCURRENT) "queued" else "running")
         WorkflowStore.putRun(run)
         runCatching { dev.cueopen.app.sandbox.SandboxService.start(CueApp.instance, "Fluxo em execução: ${w.name}") }
-        jobs[run.id] = scope.launch { execute(w, run, triggerNodeId) }
+        jobs[run.id] = scope.launch {
+            slots.acquire()
+            try {
+                val cur = WorkflowStore.runs.value.firstOrNull { it.id == run.id } ?: run
+                if (cur.status == "cancelled") return@launch
+                val started = cur.copy(status = "running", startedAt = System.currentTimeMillis())
+                if (cur.status == "queued") WorkflowStore.putRun(started)
+                val finished = kotlinx.coroutines.withTimeoutOrNull(MAX_RUN_MS) { execute(w, started, triggerNodeId); true }
+                if (finished == null) WorkflowStore.runs.value.firstOrNull { it.id == run.id }?.takeIf { isActive(it.status) }?.let {
+                    WorkflowStore.putRun(it.copy(status = "error", finishedAt = System.currentTimeMillis(), error = "A execução passou de ${MAX_RUN_MS / 60_000} min e foi encerrada."))
+                }
+            } finally { slots.release() }
+        }
         return Result.success(run.id)
     }
 
@@ -81,7 +100,7 @@ object WorkflowEngine {
         val end = System.currentTimeMillis() + timeoutMs
         while (System.currentTimeMillis() < end) {
             val r = WorkflowStore.runs.value.firstOrNull { it.id == runId }
-            if (r != null && r.status != "running") return r
+            if (r != null && r.status != "running" && r.status != "queued") return r
             delay(400)
         }
         return null
@@ -406,7 +425,8 @@ class WorkflowWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(c
         if (!w.enabled) return Result.success()
         // Agenda o próximo ANTES de rodar: uma execução longa ou com erro não apaga a agenda.
         WorkflowScheduler.scheduleNext(applicationContext, wfId, node)
-        WorkflowEngine.start(wfId, trigger = "schedule", triggerNodeId = nodeId)
+        // Espera a execução (até ~9 min) para o Android manter o processo vivo; já rodando = este disparo é pulado.
+        WorkflowEngine.start(wfId, trigger = "schedule", triggerNodeId = nodeId).onSuccess { WorkflowEngine.awaitRun(it, 9 * 60_000L) }
         return Result.success()
     }
 }

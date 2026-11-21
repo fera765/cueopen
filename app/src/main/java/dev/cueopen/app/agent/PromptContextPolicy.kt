@@ -85,7 +85,7 @@ internal object PromptContextPolicy {
         appendLine(untrustedBlock("assigned_task", task, 2_000))
         if (target.isNotBlank()) appendLine("Seu alvo na página: $target (é sobre ele que o usuário vê o seu cursor).")
         if (parentRequest.isNotBlank()) appendLine(untrustedBlock("user_request", parentRequest, 1_200))
-        if (teamPlan.isNotBlank()) { appendLine(); appendLine("PLANO DO TIME (o mesmo para todos; siga nomes, ids, âncoras e contrato exatamente — também salvo em .fluwy/TIME.md na pasta do projeto):"); appendLine(teamPlan.take(6_000)) }
+        if (teamPlan.isNotBlank()) { appendLine(); appendLine("PLANO DO TIME (o mesmo para todos; siga nomes, ids, âncoras e contrato exatamente — também salvo em .fluwy/TIME.md na pasta do projeto):"); appendLine(teamPlan.take(6_000)); appendLine("A seção \"## Entregas\" de .fluwy/TIME.md lista o que cada colega já entregou (arquivo e resumo): consulte-a em vez de reabrir arquivos que não são seus.") }
         appendLine()
         appendLine("Regras do time:")
         appendLine("- Faça só a sua parte. Comece já: leia só os arquivos de que precisa (file_list/file_read).")

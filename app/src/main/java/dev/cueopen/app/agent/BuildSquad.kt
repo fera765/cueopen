@@ -108,7 +108,7 @@ object BuildSquad {
         get(id)?.let { return it }
         val f = dir?.let { java.io.File(it, "$id.json") }?.takeIf { it.isFile } ?: return null
         val s = runCatching { fromJson(f.readText()) }.getOrNull() ?: return null
-        val fixed = if (!s.running) s else s.copy(running = false, workers = s.workers.map {
+        val fixed = if (!s.running) s else s.copy(running = false, notice = "Interrompido: o app foi reiniciado. Peça para continuar que o time retoma.", workers = s.workers.map {
             if (it.status == St.RUNNING || it.status == St.QUEUED) it.copy(status = St.FAILED, doing = "interrompido (app reiniciado)") else it })
         _squads.update { it + (id to fixed) }
         return fixed

@@ -1963,6 +1963,8 @@ class AgentRunner(
                     gate
                 } else if (toolArgsGuard(call) != null) {
                     ToolResult(toolArgsGuard(call)!!)
+                } else if (squadModeGuard(sessionId, call) != null) {
+                    ToolResult(squadModeGuard(sessionId, call)!!)
                 } else if (blockedSnapshotReuse) {
                     ToolResult("ERRO: Snapshot ausente ou invalidado; nenhuma ação foi executada com o ID já recusado. Use somente IDs da releitura atual:\n${blockedSnapshotRead.orEmpty()}")
                 } else try {
@@ -3095,7 +3097,7 @@ class AgentRunner(
             }
         }
         val plan = ToolContextPlanner.plan(ToolContextPlanner.Input(
-            sessionId = sessionId, query = contextQuery(s), usedTools = used, builder = s.connectorBuilder || s.connectorEditId != null,
+            sessionId = sessionId, query = contextQuery(s), usedTools = if (s.squadProject != null && s.squadParentId == null) used + "build_team" else used, builder = s.connectorBuilder || s.connectorEditId != null,
             allowedGroups = availableGroups,
             connectors = conns, mcpServers = mcp, mcpKeywords = mcpKeywords,
             historyTokens = ctxMgr.estimateTokens(s.llm) + ctxMgr.estimateTokens(s.summary),
@@ -3347,6 +3349,12 @@ class AgentRunner(
                     appendLine("  Se uma capacidade (terminal, arquivos ou browser) não estiver autorizada, peça ao usuário que a ative em Conectores → (conector) → Permissões.")
                     appendLine("- Respostas que começam com RECUSADO são limites de segurança definidos pelo usuário. Respeite-os, explique o limite ao usuário e não procure outro caminho para o mesmo efeito (como trocar de conta ou de valor). Operar envolve risco de perda, e nenhum lucro é garantido.")
                 }
+            }
+            session.squadProject?.takeIf { session.squadParentId == null }?.let { proj ->
+                appendLine(); appendLine("## Modo exército ativo neste chat")
+                appendLine("- Este projeto ($proj) é construído pelo exército de agentes. TODA alteração no código — nova seção, correção, ajuste de estilo, até uma linha — é feita com build_team (preview=\"$proj\"), com tarefas pequenas e específicas (1 a 3 agentes para ajustes; mais para features grandes).")
+                appendLine("- Você é o orquestrador: lê arquivos para planejar (file_read/file_search), mas NÃO grava arquivos do projeto nem roda comandos que os alterem; o app recusa. Leia .fluwy/TIME.md para saber o que o time já fez.")
+                appendLine("- Só saia deste modo se o usuário pedir explicitamente para trabalhar sem o time.")
             }
             run {
                 val cats = if (agent?.confirmMode == "auto") emptyList()
@@ -3679,8 +3687,11 @@ class AgentRunner(
             "Fluxo obrigatório no front-end: em preview passe a PASTA do projeto (pode estar vazia). O app ANTES cria o projeto React + Vite em branco se não houver um, instala as dependências, sobe o servidor de desenvolvimento e confere que o app abriu e desenhou no browser; só então o time entra. Se o app não ficar de pé, nenhum agente começa e você recebe o log para corrigir. " +
             "API Node (Express, Fastify…): crie package.json com a dependência e um server.js que escuta process.env.PORT, e passe a pasta em preview: o app instala, sobe e confere que responde antes do time entrar. " +
             "Cada edição do time aparece na hora (HMR), com o elemento sendo construído e o cursor do agente sobre ele. Se o preview quebrar, o app corrige sozinho: instala pacote que faltou ou chama o agente Doc para consertar. " +
-            "Divida em 8 a 40 tarefas pequenas, uma por agente, cada uma num elemento ou arquivo diferente; use depends_on só quando uma parte precisa da outra. " +
+            "Projeto novo: divida em 8 a 40 tarefas pequenas, uma por agente, cada uma num elemento ou arquivo diferente; use depends_on só quando uma parte precisa da outra. " +
             "NÃO crie tarefa de revisão geral (\"QA/revisar o app inteiro\"): o app já confere compilação, imports, export default e âncoras no fim e chama o agente Doc para cada falha; revisão, se precisar, é por seção e objetiva. " +
+            "EDIÇÕES DEPOIS: projeto já feito pelo time = toda mudança seguinte também vai pelo time (o app recusa edição direta do orquestrador). Para ajustes, 1 a 3 tarefas pequenas com file do componente existente " +
+            "(o app não recria a base nem duplica seções) e o mesmo preview; leia antes a seção \"## Entregas\" de .fluwy/TIME.md para dividir certo. Orçamento menor para ajustes (budget_tokens 200000). " +
+            "No fim o app ainda roda o build de produção e chama o Doc se falhar. " +
             "Bloqueia até o time terminar e devolve o relatório; depois teste, corrija o que faltar e mostre o resultado ao usuário.", buildJsonObject {
             put("goal", str("Objetivo do time em uma frase"))
             put("tasks_json", str("Array JSON de objetos {id, role, task, file, target, depends_on:[ids]}. file (front-end): componente da tarefa, ex.: \"src/components/Hero.jsx\" — o app cria o esqueleto e liga no App ANTES do time, na ordem das tarefas. target: seletor CSS do elemento, ex.: \"#hero\""))
@@ -5840,6 +5851,29 @@ class AgentRunner(
      */
     private val SQUAD_FATAL_CONSOLE = Regex("Uncaught|SyntaxError|does not provide an export named|Failed to resolve import|Failed to fetch dynamically imported module|is not defined")
 
+    /** Modo exército: o chat líder não edita o projeto direto (só o time). Leitura continua livre. */
+    private fun squadModeGuard(sessionId: String, call: ToolCall): String? {
+        val sess = store.session(sessionId) ?: return null
+        val proj = sess.squadProject?.trimEnd('/')?.takeIf { sess.squadParentId == null && it.isNotBlank() } ?: return null
+        val o = runCatching { org.json.JSONObject(call.argsJson.ifBlank { "{}" }) }.getOrNull() ?: return null
+        val msg = "RECUSADO: este chat está no modo exército — alterações no projeto $proj são feitas pelo time. Chame build_team com preview=\"$proj\" " +
+            "e uma tarefa específica para esta mudança (ex.: 1 agente). Para sair do modo, o usuário precisa pedir explicitamente."
+        return when (call.name) {
+            "file_write", "file_edit", "file_delete", "file_move" -> {
+                val path = o.optString("path").ifBlank { o.optString("from") }
+                val abs = if (path.startsWith("/")) path else "/root/workspace/" + path
+                if (abs.startsWith(proj + "/") || abs == proj) msg else null
+            }
+            "shell" -> {
+                val cmd = o.optString("command")
+                val touches = cmd.contains(proj) || Regex("""(^|[;&|]\s*)cd\s+\S*${Regex.escape(proj.substringAfterLast('/'))}""").containsMatchIn(cmd)
+                val writes = Regex("""(?<![<>])>{1,2}(?!&)|\bsed\s+-i|\btee\b|\brm\s|\bmv\s|\bcp\s|\bnpm\s+(i|install|uninstall|remove)\b|\bnpx\s+\S+\s+(init|create)|\bgit\s+(checkout|reset|apply)|\bpatch\b|\bcat\s*<<""").containsMatchIn(cmd)
+                if (touches && writes) msg else null
+            }
+            else -> null
+        }
+    }
+
     private fun toolArgsGuard(call: ToolCall): String? {
         if (call.name != "file_write" && call.name != "file_edit") return null
         val o = runCatching { org.json.JSONObject(call.argsJson.ifBlank { "{}" }) }.getOrNull()
@@ -5896,6 +5930,12 @@ class AgentRunner(
             "create", "update" -> {
                 val j = org.json.JSONObject(o.optString("workflow_json").ifBlank { "{}" })
                 val base = if (action == "update") (find() ?: return@runCatching "ERRO: fluxo não encontrado.") else null
+                // Evita fluxos duplicados (com dezenas de fluxos, criar de novo em vez de editar gerava cópias rodando em paralelo).
+                if (base == null) j.optString("name").trim().takeIf { it.isNotEmpty() }?.let { nm ->
+                    st.flows.value.firstOrNull { it.name.equals(nm, true) }?.let { dup ->
+                        return@runCatching "ERRO: já existe o fluxo \"${dup.name}\" (id ${dup.id}). Para alterá-lo use action=update id=${dup.id}; para um novo, use outro nome."
+                    }
+                }
                 val nodesJ = j.optJSONArray("nodes") ?: org.json.JSONArray()
                 val types = dev.cueopen.app.workflow.WfCatalog.TYPES.filter { !it.hidden }.map { it.type }.toSet()
                 val nodes = mutableListOf<dev.cueopen.app.workflow.WfNode>()
@@ -5970,7 +6010,7 @@ class AgentRunner(
     }.getOrElse { if (it is kotlinx.coroutines.CancellationException) throw it; "ERRO: ${it.message}" }
 
     /** Pasta do projeto que o exército deste chat está construindo (caminho do sandbox). */
-    fun projectDirOf(sessionId: String): String? = squadProjectDir[sessionId]
+    fun projectDirOf(sessionId: String): String? = squadProjectDir[sessionId] ?: store.session(sessionId)?.squadProject?.also { squadProjectDir[sessionId] = it }
 
     /** Schemas de TODAS as ferramentas (como o modelo as recebe), para o arquivo "Dados" das Configurações. */
     fun toolSchemasForExport(): String = tools(null, allowMultiAgent = true).toString()
@@ -6166,7 +6206,11 @@ class AgentRunner(
         val app = listOf("src/App.tsx", "src/App.jsx", "src/App.js").map { File(dir, it) }.firstOrNull { it.isFile } ?: File(dir, "src/App.$ext")
         val appText = if (app.isFile) app.readText() else ""
         val wired = out.values.count { (name, _) -> Regex("""import\s+$name\b""").containsMatchIn(appText) }
-        if (wired == 0) {
+        // Projeto já montado (edições seguintes): nunca reescreve o App que tem seções próprias; componente novo é ligado pela tarefa.
+        val appHasOwnSections = Regex("""import\s+\w+\s+from\s+['"]\./(components|sections|pages)/""").containsMatchIn(appText)
+        if (wired == 0 && appHasOwnSections) {
+            log("Projeto já existente: o App não foi reescrito; componentes novos (${out.values.joinToString { it.first }}) entram no App pela própria tarefa.")
+        } else if (wired == 0) {
             val imports = out.values.joinToString("") { (name, f) ->
                 val rel = f.relativeTo(app.parentFile).path.substringBeforeLast('.').let { if (it.startsWith(".")) it else "./$it" }
                 "import $name from '$rel'\n"
@@ -6254,6 +6298,7 @@ class AgentRunner(
         val dir = if (isFile) f.parentFile else f
         val guestDir = if (isFile) guest.substringBeforeLast('/') else guest
         squadProjectDir[sessionId] = guestDir
+        if (store.session(sessionId)?.squadProject != guestDir) store.editSession(sessionId) { it.copy(squadProject = guestDir) }
         val pkg = File(dir, "package.json")
         val staticSite = !pkg.isFile && (File(dir, "index.html").isFile || isFile)
         if (staticSite) return "file://" + (if (isFile) f else File(dir, "index.html")).absolutePath
@@ -6351,25 +6396,35 @@ class AgentRunner(
      * dependências pré-empacotadas do Vite). Sem isso a 1ª carga no WebView travava (só onPageStarted por 30 s) enquanto o
      * Vite empacotava o React, e no celular com pouca memória o renderer chegava a ser encerrado.
      */
-    private fun warmDevServer(url: String, html: String) {
+    private fun warmDevServer(url: String, html: String, progress: (Int) -> Unit = {}) {
         val base = url.trimEnd('/')
         val seen = mutableSetOf<String>()
         val queue = ArrayDeque(Regex("""src=["'](/[^"']+)["']""").findAll(html).map { it.groupValues[1] }.toList() + "/@vite/client")
-        val deadline = System.currentTimeMillis() + 120_000
-        while (queue.isNotEmpty() && seen.size < 60 && System.currentTimeMillis() < deadline) {
+        // Teto TOTAL de 75 s: cada pedido usa no máximo o tempo que sobra (antes uma leitura sem limite travava o time aqui para sempre).
+        val deadline = System.currentTimeMillis() + 75_000
+        while (queue.isNotEmpty() && seen.size < 60) {
+            val left = (deadline - System.currentTimeMillis()).toInt()
+            if (left < 1_000) break
             val path = queue.removeFirst().substringBefore('?')
             if (!seen.add(path)) continue
-            val (code, _) = previewStatus(base + path, 60_000)
-            if (code != 200) continue
+            if (seen.size % 5 == 0) progress(seen.size)
             val body = runCatching {
                 (java.net.URL(base + path).openConnection() as java.net.HttpURLConnection).run {
-                    connectTimeout = 1_500; readTimeout = 60_000
-                    try { inputStream.bufferedReader().use { it.readText() } } finally { disconnect() }
+                    connectTimeout = 1_500; readTimeout = minOf(25_000, left)
+                    try { if (responseCode == 200) inputStream.bufferedReader().use { it.readText() } else "" } finally { disconnect() }
                 }
             }.getOrDefault("")
             Regex("""(?:from\s*|import\s*\(?\s*)["'](/(?:src|node_modules/\.vite/deps)/[^"'?]+)""").findAll(body).forEach { queue.add(it.groupValues[1]) }
         }
     }
+
+    /** GET com tempo limite (nunca trava): corpo ou "" em erro. */
+    private fun fetchText(url: String, readMs: Int): String = runCatching {
+        (java.net.URL(url).openConnection() as java.net.HttpURLConnection).run {
+            connectTimeout = 1_500; readTimeout = readMs
+            try { if (responseCode in 200..299) inputStream.bufferedReader().use { it.readText() } else "" } finally { disconnect() }
+        }
+    }.getOrDefault("")
 
     /** O App compila no dev server? (Vite: GET /src/App.jsx|tsx = 200). null = não dá para saber. */
     private fun appModuleOk(url: String): Boolean? {
@@ -6387,19 +6442,21 @@ class AgentRunner(
         val browser = browserFor(sessionId)
         if (sessionId !in squadApi) runCatching {
             log("Aquecendo o app (pré-carregando React e componentes)…")
-            kotlinx.coroutines.withContext(Dispatchers.IO) {
-                val html = runCatching { java.net.URL(url).readText() }.getOrDefault("")
-                warmDevServer(url, html)
+            kotlinx.coroutines.withTimeoutOrNull(90_000) {
+                kotlinx.coroutines.withContext(Dispatchers.IO) {
+                    warmDevServer(url, fetchText(url, 20_000)) { n -> log("Aquecendo o app… $n módulos prontos") }
+                }
             }
         }
-        runCatching { browser.navigate(url) }
+        // Navegar nunca pode prender o time: o WebView do celular às vezes trava/renasce (renderer encerrado).
+        kotlinx.coroutines.withTimeoutOrNull(40_000) { runCatching { browser.navigate(url) } }
         if (sessionId in squadApi) return previewStatus(url).first in 100..499  // API: responder já basta
         val deadline = System.currentTimeMillis() + 120_000  // 1ª compilação no celular pode passar de 1 min
         var last = ""
         var nextNav = System.currentTimeMillis() + 20_000
         var jsFails = 0
         while (System.currentTimeMillis() < deadline) {
-            if (System.currentTimeMillis() > nextNav && !last.contains("ok")) { runCatching { browser.navigate(url) }; nextNav = System.currentTimeMillis() + 20_000 }
+            if (System.currentTimeMillis() > nextNav && !last.contains("ok")) { kotlinx.coroutines.withTimeoutOrNull(30_000) { runCatching { browser.navigate(url) } }; nextNav = System.currentTimeMillis() + 20_000 }
             last = runCatching { browser.runJs(
                 "(function(){var t=document.title||'';if(/não disponível|not available|ERR_/i.test(t+document.body.innerText.slice(0,200)))return 'erro';" +
                     "var r=document.getElementById('root')||document.getElementById('__next')||document.getElementById('app')||document.body;" +
@@ -6408,14 +6465,20 @@ class AgentRunner(
             // WebView sem responder JS (renderer ocupado/encerrado por memória) mas servidor e código OK: não barra o time por isso.
             if (last.startsWith("timeout") || last.startsWith("ERROR")) {
                 jsFails++
-                if (jsFails == 3) runCatching { browser.navigate(url) }
+                if (jsFails == 3) kotlinx.coroutines.withTimeoutOrNull(30_000) { runCatching { browser.navigate(url) } }
                 if (jsFails >= 5 && previewStatus(url, 15_000).first == 200 && (appModuleOk(url) != false)) {
                     log("O browser do celular demorou a responder, mas o app está no ar e compilando (HTTP 200); o time vai começar.")
                     return true
                 }
             } else jsFails = 0
-            if (last.contains("erro")) { kotlinx.coroutines.delay(1_500); runCatching { browser.navigate(url) } }
+            if (last.contains("erro")) { kotlinx.coroutines.delay(1_500); kotlinx.coroutines.withTimeoutOrNull(30_000) { runCatching { browser.navigate(url) } } }
             kotlinx.coroutines.delay(1_500)
+        }
+        // Servidor no ar e App compilando: o problema é o WebView do celular (lento/encerrado), não o projeto. O time começa
+        // mesmo assim (antes ficava barrado e o pedido morria aqui).
+        if (previewStatus(url, 15_000).first == 200 && appModuleOk(url) != false) {
+            log("O browser do celular não respondeu a tempo, mas o app está no ar e compilando (HTTP 200); o time vai começar (preview pode demorar a aparecer).")
+            return true
         }
         log("O app não apareceu no browser em 2 min (estado: ${last.ifBlank { "sem resposta" }}). Log do servidor: " +
             runCatching { File(sandbox.workspaceFor(sessionId), ".cue/devserver.log").readText().takeLast(500) }.getOrDefault(""))
@@ -6476,7 +6539,9 @@ class AgentRunner(
             runCatching { wireComponents(sandbox.hostFile(g, sessionId), g, tasks, note) }.getOrDefault(emptyMap())
         }.orEmpty()
         // Regra: o time só entra com o app VIVO no browser. Sem isso, nenhum agente começa.
-        val alive = previewUrl != null && (!previewUrl.startsWith("http") || appAliveInBrowser(sessionId, previewUrl, note))
+        val alive = previewUrl != null && (!previewUrl.startsWith("http") ||
+            (kotlinx.coroutines.withTimeoutOrNull(240_000) { appAliveInBrowser(sessionId, previewUrl, note) }
+                ?: (previewStatus(previewUrl, 15_000).first == 200).also { if (it) note("Checagem do browser passou do tempo, mas o servidor responde; o time vai começar.") }))
         if (preview.isNotBlank() && !alive) {
             BuildSquad.edit(squadId) { it.copy(running = false) }
             store.replaceItem(sessionId, card.copy(result = "O app não ficou de pé; o time não começou.", status = StepStatus.ERROR))
@@ -6507,7 +6572,11 @@ class AgentRunner(
                 appendLine("- ${personas[n].name} (${personas[n].role}): ${t.task.lineSequence().first().take(140)}" + (componentFiles[t.id]?.let { " — ${it.first.substringAfterLast('/')} (#${it.second})" } ?: ""))
             }
         }.take(6_000)
-        squadProjectDir[sessionId]?.let { g -> runCatching { File(sandbox.hostFile(g, sessionId), ".fluwy/TIME.md").apply { parentFile?.mkdirs() }.writeText("# Plano do time\n\nObjetivo: $goal\n\n$squadPlanText") } }
+        squadProjectDir[sessionId]?.let { g -> runCatching { File(sandbox.hostFile(g, sessionId), ".fluwy/TIME.md").apply { parentFile?.mkdirs() }.let { f ->
+            // Mantém o histórico das rodadas anteriores (edições seguintes do chat), só com o resumo do que foi entregue.
+            val prevDone = runCatching { f.readText() }.getOrDefault("").lines().filter { it.startsWith("- ") && (it.contains(" · ok") || it.contains("FALHOU")) }.takeLast(40)
+            f.writeText("# Plano do time\n\nObjetivo: $goal\n\n$squadPlanText\n\n## Entregas" + (if (prevDone.isNotEmpty()) "\n" + prevDone.joinToString("\n") else ""))
+        } } }
         val workers = tasks.mapIndexed { n, t ->
             val p = personas[n]
             val label = BuildSquad.shortLabel(t.task)
@@ -6585,6 +6654,19 @@ class AgentRunner(
                 BuildSquad.editWorker(squadId, n) { it.copy(status = if (ok) BuildSquad.St.DONE else BuildSquad.St.FAILED,
                     doing = if (ok) "pronto" else it.doing.takeIf { d -> d.startsWith("parou") || d.startsWith("componente") } ?: "falhou") }
                 BuildSquad.edit(squadId) { it.copy(log = (it.log + "${w.persona.name}|${w.label}|${if (ok) "ok" else "erro"}").takeLast(60)) }
+                // Mural do time (ideia do canal compartilhado do OpenBot): o que cada um entregou fica em .fluwy/TIME.md, e quem
+                // começa depois (dependentes, Doc, próximas edições do chat) lê só o resumo em vez de reabrir todos os arquivos.
+                runCatching {
+                    val answer = (store.session(w.sessionId)?.items?.lastOrNull { it is ChatItem.Assistant } as? ChatItem.Assistant)?.text.orEmpty()
+                    squadProjectDir[sessionId]?.let { g ->
+                        val f = File(sandbox.hostFile(g, sessionId), ".fluwy/TIME.md")
+                        if (f.parentFile?.isDirectory == true) synchronized(this@AgentRunner) {
+                            f.appendText("\n- ${java.text.SimpleDateFormat("dd/MM HH:mm", java.util.Locale.US).format(java.util.Date())} · ${w.persona.name} (${w.persona.role}) · ${t.task.take(90)}" +
+                                (t.file.takeIf { it.isNotBlank() }?.let { " · arquivo $it" } ?: "") + " · ${if (ok) "ok" else "FALHOU"}" +
+                                (answer.takeIf { it.isNotBlank() }?.let { ": " + it.replace(Regex("\\s+"), " ").take(220) } ?: ""))
+                        }
+                    }
+                }
                 finished[t.id]?.complete(ok)
                 runCatching { terminals.close(w.sessionId) }
             }
@@ -6728,6 +6810,7 @@ class AgentRunner(
             var finalChecks = 0
             var anchorsChecked = false
             var importsChecked = false
+            var buildChecked = false
             while (true) {
                 val active = synchronized(jobs) { jobs.filter { it.isActive } }
                 if (active.isNotEmpty()) { active.joinAll(); continue }
@@ -6751,6 +6834,21 @@ class AgentRunner(
                             "Links internos do site apontam para seções que não existem: " + broken.first.joinToString { "#$it" } +
                                 ". Ids que existem: " + broken.second.joinToString { "#$it" }.ifBlank { "(nenhum)" } +
                                 ". Alinhe com o plano do time: cada link deve usar o id do elemento raiz da seção certa (corrija o href ou o id, o que for menor e coerente com o plano). Não mude mais nada.")
+                        continue
+                    }
+                }
+                // Verificação final (como o "check" do OpenBot): build de produção pega erros que o dev server tolera
+                // (import inexistente, JSX quebrado, export errado). Erro → Doc corrige; uma rodada só, para não gastar tokens à toa.
+                if (!buildChecked && projectGuest != null && sessionId !in squadApi && File(sandbox.hostFile(projectGuest, sessionId), "package.json").isFile) {
+                    buildChecked = true
+                    BuildSquad.edit(squadId) { it.copy(notice = "Conferindo o build de produção…") }
+                    val r = runCatching { sandbox.exec(dev.cueopen.app.sandbox.InteractivePrompts.ENV + " && npx --no-install vite build --logLevel error --emptyOutDir --outDir .fluwy/build-check < /dev/null",
+                        cwd = projectGuest, timeoutSec = 240, idleTimeoutSec = 120, sessionId = sessionId) }.getOrNull()
+                    BuildSquad.edit(squadId) { it.copy(notice = "", log = (it.log + "Orquestrador|build de produção|${if (r?.exitCode == 0) "ok" else if (r == null || r.timedOut) "pulado" else "erro"}").takeLast(60)) }
+                    if (r != null && !r.timedOut && r.exitCode != 0 && r.output.isNotBlank()) {
+                        val err = r.output.lines().filter { it.isNotBlank() && !it.contains("npm warn", true) }.takeLast(25).joinToString("\n").take(1_800)
+                        handlePreviewError("Build de produção falhou: " + err.lineSequence().first().take(120),
+                            "O build de produção (vite build) falhou com este erro:\n$err\nCorrija só a causa (arquivo e linha indicados), sem refazer seções. Depois rode `npx vite build --logLevel error --outDir .fluwy/build-check` para confirmar.")
                         continue
                     }
                 }
