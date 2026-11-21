@@ -2,12 +2,13 @@ name: voice-diag
 on:
   workflow_dispatch:
   push:
-    paths: ["tools/voice_diag/**", ".github/workflows/voice-diag.yml"]
+    paths: ["tools/voice_diag/**", "tools/voice_lab3/normalize_pt.py", ".github/workflows/voice-diag.yml"]
 permissions:
   contents: read
 jobs:
-  ab:
+  tune:
     runs-on: ubuntu-latest
+    timeout-minutes: 150
     strategy:
       fail-fast: false
       matrix:
@@ -18,17 +19,5 @@ jobs:
         with: { ref: voices, path: tools/voice_diag/pk }
       - uses: actions/setup-python@v5
         with: { python-version: "3.11" }
-      - run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg >/dev/null
-      - run: pip install -q numpy soundfile faster-whisper num2words huggingface_hub "sherpa-onnx==1.10.46" piper-tts
-      - run: cd tools/voice_diag && ESPEAK=piper python ab.py ${{ matrix.voice }} sherpa
-  espeak:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/setup-python@v5
-        with: { python-version: "3.11" }
-      - run: pip install -q piper-tts
-      - run: |
-          D=$(python -c "import piper,os,glob;print(glob.glob(os.path.join(os.path.dirname(piper.__file__),'**','espeak-ng-data'),recursive=True)[0])")
-          mkdir -p e && cp -r "$D" e/espeak-ng-data && find e/espeak-ng-data -name '*_dict' ! -name pt_dict ! -name en_dict -delete
-          du -sh e/espeak-ng-data; (cd e && tar cJf ../espeak.tar.xz espeak-ng-data); ls -la espeak.tar.xz; sha256sum espeak.tar.xz
-          echo "==ESPEAK-BEGIN=="; base64 -w0 espeak.tar.xz; echo; echo "==ESPEAK-END=="
+      - run: pip install -q numpy soundfile faster-whisper num2words "sherpa-onnx==1.10.46"
+      - run: cd tools/voice_diag && python tune.py ${{ matrix.voice }}
