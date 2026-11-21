@@ -10,7 +10,7 @@ P = {"cadu": (0.667, 0.5, 1.15), "faber": (0.5, 0.8, 1.08), "lessac": (0.5, 0.5,
 ns, nw, ls = P
 if ENGINE == "sherpa":
     import sherpa_onnx
-    d = f"ex/piper-{VID}-int8"; zipfile.ZipFile(f"pk/piper-{VID}-int8.zip").extractall("ex")
+    d = f"ex/piper2-{VID}-int8"; zipfile.ZipFile(f"pk/piper2-{VID}-int8.zip").extractall("ex")
     tts = sherpa_onnx.OfflineTts(sherpa_onnx.OfflineTtsConfig(model=sherpa_onnx.OfflineTtsModelConfig(
         vits=sherpa_onnx.OfflineTtsVitsModelConfig(model=f"{d}/model.onnx", lexicon="", tokens=f"{d}/tokens.txt", data_dir=f"{d}/espeak-ng-data",
                                                    noise_scale=ns, noise_scale_w=nw, length_scale=ls), num_threads=4), max_num_sentences=1))
@@ -27,10 +27,11 @@ else:
     cfg = SynthesisConfig(noise_scale=ns, noise_w_scale=nw, length_scale=ls)
     def synth(text):
         return np.concatenate([ch.audio_float_array for ch in v.synthesize(text, syn_config=cfg)]), v.config.sample_rate
-errs = tot = 0; bad = []
+errs = tot = 0; bad = []; allaudio = []
 for s in t.SENT:
     a, sr = synth(t.normalize(s) if t.PT else s)
     sf.write("tmp.wav", np.concatenate([np.zeros(int(sr * 0.3), dtype=np.float32), a]), sr)
+    allaudio += [a, np.zeros(int(sr * 0.4), dtype=np.float32)]
     hyp = " ".join(x.text for x in t.asr.transcribe("tmp.wav", language="pt" if t.PT else "en", beam_size=5)[0]).strip()
     e, n = t.wer(s, hyp); errs += e; tot += n
     if e: bad.append({"enviado": s, "whisper": hyp})
@@ -38,3 +39,7 @@ ver = __import__("sherpa_onnx").__version__ if ENGINE == "sherpa" else "piper"
 os.makedirs("out", exist_ok=True)
 r = {"voice": VID, "engine": ENGINE, "version": ver, "wer": round(errs / tot, 4), "errors": bad}
 json.dump(r, open(f"out/ab_{VID}_{ENGINE}_{ver}.json", "w"), indent=2, ensure_ascii=False); print(json.dumps(r, ensure_ascii=False, indent=1))
+
+import subprocess
+full = np.concatenate(allaudio); full = full / max(1e-6, float(np.abs(full).max())) * 0.95
+sf.write("full.wav", full, sr); subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", "full.wav", "-b:a", "96k", f"out/amostra-{VID}.mp3"])

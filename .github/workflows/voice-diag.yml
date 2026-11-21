@@ -1,27 +1,30 @@
 name: voice-diag
 on:
+  workflow_dispatch:
   push:
     paths: ["tools/voice_diag/**", ".github/workflows/voice-diag.yml"]
 permissions:
   contents: write
 jobs:
   ab:
+    if: github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[diag]')
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         voice: [cadu, faber, lessac, ryan]
-        engine: ["sherpa-onnx==1.10.46", "sherpa-onnx", "piper"]
+        engine: ["sherpa-onnx==1.10.46"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with: { python-version: "3.11" }
+      - run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg >/dev/null
       - run: |
           pip install -q numpy soundfile faster-whisper num2words huggingface_hub onnxruntime onnx
           case "${{ matrix.engine }}" in piper) pip install -q piper-tts ;; *) pip install -q "${{ matrix.engine }}" ;; esac
       - env: { GH_TOKEN: "${{ github.token }}" }
         run: |
-          cd tools/voice_diag && mkdir -p pk && gh release download voices-v2 -R "$GITHUB_REPOSITORY" -p "piper-${{ matrix.voice }}-int8.zip" -D pk
+          cd tools/voice_diag && mkdir -p pk && gh release download voices-v3 -R "$GITHUB_REPOSITORY" -p "piper2-${{ matrix.voice }}-int8.zip" -D pk
           E=sherpa; [ "${{ matrix.engine }}" = piper ] && E=piper
           python ab.py ${{ matrix.voice }} $E
       - uses: actions/upload-artifact@v4
