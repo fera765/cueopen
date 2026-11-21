@@ -31,10 +31,21 @@ import onnx
 from onnxruntime.quantization import quantize_dynamic, QuantType
 import onnxruntime as ort
 
+# Voz Piper oficial já convertida pelo sherpa-onnx: copia o formato EXATO dos metadados e o espeak-ng-data compatível.
+REF = "vits-piper-pt_PT-tugão-medium"
+if not os.path.isdir(REF):
+    import urllib.parse
+    subprocess.run(["bash", "-c", "curl -sSL -o ref.tar.bz2 'https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/" + urllib.parse.quote(REF) + ".tar.bz2' && tar xjf ref.tar.bz2"], check=True)
+ref_onnx = glob.glob(f"{REF}/*.onnx")[0]
+REF_META = {p.key: p.value for p in onnx.load(ref_onnx).metadata_props}
+log("metadados da referência:", REF_META)
+if not os.path.isdir("espeak-ng-data"): shutil.copytree(f"{REF}/espeak-ng-data", "espeak-ng-data")
+
 def add_meta(path_in, path_out):
     m = onnx.load(path_in)
-    meta = {"model_type": "vits", "comment": "piper", "language": "Portuguese", "voice": cfg.get("espeak", {}).get("voice", "pt"),
-            "has_espeak": 1, "n_speakers": cfg.get("num_speakers", 1), "sample_rate": SR}
+    meta = dict(REF_META)
+    meta.update({"voice": cfg.get("espeak", {}).get("voice", meta.get("voice", "pt")), "sample_rate": SR,
+                 "n_speakers": cfg.get("num_speakers", 1), "language": "Portuguese"})
     del m.metadata_props[:]
     for k, v in meta.items():
         p = m.metadata_props.add(); p.key = k; p.value = str(v)
@@ -55,19 +66,17 @@ with open("variants/tokens.txt", "w") as f:
     for sym, ids in cfg["phoneme_id_map"].items():
         f.write(f"{sym} {ids[0]}\n")
 
-# ---------- 2) espeak-ng-data (o mesmo que o app usa) ----------
-if not os.path.isdir("espeak-ng-data"):
-    subprocess.run(["bash", "-c", "curl -sSL -o e.tar.bz2 https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/espeak-ng-data.tar.bz2 && tar xjf e.tar.bz2"], check=False)
-assert os.path.isdir("espeak-ng-data"), "espeak-ng-data ausente"
+# ---------- 2) espeak-ng-data: o da voz de referência (versão compatível com o sherpa-onnx) ----------
+assert os.path.isfile("espeak-ng-data/phontab"), "espeak-ng-data inválido"
 
 # ---------- 3) Benchmark em processo separado (memória isolada) ----------
 BENCH = r'''
 import sys, time, json, resource, numpy as np, sherpa_onnx, soundfile as sf
 model, name, threads, ns, nw, ls = sys.argv[1], sys.argv[2], int(sys.argv[3]), float(sys.argv[4]), float(sys.argv[5]), float(sys.argv[6])
-texts = json.loads(sys.argv[7])
+texts = json.loads(sys.argv[7]); tokens = sys.argv[8]
 t0 = time.time()
 cfg = sherpa_onnx.OfflineTtsConfig(model=sherpa_onnx.OfflineTtsModelConfig(vits=sherpa_onnx.OfflineTtsVitsModelConfig(
-    model=model, tokens="variants/tokens.txt", data_dir="espeak-ng-data", noise_scale=ns, noise_scale_w=nw, length_scale=ls),
+    model=model, tokens=tokens, data_dir="espeak-ng-data", noise_scale=ns, noise_scale_w=nw, length_scale=ls),
     num_threads=threads, provider="cpu"), max_num_sentences=1)
 tts = sherpa_onnx.OfflineTts(cfg)
 load = time.time() - t0
@@ -80,6 +89,7 @@ for i, t in enumerate(texts):
         return 1
     a = tts.generate(t, sid=0, speed=1.0, callback=cb)
     total = time.time() - s
+    if not a.samples: raise SystemExit("sem áudio para: " + t)
     dur = len(a.samples) / a.sample_rate
     sf.write(f"out/{name}_{i}.wav", np.array(a.samples, dtype=np.float32), a.sample_rate)
     res.append({"first_audio_s": round(first[0] or total, 3), "total_s": round(total, 3), "audio_s": round(dur, 2), "rtf": round(total / max(dur, 1e-6), 3)})
@@ -87,13 +97,13 @@ print(json.dumps({"name": name, "load_s": round(load, 2), "peak_rss_mb": round(r
 '''
 open("bench.py", "w").write(BENCH)
 
-def bench(model, name, threads=2, ns=0.667, nw=0.8, ls=1.0):
-    r = subprocess.run(["taskset", "-c", "0,1", sys.executable, "bench.py", model, name, str(threads), str(ns), str(nw), str(ls), json.dumps(TEXTS)],
+def bench(model, name, threads=2, ns=0.667, nw=0.8, ls=1.0, tokens="variants/tokens.txt"):
+    r = subprocess.run(["taskset", "-c", "0,1", sys.executable, "bench.py", model, name, str(threads), str(ns), str(nw), str(ls), json.dumps(TEXTS), tokens],
                        capture_output=True, text=True)
     if r.returncode != 0: log(r.stderr[-3000:]); return None
     j = json.loads(r.stdout.strip().splitlines()[-1]); j["size_mb"] = round(os.path.getsize(model) / 1e6, 1); log(json.dumps(j)); return j
 
-results = [bench(fp32, "fp32"), bench(int8, "int8"), bench(opt, "int8opt"), bench(opt, "int8opt_1thread", threads=1),
+results = [bench(ref_onnx, "ref_tugao_medium", tokens=f"{REF}/tokens.txt"), bench(fp32, "fp32"), bench(int8, "int8"), bench(opt, "int8opt"), bench(opt, "int8opt_1thread", threads=1),
            bench(opt, "int8opt_natural", ns=0.6, nw=0.7, ls=1.05)]
 
 # ---------- 4) Qualidade: distância espectral log-mel vs. original ----------
