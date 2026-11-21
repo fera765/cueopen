@@ -53,9 +53,18 @@ class FluwyAssistantSession(baseContext: Context) : VoiceInteractionSession(base
     private var sessionShownAtWallClock = 0L
     private var lastRenderedStateAt = 0L
 
+    private var autoListenedRequest = ""
     private val refreshState = object : Runnable {
         override fun run() {
-            renderState(AssistantOverlayStateStore.read(appContext))
+            val st = AssistantOverlayStateStore.read(appContext)
+            renderState(st)
+            // Conversa contínua por voz: terminou de responder (e de falar) → volta a ouvir sozinho.
+            if (st.phase == "done" && st.requestId.isNotBlank() && st.requestId != autoListenedRequest && st.startedAt >= sessionShownAtWallClock &&
+                turnDone && sessionVisible && speechRecognizer == null && restartRunnable == null && !dev.cueopen.app.voice.AppVoice.speaking.value) {
+                autoListenedRequest = st.requestId
+                lastVoiceActivityAt = SystemClock.elapsedRealtime()
+                beginTurn()
+            }
             mainHandler.postDelayed(this, STATE_REFRESH_INTERVAL_MS)
         }
     }
@@ -94,7 +103,7 @@ class FluwyAssistantSession(baseContext: Context) : VoiceInteractionSession(base
             val idleFor = SystemClock.elapsedRealtime() - lastVoiceActivityAt
             val state = AssistantOverlayStateStore.read(appContext)
             val assistantIsProcessing = state.startedAt >= sessionShownAtWallClock &&
-                state.phase in setOf("queued", "working")
+                state.phase in setOf("queued", "working", "speaking")
             val hasUnfinalizedSpeech = speechTurn.hasPendingSpeech || liveTranscript.isNotBlank()
             if (AssistantListeningPolicy.shouldCloseForInactivity(idleFor, hasUnfinalizedSpeech, assistantIsProcessing)) {
                 finish()
@@ -135,6 +144,10 @@ class FluwyAssistantSession(baseContext: Context) : VoiceInteractionSession(base
             setOnClickListener {
                 if (ContextCompat.checkSelfPermission(appContext, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
                     requestMicrophonePermission()
+                } else if (dev.cueopen.app.voice.AppVoice.speaking.value) {
+                    dev.cueopen.app.voice.AppVoice.stop()  // toque interrompe a fala e já ouve
+                    lastVoiceActivityAt = SystemClock.elapsedRealtime()
+                    beginTurn()
                 } else if (speechRecognizer == null && restartRunnable == null) {
                     beginTurn()
                 }

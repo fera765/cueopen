@@ -48,8 +48,23 @@ class AssistantCommandReceiver : BroadcastReceiver() {
                     AssistantOverlayStateStore.updateIfCurrent(app, requestId) {
                         it.copy(phase = "working", detail = "O agente está iniciando a tarefa…")
                     }
+                    // Fala o andamento: cada mensagem do agente (texto do chat) é falada assim que fica completa.
+                    val before = app.store.session(target.id)?.items?.map { it.id }?.toSet().orEmpty()
+                    val voiceOn = dev.cueopen.app.voice.AppVoice.enabled(app)
+                    val voice = if (voiceOn) dev.cueopen.app.voice.AppVoice.startStream(app, dev.cueopen.app.voice.AppVoice.detectLang(transcript)) else null
+                    val spoken = HashSet<String>()
+                    fun speakNew(all: Boolean) {
+                        val items = app.store.session(target.id)?.items.orEmpty()
+                        items.forEachIndexed { i, it ->
+                            if (it !is ChatItem.Assistant || it.id in before || it.id in spoken || it.text.isBlank()) return@forEachIndexed
+                            if (!all && !it.final && i == items.lastIndex) return@forEachIndexed  // ainda pode estar sendo escrita
+                            spoken += it.id
+                            voice?.trySend(VoiceReplies.speakable(it.text))
+                        }
+                    }
                     val job = app.agent.send(target.id, transcript)
                     while (job.isActive) {
+                        speakNew(false)
                         val session = app.store.session(target.id)
                         val activity = app.agent.activity.value[target.id]
                         val step = session?.items?.filterIsInstance<ChatItem.Step>()?.lastOrNull()
@@ -71,9 +86,14 @@ class AssistantCommandReceiver : BroadcastReceiver() {
                     val finalText = session?.items?.filterIsInstance<ChatItem.Assistant>()
                         ?.lastOrNull { it.final }?.text.orEmpty()
                     val errorText = session?.items?.filterIsInstance<ChatItem.Error>()?.lastOrNull()?.text.orEmpty()
-                    // Assistente de voz responde falando (Dii no aparelho, sem esperar arquivo): começa em décimos de segundo.
-                    if (finalText.isNotBlank() && dev.cueopen.app.voice.DiiVoice.enabled(app))
-                        runCatching { dev.cueopen.app.voice.DiiVoice.speak(app, VoiceReplies.speakable(finalText)) }
+                    // Termina de falar o que faltou (resposta final) e espera a fala acabar antes de voltar a ouvir.
+                    speakNew(true); voice?.close()
+                    if (voice != null) {
+                        AssistantOverlayStateStore.updateIfCurrent(app, requestId) { it.copy(phase = "speaking", detail = "Respondendo…") }
+                        delay(300)
+                        val until = System.currentTimeMillis() + 120_000
+                        while (dev.cueopen.app.voice.AppVoice.speaking.value && System.currentTimeMillis() < until) delay(150)
+                    }
                     val media = session?.items?.filterIsInstance<ChatItem.Media>()
                         ?.lastOrNull { it.time >= startedAt && it.caption.contains("captura", ignoreCase = true) }
                     val phase = when {
@@ -89,7 +109,7 @@ class AssistantCommandReceiver : BroadcastReceiver() {
                                 "needs_input" -> "O agente precisa de uma resposta. Abra o chat para continuar."
                                 "error" -> errorText.ifBlank { "A tarefa terminou com um erro. Consulte o chat para ver os detalhes." }
                                 "stopped" -> "A tarefa foi interrompida."
-                                else -> "Resposta pronta no chat. Nenhum áudio de resposta foi reproduzido."
+                                else -> if (voice != null) "Respondido. Pode falar de novo." else "Resposta pronta no chat."
                             },
                             result = finalText.ifBlank { errorText },
                             screenshotPath = media?.path,

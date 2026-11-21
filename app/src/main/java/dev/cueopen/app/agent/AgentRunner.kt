@@ -2696,6 +2696,9 @@ class AgentRunner(
         fun s(k: String) = a[k]?.jsonPrimitive?.contentOrNull.orEmpty()
         return when (name) {
             "reply_audio" -> {
+                // "always": o usuário pediu para responder sempre (ou não mais) em áudio nesta conversa.
+                a["always"]?.jsonPrimitive?.booleanOrNull?.let { on -> store.editSession(sessionId) { it.copy(voiceReplies = on) } }
+                if (s("text").isBlank()) return if (store.session(sessionId)?.voiceReplies == true) "Modo áudio ligado: as próximas respostas finais virão em áudio automaticamente." else "Modo áudio desligado."
                 val audio = dev.cueopen.app.assistant.VoiceReplies.synthesize(ctx, java.io.File(sandbox.workspaceFor(sessionId), "audio"), s("text"))
                 if (audio == null) "ERRO: o motor de voz do aparelho não está disponível (sem voz pt-BR instalada). Responda em texto e avise o usuário."
                 else { store.addItem(sessionId, audio); "Áudio enviado no chat (${audio.durationMs / 1000}s). Não repita o mesmo conteúdo em texto longo." }
@@ -2780,7 +2783,11 @@ class AgentRunner(
             (if (itemId != null) items.firstOrNull { it.id == itemId } else items.lastOrNull { it is ChatItem.Assistant && it.final }) as? ChatItem.Assistant
         } ?: return
         scope.launch {
+            // Indicador "Gerando áudio…" (o card da ferramenta não aparece; no fim fica só o áudio).
+            val step = ChatItem.Step(tool = "reply_audio", title = "Gerando áudio", args = "")
+            store.addItem(sessionId, step)
             val audio = runCatching { dev.cueopen.app.assistant.VoiceReplies.synthesize(ctx, java.io.File(sandbox.workspaceFor(sessionId), "audio"), target.text, target.id) }.getOrNull()
+            store.replaceItem(sessionId, step.copy(status = StepStatus.OK))
             if (audio != null) store.addItem(sessionId, audio)
             else store.addItemUnique(sessionId, ChatItem.Error(text = "Não consegui gerar o áudio: instale uma voz em português em Configurações do Android › Saída de texto para voz."))
         }
@@ -3430,6 +3437,7 @@ class AgentRunner(
                 skills.forEach { sk -> appendLine(PromptContextPolicy.untrustedBlock("skill_description", "${sk.name}: ${sk.description}", 220)) }
             }
             // ---- parte dinâmica ----
+            if (session.voiceReplies) appendLine("\nMODO ÁUDIO LIGADO nesta conversa: cada resposta final sua é convertida em áudio automaticamente (não chame reply_audio para isso). Escreva como quem fala: frases curtas e naturais, sem tabelas, listas longas, markdown ou links. Para desligar a pedido do usuário: reply_audio com always=false.")
             val memoryFacts = PromptContextPolicy.boundedFacts(
                 agentFacts = agent?.memory.orEmpty().takeLast(10),
                 recalledFacts = memories.map { it.text },
@@ -4060,8 +4068,8 @@ class AgentRunner(
         }
         // UI Connectors (ex.: IQ Option): só os que este agente pode usar (toggle por agente / "Agent required?").
         runCatching { dev.cueopen.app.CueApp.instance.uiConnectors.toolDefinitions(agent) }.getOrDefault(emptyList()).forEach { add(it) }
-        add(tool("reply_audio", "Responde por ÁUDIO no chat (voz gerada no aparelho), além do texto. Use quando o usuário pedir resposta falada/em áudio. Passe o texto exato a ser falado (curto e natural, sem markdown).",
-            buildJsonObject { put("text", str("Texto a falar")) }, listOf("text")))
+        add(tool("reply_audio", "Responde por ÁUDIO no chat (voz gerada no aparelho). Use quando o usuário pedir uma resposta falada: passe o texto exato a falar (curto, natural, sem markdown). Se ele pedir para responder SEMPRE/SÓ com áudio daqui para frente, passe always=true (e always=false quando pedir para voltar ao texto); com o modo ligado, as respostas finais viram áudio sozinhas — não chame de novo a cada resposta.",
+            buildJsonObject { put("text", str("Texto a falar (pode ficar vazio se só ligar/desligar o modo)")); put("always", buildJsonObject { put("type", "boolean"); put("description", "true = responder sempre em áudio nesta conversa; false = voltar ao texto") }) }, emptyList()))
         add(tool("notify", "Avisa o usuário fora do chat. Use com critério: 'silent' só registra no histórico (rotina sem novidade), 'low' aviso discreto, 'normal' conclusão importante ou falha moderada, 'high' precisa da atenção dele, 'critical' falha grave que exige intervenção. Nunca repita o mesmo aviso.",
             buildJsonObject {
                 put("title", str("Título curto")); put("text", str("Mensagem objetiva (o que houve e o que fazer)"))

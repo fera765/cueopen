@@ -95,8 +95,8 @@ class CueApp : Application() {
 
     override fun onCreate() {
         super.onCreate()
-        // Voz Dii: se instalada, carrega o motor em segundo plano (o 1º áudio já sai rápido).
-        runCatching { dev.cueopen.app.voice.DiiVoice.prewarm(this) }
+        // Voz do app: se instalada, carrega o motor em segundo plano (o 1º áudio já sai rápido).
+        runCatching { dev.cueopen.app.voice.AppVoice.prewarm(this) }
         // Processo ":restart" (só reabre o app depois de importar dados): nada do app sobe nele.
         if (dev.cueopen.app.backup.RestartActivity.isRestartProcess(this)) return
         instance = this

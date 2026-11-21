@@ -457,6 +457,7 @@ fun TimelineItem(item: ChatItem, onOpenComputer: (String) -> Unit, onOpenMedia: 
             dev.cueopen.app.agent.TEAM_MEMBER_STEP -> TeamMemberPill(item, nav)
             dev.cueopen.app.agent.BuildSquad.STEP -> BuildSquadCard(item, sessionId, nav)
             "team_delegate", "team_status" -> {}  // a pílula do agente já representa a delegação
+            "reply_audio" -> if (item.status == StepStatus.RUNNING) GeneratingAudioRow() // no fim aparece só o áudio
             "page" -> PageStepCard(item, nav)
             "login_needed" -> LoginNeededCard(item, sessionId, nav)
             else -> StepRow(item, onOpenComputer)
@@ -1466,4 +1467,15 @@ private fun ExecutionsDialog(sessionId: String, onDismiss: () -> Unit) {
             }
         }
     }, confirmButton = { TextButton(onDismiss) { Text("Fechar") } })
+}
+
+/** Enquanto a resposta em áudio é gerada (no lugar do card da ferramenta). */
+@Composable
+private fun GeneratingAudioRow() {
+    val c = dev.cueopen.app.ui.theme.Cue.c
+    Row(Modifier.padding(horizontal = 16.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+        CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp, color = c.accent)
+        Spacer(Modifier.width(8.dp))
+        Text("Gerando áudio…", fontSize = 13.sp, color = c.ink2)
+    }
 }

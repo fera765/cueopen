@@ -39,13 +39,14 @@ import dev.cueopen.app.CueApp
 import dev.cueopen.app.assistant.SpeechRecognizers
 import dev.cueopen.app.assistant.VoiceReplies
 import dev.cueopen.app.ui.theme.Cue
-import dev.cueopen.app.voice.DiiVoice
+import dev.cueopen.app.voice.AppVoice
 import kotlinx.coroutines.launch
 
 /**
- * Conversa ao vivo por voz: ouve → responde curto → a Dii fala na hora (streaming, frase a frase) → volta a ouvir.
- * Tocar na esfera interrompe a fala e volta a ouvir. Modo rápido (padrão): chamada direta ao modelo rápido, sem
- * ferramentas, para a resposta chegar em ~1 s; modo agente: o agente completo (ferramentas), mais lento.
+ * Live Audio: simula uma ligação com a assistente (base para o futuro sistema de chamadas).
+ * Ouve → responde → fala na hora (streaming, frase a frase) → volta a ouvir, sem tocar em nada.
+ * Tocar na esfera interrompe a fala. Modo rápido: chamada direta ao modelo rápido (~1 s); modo agente: o agente
+ * completo (ferramentas) e cada mensagem dele é falada assim que fica pronta.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -61,15 +62,19 @@ fun LiveVoiceScreen(nav: NavController) {
     var level by remember { mutableFloatStateOf(0f) }
     var useAgent by remember { mutableStateOf(false) }
     var active by remember { mutableStateOf(false) }
-    val voiceState by DiiVoice.state.collectAsStateWithLifecycle()
-    val hasVoice = remember(voiceState) { DiiVoice.enabled(ctx) }
+    val voiceState by AppVoice.state.collectAsStateWithLifecycle()
+    val hasVoice = remember(voiceState) { AppVoice.enabled(ctx) }
     var granted by remember { mutableStateOf(ContextCompat.checkSelfPermission(ctx, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) }
     val perm = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted = it }
     val list = rememberLazyListState()
     val sessionId = remember { "live-" + System.currentTimeMillis() }
     var recognizer by remember { mutableStateOf<SpeechRecognizer?>(null) }
+    var muted by remember { mutableStateOf(false) }
+    var callStart by remember { mutableLongStateOf(0L) }
+    var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
+    LaunchedEffect(callStart) { while (callStart > 0) { now = System.currentTimeMillis(); kotlinx.coroutines.delay(1000) } }
 
-    LaunchedEffect(Unit) { DiiVoice.prewarm(ctx) }
+    LaunchedEffect(Unit) { AppVoice.prewarm(ctx) }
     LaunchedEffect(turns.size) { if (turns.isNotEmpty()) list.animateScrollToItem(turns.size - 1) }
 
     fun stopListening() { runCatching { recognizer?.cancel(); recognizer?.destroy() }; recognizer = null }
@@ -78,30 +83,46 @@ fun LiveVoiceScreen(nav: NavController) {
     fun answer(text: String) {
         phase = "pensando"
         scope.launch {
-            val reply = runCatching {
-                if (useAgent) {
-                    val s = app.store.session(sessionId) ?: dev.cueopen.app.data.Session(id = sessionId, title = "Conversa por voz").also(app.store::upsertSession)
-                    app.agent.send(s.id, text).join()
-                    (app.store.session(s.id)?.items?.lastOrNull { it is dev.cueopen.app.data.ChatItem.Assistant } as? dev.cueopen.app.data.ChatItem.Assistant)?.text.orEmpty()
-                } else {
-                    val history = turns.takeLast(10).joinToString("\n") { (if (it.me) "Usuário: " else "Assistente: ") + it.text }
-                    app.llm.quick("Você é a assistente de voz do app, numa conversa falada em tempo real em português do Brasil. " +
-                        "Responda como fala natural: curto (1 a 3 frases), direto, sem markdown, listas, emojis ou links. " +
-                        "Se precisar de uma ação no celular ou na internet, diga em uma frase que pode fazer pelo chat.\n\nConversa até agora:\n$history\n\nAssistente:",
-                        maxTokens = 220, conversationId = sessionId)
+            if (useAgent) {
+                // Agente: fala cada mensagem dele assim que fica completa (andamento + resposta final).
+                val s = app.store.session(sessionId) ?: dev.cueopen.app.data.Session(id = sessionId, title = "Live Audio").also(app.store::upsertSession)
+                val before = s.items.map { it.id }.toSet(); val spoken = HashSet<String>()
+                val voice = AppVoice.startStream(ctx, AppVoice.detectLang(text)) { scope.launch { if (active && phase == "falando") listen() } }
+                fun flush(all: Boolean) {
+                    val items = app.store.session(s.id)?.items.orEmpty()
+                    items.forEachIndexed { i, it ->
+                        if (it !is dev.cueopen.app.data.ChatItem.Assistant || it.id in before || it.id in spoken || it.text.isBlank()) return@forEachIndexed
+                        if (!all && !it.final && i == items.lastIndex) return@forEachIndexed
+                        spoken += it.id
+                        val say = VoiceReplies.speakable(it.text); turns += Turn(false, say)
+                        if (voice != null) { phase = "falando"; voice.trySend(say) }
+                    }
                 }
+                val job = runCatching { app.agent.send(s.id, text) }.getOrNull()
+                while (job?.isActive == true && active) { flush(false); kotlinx.coroutines.delay(300) }
+                flush(true); voice?.close()
+                if (voice == null || spoken.isEmpty()) { if (active) listen() else phase = "pronto" }
+                return@launch
+            }
+            val reply = runCatching {
+                val history = turns.takeLast(10).joinToString("\n") { (if (it.me) "Usuário: " else "Assistente: ") + it.text }
+                app.llm.quick("Você é a assistente de voz do app, numa ligação em tempo real em português do Brasil. " +
+                    "Responda como fala natural de telefone: curto (1 a 3 frases), direto, sem markdown, listas, emojis ou links. " +
+                    "Se precisar de uma ação no celular ou na internet, diga em uma frase que pode fazer no modo Agente.\n\nConversa até agora:\n$history\n\nAssistente:",
+                    maxTokens = 220, conversationId = sessionId)
             }.getOrElse { "Desculpe, não consegui responder agora: ${it.message ?: "erro"}." }
             val say = VoiceReplies.speakable(reply).ifBlank { "Não tenho uma resposta para isso." }
             turns += Turn(false, say)
             if (!active) { phase = "pronto"; return@launch }
             phase = "falando"
-            val ok = DiiVoice.speak(ctx, say) { scope.launch { if (active && phase == "falando") listen() } }
-            if (!ok) { phase = "pronto"; turns += Turn(false, "(Baixe a voz Dii em Configurações › Voz do app para ouvir as respostas.)") }
+            val ok = AppVoice.speak(ctx, say) { scope.launch { if (active && phase == "falando") listen() } }
+            if (!ok) { phase = "pronto"; turns += Turn(false, "(Baixe uma voz em Configurações › Voz do app para ouvir as respostas.)") }
         }
     }
 
     listen = listen@{
         stopListening()
+        if (muted) { phase = "mudo"; return@listen }
         if (!granted) { perm.launch(Manifest.permission.RECORD_AUDIO); return@listen }
         val r = runCatching { SpeechRecognizers.create(ctx) }.getOrNull() ?: run { phase = "pronto"; return@listen }
         recognizer = r
@@ -139,10 +160,18 @@ fun LiveVoiceScreen(nav: NavController) {
         })
     }
 
-    DisposableEffect(Unit) { onDispose { active = false; DiiVoice.stop(); stopListening() } }
+    DisposableEffect(Unit) { onDispose { active = false; AppVoice.stop(); stopListening() } }
+
+    fun startCall() {
+        active = true; callStart = System.currentTimeMillis(); turns.clear()
+        phase = "falando"
+        val hello = if (AppVoice.speak(ctx, "Oi! Pode falar, estou ouvindo.") { scope.launch { if (active) listen() } }) true else { listen(); false }
+        if (hello) turns += Turn(false, "Oi! Pode falar, estou ouvindo.")
+    }
+    fun hangUp() { active = false; AppVoice.stop(); stopListening(); phase = "pronto"; callStart = 0L }
 
     Scaffold(containerColor = c.bg, topBar = {
-        CueTopBar("Conversa por voz", { nav.popBackStack() }) {
+        CueTopBar("Live Audio", { hangUp(); nav.popBackStack() }) {
             FilterChip(useAgent, { useAgent = !useAgent }, { Text(if (useAgent) "Agente" else "Rápido") },
                 leadingIcon = { Icon(if (useAgent) Icons.Rounded.SmartToy else Icons.Rounded.Bolt, null, Modifier.size(16.dp)) })
         }
@@ -150,9 +179,15 @@ fun LiveVoiceScreen(nav: NavController) {
         Column(Modifier.padding(pad).fillMaxSize(), horizontalAlignment = Alignment.CenterHorizontally) {
             if (!hasVoice) Row(Modifier.padding(12.dp).fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(c.warn.copy(alpha = .12f)).clickable { nav.navigate("settings") }.padding(12.dp)) {
                 Icon(Icons.Rounded.RecordVoiceOver, null, tint = c.warn); Spacer(Modifier.width(8.dp))
-                Text("Baixe a voz Dii em Configurações › Voz do app para ouvir as respostas na hora.", fontSize = 13.sp)
+                Text("Baixe uma voz em Configurações › Voz do app para ouvir as respostas na hora.", fontSize = 13.sp)
             }
-            LazyColumn(Modifier.weight(1f).fillMaxWidth().padding(horizontal = 16.dp), state = list, verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            // Cabeçalho de chamada
+            Text("Assistente", fontSize = 22.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(top = 12.dp))
+            val secs = if (callStart > 0) ((now - callStart) / 1000).coerceAtLeast(0) else 0
+            Text(if (callStart > 0) "%02d:%02d".format(secs / 60, secs % 60) + " · " + when (phase) {
+                    "ouvindo" -> "ouvindo"; "pensando" -> "pensando"; "falando" -> "falando"; "mudo" -> "microfone mudo"; else -> "em chamada" }
+                else "Simulação de ligação por voz", color = c.ink3, fontSize = 13.sp)
+            LazyColumn(Modifier.weight(1f).fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp), state = list, verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 items(turns) { t ->
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = if (t.me) Arrangement.End else Arrangement.Start) {
                         Text(t.text, Modifier.widthIn(max = 300.dp).clip(RoundedCornerShape(16.dp)).background(if (t.me) c.accent.copy(alpha = .16f) else c.surface).padding(12.dp), fontSize = 15.sp)
@@ -160,25 +195,36 @@ fun LiveVoiceScreen(nav: NavController) {
                 }
             }
             if (partial.isNotBlank()) Text(partial, Modifier.padding(horizontal = 24.dp), color = c.ink3, fontSize = 14.sp, textAlign = TextAlign.Center)
-            // Esfera: toque para começar/interromper.
             val pulse = rememberInfiniteTransition(label = "orb")
             val breathe by pulse.animateFloat(1f, 1.08f, infiniteRepeatable(tween(900), RepeatMode.Reverse), label = "b")
             val sc = when (phase) { "ouvindo" -> 1f + level * 0.35f; "falando", "pensando" -> breathe; else -> 1f }
-            Box(Modifier.padding(28.dp).size(150.dp).scale(sc).clip(CircleShape)
+            Box(Modifier.padding(18.dp).size(130.dp).scale(sc).clip(CircleShape)
                 .background(Brush.radialGradient(listOf(c.accent, c.accent.copy(alpha = .35f))))
                 .clickable {
-                    when (phase) {
-                        "falando" -> { DiiVoice.stop(); active = true; listen() }  // interrompe e já ouve
-                        "ouvindo" -> { active = false; stopListening(); phase = "pronto" }
-                        "pensando" -> {}
-                        else -> { active = true; listen() }
+                    when {
+                        callStart == 0L -> startCall()
+                        phase == "falando" -> { AppVoice.stop(); listen() }  // interrompe e já ouve
+                        phase == "pronto" -> listen()
                     }
                 }, contentAlignment = Alignment.Center) {
-                Icon(when (phase) { "ouvindo" -> Icons.Rounded.Mic; "falando" -> Icons.Rounded.GraphicEq; "pensando" -> Icons.Rounded.MoreHoriz; else -> Icons.Rounded.MicNone },
-                    null, Modifier.size(56.dp), tint = c.bg)
+                Icon(when (phase) { "ouvindo" -> Icons.Rounded.Mic; "falando" -> Icons.Rounded.GraphicEq; "pensando" -> Icons.Rounded.MoreHoriz; "mudo" -> Icons.Rounded.MicOff; else -> Icons.Rounded.MicNone },
+                    null, Modifier.size(50.dp), tint = c.bg)
             }
-            Text(when (phase) { "ouvindo" -> "Ouvindo… fale à vontade"; "pensando" -> "Pensando…"; "falando" -> "Falando — toque para interromper"; else -> "Toque para conversar" },
-                color = c.ink2, fontWeight = FontWeight.Medium, modifier = Modifier.padding(bottom = 28.dp))
+            // Controles da chamada
+            Row(Modifier.padding(bottom = 28.dp), horizontalArrangement = Arrangement.spacedBy(28.dp), verticalAlignment = Alignment.CenterVertically) {
+                if (callStart == 0L) {
+                    Button({ startCall() }, colors = ButtonDefaults.buttonColors(containerColor = c.ok), shape = CircleShape, modifier = Modifier.size(68.dp), contentPadding = PaddingValues(0.dp)) {
+                        Icon(Icons.Rounded.Call, "Ligar", Modifier.size(30.dp))
+                    }
+                } else {
+                    FilledTonalIconButton({ muted = !muted; if (muted) { stopListening(); phase = "mudo" } else listen() }, Modifier.size(56.dp)) {
+                        Icon(if (muted) Icons.Rounded.MicOff else Icons.Rounded.Mic, if (muted) "Ativar microfone" else "Mudo")
+                    }
+                    Button({ hangUp() }, colors = ButtonDefaults.buttonColors(containerColor = c.err), shape = CircleShape, modifier = Modifier.size(68.dp), contentPadding = PaddingValues(0.dp)) {
+                        Icon(Icons.Rounded.CallEnd, "Encerrar", Modifier.size(30.dp))
+                    }
+                }
+            }
         }
     }
 }
