@@ -89,7 +89,7 @@ object WfFormat {
     private val IMG_KEYS = listOf("image", "imageUrl", "image_url", "urlToImage", "thumbnail", "thumbnailUrl", "thumb", "picture", "photo", "cover", "avatar", "icon", "logo", "media")
     private val URL_KEYS = listOf("url", "link", "href", "webLink", "web_link", "permalink", "htmlUrl", "html_url", "webViewLink")
 
-    /** Primeira imagem do item: campos de imagem ou anexos image/*. */
+    /** Primeira imagem do item: campos de imagem ou anexos de imagem. */
     internal fun imageOf(o: JsonObject): String? {
         o.raw(IMG_KEYS)?.let { v ->
             (v.str() ?: (v as? JsonObject)?.let { it["url"]?.str() ?: it["src"]?.str() } ?: (v as? JsonArray)?.firstOrNull()?.let { it.str() ?: (it as? JsonObject)?.get("url")?.str() })
