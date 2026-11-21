@@ -1,5 +1,7 @@
 name: voice-lab
 on:
+  push:
+    paths: ["tools/voice_lab/**", ".github/workflows/voice-lab.yml"]
   workflow_dispatch:
     inputs:
       repo:
@@ -16,7 +18,7 @@ jobs:
       - run: pip install --quiet onnx onnxruntime huggingface_hub numpy soundfile sherpa-onnx
       - name: Lab
         working-directory: tools/voice_lab
-        env: { VOICE_REPO: "${{ inputs.repo }}" }
+        env: { VOICE_REPO: "${{ inputs.repo || 'OpenVoiceOS/pipertts_pt-PT_dii' }}" }
         run: python lab.py
       - uses: actions/upload-artifact@v4
         with:
