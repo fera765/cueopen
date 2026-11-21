@@ -78,7 +78,7 @@ model, name, threads, ns, nw, ls = sys.argv[1], sys.argv[2], int(sys.argv[3]), f
 texts = json.loads(sys.argv[7]); tokens = sys.argv[8]
 t0 = time.time()
 cfg = sherpa_onnx.OfflineTtsConfig(model=sherpa_onnx.OfflineTtsModelConfig(vits=sherpa_onnx.OfflineTtsVitsModelConfig(
-    model=model, tokens=tokens, data_dir="espeak-ng-data", noise_scale=ns, noise_scale_w=nw, length_scale=ls),
+    model=model, lexicon="", tokens=tokens, data_dir="espeak-ng-data", noise_scale=ns, noise_scale_w=nw, length_scale=ls),
     num_threads=threads, provider="cpu"), max_num_sentences=1)
 tts = sherpa_onnx.OfflineTts(cfg)
 load = time.time() - t0
