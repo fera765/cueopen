@@ -7,7 +7,7 @@ import importlib.util
 spec = importlib.util.spec_from_file_location("t", os.path.join(os.path.dirname(__file__), "tune_lib2.py")); t = importlib.util.module_from_spec(spec); spec.loader.exec_module(t)
 VID = sys.argv[1]
 P = {"cadu": (0.5, 0.5, 1.08), "faber": (0.333, 0.5, 1.08), "lessac": (0.333, 0.8, 1.0), "ryan": (0.333, 0.8, 1.15)}[VID]
-LEX = {"cadu": [(r"(?<![^\W\d_])criei(?![^\W\d_])", "criiêi")], "faber": [(r"(?<![^\W\d_])(?<!eu )criei(?![^\W\d_])", "eu criei")],
+LEX = {"cadu": [(r"(?<![^\W\d_])(?<!eu )criei(?![^\W\d_])", "eu criei")], "faber": [(r"(?<![^\W\d_])(?<!eu )criei(?![^\W\d_])", "eu criei")],
        "ryan": [(r"(?<![^\W\d_])saved(?![^\W\d_])", "save'd")]}.get(VID, [])
 def prep(s):
     s = t.normalize(s) if t.PT else s

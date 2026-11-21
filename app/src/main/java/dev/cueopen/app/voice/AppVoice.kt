@@ -188,7 +188,7 @@ object AppVoice {
      * Só muda o texto enviado à voz; o que aparece na tela continua igual.
      */
     private val LEX: Map<String, List<Pair<Regex, String>>> = mapOf(
-        "cadu" to listOf(Regex("(?<![\\p{L}])criei(?![\\p{L}])", RegexOption.IGNORE_CASE) to "criiêi"),
+        "cadu" to listOf(Regex("(?<![\\p{L}])(?<!eu )criei(?![\\p{L}])", RegexOption.IGNORE_CASE) to "eu criei"),
         "faber" to listOf(Regex("(?<![\\p{L}])(?<!eu )criei(?![\\p{L}])", RegexOption.IGNORE_CASE) to "eu criei"),
         "ryan" to listOf(Regex("(?<![\\p{L}])saved(?![\\p{L}])", RegexOption.IGNORE_CASE) to "save'd"),
     )
