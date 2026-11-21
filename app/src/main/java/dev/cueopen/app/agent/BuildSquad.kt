@@ -244,7 +244,7 @@ if(!w.__fluwySquad){
  try{S.mo=new MutationObserver(function(ms){var add=[];ms.forEach(function(m){
    (m.type==='childList'?m.addedNodes:[m.target]).forEach(function(n){var el=n.nodeType===1?n:n.parentElement;
     if(!el||!el.isConnected||el.id==='__fluwy_squad'||(el.closest&&el.closest('#__fluwy_squad'))||el.tagName==='STYLE'||el.tagName==='SCRIPT')return;add.push(el);});});
-  if(!add.length)return;var nw=Date.now();S.lastMut=nw;
+  if(!add.length)return;S.lastMut=Date.now();var nw=S.lastMut;
   // Página que muda sozinha (ticker, relógio, carrossel): sem animação, senão o renderer do celular cai.
   S.bursts=(S.bursts||[]).filter(function(t){return nw-t<5000;});S.bursts.push(nw);if(S.bursts.length>12||S.calm){S.calm=S.bursts.length>6;return;}
   if(nw-(S.lastAnim||0)<500)return;S.lastAnim=nw;
