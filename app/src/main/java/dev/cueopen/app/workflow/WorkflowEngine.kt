@@ -213,6 +213,40 @@ object WorkflowEngine {
         }
     }
 
+    /**
+     * Publicar = testar ponta a ponta antes. Versão já testada com sucesso publica direto; senão roda o teste completo
+     * (leituras reais, envios simulados) e só ativa se tudo passar. Devolve (publicou, mensagem).
+     */
+    suspend fun publishTested(ctx: Context, wfId: String): Pair<Boolean, String> {
+        val w = WorkflowStore.get(wfId) ?: return false to "Fluxo não encontrado."
+        WfLogic.problems(w).filterNot { it.contains("não está ligado a nada") }.takeIf { it.isNotEmpty() }?.let { return false to "Corrija antes de publicar:\n• " + it.joinToString("\n• ") }
+        if (w.testedSig != WfLogic.signature(w)) {
+            val id = start(wfId, trigger = "test").getOrElse { return false to (it.message ?: "Não foi possível testar.") }
+            val r = awaitRun(id, 6 * 60_000L) ?: return false to "O teste passou de 6 min; não publiquei."
+            if (r.status != "ok") return false to "O teste falhou; não publiquei.\n" + (r.steps.firstOrNull { it.status == "error" }?.let { "${it.label}: ${it.error.take(400)}" } ?: r.error.take(400))
+        }
+        val cur = WorkflowStore.get(wfId) ?: return false to "Fluxo não encontrado."
+        if (cur.testedSig != WfLogic.signature(cur)) return false to "O fluxo mudou durante o teste; teste de novo."
+        val p = WorkflowStore.upsert(cur.copy(enabled = true)); WorkflowScheduler.sync(ctx, p)
+        return true to "Testado de ponta a ponta e publicado."
+    }
+
+    fun publish(ctx: Context, wfId: String, onDone: (Boolean, String) -> Unit) {
+        scope.launch { val r = publishTested(ctx, wfId); withContext(Dispatchers.Main) { onDone(r.first, r.second) } }
+    }
+
+    /** Envio externo no teste: valida o conteúdo e devolve o que SERIA enviado, sem acionar nada. */
+    private fun simulated(node: WfNode, target: String, payload: String): NodeResult {
+        if (WfQuality.isEmailSend(node)) runCatching { Json.parseToJsonElement(payload) as JsonObject }.getOrNull()
+            ?.let { WfQuality.emailProblem(it) }?.let { return NodeResult(error = "$it (teste: nada foi enviado)") }
+        if (payload.isNotBlank()) Regex("\\{\\{[^}]*\\}\\}").find(payload)?.let { return NodeResult(error = "Campo não preenchido no envio: ${it.value} (teste: nada foi enviado)") }
+        return NodeResult(buildJsonObject {
+            put("simulated", true); put("target", target)
+            put("would_send", runCatching { Json.parseToJsonElement(payload) }.getOrElse { kotlinx.serialization.json.JsonPrimitive(payload.take(8_000)) })
+            put("note", "Teste: envio externo simulado — nada saiu do celular.")
+        }.toString())
+    }
+
     data class NodeResult(val output: String = "", val port: String? = null, val error: String? = null, val sessionId: String? = null)
 
     private suspend fun runNode(w: Workflow, run: WfRun, node: WfNode, prev: String, r: (String) -> String, rh: (String, Boolean) -> String, rt: (String, Int) -> String, setStatus: (String) -> Unit): NodeResult {
@@ -240,7 +274,8 @@ object WorkflowEngine {
                 val msg = "[Fluxo automático \"${w.name}\" — ninguém está acompanhando agora; execute e responda com o resultado final, sem perguntas. " +
                     "Os dados que vieram dos nós anteriores já estão nesta mensagem: use-os direto, não busque de novo nos conectores. " +
                     "Seja econômico: prefira web_search e web_fetch (no máximo ~6 consultas); só use o navegador se for indispensável. " +
-                    "Links: use o endereço direto da fonte (nunca links de redirecionamento como news.google.com/read).]\n\n$prompt"
+                    "Links: use o endereço direto da fonte (nunca links de redirecionamento como news.google.com/read)." +
+                    (if (run.trigger == "test") " MODO TESTE: pesquise e leia de verdade, mas NÃO envie nada para fora (e-mail, mensagem, POST, publicação, compra); descreva o que enviaria." else "") + "]\n\n$prompt"
                 val maxSteps = (r("maxSteps").toIntOrNull() ?: 14).coerceIn(3, 40)
                 val budget = (r("budget").toLongOrNull() ?: 200_000L).coerceIn(30_000L, 1_500_000L)
                 val finished = withTimeoutOrNull(timeoutMin * 60_000L) { app.agent.runBudgeted(session.id, msg, maxSteps, budget); true }
@@ -272,17 +307,32 @@ object WorkflowEngine {
                     runCatching { Json.parseToJsonElement(camposText) as JsonObject }.getOrElse { return NodeResult(error = "Campos não são um objeto JSON válido depois de preencher os valores: ${camposText.take(300)}") }
                 }
                 if (WfQuality.isEmailSend(node)) WfQuality.emailProblem(campos)?.let { return NodeResult(error = "$it Nada foi enviado.") }
-                val o = WfConnectors.run(app.store, node.config["source"].orEmpty().ifBlank { WfConnectors.HUB }, r("conector").trim(), r("acao").trim(), campos, r("conexao").trim())
+                val kind = node.config["source"].orEmpty().ifBlank { WfConnectors.HUB }
+                // E-mail sai sempre em HTML formatado (Markdown → HTML com estilos inline) + versão em texto.
+                val sendCampos = if (WfQuality.isEmailSend(node)) {
+                    val keys = runCatching { WfConnectors.fields(app.store, kind, r("conector").trim(), r("acao").trim(), r("conexao").trim()).map { it.key }.toSet() }.getOrDefault(emptySet())
+                    WfEmail.prepare(campos, keys)
+                } else campos
+                if (run.trigger == "test" && WfQuality.isExternalSend("connector", node.config))
+                    return simulated(node, "${r("conector").trim()} · ${r("acao").trim()}", sendCampos.toString())
+                val o = WfConnectors.run(app.store, kind, r("conector").trim(), r("acao").trim(), sendCampos, r("conexao").trim())
                 NodeResult(o.output, error = o.error)
             }
             "mcp" -> {
                 val argsText = r("args").ifBlank { "{}" }
                 val args = runCatching { Json.parseToJsonElement(argsText) as JsonObject }.getOrElse { return NodeResult(error = "Argumentos não são um objeto JSON válido: ${argsText.take(300)}") }
+                if (run.trigger == "test" && WfQuality.isExternalSend("mcp", node.config)) return simulated(node, r("tool").trim(), args.toString())
                 val out = dev.cueopen.app.connectors.Connectors.callTool(app.store, r("tool").trim(), args)
                 if (Regex("^\\s*(ERRO|ERROR|RECUSADO|Falha)", RegexOption.IGNORE_CASE).containsMatchIn(out)) NodeResult(error = out.take(1_500)) else NodeResult(out)
             }
 
             "http" -> withContext(Dispatchers.IO) {
+                val method = r("method").ifBlank { "GET" }
+                if (run.trigger == "test" && WfQuality.isExternalSend("http", node.config, method)) {
+                    val url = r("url").trim()
+                    if (!Regex("^https?://[^\\s/]+\\.[^\\s]+").containsMatchIn(url)) return@withContext NodeResult(error = "URL inválida: ${url.take(200)}")
+                    return@withContext simulated(node, "${method.uppercase()} $url", r("body"))
+                }
                 val res = http(r("method").ifBlank { "GET" }, r("url").trim(), r("headers"), r("body"), (r("timeout").toIntOrNull() ?: 30).coerceIn(1, 300))
                 // "Continuar": o erro vira dado ({status, error}) para um nó Condição decidir o caminho.
                 if (res.error != null && node.config["onError"] == "continue")
@@ -293,6 +343,7 @@ object WorkflowEngine {
             "shell" -> {
                 val cmd = r("command").trim()
                 if (cmd.isBlank()) return NodeResult(error = "Comando vazio.")
+                if (run.trigger == "test" && WfQuality.isExternalSend("shell", mapOf("command" to cmd))) return simulated(node, "comando que envia para fora", cmd)
                 if (!app.sandbox.isInstalled()) return NodeResult(error = "O Linux do app não está instalado (Configurações › Sandbox).")
                 val res = app.sandbox.exec(dev.cueopen.app.sandbox.InteractivePrompts.ENV + " ; " + cmd + " < /dev/null",
                     cwd = "/root/workspace", timeoutSec = (r("timeout").toLongOrNull() ?: 120L).coerceIn(5, 1_800))
@@ -315,6 +366,8 @@ object WorkflowEngine {
 
             "approval" -> {
                 val q = r("question").ifBlank { "Posso continuar?" }
+                WfQuality.contentProblem("A pergunta de aprovação", q)?.let { return NodeResult(error = it) }
+                if (run.trigger == "test") return NodeResult("aprovado (teste: aprovação simulada; o envio seguinte também é simulado)", port = "true")
                 val d = CompletableDeferred<Boolean>()
                 approvals["${run.id}|${node.id}"] = d
                 setStatus("waiting")
@@ -360,8 +413,8 @@ object WorkflowEngine {
                 }.toString(), port = if (ok) "true" else "false")
                 when {
                     // Teste nunca dispara o envio de verdade (ex.: responder um cliente): segue por "não".
-                    run.trigger == "test" -> NodeResult(buildJsonObject { put("approved", false); put("draft", draft); put("decided_by", "teste")
-                        put("note", "teste: nada foi enviado; em execução real " + (if (auto) "segue sozinho (automático)" else "espera a sua aprovação na página de revisão")) }.toString(), port = "false")
+                    run.trigger == "test" -> NodeResult(buildJsonObject { put("approved", true); put("draft", draft); put("decided_by", "teste")
+                        put("note", "teste: aprovação simulada para testar o caminho todo; o envio seguinte é simulado. Em execução real " + (if (auto) "segue sozinho (automático)" else "espera a sua aprovação na página de revisão")) }.toString(), port = "true")
                     auto -> out(true, draft, "automático")
                     else -> {
                         val key = "${run.id}|${node.id}"

@@ -121,4 +121,49 @@ class WfScenarioTest {
     @Test fun s44_gfmLinkMarkdownIntacto() { assertEquals("[a](https://a.com)", GfmPrep.normalize("[a](https://a.com)")) }
     @Test fun s45_gfmCodigoIntacto() { val s = "```\n- [ ] x https://a.com\n```"; assertEquals(s, GfmPrep.normalize(s)) }
     @Test fun s46_gfmTabelaIntacta() { val s = "| a | b |\n|---|---|\n| 1 | 2 |"; assertEquals(s, GfmPrep.normalize(s)) }
+
+    // ── teste "mock real": leituras reais, envios simulados ──
+    private fun send(type: String, vararg c: Pair<String, String>) = WfQuality.isExternalSend(type, mapOf(*c))
+    @Test fun s47_conectorEnvioSimulado() {
+        assertTrue(send("connector", "acao" to "send_email")); assertTrue(send("connector", "acao" to "reply_to_email"))
+        assertTrue(send("connector", "acao" to "create_row")); assertTrue(send("connector", "acao" to "slack_post_message"))
+        assertTrue(send("connector", "acao" to ""))  // na dúvida, simula
+    }
+    @Test fun s48_conectorLeituraReal() {
+        assertTrue(!send("connector", "acao" to "gmail_search_email")); assertTrue(!send("connector", "acao" to "get_rows"))
+        assertTrue(!send("connector", "acao" to "list_events")); assertTrue(!send("connector", "acao" to "read_file"))
+    }
+    @Test fun s49_httpMetodo() {
+        assertTrue(!send("http", "method" to "GET")); assertTrue(!send("http")); assertTrue(send("http", "method" to "POST"))
+        assertTrue(send("http", "method" to "delete")); assertTrue(send("http", "method" to "PUT"))
+    }
+    @Test fun s50_shell() {
+        assertTrue(send("shell", "command" to "curl -X POST https://h.com -d x")); assertTrue(send("shell", "command" to "git push origin main"))
+        assertTrue(send("shell", "command" to "echo oi | sendmail a@b.com"))
+        assertTrue(!send("shell", "command" to "curl -s https://api.site.com/dados | jq .")); assertTrue(!send("shell", "command" to "ls -la"))
+    }
+    @Test fun s51_mcp() { assertTrue(send("mcp", "tool" to "notion_create_page")); assertTrue(!send("mcp", "tool" to "notion_search")) }
+    @Test fun s52_outrosNaoSaem() { assertTrue(!send("ai")); assertTrue(!send("notify")); assertTrue(!send("if")) }
+
+    // ── e-mail em HTML ──
+    private fun jo(s: String) = Json.parseToJsonElement(s) as JsonObject
+    private fun str(o: JsonObject, k: String) = (o[k] as kotlinx.serialization.json.JsonPrimitive).content
+    @Test fun s53_markdownViraHtml() {
+        val h = WfEmail.toHtml("# Título\n\nOlá **Ana**, veja [o site](https://a.com).\n\n- um\n- dois\n\n| A | B |\n|---|---|\n| 1 | 2 |\n\n> nota\n\n```\nx<1\n```")
+        listOf("<h1", "<strong>Ana</strong>", "<a href=\"https://a.com\"", "<ul", "<li", "<table", "<th", "<td", "<blockquote", "<pre", "x&lt;1").forEach { assertTrue("$it em $h", h.contains(it)) }
+    }
+    @Test fun s54_escapaHtmlDoTexto() { assertTrue(WfEmail.toHtml("a <script>x</script>").contains("&lt;script&gt;")) }
+    @Test fun s55_prepareBodyHtml() {
+        val o = WfEmail.prepare(jo("{\"receiver\":[\"a@b.com\"],\"subject\":\"S\",\"body_text\":\"**oi**\"}"), setOf("receiver", "subject", "body_text", "body_html"))
+        assertTrue(str(o, "body_html").startsWith("<!DOCTYPE html>")); assertTrue(str(o, "body_html").contains("<strong>oi</strong>")); assertEquals("oi", str(o, "body_text"))
+    }
+    @Test fun s56_prepareBodyType() {
+        val o = WfEmail.prepare(jo("{\"receiver\":[\"a@b.com\"],\"subject\":\"S\",\"body_text\":\"oi\"}"), setOf("receiver", "subject", "body_type", "body"))
+        assertEquals("html", str(o, "body_type")); assertTrue(str(o, "body").contains("<p")); assertTrue(!o.containsKey("body_text"))
+    }
+    @Test fun s57_htmlProntoMantido() {
+        val o = WfEmail.prepare(jo("{\"subject\":\"S\",\"body_text\":\"<p>Oi <b>Ana</b></p>\"}"), setOf("body_html", "body_text"))
+        assertTrue(str(o, "body_html").contains("<p>Oi <b>Ana</b></p>")); assertEquals("Oi Ana", str(o, "body_text"))
+    }
+    @Test fun s58_tarefasNoEmail() { assertTrue(WfEmail.toHtml("- [x] feito").contains("☑ feito")) }
 }

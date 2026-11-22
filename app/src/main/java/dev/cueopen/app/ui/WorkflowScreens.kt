@@ -304,7 +304,8 @@ fun WorkflowsScreen(nav: NavController) {
                                 Text("Agendamento", fontSize = 12.sp, color = c.ink3, modifier = Modifier.weight(1f))
                                 Switch(checked = w.enabled, onCheckedChange = { on ->
                                     if (on && WfLogic.problems(w).any { !it.contains("não está ligado") }) nav.navigate("workflow/${w.id}")
-                                    else { val v = WorkflowStore.upsert(w.copy(enabled = on)); WorkflowScheduler.sync(ctx, v) }
+                                    else if (on) WorkflowEngine.publish(ctx, w.id) { ok, msg -> if (!ok) android.widget.Toast.makeText(ctx, msg.take(300), android.widget.Toast.LENGTH_LONG).show() }
+                                    else { val v = WorkflowStore.upsert(w.copy(enabled = false)); WorkflowScheduler.sync(ctx, v) }
                                 }, modifier = Modifier.scale(0.85f))
                             }
                         }
@@ -477,9 +478,10 @@ fun WorkflowEditorScreen(nav: NavController, id: String) {
                 }
             },
             actions = {
-                if (w.nodes.any { it.type == "trigger_schedule" }) Switch(checked = w.enabled, onCheckedChange = { on ->
+                if (w.nodes.any { it.type == "trigger_schedule" || it.type == "trigger_webhook" }) Switch(checked = w.enabled, onCheckedChange = { on ->
                     if (on && problems.any { !it.contains("não está ligado") }) { problemsOpen = true }
-                    else { val v = WorkflowStore.upsert(w.copy(enabled = on)); WorkflowScheduler.sync(ctx, v); toast = if (on) "Agendamento ligado" else "Agendamento desligado" }
+                    else if (on) { toast = "Testando de ponta a ponta antes de publicar…"; WorkflowEngine.publish(ctx, w.id) { _, msg -> toast = msg.take(300) } }
+                    else { val v = WorkflowStore.upsert(w.copy(enabled = false)); WorkflowScheduler.sync(ctx, v); toast = "Desligado" }
                 }, modifier = Modifier.padding(end = 4.dp))
                 IconButton({ history = true }) {
                     BadgedBox(badge = { if (active?.status == "waiting") Badge(containerColor = c.warn) }) { Icon(Icons.Rounded.History, "Execuções") }

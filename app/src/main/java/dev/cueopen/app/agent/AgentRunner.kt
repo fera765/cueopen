@@ -145,6 +145,7 @@ class AgentRunner(
      * Agente parado ou em espera: envia na hora, como antes.
      */
     fun sendOrQueue(sessionId: String, text: String, quotedReply: String? = null, attachments: List<String> = emptyList()): Job {
+        runCatching { dev.cueopen.app.notify.NotificationCenter.markRead(sessionId) } // respondeu: some da barra
         // Ordem de parar: interrompe tudo na hora (não entra na fila) e, se pedida, faz só a entrega final.
         StopIntent.parse(text).takeIf { it.stop }?.let { return stopAndDeliver(sessionId, text, it.deliver, quotedReply) }
         val session = store.session(sessionId)
@@ -1514,6 +1515,7 @@ class AgentRunner(
     // ------------------------------------------------------------------ ask_question / ask_secure (respostas da UI)
     /** O usuário respondeu o card de perguntas: marca respondido e retoma a tarefa com as respostas. */
     fun answerQuestion(sessionId: String, item: ChatItem.Question, answers: List<List<String>>) {
+        runCatching { dev.cueopen.app.notify.NotificationCenter.markRead(sessionId) } // respondeu: some da barra
         val cur = store.session(sessionId)?.items?.firstOrNull { it.id == item.id } as? ChatItem.Question ?: return
         if (cur.state != "pending") return
         store.replaceItem(sessionId, cur.copy(answers = answers, state = "answered"))
@@ -3718,7 +3720,7 @@ class AgentRunner(
             "Actions: list | get | create | update | validate | test | status | publish | run | disable | delete. " +
             "workflow_json = {name, nodes:[{id, type, label, config}], edges:[{from, to, port}]} (ids curtos como t1, h1, a1; layout é automático). Tipos e config (valores em texto): " +
             "trigger_manual; trigger_schedule (mode=interval|daily|weekly, minutes, time HH:mm, weekday 1-7 — ou when=\"frase do usuário\", ex. \"a cada 2 minutos\", \"todo dia às 8h\", \"toda segunda 18:30\"; roda com o app aberto, em segundo plano ou fechado). " +
-            "E-MAIL DE DESTINO: nunca invente nem use exemplo (x@y.com, email@exemplo.com). Se o fluxo envia e-mail e o usuário não disse o destino, pergunte com ask_question (opções: o e-mail da conta conectada, se souber, + allow_other) ou ask_secure se ele preferir não expor; coloque em campos.receiver e envie pelo conector de e-mail dele (gmail send_email). O fluxo só é aceito/publicado com destinatário real, assunto e corpo. WEBHOOK: trigger_webhook {repo dono/repo, issue N, secret ≥12 caracteres} — quem chama posta um comentário na issue (1ª linha = segredo, resto = payload JSON), use {{trigger.payload.campo}}. NOTIFY open=chat abre uma conversa do fluxo com o conteúdo (Markdown GitHub: tabelas, links, listas). Portão: título/texto/corpo vazios, {{…}} sem valor ou JSON cru fazem o teste falhar e bloqueiam a publicação — corrija e teste de novo. QUANDO EXECUTAR: se o pedido é recorrente e o usuário NÃO disse quando, ANTES do create chame ask_question UMA vez com no máximo 2 perguntas diretas, opções de rádio e allow_other=true " +
+            "E-MAIL DE DESTINO: nunca invente nem use exemplo (x@y.com, email@exemplo.com). Se o fluxo envia e-mail e o usuário não disse o destino, pergunte com ask_question (opções: o e-mail da conta conectada, se souber, + allow_other) ou ask_secure se ele preferir não expor; coloque em campos.receiver e envie pelo conector de e-mail dele (gmail send_email). O fluxo só é aceito/publicado com destinatário real, assunto e corpo. FORMATO: corpo de e-mail em Markdown limpo (títulos, listas, tabelas, links) — o app converte para HTML de e-mail com estilos inline; notificação/página/chat usam Markdown estilo GitHub. TESTE e PUBLICAÇÃO: action=test lê de verdade (sites, buscas, e-mails, APIs GET) mas simula todo envio externo (e-mail, POST, webhook, ações de escrita) e valida o conteúdo; action=publish roda esse teste ponta a ponta e só ativa se passar. WEBHOOK: trigger_webhook {repo dono/repo, issue N, secret ≥12 caracteres} — quem chama posta um comentário na issue (1ª linha = segredo, resto = payload JSON), use {{trigger.payload.campo}}. NOTIFY open=chat abre uma conversa do fluxo com o conteúdo (Markdown GitHub: tabelas, links, listas). Portão: título/texto/corpo vazios, {{…}} sem valor ou JSON cru fazem o teste falhar e bloqueiam a publicação — corrija e teste de novo. QUANDO EXECUTAR: se o pedido é recorrente e o usuário NÃO disse quando, ANTES do create chame ask_question UMA vez com no máximo 2 perguntas diretas, opções de rádio e allow_other=true " +
             "(ex.: header \"Frequência\": \"1x por dia\", \"A cada hora\", \"Dia e horário fixos\", \"Só quando eu mandar\"; e, se fizer sentido, header \"Horário\": \"08:00\", \"12:00\", \"18:00\"). " +
             "A resposta (inclusive o texto livre de \"Outra resposta\", ex. \"a cada 2 minutos\") vai em when=. Se o usuário já disse a frequência, não pergunte. \"Só quando eu mandar\" = trigger_manual. " +
             "ai (prompt, maxTokens) — chamada direta ao modelo SEM ferramentas: use para resumir/formatar/classificar/extrair dados (rápido; prefira a agent); " +
@@ -6019,10 +6021,13 @@ class AgentRunner(
                 val w = find() ?: return@runCatching "ERRO: fluxo não encontrado."
                 val v = validation(w)
                 if (v.isNotEmpty()) return@runCatching "ERRO: corrija antes de publicar:\n" + v.joinToString("\n") { "• $it" }
-                if (w.testedSig != logic.signature(w)) return@runCatching "ERRO: esta versão ainda não passou num teste completo. Rode action=test id=${w.id} primeiro."
-                val p = st.upsert(w.copy(enabled = true)); dev.cueopen.app.workflow.WorkflowScheduler.sync(ctx, p)
+                stopActive(w)
+                // Testa ponta a ponta (leituras reais, envios simulados) e só publica se passar.
+                val (okPub, msgPub) = engine.publishTested(ctx, w.id)
+                if (!okPub) return@runCatching "ERRO: $msgPub\nCorrija com action=update e publique de novo."
+                val p = st.get(w.id) ?: return@runCatching "ERRO: fluxo não encontrado."
                 val next = dev.cueopen.app.workflow.WorkflowScheduler.nextRuns(p, ctx).minOrNull()
-                "OK: publicado — " + describe(p) + (next?.let { "\nPróxima execução: " + java.text.SimpleDateFormat("dd/MM HH:mm", java.util.Locale("pt", "BR")).format(java.util.Date(it)) } ?: "\nSem agendamento: roda quando executado.")
+                "OK: testado de ponta a ponta e publicado — " + describe(p) + (next?.let { "\nPróxima execução: " + java.text.SimpleDateFormat("dd/MM HH:mm", java.util.Locale("pt", "BR")).format(java.util.Date(it)) } ?: "\nSem agendamento: roda quando executado.")
             }
             "run" -> find()?.let { w -> engine.start(w.id).fold({ "Execução iniciada (id $it). Veja o resultado com action=status id=${w.id}." }, { "ERRO: ${it.message}" }) } ?: "ERRO: fluxo não encontrado."
             "enable" -> "ERRO: use action=publish (valida e exige teste aprovado antes de ativar)."

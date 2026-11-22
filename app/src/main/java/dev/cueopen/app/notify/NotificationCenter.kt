@@ -47,7 +47,16 @@ object NotificationCenter {
     /** Notificações com quadro/rota publicadas agora (o app aberto mostra um aviso no topo). */
     val live: kotlinx.coroutines.flow.SharedFlow<Entry> = _live
     fun entry(id: Long): Entry? = _history.value.firstOrNull { it.id == id }
-    fun markEntryRead(id: Long) { _history.value = _history.value.map { if (it.id == id) it.copy(read = true) else it }.also { save(it) } }
+    fun markEntryRead(id: Long) {
+        _history.value = _history.value.map { if (it.id == id) it.copy(read = true) else it }.also { save(it) }
+        cancelSystem(listOf(id))
+    }
+
+    /** Tira da barra do Android as notificações (com quadro/rota) destas entradas. */
+    private fun cancelSystem(ids: List<Long>) {
+        if (!::app.isInitialized || ids.isEmpty()) return
+        runCatching { val nm = app.getSystemService(NotificationManager::class.java); ids.forEach { nm.cancel(SessionNotificationRouting.stableId("entry|$it")) } }
+    }
 
     const val CH_ATTENTION = "attention"
     const val CH_ALERTS = "alerts"
@@ -157,7 +166,9 @@ object NotificationCenter {
     fun pendingCount(): Int = _history.value.count { it.needsAction && !it.read }
 
     fun markRead(sessionId: String? = null) {
-        _history.value = _history.value.map { if (sessionId == null || it.sessionId == sessionId) it.copy(read = true) else it }.also { save(it) }
+        // Abriu/respondeu o chat: some da barra tudo que aponta para ele (da sessão ou do chat do fluxo).
+        if (sessionId != null) cancelSystem(_history.value.filter { it.sessionId == sessionId || it.route == "chat/$sessionId" }.map { it.id })
+        _history.value = _history.value.map { if (sessionId == null || it.sessionId == sessionId || it.route == "chat/$sessionId") it.copy(read = true) else it }.also { save(it) }
         if (::app.isInitialized && sessionId != null) runCatching {
             val nm = app.getSystemService(NotificationManager::class.java)
             Category.entries.forEach { nm.cancel(SessionNotificationRouting.stableId("$sessionId|$it")) }

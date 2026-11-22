@@ -122,4 +122,20 @@ object WfQuality {
         for (i in 0 until maxOf(x.size, y.size)) d = d or ((x.getOrElse(i) { 0 }.toInt()) xor (y.getOrElse(i) { 0 }.toInt()))
         return d == 0
     }
+
+    // ───────── Teste "mock real": leituras de verdade, envios externos simulados ─────────
+    private val READ_ACTION = Regex("(^|[_\\-. ])(get|list|search|read|find|fetch|query|retrieve|lookup|count|download|describe|show|view|check|status|watch|poll|info)([_\\-. ]|s?$)", RegexOption.IGNORE_CASE)
+    private val SHELL_SEND = Regex("(curl\\b[^|;&]*(\\s-X\\s*(POST|PUT|PATCH|DELETE)|\\s(-d|--data|-F|--form|-T|--upload-file)\\b))|\\bwget\\b[^|;&]*--post|\\b(sendmail|mailx?|mutt|ssmtp|scp|rsync|sftp|ftp|nc|ncat|telnet)\\b|\\bgit\\s+push\\b|\\bgh\\s+(issue|pr|release|api)\\b", RegexOption.IGNORE_CASE)
+
+    /**
+     * true = o nó manda algo para fora (e-mail, POST, webhook, ação de escrita num app). No teste ele NÃO é acionado:
+     * o conteúdo é validado e o envio é simulado. Na dúvida, conta como envio (mais seguro).
+     */
+    fun isExternalSend(type: String, config: Map<String, String>, renderedMethod: String = config["method"].orEmpty()): Boolean = when (type) {
+        "connector" -> !READ_ACTION.containsMatchIn(config["acao"].orEmpty().ifBlank { "send" })
+        "mcp" -> !READ_ACTION.containsMatchIn(config["tool"].orEmpty().ifBlank { "send" })
+        "http" -> renderedMethod.trim().uppercase().ifBlank { "GET" } !in setOf("GET", "HEAD", "OPTIONS")
+        "shell" -> SHELL_SEND.containsMatchIn(config["command"].orEmpty())
+        else -> false
+    }
 }
