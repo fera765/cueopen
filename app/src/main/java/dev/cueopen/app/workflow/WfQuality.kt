@@ -67,7 +67,7 @@ object WfQuality {
         val t = text.trim()
         return when {
             t.isEmpty() -> "$what ficou vazio."
-            Regex("\\{\\{[^}]*}}").containsMatchIn(t) -> "$what tem campos não preenchidos: ${Regex("\\{\\{[^}]*}}").find(t)!!.value}. Corrija o caminho e teste de novo."
+            Regex("\\{\\{[^}]*\\}\\}").containsMatchIn(t) -> "$what tem campos não preenchidos: ${Regex("\\{\\{[^}]*\\}\\}").find(t)!!.value}. Corrija o caminho e teste de novo."
             t.equals("null", true) || t.equals("undefined", true) || t == "[]" || t == "{}" -> "$what ficou sem conteúdo ($t)."
             !allowJson && WfFormat.isJson(t) -> "$what está como dados brutos (JSON). Use um nó de IA ou {{id | text}} para deixar legível."
             Regex("^\\s*(ERRO|ERROR|Exception|Traceback)", RegexOption.IGNORE_CASE).containsMatchIn(t) -> "$what contém uma mensagem de erro em vez do conteúdo."
