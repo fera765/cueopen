@@ -44,9 +44,11 @@ jobs:
           timeout 18300 python3 -m piper.train fit \
             --data.voice_name voz-br --data.csv_path ds/metadata.csv --data.audio_dir ds/wavs \
             --model.sample_rate 22050 --data.espeak_voice pt-br --data.cache_dir cache --data.config_path config.json \
-            --data.batch_size 16 --ckpt_path start.ckpt \
+            --data.batch_size 8 --data.num_workers 1 --ckpt_path start.ckpt \
             --trainer.accelerator cpu --trainer.devices 1 --trainer.max_epochs 100000 --trainer.max_time 00:05:00:00 \
-            --trainer.default_root_dir runs 2>&1 | grep -vE "^\s*$" | tail -40 || true
+            --trainer.default_root_dir runs > train.log 2>&1 &
+          P=$!; while kill -0 $P 2>/dev/null; do sleep 300; echo "--- $(date -u +%H:%M) mem: $(free -m | awk '/Mem/{print $3"/"$2" MB"}')"; tail -c 600 train.log | tr '\r' '\n' | tail -3; done
+          tail -60 train.log
           CK=$(ls -t $(find runs -name '*.ckpt') | head -1); echo "checkpoint: $CK"; mkdir -p out && cp "$CK" out/last.ckpt && cp config.json out/ && cp -r cache out/cache
       - name: Exporta e avalia (Whisper + UTMOS)
         run: |
@@ -79,9 +81,11 @@ jobs:
           timeout 18300 python3 -m piper.train fit \
             --data.voice_name voz-br --data.csv_path ds/metadata.csv --data.audio_dir ds/wavs \
             --model.sample_rate 22050 --data.espeak_voice pt-br --data.cache_dir cache --data.config_path config.json \
-            --data.batch_size 16 --ckpt_path start.ckpt \
+            --data.batch_size 8 --data.num_workers 1 --ckpt_path start.ckpt \
             --trainer.accelerator cpu --trainer.devices 1 --trainer.max_epochs 100000 --trainer.max_time 00:05:00:00 \
-            --trainer.default_root_dir runs 2>&1 | grep -vE "^\s*$" | tail -40 || true
+            --trainer.default_root_dir runs > train.log 2>&1 &
+          P=$!; while kill -0 $P 2>/dev/null; do sleep 300; echo "--- $(date -u +%H:%M) mem: $(free -m | awk '/Mem/{print $3"/"$2" MB"}')"; tail -c 600 train.log | tr '\r' '\n' | tail -3; done
+          tail -60 train.log
           CK=$(ls -t $(find runs -name '*.ckpt') | head -1); echo "checkpoint: $CK"; mkdir -p out && cp "$CK" out/last.ckpt && cp config.json out/ && cp -r cache out/cache
       - name: Exporta e avalia (Whisper + UTMOS)
         run: |
@@ -114,9 +118,11 @@ jobs:
           timeout 18300 python3 -m piper.train fit \
             --data.voice_name voz-br --data.csv_path ds/metadata.csv --data.audio_dir ds/wavs \
             --model.sample_rate 22050 --data.espeak_voice pt-br --data.cache_dir cache --data.config_path config.json \
-            --data.batch_size 16 --ckpt_path start.ckpt \
+            --data.batch_size 8 --data.num_workers 1 --ckpt_path start.ckpt \
             --trainer.accelerator cpu --trainer.devices 1 --trainer.max_epochs 100000 --trainer.max_time 00:05:00:00 \
-            --trainer.default_root_dir runs 2>&1 | grep -vE "^\s*$" | tail -40 || true
+            --trainer.default_root_dir runs > train.log 2>&1 &
+          P=$!; while kill -0 $P 2>/dev/null; do sleep 300; echo "--- $(date -u +%H:%M) mem: $(free -m | awk '/Mem/{print $3"/"$2" MB"}')"; tail -c 600 train.log | tr '\r' '\n' | tail -3; done
+          tail -60 train.log
           CK=$(ls -t $(find runs -name '*.ckpt') | head -1); echo "checkpoint: $CK"; mkdir -p out && cp "$CK" out/last.ckpt && cp config.json out/ && cp -r cache out/cache
       - name: Exporta e avalia (Whisper + UTMOS)
         run: |
@@ -149,9 +155,11 @@ jobs:
           timeout 18300 python3 -m piper.train fit \
             --data.voice_name voz-br --data.csv_path ds/metadata.csv --data.audio_dir ds/wavs \
             --model.sample_rate 22050 --data.espeak_voice pt-br --data.cache_dir cache --data.config_path config.json \
-            --data.batch_size 16 --ckpt_path start.ckpt \
+            --data.batch_size 8 --data.num_workers 1 --ckpt_path start.ckpt \
             --trainer.accelerator cpu --trainer.devices 1 --trainer.max_epochs 100000 --trainer.max_time 00:05:00:00 \
-            --trainer.default_root_dir runs 2>&1 | grep -vE "^\s*$" | tail -40 || true
+            --trainer.default_root_dir runs > train.log 2>&1 &
+          P=$!; while kill -0 $P 2>/dev/null; do sleep 300; echo "--- $(date -u +%H:%M) mem: $(free -m | awk '/Mem/{print $3"/"$2" MB"}')"; tail -c 600 train.log | tr '\r' '\n' | tail -3; done
+          tail -60 train.log
           CK=$(ls -t $(find runs -name '*.ckpt') | head -1); echo "checkpoint: $CK"; mkdir -p out && cp "$CK" out/last.ckpt && cp config.json out/ && cp -r cache out/cache
       - name: Exporta e avalia (Whisper + UTMOS)
         run: |
@@ -184,9 +192,11 @@ jobs:
           timeout 18300 python3 -m piper.train fit \
             --data.voice_name voz-br --data.csv_path ds/metadata.csv --data.audio_dir ds/wavs \
             --model.sample_rate 22050 --data.espeak_voice pt-br --data.cache_dir cache --data.config_path config.json \
-            --data.batch_size 16 --ckpt_path start.ckpt \
+            --data.batch_size 8 --data.num_workers 1 --ckpt_path start.ckpt \
             --trainer.accelerator cpu --trainer.devices 1 --trainer.max_epochs 100000 --trainer.max_time 00:05:00:00 \
-            --trainer.default_root_dir runs 2>&1 | grep -vE "^\s*$" | tail -40 || true
+            --trainer.default_root_dir runs > train.log 2>&1 &
+          P=$!; while kill -0 $P 2>/dev/null; do sleep 300; echo "--- $(date -u +%H:%M) mem: $(free -m | awk '/Mem/{print $3"/"$2" MB"}')"; tail -c 600 train.log | tr '\r' '\n' | tail -3; done
+          tail -60 train.log
           CK=$(ls -t $(find runs -name '*.ckpt') | head -1); echo "checkpoint: $CK"; mkdir -p out && cp "$CK" out/last.ckpt && cp config.json out/ && cp -r cache out/cache
       - name: Exporta e avalia (Whisper + UTMOS)
         run: |
@@ -219,9 +229,11 @@ jobs:
           timeout 18300 python3 -m piper.train fit \
             --data.voice_name voz-br --data.csv_path ds/metadata.csv --data.audio_dir ds/wavs \
             --model.sample_rate 22050 --data.espeak_voice pt-br --data.cache_dir cache --data.config_path config.json \
-            --data.batch_size 16 --ckpt_path start.ckpt \
+            --data.batch_size 8 --data.num_workers 1 --ckpt_path start.ckpt \
             --trainer.accelerator cpu --trainer.devices 1 --trainer.max_epochs 100000 --trainer.max_time 00:05:00:00 \
-            --trainer.default_root_dir runs 2>&1 | grep -vE "^\s*$" | tail -40 || true
+            --trainer.default_root_dir runs > train.log 2>&1 &
+          P=$!; while kill -0 $P 2>/dev/null; do sleep 300; echo "--- $(date -u +%H:%M) mem: $(free -m | awk '/Mem/{print $3"/"$2" MB"}')"; tail -c 600 train.log | tr '\r' '\n' | tail -3; done
+          tail -60 train.log
           CK=$(ls -t $(find runs -name '*.ckpt') | head -1); echo "checkpoint: $CK"; mkdir -p out && cp "$CK" out/last.ckpt && cp config.json out/ && cp -r cache out/cache
       - name: Exporta e avalia (Whisper + UTMOS)
         run: |
