@@ -1,7 +1,5 @@
 name: voice-lab
 on:
-  push:
-    paths: ["tools/voice_lab/**", ".github/workflows/voice-lab.yml"]
   workflow_dispatch:
     inputs:
       repo:

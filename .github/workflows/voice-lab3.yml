@@ -1,7 +1,6 @@
 name: voice-lab3
 on:
-  push:
-    paths: ["tools/voice_lab3/**", ".github/workflows/voice-lab3.yml"]
+  workflow_dispatch:
 permissions:
   contents: write
 jobs:

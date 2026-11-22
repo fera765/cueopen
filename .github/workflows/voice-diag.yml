@@ -1,8 +1,6 @@
 name: voice-diag
 on:
   workflow_dispatch:
-  push:
-    paths: ["tools/voice_diag/**", "tools/voice_lab3/normalize_pt.py", ".github/workflows/voice-diag.yml"]
 permissions:
   contents: read
 jobs:

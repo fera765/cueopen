@@ -1,7 +1,6 @@
 name: voice-pack
 on:
-  push:
-    paths: ["tools/voice_pack/**", ".github/workflows/voice-pack.yml"]
+  workflow_dispatch:
 permissions:
   contents: write
 jobs:
