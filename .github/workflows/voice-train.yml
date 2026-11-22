@@ -33,7 +33,7 @@ jobs:
         run: |
           git clone -q --depth 1 https://github.com/OHF-voice/piper1-gpl.git /tmp/piper1
           cd /tmp/piper1 && pip install -q torch torchaudio --index-url https://download.pytorch.org/whl/cpu && pip install -q -e '.[train]'
-          ./build_monotonic_align.sh >/dev/null && python3 setup.py build_ext --inplace >/dev/null
+          pip install -q scikit-build cmake ninja && ./build_monotonic_align.sh >/dev/null && (python3 setup.py build_ext --inplace >/dev/null || true) && python3 -c 'import piper.train, piper; print("piper ok")'
           pip install -q faster-whisper soundfile scipy huggingface_hub
       - uses: actions/download-artifact@v4
         with: { name: dataset, path: ds }
@@ -67,7 +67,7 @@ jobs:
         run: |
           git clone -q --depth 1 https://github.com/OHF-voice/piper1-gpl.git /tmp/piper1
           cd /tmp/piper1 && pip install -q torch torchaudio --index-url https://download.pytorch.org/whl/cpu && pip install -q -e '.[train]'
-          ./build_monotonic_align.sh >/dev/null && python3 setup.py build_ext --inplace >/dev/null
+          pip install -q scikit-build cmake ninja && ./build_monotonic_align.sh >/dev/null && (python3 setup.py build_ext --inplace >/dev/null || true) && python3 -c 'import piper.train, piper; print("piper ok")'
           pip install -q faster-whisper soundfile scipy huggingface_hub
       - uses: actions/download-artifact@v4
         with: { name: dataset, path: ds }
@@ -102,7 +102,7 @@ jobs:
         run: |
           git clone -q --depth 1 https://github.com/OHF-voice/piper1-gpl.git /tmp/piper1
           cd /tmp/piper1 && pip install -q torch torchaudio --index-url https://download.pytorch.org/whl/cpu && pip install -q -e '.[train]'
-          ./build_monotonic_align.sh >/dev/null && python3 setup.py build_ext --inplace >/dev/null
+          pip install -q scikit-build cmake ninja && ./build_monotonic_align.sh >/dev/null && (python3 setup.py build_ext --inplace >/dev/null || true) && python3 -c 'import piper.train, piper; print("piper ok")'
           pip install -q faster-whisper soundfile scipy huggingface_hub
       - uses: actions/download-artifact@v4
         with: { name: dataset, path: ds }
@@ -137,7 +137,7 @@ jobs:
         run: |
           git clone -q --depth 1 https://github.com/OHF-voice/piper1-gpl.git /tmp/piper1
           cd /tmp/piper1 && pip install -q torch torchaudio --index-url https://download.pytorch.org/whl/cpu && pip install -q -e '.[train]'
-          ./build_monotonic_align.sh >/dev/null && python3 setup.py build_ext --inplace >/dev/null
+          pip install -q scikit-build cmake ninja && ./build_monotonic_align.sh >/dev/null && (python3 setup.py build_ext --inplace >/dev/null || true) && python3 -c 'import piper.train, piper; print("piper ok")'
           pip install -q faster-whisper soundfile scipy huggingface_hub
       - uses: actions/download-artifact@v4
         with: { name: dataset, path: ds }
@@ -172,7 +172,7 @@ jobs:
         run: |
           git clone -q --depth 1 https://github.com/OHF-voice/piper1-gpl.git /tmp/piper1
           cd /tmp/piper1 && pip install -q torch torchaudio --index-url https://download.pytorch.org/whl/cpu && pip install -q -e '.[train]'
-          ./build_monotonic_align.sh >/dev/null && python3 setup.py build_ext --inplace >/dev/null
+          pip install -q scikit-build cmake ninja && ./build_monotonic_align.sh >/dev/null && (python3 setup.py build_ext --inplace >/dev/null || true) && python3 -c 'import piper.train, piper; print("piper ok")'
           pip install -q faster-whisper soundfile scipy huggingface_hub
       - uses: actions/download-artifact@v4
         with: { name: dataset, path: ds }
@@ -207,7 +207,7 @@ jobs:
         run: |
           git clone -q --depth 1 https://github.com/OHF-voice/piper1-gpl.git /tmp/piper1
           cd /tmp/piper1 && pip install -q torch torchaudio --index-url https://download.pytorch.org/whl/cpu && pip install -q -e '.[train]'
-          ./build_monotonic_align.sh >/dev/null && python3 setup.py build_ext --inplace >/dev/null
+          pip install -q scikit-build cmake ninja && ./build_monotonic_align.sh >/dev/null && (python3 setup.py build_ext --inplace >/dev/null || true) && python3 -c 'import piper.train, piper; print("piper ok")'
           pip install -q faster-whisper soundfile scipy huggingface_hub
       - uses: actions/download-artifact@v4
         with: { name: dataset, path: ds }
