@@ -50,6 +50,7 @@ private val openFence = Regex("```[a-zA-Z0-9_+.-]*[ \\t]*\\n?[\\s\\S]*$")
 @Composable
 fun CueMarkdown(text: String, modifier: Modifier = Modifier, onSend: ((String) -> Unit)? = null) {
     val parts = remember(text) {
+        val text = GfmPrep.normalize(text)
         val out = mutableListOf<Triple<String, String, String>>() // tipo, linguagem, conteúdo
         var last = 0
         fencedBlock.findAll(text).forEach { m ->

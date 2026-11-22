@@ -75,7 +75,10 @@ object WorkflowEngine {
     fun isPaused(runId: String) = runId in pauses
 
     /** Dispara uma execução (manual ou pelo agendamento). Devolve o id da execução, ou um erro de validação. */
-    fun start(workflowId: String, trigger: String = "manual", triggerNodeId: String? = null): Result<String> {
+    /** Payload recebido por um gatilho webhook, por execução (só em memória). */
+    private val payloads = java.util.concurrent.ConcurrentHashMap<String, String>()
+
+    fun start(workflowId: String, trigger: String = "manual", triggerNodeId: String? = null, payload: String? = null): Result<String> {
         val w = WorkflowStore.get(workflowId) ?: return Result.failure(IllegalStateException("Fluxo não encontrado."))
         val blocking = WfLogic.problems(w).filterNot { it.contains("não está ligado a nada") }
         if (blocking.isNotEmpty()) return Result.failure(IllegalStateException(blocking.joinToString("\n")))
@@ -83,6 +86,7 @@ object WorkflowEngine {
         val busy = WorkflowStore.runs.value.count { it.status == "running" || it.status == "paused" }
         val run = WfRun(workflowId = w.id, workflowName = w.name, trigger = trigger, status = if (busy >= MAX_CONCURRENT) "queued" else "running")
         WorkflowStore.putRun(run)
+        payload?.let { payloads[run.id] = it }
         runCatching { dev.cueopen.app.sandbox.SandboxService.start(CueApp.instance, "Fluxo em execução: ${w.name}") }
         jobs[run.id] = scope.launch {
             slots.acquire()
@@ -95,7 +99,7 @@ object WorkflowEngine {
                 if (finished == null) WorkflowStore.runs.value.firstOrNull { it.id == run.id }?.takeIf { isActive(it.status) }?.let {
                     WorkflowStore.putRun(it.copy(status = "error", finishedAt = System.currentTimeMillis(), error = "A execução passou de ${MAX_RUN_MS / 60_000} min e foi encerrada."))
                 }
-            } finally { slots.release() }
+            } finally { slots.release(); payloads.remove(run.id) }
         }
         return Result.success(run.id)
     }
@@ -214,9 +218,14 @@ object WorkflowEngine {
     private suspend fun runNode(w: Workflow, run: WfRun, node: WfNode, prev: String, r: (String) -> String, rh: (String, Boolean) -> String, rt: (String, Int) -> String, setStatus: (String) -> Unit): NodeResult {
         val app = CueApp.instance
         return when (node.type) {
-            "trigger_manual", "trigger_schedule" -> NodeResult(buildJsonObject {
+            "trigger_manual", "trigger_schedule", "trigger_webhook" -> NodeResult(buildJsonObject {
                 put("trigger", run.trigger); put("time", java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss", java.util.Locale.US).format(java.util.Date()))
                 put("workflow", w.name)
+                if (node.type == "trigger_webhook") {
+                    val raw = payloads[run.id] ?: node.config["sample"].orEmpty()
+                    val el = runCatching { Json.parseToJsonElement(raw) }.getOrNull()
+                    if (el != null && raw.isNotBlank()) put("payload", el) else put("payload", raw)
+                }
             }.toString())
 
             "agent" -> {
@@ -262,6 +271,7 @@ object WorkflowEngine {
                     val camposText = r("campos").ifBlank { "{}" }
                     runCatching { Json.parseToJsonElement(camposText) as JsonObject }.getOrElse { return NodeResult(error = "Campos não são um objeto JSON válido depois de preencher os valores: ${camposText.take(300)}") }
                 }
+                if (WfQuality.isEmailSend(node)) WfQuality.emailProblem(campos)?.let { return NodeResult(error = "$it Nada foi enviado.") }
                 val o = WfConnectors.run(app.store, node.config["source"].orEmpty().ifBlank { WfConnectors.HUB }, r("conector").trim(), r("acao").trim(), campos, r("conexao").trim())
                 NodeResult(o.output, error = o.error)
             }
@@ -406,10 +416,28 @@ object WorkflowEngine {
                     }
                     if (detail.isBlank()) detail = if (view.isNotBlank()) WfView.plainText(view).take(6_000) else text
                 }
+                // Portão de conteúdo: nada vazio, sem {{…}} sobrando, sem JSON cru para o usuário.
+                WfQuality.contentProblem("O título da notificação", title)?.let { return NodeResult(error = it) }
+                WfQuality.contentProblem("O texto da notificação", text)?.let { return NodeResult(error = it) }
+                if (view.isBlank() && detail.isNotBlank()) WfQuality.contentProblem("O conteúdo do quadro/página", detail)?.let { return NodeResult(error = it) }
+                if (view.isNotBlank()) WfQuality.contentProblem("O conteúdo do quadro/página", WfView.plainText(view))?.let { return NodeResult(error = it) }
+                var route = if (open == "none") null else "workflow/${w.id}"
+                if (open == "chat") {
+                    // Chat do fluxo: uma conversa com o conteúdo completo (Markdown estilo GitHub + UI kit), onde dá para continuar perguntando.
+                    val md = buildString {
+                        append("**").append(title).append("**\n\n").append(text)
+                        val extra = if (detailTpl.isNotBlank()) rh("detail", false) else if (prevIsData) WfFormat.readable(prev) else ""
+                        if (extra.isNotBlank() && extra.trim() != text.trim()) append("\n\n").append(extra)
+                        if (WfView.isView(rawDetail)) append("\n\n```cueui\n").append(rawDetail.trim()).append("\n```")
+                    }
+                    WfQuality.contentProblem("A mensagem do chat do fluxo", md)?.let { return NodeResult(error = it) }
+                    if (run.trigger != "test") route = WfChat.post(app.store, w, md)?.let { "chat/$it" } ?: route
+                    detail = ""; view = ""
+                }
                 dev.cueopen.app.notify.NotificationCenter.post(title, text.replace("**", "").take(300),
                     dev.cueopen.app.notify.NotificationCenter.Priority.NORMAL, dev.cueopen.app.notify.NotificationCenter.Category.DONE,
                     agent = "Fluxo · ${w.name}", dedupeKey = "wf|${run.id}|${node.id}",
-                    detail = detail, route = if (open == "none") null else "workflow/${w.id}", routeLabel = "Abrir fluxo", page = open == "page", view = view)
+                    detail = detail, route = route, routeLabel = if (route?.startsWith("chat/") == true) "Abrir chat" else "Abrir fluxo", page = open == "page", view = view)
                 NodeResult(buildJsonObject { put("title", title); put("text", text.take(4_000)); if (detail.isNotEmpty()) put("detail", detail.take(4_000)); put("layout", if (view.isNotEmpty()) "ui-kit" else "markdown") }.toString())
             }
 
@@ -496,6 +524,8 @@ object WorkflowScheduler {
         cancel(ctx, w)
         if (!w.enabled) return
         w.nodes.filter { it.type == "trigger_schedule" }.forEach { n -> scheduleNext(ctx, w.id, n, keepPending = true) }
+        // Webhook: confere a issue a cada minuto (mesmo alarme exato + reserva do agendamento).
+        w.nodes.filter { it.type == "trigger_webhook" }.forEach { n -> scheduleNext(ctx, w.id, n, keepPending = true) }
     }
 
     private fun cancel(ctx: Context, w: Workflow) {
@@ -525,7 +555,7 @@ object WorkflowScheduler {
         val sig = n.config.toSortedMap().toString()
         val st = WfScheduleState.get(ctx, wfId, n.id)
         val at = if (keepPending && st.sig == sig && st.next != null && st.next > now) st.next
-            else WfLogic.nextFire(n.config, now, lastFire = st.last.takeIf { st.sig == sig }) ?: return
+            else WfLogic.nextFire(if (n.type == "trigger_webhook") mapOf("mode" to "interval", "minutes" to "1") else n.config, now, lastFire = st.last.takeIf { st.sig == sig }) ?: return
         WfScheduleState.setNext(ctx, wfId, n.id, at, sig)
         // 1) alarme exato
         runCatching {
@@ -598,7 +628,7 @@ class WorkflowWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(c
         val ctx = applicationContext
         WorkflowStore.init(ctx.filesDir)
         val w = WorkflowStore.get(wfId) ?: return Result.success()
-        val node = w.nodes.firstOrNull { it.id == nodeId && it.type == "trigger_schedule" } ?: return Result.success()
+        val node = w.nodes.firstOrNull { it.id == nodeId && (it.type == "trigger_schedule" || it.type == "trigger_webhook") } ?: return Result.success()
         if (!w.enabled) return Result.success()
         // Disparo duplicado (alarme + reserva): este horário já rodou.
         val st = WfScheduleState.get(ctx, wfId, nodeId)
@@ -606,6 +636,13 @@ class WorkflowWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(c
         WfScheduleState.setLast(ctx, wfId, nodeId, System.currentTimeMillis())
         // Agenda o próximo ANTES de rodar: uma execução longa ou com erro não apaga a agenda.
         WorkflowScheduler.scheduleNext(ctx, wfId, node)
+        if (node.type == "trigger_webhook") {
+            // Uma execução por chamada nova, em ordem; nada de rodar sem chamada.
+            WfWebhook.poll(ctx, wfId, node).forEach { h ->
+                WorkflowEngine.start(wfId, trigger = "webhook", triggerNodeId = nodeId, payload = h.payload).onSuccess { WorkflowEngine.awaitRun(it, 4 * 60_000L) }
+            }
+            return Result.success()
+        }
         // Espera a execução (até ~9 min) para o Android manter o processo vivo; já rodando = este disparo é pulado.
         WorkflowEngine.start(wfId, trigger = "schedule", triggerNodeId = nodeId).onSuccess { WorkflowEngine.awaitRun(it, 9 * 60_000L) }
         return Result.success()

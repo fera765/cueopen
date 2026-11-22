@@ -113,6 +113,13 @@ object WfCatalog {
                 WfField("time", "Horário (HH:mm)", WfField.Kind.TIME, default = "09:00"),
                 WfField("weekday", "Dia da semana", WfField.Kind.SELECT, options = listOf("1" to "Segunda", "2" to "Terça", "3" to "Quarta", "4" to "Quinta", "5" to "Sexta", "6" to "Sábado", "7" to "Domingo"), default = "1"),
             )),
+        WfNodeType("trigger_webhook", "Webhook", CAT_TRIGGER, "Roda quando um sistema externo chama o endereço do fluxo (ponte segura pelo GitHub: cada chamada é um comentário numa issue, conferido a cada minuto).", 0xFF2EA043, "webhook", trigger = true,
+            fields = listOf(
+                WfField("repo", "Repositório (dono/repo)", WfField.Kind.TEXT, "Ex.: fulano/meus-webhooks", required = true),
+                WfField("issue", "Número da issue", WfField.Kind.NUMBER, "A issue que recebe as chamadas", required = true),
+                WfField("secret", "Segredo (1ª linha do comentário)", WfField.Kind.TEXT, "Mínimo 12 caracteres; chamadas sem ele são ignoradas", required = true),
+                WfField("sample", "Exemplo de payload (usado no teste)", WfField.Kind.MULTILINE, "{\"evento\": \"teste\"}", default = "{\"evento\": \"teste\"}"),
+            )),
         WfNodeType("ai", "IA (texto)", CAT_AI, "Uma chamada rápida ao modelo, sem ferramentas: resumir, traduzir, classificar, formatar ou extrair dados do que veio antes.", 0xFF9B7BFF, "ai",
             fields = listOf(
                 WfField("prompt", "Instrução", WfField.Kind.MULTILINE, "Inclua os dados com {{prev}} ou {{id.campo}}. $TEMPLATE_HINT", required = true),
@@ -199,7 +206,7 @@ object WfCatalog {
                 WfField("text", "Texto", WfField.Kind.MULTILINE, TEMPLATE_HINT, default = "{{prev}}"),
                 WfField("detail", "Conteúdo completo (quadro/página ao tocar)", WfField.Kind.MULTILINE, "Vazio = cartões com os dados do nó anterior. Aceita {{id}} (dados viram cartões), texto/Markdown ou um modelo do UI kit {\"blocks\":[…]}. $TEMPLATE_HINT"),
                 WfField("layout", "Visual do quadro/página", WfField.Kind.SELECT, options = listOf("auto" to "Cartões (UI kit)", "markdown" to "Texto formatado"), default = "auto"),
-                WfField("open", "Ao tocar na notificação", WfField.Kind.SELECT, options = listOf("modal" to "Quadro com o conteúdo", "page" to "Página com o conteúdo", "flow" to "Abrir o fluxo", "none" to "Só abrir o app"), default = "modal"),
+                WfField("open", "Ao tocar na notificação", WfField.Kind.SELECT, options = listOf("modal" to "Quadro com o conteúdo", "page" to "Página com o conteúdo", "chat" to "Chat do fluxo (conversa com o conteúdo)", "flow" to "Abrir o fluxo", "none" to "Só abrir o app"), default = "modal"),
             )),
     )
 
@@ -211,6 +218,7 @@ object WfCatalog {
         WfPreset("Todo dia às 8h", CAT_TRIGGER, "trigger_schedule", "Roda todos os dias às 08:00.", mapOf("mode" to "daily", "time" to "08:00")),
         WfPreset("A cada 15 minutos", CAT_TRIGGER, "trigger_schedule", "Roda a cada 15 minutos.", mapOf("mode" to "interval", "minutes" to "15")),
         WfPreset("Toda segunda às 9h", CAT_TRIGGER, "trigger_schedule", "Roda toda segunda-feira às 09:00.", mapOf("mode" to "weekly", "weekday" to "1", "time" to "09:00")),
+        WfPreset("Webhook (GitHub)", CAT_TRIGGER, "trigger_webhook", "Roda quando chega uma chamada na issue configurada.", mapOf("sample" to "{\"evento\": \"teste\"}")),
         WfPreset("Toda hora", CAT_TRIGGER, "trigger_schedule", "Roda a cada 60 minutos.", mapOf("mode" to "interval", "minutes" to "60")),
         // IA
         WfPreset("Resumir texto", CAT_AI, "ai", "Resume a saída anterior em tópicos curtos.", mapOf("prompt" to "Resuma em até 5 tópicos curtos, em português:\n\n{{prev}}")),

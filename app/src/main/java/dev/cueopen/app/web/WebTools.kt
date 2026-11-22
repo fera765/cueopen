@@ -95,20 +95,27 @@ object WebTools {
      * Responde assim que um buscador traz ≥3 resultados, espera um instante pelos outros e mistura sem repetir.
      * Cache de 5 min para repetições. Sem WebView (ou bloqueio/captcha) segue só com quem respondeu.
      */
+    private val cooldown = java.util.concurrent.ConcurrentHashMap<String, Long>()
+
     suspend fun search(query: String, max: Int): String {
         if (query.isBlank()) return "ERRO: informe query."
         val n = max.coerceIn(1, 15)
         cache.get("$n|$query")?.let { return it }
         val ctx = runCatching { CueApp.instance.applicationContext }.getOrNull()
+        // WebView primeiro (navegador real: passa por bloqueios que derrubam chamadas HTTP). Buscador que voltou vazio/bloqueado
+        // descansa alguns minutos; o DuckDuckGo por HTTP só entra quando não há WebView ou todos estão descansando.
+        val now = System.currentTimeMillis()
+        fun wv(e: SearchApi.Engine): suspend () -> List<WebExtract.SearchHit> = suspend {
+            WebViewSearch.search(ctx!!, e, query).also { if (it.isEmpty()) cooldown[e.label] = System.currentTimeMillis() + 5 * 60_000L else cooldown.remove(e.label) }
+        }
         val engines = buildList<Pair<String, suspend () -> List<WebExtract.SearchHit>>> {
-            add("DuckDuckGo" to suspend { withContext(Dispatchers.IO) { duckHttp(query) } })
-            if (ctx != null) {
-                add("Google" to suspend { WebViewSearch.search(ctx, SearchApi.Engine.GOOGLE, query) })
-                add("Bing" to suspend { WebViewSearch.search(ctx, SearchApi.Engine.BING, query) })
-            }
+            if (ctx != null) SearchApi.Engine.values().filter { (cooldown[it.label] ?: 0L) < now }.forEach { add(it.label to wv(it)) }
+            if (isEmpty()) add("DuckDuckGo (HTTP)" to suspend { withContext(Dispatchers.IO) { duckHttp(query) } })
         }
         val got = HybridSearch.race(engines, firstMin = 3, graceMs = 700, totalMs = 10_000)
-        val hits = SearchApi.merge(got.map { it.second }, n)
+        var hits = SearchApi.merge(got.map { it.second }, n)
+        if (hits.isEmpty() && engines.none { it.first == "DuckDuckGo (HTTP)" })
+            hits = SearchApi.merge(listOf(withContext(Dispatchers.IO) { duckHttp(query) }), n)
         if (hits.isEmpty()) return "Nenhum resultado na busca (Google, Bing e DuckDuckGo). Tente outros termos, mais curtos."
         return SearchApi.format(query, hits, got.filter { it.second.isNotEmpty() }.joinToString(" + ") { it.first }).also { cache.put("$n|$query", it) }
     }

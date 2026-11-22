@@ -63,6 +63,7 @@ private const val WORLD = 4000f
 private fun nodeIcon(type: String): ImageVector = when (WfCatalog.of(type).icon) {
     "play" -> Icons.Rounded.PlayArrow
     "schedule" -> Icons.Rounded.Schedule
+    "webhook" -> Icons.Rounded.Webhook
     "agent" -> Icons.Rounded.SmartToy
     "apps" -> Icons.Rounded.Apps
     "mcp" -> Icons.Rounded.Extension
@@ -188,6 +189,22 @@ private fun templates(): List<WfTemplate> = listOf(
             "campos" to "{\n  \"receiver\": [\"cliente@email.com\"],\n  \"subject\": \"Seu orçamento\",\n  \"body_text\": \"{{${a.id}}}\"\n}"))
         val n = WfNode(id = "n$id", type = "notify", label = "Enviado", config = mapOf("title" to "✉ E-mail enviado", "text" to "O follow-up foi enviado.", "open" to "flow"))
         flow("E-mail com aprovação", listOf(t, a, ap, g, n), WfEdge(from = t.id, to = a.id), WfEdge(from = a.id, to = ap.id), WfEdge(from = ap.id, to = g.id, port = "true"), WfEdge(from = g.id, to = n.id))
+    },
+    WfTemplate("Webhook → aviso com os dados", "Um sistema externo chama o webhook (comentário numa issue do GitHub com o segredo); a IA resume o payload e o toque abre uma página formatada.", "notify") {
+        val id = WfIds.new().take(4)
+        val t = WfNode(id = "t$id", type = "trigger_webhook", label = "Webhook", config = mapOf("repo" to "", "issue" to "", "secret" to "", "sample" to "{\"pedido\": 1042, \"cliente\": \"Ana\", \"total\": 189.9, \"status\": \"pago\"}"))
+        val a = WfNode(id = "a$id", type = "ai", label = "Resumir chamada", config = mapOf("maxTokens" to "500", "prompt" to
+            "Transforme os dados abaixo num resumo em Markdown para o celular: uma linha de título em negrito e uma tabela | Campo | Valor | com os campos importantes. Sem JSON.\n\n{{${t.id}.payload}}"))
+        val n = WfNode(id = "n$id", type = "notify", label = "Avisar", config = mapOf("title" to "🔔 Chamada recebida", "text" to "Toque para ver os detalhes", "detail" to "{{${a.id}}}", "open" to "page", "layout" to "markdown"))
+        flow("Webhook → aviso", listOf(t, a, n), WfEdge(from = t.id, to = a.id), WfEdge(from = a.id, to = n.id))
+    },
+    WfTemplate("Resumo do dia no chat do fluxo", "Todo dia às 18h a IA pesquisa as notícias do seu tema e manda num chat do fluxo (tabela + links), onde você pode continuar perguntando.", "agent") {
+        val id = WfIds.new().take(4)
+        val t = WfNode(id = "t$id", type = "trigger_schedule", label = "Todo dia às 18h", config = mapOf("mode" to "daily", "time" to "18:00"))
+        val a = WfNode(id = "a$id", type = "agent", label = "Pesquisar", config = mapOf("maxSteps" to "10", "prompt" to
+            "Pesquise com web_search as 5 notícias mais importantes de hoje sobre tecnologia no Brasil. Responda em Markdown: uma tabela | # | Manchete | Fonte | com o link direto de cada fonte e, abaixo, 1 frase de contexto por notícia."))
+        val n = WfNode(id = "n$id", type = "notify", label = "Enviar ao chat", config = mapOf("title" to "🗞 Resumo do dia", "text" to "As 5 notícias de hoje", "detail" to "{{${a.id}}}", "open" to "chat"))
+        flow("Resumo do dia no chat", listOf(t, a, n), WfEdge(from = t.id, to = a.id), WfEdge(from = a.id, to = n.id))
     },
 )
 
@@ -1192,7 +1209,7 @@ private fun RunsPanel(w: Workflow, runs: List<WfRun>, nav: NavController, onClos
                         Spacer(Modifier.width(8.dp))
                         Text(when (r.status) { "ok" -> "Concluída"; "error" -> "Falhou"; "running" -> "Executando"; "waiting" -> "Aguardando aprovação"; "paused" -> "Pausada"; "queued" -> "Na fila"; else -> "Parada" },
                             fontWeight = FontWeight.SemiBold, color = col, modifier = Modifier.weight(1f))
-                        Text("${when (r.trigger) { "schedule" -> "agendada"; "test" -> "teste"; else -> "manual" }} · ${timeFmt.format(Date(r.startedAt))}", fontSize = 11.sp, color = c.ink3)
+                        Text("${when (r.trigger) { "schedule" -> "agendada"; "webhook" -> "webhook"; "test" -> "teste"; else -> "manual" }} · ${timeFmt.format(Date(r.startedAt))}", fontSize = 11.sp, color = c.ink3)
                     }
                     r.finishedAt?.let { Text("Duração: ${((it - r.startedAt) / 1000).coerceAtLeast(0)} s", fontSize = 11.sp, color = c.ink3) }
                     if (r.error.isNotBlank()) Text(r.error.take(400), fontSize = 12.sp, color = c.err)

@@ -18,7 +18,7 @@ object WfLogic {
         val ids = w.nodes.map { it.id }.toSet()
         val triggers = w.nodes.filter { WfCatalog.of(it.type).trigger }
         if (w.nodes.isEmpty()) out += "O fluxo está vazio: adicione um gatilho."
-        else if (triggers.isEmpty()) out += "Falta um gatilho (Manual ou Agendamento)."
+        else if (triggers.isEmpty()) out += "Falta um gatilho (Manual, Agendamento ou Webhook)."
         w.edges.filter { it.from !in ids || it.to !in ids }.forEach { out += "Ligação aponta para um nó que não existe mais." }
         w.edges.filter { e -> w.nodes.firstOrNull { it.id == e.to }?.let { WfCatalog.of(it.type).trigger } == true }
             .forEach { out += "Um gatilho não pode receber ligação de entrada." }
@@ -46,6 +46,7 @@ object WfLogic {
             }
             if (!t.trigger && w.edges.none { it.to == n.id }) out += "${label(n)} não está ligado a nada (não vai rodar)."
         }
+        out += WfQuality.structural(w)
         return out.distinct()
     }
 
