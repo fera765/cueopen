@@ -2,15 +2,230 @@ name: voice-train
 on:
   workflow_dispatch:
   push:
-    paths: ["tools/voice_train/**", ".github/workflows/voice-train.yml"]
+    paths: [".github/workflows/voice-train.yml"]
 permissions:
   contents: read
+env:
+  GENDER: F
+  MAX_HOURS: "2.0"
 jobs:
-  explore:
+  prep:
     runs-on: ubuntu-latest
+    timeout-minutes: 300
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with: { python-version: "3.11" }
-      - run: pip install -q huggingface_hub && python tools/voice_train/explore.py
-      - run: nproc; free -g; df -h / | tail -1
+      - run: pip install -q "datasets<4" soundfile scipy numpy
+      - run: cd tools/voice_train && python prep.py && cat ds/info.json && du -sh ds
+      - uses: actions/upload-artifact@v4
+        with: { name: dataset, path: tools/voice_train/ds, retention-days: 7 }
+  s1:
+    needs: prep
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      - run: sudo apt-get update -qq && sudo apt-get install -y -qq build-essential cmake ninja-build ffmpeg espeak-ng >/dev/null
+      - name: Piper (treino)
+        run: |
+          git clone -q --depth 1 https://github.com/OHF-voice/piper1-gpl.git /tmp/piper1
+          cd /tmp/piper1 && pip install -q torch torchaudio --index-url https://download.pytorch.org/whl/cpu && pip install -q -e '.[train]'
+          ./build_monotonic_align.sh >/dev/null && python3 setup.py build_ext --inplace >/dev/null
+          pip install -q faster-whisper soundfile scipy huggingface_hub
+      - uses: actions/download-artifact@v4
+        with: { name: dataset, path: ds }
+      - name: Checkpoint inicial (Faber)
+        run: python -c "from huggingface_hub import hf_hub_download as h; import shutil; shutil.copy(h('rhasspy/piper-checkpoints','pt/pt_BR/faber/medium/epoch=1999-step=92000.ckpt',repo_type='dataset'),'start.ckpt')"
+      - name: Treino (etapa 1, ~5 h na CPU)
+        run: |
+          timeout 18300 python3 -m piper.train fit \
+            --data.voice_name voz-br --data.csv_path ds/metadata.csv --data.audio_dir ds/wavs \
+            --model.sample_rate 22050 --data.espeak_voice pt-br --data.cache_dir cache --data.config_path config.json \
+            --data.batch_size 16 --ckpt_path start.ckpt \
+            --trainer.accelerator cpu --trainer.devices 1 --trainer.max_epochs 100000 --trainer.max_time 00:05:00:00 \
+            --trainer.default_root_dir runs 2>&1 | grep -vE "^\s*$" | tail -40 || true
+          CK=$(ls -t $(find runs -name '*.ckpt') | head -1); echo "checkpoint: $CK"; mkdir -p out && cp "$CK" out/last.ckpt && cp config.json out/ && cp -r cache out/cache
+      - name: Exporta e avalia (Whisper + UTMOS)
+        run: |
+          python3 -m piper.train.export_onnx --checkpoint out/last.ckpt --output-file out/model.onnx
+          python3 tools/voice_train/evalstage.py out/model.onnx out/config.json s1
+      - uses: actions/upload-artifact@v4
+        with: { name: ckpt-s1, path: out, retention-days: 7 }
+  s2:
+    needs: s1
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      - run: sudo apt-get update -qq && sudo apt-get install -y -qq build-essential cmake ninja-build ffmpeg espeak-ng >/dev/null
+      - name: Piper (treino)
+        run: |
+          git clone -q --depth 1 https://github.com/OHF-voice/piper1-gpl.git /tmp/piper1
+          cd /tmp/piper1 && pip install -q torch torchaudio --index-url https://download.pytorch.org/whl/cpu && pip install -q -e '.[train]'
+          ./build_monotonic_align.sh >/dev/null && python3 setup.py build_ext --inplace >/dev/null
+          pip install -q faster-whisper soundfile scipy huggingface_hub
+      - uses: actions/download-artifact@v4
+        with: { name: dataset, path: ds }
+      - uses: actions/download-artifact@v4
+        with: { name: ckpt-s1, path: prev }
+      - run: cp prev/last.ckpt start.ckpt && cp -r prev/cache cache || true
+      - name: Treino (etapa 2, ~5 h na CPU)
+        run: |
+          timeout 18300 python3 -m piper.train fit \
+            --data.voice_name voz-br --data.csv_path ds/metadata.csv --data.audio_dir ds/wavs \
+            --model.sample_rate 22050 --data.espeak_voice pt-br --data.cache_dir cache --data.config_path config.json \
+            --data.batch_size 16 --ckpt_path start.ckpt \
+            --trainer.accelerator cpu --trainer.devices 1 --trainer.max_epochs 100000 --trainer.max_time 00:05:00:00 \
+            --trainer.default_root_dir runs 2>&1 | grep -vE "^\s*$" | tail -40 || true
+          CK=$(ls -t $(find runs -name '*.ckpt') | head -1); echo "checkpoint: $CK"; mkdir -p out && cp "$CK" out/last.ckpt && cp config.json out/ && cp -r cache out/cache
+      - name: Exporta e avalia (Whisper + UTMOS)
+        run: |
+          python3 -m piper.train.export_onnx --checkpoint out/last.ckpt --output-file out/model.onnx
+          python3 tools/voice_train/evalstage.py out/model.onnx out/config.json s2
+      - uses: actions/upload-artifact@v4
+        with: { name: ckpt-s2, path: out, retention-days: 7 }
+  s3:
+    needs: s2
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      - run: sudo apt-get update -qq && sudo apt-get install -y -qq build-essential cmake ninja-build ffmpeg espeak-ng >/dev/null
+      - name: Piper (treino)
+        run: |
+          git clone -q --depth 1 https://github.com/OHF-voice/piper1-gpl.git /tmp/piper1
+          cd /tmp/piper1 && pip install -q torch torchaudio --index-url https://download.pytorch.org/whl/cpu && pip install -q -e '.[train]'
+          ./build_monotonic_align.sh >/dev/null && python3 setup.py build_ext --inplace >/dev/null
+          pip install -q faster-whisper soundfile scipy huggingface_hub
+      - uses: actions/download-artifact@v4
+        with: { name: dataset, path: ds }
+      - uses: actions/download-artifact@v4
+        with: { name: ckpt-s2, path: prev }
+      - run: cp prev/last.ckpt start.ckpt && cp -r prev/cache cache || true
+      - name: Treino (etapa 3, ~5 h na CPU)
+        run: |
+          timeout 18300 python3 -m piper.train fit \
+            --data.voice_name voz-br --data.csv_path ds/metadata.csv --data.audio_dir ds/wavs \
+            --model.sample_rate 22050 --data.espeak_voice pt-br --data.cache_dir cache --data.config_path config.json \
+            --data.batch_size 16 --ckpt_path start.ckpt \
+            --trainer.accelerator cpu --trainer.devices 1 --trainer.max_epochs 100000 --trainer.max_time 00:05:00:00 \
+            --trainer.default_root_dir runs 2>&1 | grep -vE "^\s*$" | tail -40 || true
+          CK=$(ls -t $(find runs -name '*.ckpt') | head -1); echo "checkpoint: $CK"; mkdir -p out && cp "$CK" out/last.ckpt && cp config.json out/ && cp -r cache out/cache
+      - name: Exporta e avalia (Whisper + UTMOS)
+        run: |
+          python3 -m piper.train.export_onnx --checkpoint out/last.ckpt --output-file out/model.onnx
+          python3 tools/voice_train/evalstage.py out/model.onnx out/config.json s3
+      - uses: actions/upload-artifact@v4
+        with: { name: ckpt-s3, path: out, retention-days: 7 }
+  s4:
+    needs: s3
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      - run: sudo apt-get update -qq && sudo apt-get install -y -qq build-essential cmake ninja-build ffmpeg espeak-ng >/dev/null
+      - name: Piper (treino)
+        run: |
+          git clone -q --depth 1 https://github.com/OHF-voice/piper1-gpl.git /tmp/piper1
+          cd /tmp/piper1 && pip install -q torch torchaudio --index-url https://download.pytorch.org/whl/cpu && pip install -q -e '.[train]'
+          ./build_monotonic_align.sh >/dev/null && python3 setup.py build_ext --inplace >/dev/null
+          pip install -q faster-whisper soundfile scipy huggingface_hub
+      - uses: actions/download-artifact@v4
+        with: { name: dataset, path: ds }
+      - uses: actions/download-artifact@v4
+        with: { name: ckpt-s3, path: prev }
+      - run: cp prev/last.ckpt start.ckpt && cp -r prev/cache cache || true
+      - name: Treino (etapa 4, ~5 h na CPU)
+        run: |
+          timeout 18300 python3 -m piper.train fit \
+            --data.voice_name voz-br --data.csv_path ds/metadata.csv --data.audio_dir ds/wavs \
+            --model.sample_rate 22050 --data.espeak_voice pt-br --data.cache_dir cache --data.config_path config.json \
+            --data.batch_size 16 --ckpt_path start.ckpt \
+            --trainer.accelerator cpu --trainer.devices 1 --trainer.max_epochs 100000 --trainer.max_time 00:05:00:00 \
+            --trainer.default_root_dir runs 2>&1 | grep -vE "^\s*$" | tail -40 || true
+          CK=$(ls -t $(find runs -name '*.ckpt') | head -1); echo "checkpoint: $CK"; mkdir -p out && cp "$CK" out/last.ckpt && cp config.json out/ && cp -r cache out/cache
+      - name: Exporta e avalia (Whisper + UTMOS)
+        run: |
+          python3 -m piper.train.export_onnx --checkpoint out/last.ckpt --output-file out/model.onnx
+          python3 tools/voice_train/evalstage.py out/model.onnx out/config.json s4
+      - uses: actions/upload-artifact@v4
+        with: { name: ckpt-s4, path: out, retention-days: 7 }
+  s5:
+    needs: s4
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      - run: sudo apt-get update -qq && sudo apt-get install -y -qq build-essential cmake ninja-build ffmpeg espeak-ng >/dev/null
+      - name: Piper (treino)
+        run: |
+          git clone -q --depth 1 https://github.com/OHF-voice/piper1-gpl.git /tmp/piper1
+          cd /tmp/piper1 && pip install -q torch torchaudio --index-url https://download.pytorch.org/whl/cpu && pip install -q -e '.[train]'
+          ./build_monotonic_align.sh >/dev/null && python3 setup.py build_ext --inplace >/dev/null
+          pip install -q faster-whisper soundfile scipy huggingface_hub
+      - uses: actions/download-artifact@v4
+        with: { name: dataset, path: ds }
+      - uses: actions/download-artifact@v4
+        with: { name: ckpt-s4, path: prev }
+      - run: cp prev/last.ckpt start.ckpt && cp -r prev/cache cache || true
+      - name: Treino (etapa 5, ~5 h na CPU)
+        run: |
+          timeout 18300 python3 -m piper.train fit \
+            --data.voice_name voz-br --data.csv_path ds/metadata.csv --data.audio_dir ds/wavs \
+            --model.sample_rate 22050 --data.espeak_voice pt-br --data.cache_dir cache --data.config_path config.json \
+            --data.batch_size 16 --ckpt_path start.ckpt \
+            --trainer.accelerator cpu --trainer.devices 1 --trainer.max_epochs 100000 --trainer.max_time 00:05:00:00 \
+            --trainer.default_root_dir runs 2>&1 | grep -vE "^\s*$" | tail -40 || true
+          CK=$(ls -t $(find runs -name '*.ckpt') | head -1); echo "checkpoint: $CK"; mkdir -p out && cp "$CK" out/last.ckpt && cp config.json out/ && cp -r cache out/cache
+      - name: Exporta e avalia (Whisper + UTMOS)
+        run: |
+          python3 -m piper.train.export_onnx --checkpoint out/last.ckpt --output-file out/model.onnx
+          python3 tools/voice_train/evalstage.py out/model.onnx out/config.json s5
+      - uses: actions/upload-artifact@v4
+        with: { name: ckpt-s5, path: out, retention-days: 7 }
+  s6:
+    needs: s5
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      - run: sudo apt-get update -qq && sudo apt-get install -y -qq build-essential cmake ninja-build ffmpeg espeak-ng >/dev/null
+      - name: Piper (treino)
+        run: |
+          git clone -q --depth 1 https://github.com/OHF-voice/piper1-gpl.git /tmp/piper1
+          cd /tmp/piper1 && pip install -q torch torchaudio --index-url https://download.pytorch.org/whl/cpu && pip install -q -e '.[train]'
+          ./build_monotonic_align.sh >/dev/null && python3 setup.py build_ext --inplace >/dev/null
+          pip install -q faster-whisper soundfile scipy huggingface_hub
+      - uses: actions/download-artifact@v4
+        with: { name: dataset, path: ds }
+      - uses: actions/download-artifact@v4
+        with: { name: ckpt-s5, path: prev }
+      - run: cp prev/last.ckpt start.ckpt && cp -r prev/cache cache || true
+      - name: Treino (etapa 6, ~5 h na CPU)
+        run: |
+          timeout 18300 python3 -m piper.train fit \
+            --data.voice_name voz-br --data.csv_path ds/metadata.csv --data.audio_dir ds/wavs \
+            --model.sample_rate 22050 --data.espeak_voice pt-br --data.cache_dir cache --data.config_path config.json \
+            --data.batch_size 16 --ckpt_path start.ckpt \
+            --trainer.accelerator cpu --trainer.devices 1 --trainer.max_epochs 100000 --trainer.max_time 00:05:00:00 \
+            --trainer.default_root_dir runs 2>&1 | grep -vE "^\s*$" | tail -40 || true
+          CK=$(ls -t $(find runs -name '*.ckpt') | head -1); echo "checkpoint: $CK"; mkdir -p out && cp "$CK" out/last.ckpt && cp config.json out/ && cp -r cache out/cache
+      - name: Exporta e avalia (Whisper + UTMOS)
+        run: |
+          python3 -m piper.train.export_onnx --checkpoint out/last.ckpt --output-file out/model.onnx
+          python3 tools/voice_train/evalstage.py out/model.onnx out/config.json s6
+      - uses: actions/upload-artifact@v4
+        with: { name: ckpt-s6, path: out, retention-days: 7 }
