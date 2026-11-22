@@ -206,6 +206,9 @@ fun WorkflowsScreen(nav: NavController) {
             ExtendedFloatingActionButton(onClick = { newSheet = true }, containerColor = c.accent, contentColor = Color.White,
                 icon = { Icon(Icons.Rounded.Add, null) }, text = { Text("Novo fluxo") })
         }) { pad ->
+        // Relógio da lista: atualiza "última/próxima execução" a cada 15 s.
+        var tick by remember { mutableStateOf(System.currentTimeMillis()) }
+        LaunchedEffect(Unit) { while (true) { tick = System.currentTimeMillis(); kotlinx.coroutines.delay(15_000) } }
         if (flows.isEmpty()) Box(Modifier.padding(pad).fillMaxSize(), contentAlignment = Alignment.Center) {
             EmptyState(Icons.Rounded.AccountTree, "Nenhum fluxo ainda",
                 "Monte automações ligando nós no canvas: gatilho por horário, agentes de IA, apps conectados, HTTP, condições e notificações.")
@@ -266,6 +269,17 @@ fun WorkflowsScreen(nav: NavController) {
                                     modifier = Modifier.weight(1f))
                                 Text("Ver ao vivo ›", fontSize = 12.sp, color = c.ink3)
                             }
+                        }
+                                // Sempre: última execução e próxima (qualquer intervalo — 2 min, 1 h, 1 dia…).
+                        val lastAt = listOfNotNull(last?.startedAt, if (sched != null) WorkflowScheduler.lastFire(w, ctx) else null).maxOrNull()
+                        val nextAt = if (sched != null && w.enabled) WorkflowScheduler.nextRuns(w, ctx).firstOrNull { it > tick - 120_000 } else null
+                        Spacer(Modifier.height(8.dp))
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(Icons.Rounded.History, null, Modifier.size(14.dp), tint = c.ink3); Spacer(Modifier.width(4.dp))
+                            Text("Última: " + (lastAt?.let { WfLogic.whenLabel(it, tick) } ?: "nunca"), fontSize = 12.sp, color = c.ink2, modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            Icon(Icons.Rounded.Schedule, null, Modifier.size(14.dp), tint = if (nextAt != null) c.accent else c.ink3); Spacer(Modifier.width(4.dp))
+                            Text("Próxima: " + when { nextAt != null -> WfLogic.whenLabel(nextAt, tick); sched == null -> "manual"; else -> "desligado" },
+                                fontSize = 12.sp, color = if (nextAt != null) c.accent else c.ink3, maxLines = 1, overflow = TextOverflow.Ellipsis)
                         }
                         if (sched != null) {
                             Spacer(Modifier.height(6.dp))
@@ -433,7 +447,7 @@ fun WorkflowEditorScreen(nav: NavController, id: String) {
             title = {
                 Column(Modifier.clickable { rename = true }) {
                     Text(w.name, maxLines = 1, overflow = TextOverflow.Ellipsis, fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
-                    val next = WorkflowScheduler.nextRuns(w).minOrNull()
+                    val next = WorkflowScheduler.nextRuns(w, ctx).minOrNull()
                     val done = active?.steps?.count { it.status == "ok" } ?: 0
                     Text(when {
                         active?.status == "waiting" -> "Aguardando sua aprovação"

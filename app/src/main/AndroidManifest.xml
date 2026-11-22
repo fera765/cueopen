@@ -137,6 +137,10 @@
         </receiver>
 
 
+        <receiver android:name=".workflow.WorkflowAlarmReceiver" android:exported="false">
+            <intent-filter><action android:name="com.fluwy.bot.WORKFLOW_FIRE" /></intent-filter>
+        </receiver>
+
         <receiver android:name=".scheduler.HeartbeatReceiver" android:exported="false">
             <intent-filter><action android:name="com.fluwy.bot.HEARTBEAT" /></intent-filter>
         </receiver>

@@ -81,15 +81,35 @@ object WebTools {
         runCatching { val (code, body) = get(url); if (code in 200..299) imageFromHtml(body.take(400_000), url) else null }.getOrNull()
     }
 
-    suspend fun search(query: String, max: Int): String = withContext(Dispatchers.IO) {
-        if (query.isBlank()) return@withContext "ERRO: informe query."
-        runCatching {
-            val (code, body) = get("https://html.duckduckgo.com/html/?q=" + java.net.URLEncoder.encode(query, "UTF-8") + "&kl=br-pt")
-            val hits = if (code == 200) WebExtract.parseDuckDuckGo(body).take(max.coerceIn(1, 15)) else emptyList()
-            if (hits.isEmpty()) "Nenhum resultado pela busca direta (HTTP $code). Use browser_navigate com os termos (abre o Google no browser)."
-            else "Resultados para \"$query\" (abra os relevantes com web_fetch):\n" + hits.mapIndexed { i, h ->
-                "${i + 1}. ${h.title}\n   ${h.url}" + (if (h.snippet.isNotBlank()) "\n   ${h.snippet.take(240)}" else "")
-            }.joinToString("\n")
-        }.getOrElse { "ERRO: busca indisponível (${it.javaClass.simpleName}). Use browser_navigate com os termos." }
+    private val cache = SearchApi.Cache()
+
+    /** Busca só por HTTP no DuckDuckGo HTML (a mais leve; também é uma das fontes da busca híbrida). */
+    private fun duckHttp(query: String): List<WebExtract.SearchHit> = runCatching {
+        val (code, body) = get(SearchApi.url(SearchApi.Engine.DUCK, query))
+        if (code == 200) WebExtract.parseDuckDuckGo(body) else emptyList()
+    }.getOrDefault(emptyList())
+
+    /**
+     * Busca híbrida — a ÚNICA porta de busca do app (web_search do agente, agentes dos fluxos, assistente):
+     * Google e Bing lidos por WebView invisível (sites viram "API") + DuckDuckGo por HTTP, todos em paralelo.
+     * Responde assim que um buscador traz ≥3 resultados, espera um instante pelos outros e mistura sem repetir.
+     * Cache de 5 min para repetições. Sem WebView (ou bloqueio/captcha) segue só com quem respondeu.
+     */
+    suspend fun search(query: String, max: Int): String {
+        if (query.isBlank()) return "ERRO: informe query."
+        val n = max.coerceIn(1, 15)
+        cache.get("$n|$query")?.let { return it }
+        val ctx = runCatching { CueApp.instance.applicationContext }.getOrNull()
+        val engines = buildList<Pair<String, suspend () -> List<WebExtract.SearchHit>>> {
+            add("DuckDuckGo" to suspend { withContext(Dispatchers.IO) { duckHttp(query) } })
+            if (ctx != null) {
+                add("Google" to suspend { WebViewSearch.search(ctx, SearchApi.Engine.GOOGLE, query) })
+                add("Bing" to suspend { WebViewSearch.search(ctx, SearchApi.Engine.BING, query) })
+            }
+        }
+        val got = HybridSearch.race(engines, firstMin = 3, graceMs = 700, totalMs = 10_000)
+        val hits = SearchApi.merge(got.map { it.second }, n)
+        if (hits.isEmpty()) return "Nenhum resultado na busca (Google, Bing e DuckDuckGo). Tente outros termos, mais curtos."
+        return SearchApi.format(query, hits, got.filter { it.second.isNotEmpty() }.joinToString(" + ") { it.first }).also { cache.put("$n|$query", it) }
     }
 }

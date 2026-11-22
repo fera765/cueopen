@@ -142,6 +142,8 @@ class BootReceiver : android.content.BroadcastReceiver() {
         if (dev.cueopen.app.AppExit.exited(context)) return
         AutonomyWorker.ensure(context)
         dev.cueopen.app.scheduler.Heartbeat.rescheduleAll(context)
+        // Fluxos: religa os alarmes dos gatilhos de horário (o sistema apaga alarmes ao reiniciar).
+        runCatching { dev.cueopen.app.workflow.WorkflowStore.init(context.filesDir); dev.cueopen.app.workflow.WorkflowScheduler.syncAll(context) }
     }
 }
 

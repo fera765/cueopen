@@ -3317,7 +3317,7 @@ class AgentRunner(
                 appendLine("1. Descobrir — chame userscript_inspect na página-alvo com seletores candidatos e um texto visível do alvo. Entenda onde está o elemento ou dado, quais atributos são estáveis (data-*, aria-*, role; classes com hash mudam a cada deploy), se o conteúdo é dinâmico e se está em iframe ou shadow DOM. Se o dado não estiver no DOM, veja em browser_network se vem de uma API e investigue com browser_js. Use apenas seletores que você viu existirem.")
                 appendLine("2. Desenvolver — escreva o script completo de uma vez, pequeno e direto, usando só o que a descoberta confirmou. Para conteúdo dinâmico, use MutationObserver com filtro ou setInterval com limite. Marque o que o script criar com um atributo próprio (ex.: data-fluwy): isso evita duplicar elementos e dá ao teste algo para contar.")
                 appendLine("3. Provar — chame userscript_test com verify = uma expressão que comprova o efeito (ex.: contar os elementos que o script criou). Passou → userscript_propose com o mesmo código, 1–2 frases ao usuário e finish.")
-                appendLine("4. Se falhar — leia o motivo devolvido (erro, verify falso) e volte ao passo 1 com outra hipótese, inspecionando com inspect/browser_js o ponto exato que falhou; reenviar variações às cegas consome os testes sem aprender nada. Se não conhecer a técnica, pesquise: browser_navigate em https://duckduckgo.com/?q=<site+problema+userscript> ou em greasyfork.org, leia uma solução existente e então reescreva e teste.")
+                appendLine("4. Se falhar — leia o motivo devolvido (erro, verify falso) e volte ao passo 1 com outra hipótese, inspecionando com inspect/browser_js o ponto exato que falhou; reenviar variações às cegas consome os testes sem aprender nada. Se não conhecer a técnica, pesquise com web_search (<site problema userscript>) ou em greasyfork.org, leia uma solução existente e então reescreva e teste.")
                 appendLine("Limites impostos pelo app: teste sem descoberta é recusado; 2 falhas seguidas exigem nova descoberta; código que já falhou não roda de novo; máximo de ${ScriptBuilderPolicy.MAX_TESTS} testes — ao atingir o limite, explique o bloqueio ao usuário.")
                 appendLine("Formato: padrão Tampermonkey, sempre com este cabeçalho:\n" + dev.cueopen.app.browser.UserScriptMeta.EXAMPLE +
                     "\nTambém são aceitos: @include/@exclude, @run-at (document-start|document-end|document-idle) e @require (https).")
@@ -3717,7 +3717,10 @@ class AgentRunner(
             "6) só com teste ok: action=publish (ativa o agendamento). Nunca diga que publicou sem publish OK. Avise o usuário que o teste executa ações reais (ex.: envia o e-mail). " +
             "Actions: list | get | create | update | validate | test | status | publish | run | disable | delete. " +
             "workflow_json = {name, nodes:[{id, type, label, config}], edges:[{from, to, port}]} (ids curtos como t1, h1, a1; layout é automático). Tipos e config (valores em texto): " +
-            "trigger_manual; trigger_schedule (mode=interval|daily|weekly, minutes, time HH:mm, weekday 1-7); " +
+            "trigger_manual; trigger_schedule (mode=interval|daily|weekly, minutes, time HH:mm, weekday 1-7 — ou when=\"frase do usuário\", ex. \"a cada 2 minutos\", \"todo dia às 8h\", \"toda segunda 18:30\"; roda com o app aberto, em segundo plano ou fechado). " +
+            "QUANDO EXECUTAR: se o pedido é recorrente e o usuário NÃO disse quando, ANTES do create chame ask_question UMA vez com no máximo 2 perguntas diretas, opções de rádio e allow_other=true " +
+            "(ex.: header \"Frequência\": \"1x por dia\", \"A cada hora\", \"Dia e horário fixos\", \"Só quando eu mandar\"; e, se fizer sentido, header \"Horário\": \"08:00\", \"12:00\", \"18:00\"). " +
+            "A resposta (inclusive o texto livre de \"Outra resposta\", ex. \"a cada 2 minutos\") vai em when=. Se o usuário já disse a frequência, não pergunte. \"Só quando eu mandar\" = trigger_manual. " +
             "ai (prompt, maxTokens) — chamada direta ao modelo SEM ferramentas: use para resumir/formatar/classificar/extrair dados (rápido; prefira a agent); " +
             "agent (prompt, agent=nome existente ou vazio, timeout min) — agente completo com ferramentas/browser, só quando precisa agir/pesquisar; " +
             "ai_decide (criteria=pergunta de sim/não com os critérios do usuário, input={{id}}; ports true/false; saída {decision, reason, category}) — decisões inteligentes: importante? precisa de resposta? é comercial? é de fulano?; " +
@@ -3809,7 +3812,7 @@ class AgentRunner(
             add(tool("browser_js", "Executa JavaScript na página atual e devolve o resultado da expressão.", buildJsonObject { put("code", str("Código JS (uma expressão)")) }, listOf("code")))
         }
         if (web) {
-            add(tool("web_search", "Busca na web sem abrir o browser (rápido e barato): devolve título, URL e trecho. Depois leia os relevantes com web_fetch. Use o browser só para sites com login, JavaScript pesado ou interação.",
+            add(tool("web_search", "Busca na web (Google + Bing + DuckDuckGo ao mesmo tempo, em segundos, sem abrir o browser da sessão): devolve título, URL e trecho. Sempre use esta ferramenta para pesquisar — não abra buscadores com browser_navigate. Depois leia os relevantes com web_fetch. Use o browser só para sites com login, JavaScript pesado ou interação.",
                 buildJsonObject { put("query", str("Termos da busca")); put("max", int("Quantidade de resultados (padrão 8)")) }, listOf("query")))
             add(tool("web_fetch", "Lê uma página por HTTP e devolve só o texto principal (sem menus/rodapés), bem menor que um snapshot do browser. Se vier pouco texto (site com JS/login), use browser_navigate.",
                 buildJsonObject { put("url", str("URL http(s) completa")); put("max_chars", int("Limite de caracteres (padrão 12000, máx. 40000)")) }, listOf("url")))
@@ -5307,7 +5310,7 @@ class AgentRunner(
                 }.ifBlank { "Nenhuma página ainda. Crie com page_create." }
                 "web_search" -> dev.cueopen.app.web.WebTools.search(s("query"), i("max") ?: 8).let { r ->
                     // Busca direta bloqueada/vazia: abre a busca no browser na hora, sem o agente precisar tentar de novo.
-                    if (r.startsWith("ERRO") || r.startsWith("Nenhum resultado pela busca direta")) browserFallback(sessionId, s("query"), r, 9_000) else r
+                    if (r.startsWith("ERRO") || r.startsWith("Nenhum resultado na busca")) browserFallback(sessionId, s("query"), r, 9_000) else r
                 }
                 "web_fetch" -> {
                     val url = SecretVault.resolve(sessionId, s("url")).trim()
@@ -5963,6 +5966,10 @@ class AgentRunner(
                     if (type == "mcp") { type = "connector"; cfg = mapOf("source" to "mcp", "conector" to cfg["conector"].orEmpty(), "acao" to cfg["tool"].orEmpty(), "campos" to cfg["args"].orEmpty().ifBlank { "{}" }) }
                     if (type !in types) return@runCatching "ERRO: tipo de nó desconhecido \"$type\". Tipos: ${types.joinToString()}."
                     if (type == "connector" && cfg["source"].isNullOrBlank()) cfg = cfg + ("source" to "hub")
+                    // Agendamento: aceita a frequência escrita como o usuário respondeu ("a cada 2 minutos", "toda segunda 8h").
+                    if (type == "trigger_schedule") cfg = logic.normalizeSchedule(cfg)
+                        ?: return@runCatching "ERRO: não entendi o agendamento do nó ${n.optString("id")}. Use mode=interval (minutes) | daily (time HH:mm) | weekly (weekday 1-7, time) " +
+                            "ou when=\"frase do usuário\" (ex.: \"a cada 2 minutos\"). Se a frequência não está clara, pergunte ao usuário com ask_question."
                     nodes += dev.cueopen.app.workflow.WfNode(id = n.optString("id").ifBlank { dev.cueopen.app.workflow.WfIds.new() }, type = type, label = n.optString("label"), config = cfg)
                 }
                 if (nodes.map { it.id }.toSet().size != nodes.size) return@runCatching "ERRO: ids de nós repetidos."
@@ -6014,7 +6021,7 @@ class AgentRunner(
                 if (v.isNotEmpty()) return@runCatching "ERRO: corrija antes de publicar:\n" + v.joinToString("\n") { "• $it" }
                 if (w.testedSig != logic.signature(w)) return@runCatching "ERRO: esta versão ainda não passou num teste completo. Rode action=test id=${w.id} primeiro."
                 val p = st.upsert(w.copy(enabled = true)); dev.cueopen.app.workflow.WorkflowScheduler.sync(ctx, p)
-                val next = dev.cueopen.app.workflow.WorkflowScheduler.nextRuns(p).minOrNull()
+                val next = dev.cueopen.app.workflow.WorkflowScheduler.nextRuns(p, ctx).minOrNull()
                 "OK: publicado — " + describe(p) + (next?.let { "\nPróxima execução: " + java.text.SimpleDateFormat("dd/MM HH:mm", java.util.Locale("pt", "BR")).format(java.util.Date(it)) } ?: "\nSem agendamento: roda quando executado.")
             }
             "run" -> find()?.let { w -> engine.start(w.id).fold({ "Execução iniciada (id $it). Veja o resultado com action=status id=${w.id}." }, { "ERRO: ${it.message}" }) } ?: "ERRO: fluxo não encontrado."

@@ -184,11 +184,14 @@ object WfLogic {
     }
 
     /** Próximo disparo (epoch ms) depois de [now] para a config do gatilho de Agendamento. null = config inválida. */
-    fun nextFire(config: Map<String, String>, now: Long, zone: TimeZone = TimeZone.getDefault()): Long? {
+    fun nextFire(config: Map<String, String>, now: Long, zone: TimeZone = TimeZone.getDefault(), lastFire: Long? = null): Long? {
         return when (config["mode"] ?: "daily") {
             "interval" -> {
                 val min = config["minutes"]?.toIntOrNull()?.takeIf { it >= 1 } ?: return null
-                now + min * 60_000L
+                val step = min * 60_000L
+                // Ancorado no último disparo: o intervalo não "reinicia" ao abrir o app. Atrasado = roda já (uma vez).
+                if (lastFire == null || lastFire > now) now + step
+                else (lastFire + step).let { if (it <= now) now + 1_000L else it }
             }
             "daily", "weekly" -> {
                 val (h, m) = parseTime(config["time"] ?: "09:00") ?: return null
@@ -205,9 +208,87 @@ object WfLogic {
         }
     }
 
+    /**
+     * Interpreta a frequência escrita livremente ("a cada 2 minutos", "1x por dia às 8h", "toda segunda 18:30",
+     * "de hora em hora", "every 5 min") → config do gatilho de Agendamento. null = não entendeu.
+     */
+    fun parseSchedule(text: String): Map<String, String>? {
+        val t = java.text.Normalizer.normalize(text.lowercase(), java.text.Normalizer.Form.NFD).replace(Regex("\\p{M}+"), "").trim()
+        if (t.isBlank()) return null
+        val time = Regex("""(\d{1,2})\s*(?::|h)\s*(\d{2})?""").find(t.replace(Regex("""a cada \d+\s*h\w*"""), ""))?.let {
+            val h = it.groupValues[1].toInt(); val m = it.groupValues[2].ifBlank { "0" }.toInt()
+            if (h in 0..23 && m in 0..59) "%02d:%02d".format(h, m) else null
+        }
+        val days = listOf("segunda", "terca", "quarta", "quinta", "sexta", "sabado", "domingo")
+        val en = listOf("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")
+        val wd = days.indexOfFirst { Regex("""\b$it""").containsMatchIn(t) }.takeIf { it >= 0 }
+            ?: en.indexOfFirst { t.contains(it) }.takeIf { it >= 0 }
+        if (wd != null && !Regex("""todo dia|diari|every day|daily""").containsMatchIn(t))
+            return mapOf("mode" to "weekly", "weekday" to (wd + 1).toString(), "time" to (time ?: "09:00"))
+        val num = Regex("""(?:a cada|cada|de|every|each)\s+(\d+)\s*(min|m\b|minuto|minute|h\b|hr|hora|hour|dia|day)""").find(t)
+        if (num != null) {
+            val n = num.groupValues[1].toInt().takeIf { it >= 1 } ?: return null
+            val u = num.groupValues[2]
+            return when {
+                u.startsWith("d") -> if (n == 1) mapOf("mode" to "daily", "time" to (time ?: "09:00")) else mapOf("mode" to "interval", "minutes" to (n * 1440).toString())
+                u.startsWith("h") -> mapOf("mode" to "interval", "minutes" to (n * 60).toString())
+                else -> mapOf("mode" to "interval", "minutes" to n.toString())
+            }
+        }
+        if (Regex("""\d+\s*(min|minuto|minute)""").containsMatchIn(t))
+            return Regex("""(\d+)\s*(min|minuto|minute)""").find(t)!!.groupValues[1].toInt().takeIf { it >= 1 }?.let { mapOf("mode" to "interval", "minutes" to it.toString()) }
+        if (Regex("""a cada minuto|todo minuto|every minute""").containsMatchIn(t)) return mapOf("mode" to "interval", "minutes" to "1")
+        if (Regex("""a cada hora|toda hora|de hora em hora|1x por hora|uma vez por hora|hourly|every hour|por hora""").containsMatchIn(t)) return mapOf("mode" to "interval", "minutes" to "60")
+        if (Regex("""todo dia|todos os dias|diari|1x (por|ao) dia|uma vez (por|ao) dia|daily|every day|por dia""").containsMatchIn(t) || time != null)
+            return mapOf("mode" to "daily", "time" to (time ?: "09:00"))
+        return null
+    }
+
+    /**
+     * Este disparo deve rodar? [due] = horário que ele representa. Não roda se já houve disparo depois de
+     * (due − 30 s) — o alarme e a reserva do WorkManager chegam para o mesmo horário — nem se ainda falta
+     * mais de 30 s para o próximo agendado (disparo velho, já substituído).
+     */
+    fun shouldFire(due: Long, last: Long?, next: Long?, now: Long): Boolean {
+        if (last != null && last >= due - 30_000L) return false
+        if (next != null && next - 30_000L > now && next > due + 30_000L) return false
+        return true
+    }
+
+    /**
+     * Config final do gatilho de Agendamento: frase livre em when/text/schedule/frequency (ou em mode) é interpretada;
+     * config estruturada válida é mantida. null = inválida/incompreensível.
+     */
+    fun normalizeSchedule(cfg: Map<String, String>): Map<String, String>? {
+        val free = listOf("when", "text", "schedule", "frequency", "frequencia").firstNotNullOfOrNull { k -> cfg[k]?.takeIf { it.isNotBlank() } }
+            ?: cfg["mode"]?.takeIf { it.isNotBlank() && it !in setOf("interval", "daily", "weekly") }
+        val rest = cfg - setOf("when", "text", "schedule", "frequency", "frequencia")
+        if (free != null) {
+            val p = parseSchedule(free) ?: return null
+            return (rest - setOf("mode", "minutes", "time", "weekday")) + p
+        }
+        val c = if (rest["mode"].isNullOrBlank()) rest + ("mode" to "daily") else rest
+        return if (nextFire(c, 0L) != null) c else null
+    }
+
+    /** "agora", "em 2 min", "hoje 14:05", "amanhã 09:00", "ontem 18:30", "24/11 08:00". */
+    fun whenLabel(ts: Long, now: Long, zone: TimeZone = TimeZone.getDefault()): String {
+        val d = ts - now
+        if (kotlin.math.abs(d) < 45_000) return "agora"
+        if (d > 0 && d < 60 * 60_000L) return "em ${(d + 59_999) / 60_000} min"
+        if (d < 0 && -d < 60 * 60_000L) return "há ${-d / 60_000} min"
+        val cal = Calendar.getInstance(zone).apply { timeInMillis = ts }
+        val hm = "%02d:%02d".format(cal.get(Calendar.HOUR_OF_DAY), cal.get(Calendar.MINUTE))
+        val diff = run { val a = Calendar.getInstance(zone).apply { timeInMillis = now; set(Calendar.HOUR_OF_DAY, 12) }; val b = Calendar.getInstance(zone).apply { timeInMillis = ts; set(Calendar.HOUR_OF_DAY, 12) }; Math.round((b.timeInMillis - a.timeInMillis) / 86_400_000.0).toInt() }
+        return when (diff) { 0 -> "hoje $hm"; 1 -> "amanhã $hm"; -1 -> "ontem $hm"
+            else -> "%02d/%02d %s".format(cal.get(Calendar.DAY_OF_MONTH), cal.get(Calendar.MONTH) + 1, hm) }
+    }
+
     /** Resumo legível do agendamento ("Todo dia às 09:00"). */
     fun scheduleLabel(config: Map<String, String>): String = when (config["mode"] ?: "daily") {
-        "interval" -> "A cada ${config["minutes"] ?: "?"} min"
+        "interval" -> config["minutes"]?.toIntOrNull()?.let { m ->
+            when { m % 1440 == 0 -> if (m == 1440) "A cada 1 dia" else "A cada ${m / 1440} dias"; m % 60 == 0 -> if (m == 60) "A cada hora" else "A cada ${m / 60} h"; else -> "A cada $m min" }
+        } ?: "A cada ? min"
         "weekly" -> "Toda ${listOf("segunda", "terça", "quarta", "quinta", "sexta", "sábado", "domingo").getOrElse(((config["weekday"]?.toIntOrNull() ?: 1) - 1).coerceIn(0, 6)) { "segunda" }} às ${config["time"] ?: "09:00"}"
         else -> "Todo dia às ${config["time"] ?: "09:00"}"
     }
