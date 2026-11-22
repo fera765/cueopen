@@ -16,7 +16,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with: { python-version: "3.11" }
-      - run: pip install -q "datasets<4" soundfile scipy numpy
+      - run: pip install -q "datasets<4" soundfile librosa scipy numpy
       - run: cd tools/voice_train && python prep.py && cat ds/info.json && du -sh ds
       - uses: actions/upload-artifact@v4
         with: { name: dataset, path: tools/voice_train/ds, retention-days: 7 }
