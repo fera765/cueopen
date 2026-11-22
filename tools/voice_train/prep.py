@@ -11,7 +11,7 @@ MAX_H = float(os.environ.get("MAX_HOURS", "2.0"))
 ds = load_dataset(REPO, split="train", streaming=True)
 first = next(iter(ds)); print("colunas:", {k: (type(v).__name__) for k, v in first.items() if k != "audio"}, flush=True)
 spk_col = next(c for c in ("speaker_id", "speaker", "client_id", "spk_id", "spk") if c in first)
-txt_col = next(c for c in ("text", "transcription", "sentence", "normalized_text") if c in first)
+txt_col = next(c for c in ("transcript", "text", "transcription", "sentence", "normalized_text") if c in first)
 gen_col = next((c for c in ("gender", "sex") if c in first), None)
 print("speaker:", spk_col, "texto:", txt_col, "gênero:", gen_col, flush=True)
 
@@ -36,6 +36,8 @@ for r in load_dataset(REPO, split="train", streaming=True):
     if r[spk_col] != spk: continue
     a = r["audio"]; x = np.asarray(a["array"], dtype=np.float32); sr = a["sampling_rate"]; d = len(x) / sr
     t = re.sub(r"\s+", " ", str(r[txt_col])).strip()
+    lv = r.get("levenshtein")
+    if lv is not None and lv < 0.95: continue   # transcrição conferida por um 2º reconhecedor (MMS): só trechos com texto confiável
     if not (2.0 <= d <= 12.0) or len(t) < 8: continue
     if sr != 22050: x = ss.resample_poly(x, 22050, sr).astype(np.float32)
     x = x / max(1e-6, float(np.abs(x).max())) * 0.9
