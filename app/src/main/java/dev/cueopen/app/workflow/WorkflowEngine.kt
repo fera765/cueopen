@@ -50,6 +50,8 @@ object WorkflowEngine {
         reviewWaits.remove("$runId|$nodeId")?.complete(ReviewDecision(approved, draft))
     }
     private const val MAX_STEPS = 200
+    /** Campos onde um {{…}} vazio é erro (IA/agente/aviso/e-mail não podem receber instrução sem os dados). */
+    private val EMPTY_CHECK = mapOf("ai" to listOf("prompt"), "agent" to listOf("prompt"), "notify" to listOf("text", "title"), "connector" to listOf("campos"))
 
     private val pauses = ConcurrentHashMap.newKeySet<String>()
 
@@ -174,7 +176,9 @@ object WorkflowEngine {
                 fun rt(t: String, mode: Int) = WfLogic.render(t, outputs, labels, prev, vars, humanize = when (mode) { 1 -> { v: String -> WfFormat.oneLine(v) }; 2 -> { v: String -> WfFormat.readable(v) }; else -> null })
                 fun rh(key: String, short: Boolean) = WfLogic.render(node.config[key] ?: WfCatalog.of(node.type).fields.firstOrNull { it.key == key }?.default.orEmpty(), outputs, labels, prev, vars,
                     humanize = { v: String -> if (short) WfFormat.oneLine(v) else WfFormat.readable(v) })
-                val res = try {
+                val emptyRef = EMPTY_CHECK[node.type]?.flatMap { k -> WfLogic.emptyRefs(node.config[k].orEmpty(), outputs, labels, prev, vars) }?.firstOrNull()
+                val res = if (emptyRef != null) NodeResult(error = "$emptyRef veio vazio: o nó anterior não produziu esse dado. Abra a saída dele no teste e use um caminho que exista (veja \"caminhos\").")
+                else try {
                     runNode(w, run, node, prev, ::r, ::rh, ::rt) { status -> save(run.copy(status = status)) }
                 } catch (c: kotlinx.coroutines.CancellationException) { throw c } catch (e: Throwable) {
                     NodeResult(error = (e.message ?: e.javaClass.simpleName).take(1_500))
@@ -274,19 +278,22 @@ object WorkflowEngine {
                 val msg = "[Fluxo automático \"${w.name}\" — ninguém está acompanhando agora; execute e responda com o resultado final, sem perguntas. " +
                     "Os dados que vieram dos nós anteriores já estão nesta mensagem: use-os direto, não busque de novo nos conectores. " +
                     "Seja econômico: prefira web_search e web_fetch (no máximo ~6 consultas); só use o navegador se for indispensável. " +
-                    "Links: use o endereço direto da fonte (nunca links de redirecionamento como news.google.com/read)." +
+                    "Links: use o endereço direto da fonte (nunca links de redirecionamento como news.google.com/read); não tente abrir ou decodificar links de redirecionamento. " +
+                    "Sua ÚLTIMA mensagem é a entrega que segue para os próximos nós: escreva nela o resultado completo (ex.: o briefing pronto), nunca um relato do que fez nem o próximo passo. Não use ask_question nem peça confirmação." +
                     (if (run.trigger == "test") " MODO TESTE: pesquise e leia de verdade, mas NÃO envie nada para fora (e-mail, mensagem, POST, publicação, compra); descreva o que enviaria." else "") + "]\n\n$prompt"
                 val maxSteps = (r("maxSteps").toIntOrNull() ?: 14).coerceIn(3, 40)
                 val budget = (r("budget").toLongOrNull() ?: 200_000L).coerceIn(30_000L, 1_500_000L)
                 val finished = withTimeoutOrNull(timeoutMin * 60_000L) { app.agent.runBudgeted(session.id, msg, maxSteps, budget); true }
                 if (finished == null) { app.agent.stop(session.id); return NodeResult(error = "O agente passou de $timeoutMin min.", sessionId = session.id) }
                 val s = app.store.session(session.id)
-                val answer = (s?.items?.lastOrNull { it is ChatItem.Assistant } as? ChatItem.Assistant)?.text.orEmpty()
+                val assistants = s?.items?.filterIsInstance<ChatItem.Assistant>().orEmpty()
+                val answer = (assistants.lastOrNull { it.final } ?: assistants.lastOrNull())?.text.orEmpty()
                 when {
                     s?.status == SessionStatus.ERROR -> NodeResult(error = (s.items.lastOrNull { it is ChatItem.Error } as? ChatItem.Error)?.text ?: "O agente falhou.", sessionId = session.id)
                     s?.status == SessionStatus.WAITING_USER -> NodeResult(error = "O agente parou pedindo uma confirmação ou resposta. Abra o chat da execução.", sessionId = session.id)
                     answer.isBlank() -> NodeResult(error = "O agente terminou sem resposta.", sessionId = session.id)
-                    else -> NodeResult(answer, sessionId = session.id)
+                    WfQuality.agentUnfinished(answer) -> NodeResult(answer, error = "O agente parou no meio do trabalho (\"${answer.take(120)}\"). Deixe a instrução mais direta, aumente passos/tempo ou divida em nós.", sessionId = session.id)
+                    else -> WfQuality.aiOutputProblem("A resposta do agente", answer)?.let { NodeResult(answer, error = it, sessionId = session.id) } ?: NodeResult(answer, sessionId = session.id)
                 }
             }
 
@@ -360,7 +367,7 @@ object WorkflowEngine {
                 if (cmd.isBlank()) return NodeResult(error = "Comando vazio.")
                 if (run.trigger == "test" && WfQuality.isExternalSend("shell", mapOf("command" to cmd))) return simulated(node, "comando que envia para fora", cmd)
                 if (!app.sandbox.isInstalled()) return NodeResult(error = "O Linux do app não está instalado (Configurações › Sandbox).")
-                val res = app.sandbox.exec(dev.cueopen.app.sandbox.InteractivePrompts.ENV + " ; " + cmd + " < /dev/null",
+                val res = app.sandbox.exec(dev.cueopen.app.sandbox.InteractivePrompts.ENV + "\n{\n" + cmd + "\n} < /dev/null",
                     cwd = "/root/workspace", timeoutSec = (r("timeout").toLongOrNull() ?: 120L).coerceIn(5, 1_800))
                 val out = buildJsonObject { put("exit", res.exitCode); put("output", res.output.takeLast(15_000)) }.toString()
                 if (res.exitCode != 0) NodeResult(out, error = "Saiu com código ${res.exitCode}: ${res.output.takeLast(500)}") else NodeResult(out)
@@ -517,10 +524,20 @@ object WorkflowEngine {
                 if (prompt.length > 120_000) return NodeResult(error = "Os dados ficaram grandes demais para a IA (${prompt.length / 1000} mil caracteres). Use um caminho mais específico, ex.: {{id.data.campo}}.")
                 val max = (r("maxTokens").toIntOrNull() ?: 800).coerceIn(50, 8_000)
                 // Provedores como o OpenCode exigem um id de conversa estável: um por fluxo+nó.
-                val out = app.llm.quick(prompt, maxTokens = max, conversationId = "workflow-${w.id}-${node.id}").trim()
+                // Entrada com XML de feed cru: troca pela lista enxuta (o modelo travava com 6–160 KB de XML).
+                val input = if (Regex("(?i)<rss[\\s>]|<feed[\\s>]").containsMatchIn(prompt))
+                    Regex("(?is)(<\\?xml[^>]*>\\s*)?<(rss|feed)[\\s>].*?(</(rss|feed)>|$)").replace(prompt) { m -> WfFeed.toText(WfFeed.parse(m.value, 25)).ifBlank { m.value.take(8_000) } }
+                else prompt
+                var out = ""
+                for (attempt in 0..1) {
+                    out = runCatching { app.llm.quick(input, maxTokens = max, conversationId = "workflow-${w.id}-${node.id}") }.getOrDefault("").trim()
+                    if (out.isNotBlank()) break
+                    kotlinx.coroutines.delay(2_000)
+                }
                 // Resposta em bloco de código (```json … ```) vira o conteúdo puro (ex.: uma view do UI kit).
                 val clean = Regex("^```[a-zA-Z]*\\s*([\\s\\S]*?)\\s*```$").find(out)?.groupValues?.get(1)?.trim() ?: out
-                if (clean.isBlank()) NodeResult(error = "O modelo não respondeu.") else NodeResult(clean)
+                if (clean.isBlank()) NodeResult(error = "O modelo não respondeu (2 tentativas, entrada de ${input.length / 1000} mil caracteres). Reduza os dados: use {{id.text}} ou {{id.items}} em vez do corpo inteiro.")
+                else WfQuality.aiOutputProblem("A resposta da IA", clean)?.let { NodeResult(clean, error = it) } ?: NodeResult(clean)
             }
 
             "if_new" -> {
@@ -561,8 +578,10 @@ object WorkflowEngine {
             val code = c.responseCode
             val text = runCatching { (if (code >= 400) c.errorStream else c.inputStream)?.bufferedReader()?.use { it.readText() } }.getOrNull().orEmpty().take(200_000)
             val data = runCatching { Json.parseToJsonElement(text) }.getOrNull()
-            val out = buildJsonObject { put("status", code); put("body", text.take(50_000)); if (data != null) put("data", data)
-                if (data == null && Regex("<(html|body|div|p)[\\s>]", RegexOption.IGNORE_CASE).containsMatchIn(text)) put("text", WfLogic.htmlText(text).take(20_000)) }.toString()
+            val out = buildJsonObject { put("status", code); put("body", if (WfFeed.isFeed(text)) text.take(4_000) else text.take(50_000)); if (data != null) put("data", data)
+                val feed = if (data == null && WfFeed.isFeed(text)) WfFeed.parse(text, 30) else emptyList()
+                if (feed.isNotEmpty()) { put("items", WfFeed.toJson(feed)); put("text", WfFeed.toText(feed)); put("count", feed.size) }
+                else if (data == null && Regex("<(html|body|div|p)[\\s>]", RegexOption.IGNORE_CASE).containsMatchIn(text)) put("text", WfLogic.htmlText(text).take(20_000)) }.toString()
             if (code >= 400) NodeResult(out, error = "HTTP $code: ${text.take(400)}") else NodeResult(out)
         } catch (e: Exception) {
             NodeResult(error = "Falha de rede: ${e.message ?: e.javaClass.simpleName}")

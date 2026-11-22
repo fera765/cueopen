@@ -80,6 +80,17 @@ object WfLogic {
             if (base == null) "" else if (path.isEmpty()) base else pick(base, path)
         }
 
+    /**
+     * Caminhos {{…}} que ficaram vazios ao preencher (ex.: {{h1.output}} de um comando que não imprimiu nada).
+     * Ignora os que têm filtro default:. Evita mandar instrução vazia para a IA, o agente ou o e-mail.
+     */
+    fun emptyRefs(template: String, outputs: Map<String, String>, labels: Map<String, String>, prev: String, vars: Map<String, String> = emptyMap()): List<String> =
+        TOKEN.findAll(template).mapNotNull { m ->
+            val expr = m.groupValues[1]
+            if (expr.split('|').drop(1).any { it.trim().startsWith("default") }) return@mapNotNull null
+            if (render(m.value, outputs, labels, prev, vars).isBlank()) m.value else null
+        }.distinct().toList()
+
     private val EMAIL = Regex("[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}")
 
     fun applyFilters(value: String, filters: List<String>): String = filters.fold(value) { v, f ->

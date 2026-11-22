@@ -15,6 +15,10 @@ import kotlinx.serialization.json.contentOrNull
  * (validação dos argumentos do modelo e texto das respostas), testável na JVM.
  */
 object AskTools {
+    private val INTERVIEW = Regex("(?i)(fa[çc]a(-me)? perguntas|me (fa[çc]a|pergunte)|pergunt(e|as) at[ée]|entrevist(e|a)-?me|me entrevist|ask me questions|interview me)")
+    /** O usuário pediu explicitamente para ser questionado até o agente entender. */
+    fun wantsInterview(text: String): Boolean = INTERVIEW.containsMatchIn(text)
+
     const val MAX_QUESTIONS = 4
     const val MAX_FIELDS = 8
     val SECURE_TYPES = setOf("password", "token", "api_key", "email", "text", "number", "url")

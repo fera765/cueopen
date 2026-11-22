@@ -75,6 +75,32 @@ object WfQuality {
         }
     }
 
+    private val MISSING_INPUT = Regex(
+        "(?i)(n[ãa]o (foi incluíd|foram incluíd|recebi|veio|há (nenhum|conteúdo))|está vazi|veio vazi|ficou vazi|campo .{0,30} vazio|" +
+            "(cole|envie|forneça|mande) (o|a|os|as) (conteúdo|lista|texto|xml|feed|dados|títulos)|" +
+            "(please )?(provide|paste) the (content|list|text|data)|no (content|data) (was )?provided)"
+    )
+    private val UNFINISHED = Regex(
+        "(?i)^(vou|agora vou|vamos|deixa eu|preciso|primeiro,? vou|em seguida|let me|i('| a)ll|now i)\\b|" +
+            "(vou (buscar|confirmar|verificar|abrir|pesquisar|tentar|checar|ler)[^.]*[:.…]?)$"
+    )
+
+    /** Saída de IA/agente que reclama de entrada ausente — sinal de caminho {{…}} errado. */
+    fun aiOutputProblem(what: String, text: String): String? {
+        val t = text.trim()
+        if (t.isEmpty()) return "$what ficou vazio."
+        if (MISSING_INPUT.containsMatchIn(t.take(600))) return "$what diz que não recebeu os dados (\"${t.take(120)}\"). Confira o caminho {{…}} do nó anterior e teste de novo."
+        return null
+    }
+
+    /** Resposta final do agente que é só narração de trabalho em andamento ("Vou confirmar…:"). */
+    fun agentUnfinished(text: String): Boolean {
+        val t = text.trim()
+        if (t.isEmpty()) return true
+        val lastLine = t.lines().last { it.isNotBlank() }.trim()
+        return (t.length < 600 && (UNFINISHED.containsMatchIn(t) || lastLine.endsWith(":"))) || UNFINISHED.containsMatchIn(lastLine) && lastLine.endsWith(":")
+    }
+
     /** Checagem do e-mail já preenchido, logo antes de enviar. */
     fun emailProblem(campos: JsonObject): String? {
         val rec = when (val v = listOf("receiver", "to", "para").firstNotNullOfOrNull { campos[it] }) {

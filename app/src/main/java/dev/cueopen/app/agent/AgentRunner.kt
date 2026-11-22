@@ -3251,7 +3251,7 @@ class AgentRunner(
             appendLine("6c. IQ Option: use apenas as ferramentas manuais do conector (login, ativos abertos, candles, abrir opção/Forex, fechar Forex, consultar posições e resultados). O conector não tem scanner, estratégia nem execução automática; não cite ferramentas que não existem e não transforme a leitura de candles em uma ordem automática.")
             appendLine("7. Modo contínuo: quando o usuário pedir para monitorar, acompanhar, repetir ou rodar por horas/dias, a tarefa não termina com `finish`. Faça a verificação, registre o resultado em notes_write e chame `sleep` com os minutos até a próxima. Repita até o usuário pausar.")
             appendLine("8. Fora do modo contínuo, encerre com `finish` (resumo curto + arquivos). Responda no idioma do usuário.")
-            appendLine("8a. Dúvida real → `ask_question`: use quando o usuário pediu uma tarefa e existe uma dúvida que muda o resultado (qual de duas abordagens, público, formato, escopo) e errar custaria refazer muito trabalho ou algo irreversível. Não use para pedir permissão (\"posso começar?\"), para o que você descobre pesquisando ou lendo arquivos, nem para preferências triviais: nesses casos assuma o mais razoável e diga o que assumiu. No máximo uma vez por pedido, com 1–4 perguntas objetivas e 2–4 opções cada (\"Outra resposta\" já aparece sozinha). Recebidas as respostas, siga direto para o trabalho.")
+            appendLine("8a. Dúvida real → `ask_question`: use quando o usuário pediu uma tarefa e existe uma dúvida que muda o resultado (qual de duas abordagens, público, formato, escopo) e errar custaria refazer muito trabalho ou algo irreversível. Não use para pedir permissão (\"posso começar?\"), para o que você descobre pesquisando ou lendo arquivos, nem para preferências triviais: nesses casos assuma o mais razoável e diga o que assumiu. No máximo uma vez por pedido (se o usuário pediu para ser entrevistado/questionado até você entender, faça até 4 rodadas curtas, uma de cada vez), com 1–4 perguntas objetivas e 2–4 opções cada (\"Outra resposta\" já aparece sozinha). Recebidas as respostas, siga direto para o trabalho.")
             appendLine("8b0. Dados sensíveis → `ask_secure`: para API key, token, e-mail/senha e dados de login ou de formulário, chame ask_secure com os campos em vez de pedir que o usuário digite no chat (o chat fica no histórico; o formulário seguro não). Você não vê os valores: use o marcador {{secret:<nome>}} nos argumentos de execução e o app o troca pelo valor real. Não tente imprimir, ecoar ou adivinhar o valor, e não coloque segredos em definições YAML nem em amostras do connector_test. Se o usuário colar um segredo no chat, use-o apenas se for necessário e recomende o formulário seguro para a próxima vez.")
             SecretVault.names(sessionId).takeIf { it.isNotEmpty() }?.let { appendLine("8b1. Dados seguros já disponíveis nesta tarefa (use o marcador; não peça de novo): " + it.joinToString { n -> "{{secret:$n}}" }) }
             appendLine("8b. Elementos CueUI: quando um elemento interativo deixar a resposta mais clara (opções para tocar, gráfico, calculadora, tabela, estatísticas, passos, barra de progresso, aviso, chave→valor), inclua um bloco ```cueui com um único objeto JSON `{\"type\": ...}`. O chat renderiza o bloco como componente nativo, então não escreva o JSON como texto nem explique o bloco. Tipos e campos: " +
@@ -3721,7 +3721,7 @@ class AgentRunner(
             "Actions: list | get | create | update | validate | test | status | publish | run | disable | delete. " +
             "workflow_json = {name, nodes:[{id, type, label, config}], edges:[{from, to, port}]} (ids curtos como t1, h1, a1; layout é automático). Tipos e config (valores em texto): " +
             "trigger_manual; trigger_schedule (mode=interval|daily|weekly, minutes, time HH:mm, weekday 1-7 — ou when=\"frase do usuário\", ex. \"a cada 2 minutos\", \"todo dia às 8h\", \"toda segunda 18:30\"; roda com o app aberto, em segundo plano ou fechado). " +
-            "E-MAIL DE DESTINO: nunca invente nem use exemplo (x@y.com, email@exemplo.com). Se o fluxo envia e-mail e o usuário não disse o destino, pergunte com ask_question (opções: o e-mail da conta conectada, se souber, + allow_other) ou ask_secure se ele preferir não expor; coloque em campos.receiver e envie pelo conector de e-mail dele (gmail send_email). O fluxo só é aceito/publicado com destinatário real, assunto e corpo. FORMATO: corpo de e-mail em Markdown limpo (títulos, listas, tabelas, links) — o app converte para HTML de e-mail com estilos inline; notificação/página/chat usam Markdown estilo GitHub. TESTE e PUBLICAÇÃO: action=test lê de verdade (sites, buscas, e-mails, APIs GET) mas simula todo envio externo (e-mail, POST, webhook, ações de escrita) e valida o conteúdo; action=publish roda esse teste ponta a ponta e só ativa se passar. WEBHOOK: trigger_webhook {repo dono/repo, issue N, secret ≥12 caracteres} — quem chama posta um comentário na issue (1ª linha = segredo, resto = payload JSON), use {{trigger.payload.campo}}. NOTIFY open=chat abre uma conversa do fluxo com o conteúdo (Markdown GitHub: tabelas, links, listas). Portão: título/texto/corpo vazios, {{…}} sem valor ou JSON cru fazem o teste falhar e bloqueiam a publicação — corrija e teste de novo. QUANDO EXECUTAR: se o pedido é recorrente e o usuário NÃO disse quando, ANTES do create chame ask_question UMA vez com no máximo 2 perguntas diretas, opções de rádio e allow_other=true " +
+            "E-MAIL DE DESTINO: nunca invente nem use exemplo (x@y.com, email@exemplo.com). Se o fluxo envia e-mail e o usuário não disse o destino, pergunte com ask_question (opções: o e-mail da conta conectada, se souber, + allow_other) ou ask_secure se ele preferir não expor; coloque em campos.receiver e envie pelo conector de e-mail dele (gmail send_email). O fluxo só é aceito/publicado com destinatário real, assunto e corpo. FORMATO: corpo de e-mail em Markdown limpo (títulos, listas, tabelas, links) — o app converte para HTML de e-mail com estilos inline; notificação/página/chat usam Markdown estilo GitHub. TESTE e PUBLICAÇÃO: action=test lê de verdade (sites, buscas, e-mails, APIs GET) mas simula todo envio externo (e-mail, POST, webhook, ações de escrita) e valida o conteúdo; action=publish roda esse teste ponta a ponta e só ativa se passar. NOTÍCIAS/FEEDS: http GET num RSS/Atom já devolve {{id.items}} (title, link, date, source, image) e {{id.text}} (lista compacta, 1 por linha) — use {{id.text}} no nó de IA; nunca passe {{id.body}} (XML cru) nem baixe feed por shell. Um {{…}} que chega vazio faz o teste falhar com o nome do caminho; IA/agente que respondem \"não recebi os dados\" também falham. Nó agent: a última mensagem dele é a saída do nó; peça o resultado pronto, sem relato do processo. Ao errar o id de um fluxo, o erro lista os ids existentes. WEBHOOK: trigger_webhook {repo dono/repo, issue N, secret ≥12 caracteres} — quem chama posta um comentário na issue (1ª linha = segredo, resto = payload JSON), use {{trigger.payload.campo}}. NOTIFY open=chat abre uma conversa do fluxo com o conteúdo (Markdown GitHub: tabelas, links, listas). Portão: título/texto/corpo vazios, {{…}} sem valor ou JSON cru fazem o teste falhar e bloqueiam a publicação — corrija e teste de novo. QUANDO EXECUTAR: se o pedido é recorrente e o usuário NÃO disse quando, ANTES do create chame ask_question UMA vez com no máximo 2 perguntas diretas, opções de rádio e allow_other=true " +
             "(ex.: header \"Frequência\": \"1x por dia\", \"A cada hora\", \"Dia e horário fixos\", \"Só quando eu mandar\"; e, se fizer sentido, header \"Horário\": \"08:00\", \"12:00\", \"18:00\"). " +
             "A resposta (inclusive o texto livre de \"Outra resposta\", ex. \"a cada 2 minutos\") vai em when=. Se o usuário já disse a frequência, não pergunte. \"Só quando eu mandar\" = trigger_manual. " +
             "ai (prompt, maxTokens) — chamada direta ao modelo SEM ferramentas: use para resumir/formatar/classificar/extrair dados (rápido; prefira a agent); " +
@@ -4737,7 +4737,12 @@ class AgentRunner(
                 val lastUser = items.indexOfLast { it is ChatItem.User }
                 val autonomous = sess?.continuous == true || sess?.llm?.lastOrNull { it.role == "user" }?.content?.startsWith("[Heartbeat") == true
                 if (lastUser < 0 || autonomous) return ToolResult("RECUSADO: ask_question só pode ser usado quando o usuário pediu uma tarefa e está na conversa. Siga com a suposição mais razoável e diga qual assumiu.")
-                if (items.drop(lastUser + 1).any { it is ChatItem.Question }) return ToolResult("RECUSADO: você já fez perguntas para este pedido. Use as respostas recebidas (ou uma suposição razoável) e continue a tarefa.")
+                // Pedido de entrevista ("faça-me perguntas até entender") libera até 4 rodadas; senão, 1 por pedido.
+                val interview = items.filterIsInstance<ChatItem.User>().any { AskTools.wantsInterview(it.text) }
+                val rounds = items.drop(lastUser + 1).count { it is ChatItem.Question }
+                val pending = items.drop(lastUser + 1).filterIsInstance<ChatItem.Question>().any { it.state == "pending" }
+                if (pending) return ToolResult("RECUSADO: ainda há perguntas sem resposta. Aguarde o usuário.", SessionStatus.WAITING_USER)
+                if (rounds >= (if (interview) 4 else 1)) return ToolResult("RECUSADO: você já fez perguntas para este pedido. Use as respostas recebidas (ou uma suposição razoável) e continue a tarefa.")
                 val (qs, err) = AskTools.parseQuestions(a)
                 if (err != null) return ToolResult("ERRO em ask_question: $err")
                 store.addItem(sessionId, ChatItem.Question(questions = qs))
@@ -5932,7 +5937,10 @@ class AgentRunner(
         val logic = dev.cueopen.app.workflow.WfLogic
         val engine = dev.cueopen.app.workflow.WorkflowEngine
         val id = o.optString("id").trim()
+        // id com erro de digitação: aceita prefixo único ou nome; a mensagem de erro lista os fluxos existentes
         fun find() = st.get(id) ?: st.flows.value.firstOrNull { it.name.equals(id, true) }
+            ?: st.flows.value.filter { id.length >= 4 && (it.id.startsWith(id) || id.startsWith(it.id)) }.singleOrNull()
+        val notFound = "ERRO: fluxo não encontrado (id \"$id\"). Fluxos: " + st.flows.value.take(12).joinToString("; ") { "${it.name} = ${it.id}" }.ifBlank { "nenhum" }
         fun describe(w: dev.cueopen.app.workflow.Workflow) = "\"${w.name}\" (id ${w.id}) · ${w.nodes.size} nós · " +
             (if (w.enabled) "publicado" else "rascunho") + (if (w.testedSig.isNotEmpty() && w.testedSig == logic.signature(w)) " · testado" else " · não testado") +
             logic.problems(w).takeIf { it.isNotEmpty() }?.let { "\nAjustes pendentes: " + it.joinToString("; ") }.orEmpty()
@@ -5948,10 +5956,10 @@ class AgentRunner(
         }
         when (val action = o.optString("action").trim().lowercase()) {
             "list" -> st.flows.value.joinToString("\n") { "- " + describe(it) }.ifBlank { "Nenhum fluxo ainda." }
-            "get" -> find()?.let { kotlinx.serialization.json.Json.encodeToString(dev.cueopen.app.workflow.Workflow.serializer(), it) } ?: "ERRO: fluxo não encontrado."
+            "get" -> find()?.let { kotlinx.serialization.json.Json.encodeToString(dev.cueopen.app.workflow.Workflow.serializer(), it) } ?: notFound
             "create", "update" -> {
                 val j = org.json.JSONObject(o.optString("workflow_json").ifBlank { "{}" })
-                val base = if (action == "update") (find() ?: return@runCatching "ERRO: fluxo não encontrado.") else null
+                val base = if (action == "update") (find() ?: return@runCatching notFound) else null
                 // Evita fluxos duplicados (com dezenas de fluxos, criar de novo em vez de editar gerava cópias rodando em paralelo).
                 if (base == null) j.optString("name").trim().takeIf { it.isNotEmpty() }?.let { nm ->
                     st.flows.value.firstOrNull { it.name.equals(nm, true) }?.let { dup ->
@@ -6000,9 +6008,9 @@ class AgentRunner(
                 "OK: rascunho salvo — " + describe(saved) + "\n" + (if (v.isEmpty()) "Validação: ok. Próximo passo: action=test id=${saved.id}."
                     else "Validação falhou:\n" + v.joinToString("\n") { "• $it" } + "\nCorrija com action=update (veja conectores com conectores_listar / conector_acoes).")
             }
-            "validate" -> find()?.let { w -> validation(w).let { v -> if (v.isEmpty()) "Validação: ok." else "Validação falhou:\n" + v.joinToString("\n") { "• $it" } } } ?: "ERRO: fluxo não encontrado."
+            "validate" -> find()?.let { w -> validation(w).let { v -> if (v.isEmpty()) "Validação: ok." else "Validação falhou:\n" + v.joinToString("\n") { "• $it" } } } ?: notFound
             "test" -> {
-                val w = find() ?: return@runCatching "ERRO: fluxo não encontrado."
+                val w = find() ?: return@runCatching notFound
                 val v = validation(w)
                 if (v.isNotEmpty()) return@runCatching "ERRO: corrija antes de testar:\n" + v.joinToString("\n") { "• $it" }
                 stopActive(w)  // execução antiga (ou teste anterior travado) não impede o novo teste
@@ -6012,28 +6020,28 @@ class AgentRunner(
                 else "Teste concluído.\n" + report(r) + if (r.status == "ok") "\nTudo certo: publique com action=publish id=${w.id}." else "\nCorrija com action=update e teste de novo."
             }
             "status" -> {
-                val w = find() ?: return@runCatching "ERRO: fluxo não encontrado."
+                val w = find() ?: return@runCatching notFound
                 var last = st.runsOf(w.id).firstOrNull() ?: return@runCatching "Nenhuma execução ainda."
                 // Ainda rodando: espera até 90 s aqui (não fique chamando status em sequência).
                 if (last.status == "running") last = engine.awaitRun(last.id, 90_000L) ?: last
                 "Última execução (${last.trigger}):\n" + report(last) + if (last.status == "running") "\nAinda rodando. Se um nó demora demais, cancele com action=update corrigindo-o (ex.: troque agent por ai)." else ""
             }
             "publish" -> {
-                val w = find() ?: return@runCatching "ERRO: fluxo não encontrado."
+                val w = find() ?: return@runCatching notFound
                 val v = validation(w)
                 if (v.isNotEmpty()) return@runCatching "ERRO: corrija antes de publicar:\n" + v.joinToString("\n") { "• $it" }
                 stopActive(w)
                 // Testa ponta a ponta (leituras reais, envios simulados) e só publica se passar.
                 val (okPub, msgPub) = engine.publishTested(ctx, w.id)
                 if (!okPub) return@runCatching "ERRO: $msgPub\nCorrija com action=update e publique de novo."
-                val p = st.get(w.id) ?: return@runCatching "ERRO: fluxo não encontrado."
+                val p = st.get(w.id) ?: return@runCatching notFound
                 val next = dev.cueopen.app.workflow.WorkflowScheduler.nextRuns(p, ctx).minOrNull()
                 "OK: testado de ponta a ponta e publicado — " + describe(p) + (next?.let { "\nPróxima execução: " + java.text.SimpleDateFormat("dd/MM HH:mm", java.util.Locale("pt", "BR")).format(java.util.Date(it)) } ?: "\nSem agendamento: roda quando executado.")
             }
-            "run" -> find()?.let { w -> engine.start(w.id).fold({ "Execução iniciada (id $it). Veja o resultado com action=status id=${w.id}." }, { "ERRO: ${it.message}" }) } ?: "ERRO: fluxo não encontrado."
+            "run" -> find()?.let { w -> engine.start(w.id).fold({ "Execução iniciada (id $it). Veja o resultado com action=status id=${w.id}." }, { "ERRO: ${it.message}" }) } ?: notFound
             "enable" -> "ERRO: use action=publish (valida e exige teste aprovado antes de ativar)."
-            "disable" -> find()?.let { w -> val v = st.upsert(w.copy(enabled = false)); dev.cueopen.app.workflow.WorkflowScheduler.sync(ctx, v); "OK: despublicado — " + describe(v) } ?: "ERRO: fluxo não encontrado."
-            "delete" -> find()?.let { w -> dev.cueopen.app.workflow.WorkflowScheduler.cancel(ctx, w.id); st.delete(w.id); "OK: fluxo \"${w.name}\" excluído." } ?: "ERRO: fluxo não encontrado."
+            "disable" -> find()?.let { w -> val v = st.upsert(w.copy(enabled = false)); dev.cueopen.app.workflow.WorkflowScheduler.sync(ctx, v); "OK: despublicado — " + describe(v) } ?: notFound
+            "delete" -> find()?.let { w -> dev.cueopen.app.workflow.WorkflowScheduler.cancel(ctx, w.id); st.delete(w.id); "OK: fluxo \"${w.name}\" excluído." } ?: notFound
             else -> "ERRO: action inválida."
         }
     }.getOrElse { if (it is kotlinx.coroutines.CancellationException) throw it; "ERRO: ${it.message}" }
