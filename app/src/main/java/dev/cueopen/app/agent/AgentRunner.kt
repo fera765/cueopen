@@ -4730,19 +4730,7 @@ class AgentRunner(
             }
             "ask_question" -> {
                 if (autoSectionSession(sessionId)) return ToolResult("MODO AUTÔNOMO: o usuário não vai responder. Decida você mesmo a melhor opção com os dados que tem, registre a escolha em 1 frase e continue o trabalho agora.")
-                // GUARDRAIL: só existe para uma dúvida real dentro de um pedido do usuário presente —
-                // nunca em ciclos autônomos/agendados e no máximo uma vez por mensagem do usuário.
-                val sess = store.session(sessionId)
-                val items = sess?.items.orEmpty()
-                val lastUser = items.indexOfLast { it is ChatItem.User }
-                val autonomous = sess?.continuous == true || sess?.llm?.lastOrNull { it.role == "user" }?.content?.startsWith("[Heartbeat") == true
-                if (lastUser < 0 || autonomous) return ToolResult("RECUSADO: ask_question só pode ser usado quando o usuário pediu uma tarefa e está na conversa. Siga com a suposição mais razoável e diga qual assumiu.")
-                // Pedido de entrevista ("faça-me perguntas até entender") libera até 4 rodadas; senão, 1 por pedido.
-                val interview = items.filterIsInstance<ChatItem.User>().any { AskTools.wantsInterview(it.text) }
-                val rounds = items.drop(lastUser + 1).count { it is ChatItem.Question }
-                val pending = items.drop(lastUser + 1).filterIsInstance<ChatItem.Question>().any { it.state == "pending" }
-                if (pending) return ToolResult("RECUSADO: ainda há perguntas sem resposta. Aguarde o usuário.", SessionStatus.WAITING_USER)
-                if (rounds >= (if (interview) 4 else 1)) return ToolResult("RECUSADO: você já fez perguntas para este pedido. Use as respostas recebidas (ou uma suposição razoável) e continue a tarefa.")
+                askQuestionGuard(sessionId)?.let { return it }
                 val (qs, err) = AskTools.parseQuestions(a)
                 if (err != null) return ToolResult("ERRO em ask_question: $err")
                 store.addItem(sessionId, ChatItem.Question(questions = qs))
@@ -7242,6 +7230,24 @@ class AgentRunner(
     }
 
     private fun appendReportLine(report: StringBuilder, line: String) { report.appendLine(line) }
+
+    /** Regras do ask_question (fora do runTool, que já está no limite de tamanho do método JVM). */
+    private fun askQuestionGuard(sessionId: String): ToolResult? = run {
+                // GUARDRAIL: só existe para uma dúvida real dentro de um pedido do usuário presente —
+                // nunca em ciclos autônomos/agendados e no máximo uma vez por mensagem do usuário.
+                val sess = store.session(sessionId)
+                val items = sess?.items.orEmpty()
+                val lastUser = items.indexOfLast { it is ChatItem.User }
+                val autonomous = sess?.continuous == true || sess?.llm?.lastOrNull { it.role == "user" }?.content?.startsWith("[Heartbeat") == true
+                if (lastUser < 0 || autonomous) return@run ToolResult("RECUSADO: ask_question só pode ser usado quando o usuário pediu uma tarefa e está na conversa. Siga com a suposição mais razoável e diga qual assumiu.")
+                // Pedido de entrevista ("faça-me perguntas até entender") libera até 4 rodadas; senão, 1 por pedido.
+                val interview = items.filterIsInstance<ChatItem.User>().any { AskTools.wantsInterview(it.text) }
+                val rounds = items.drop(lastUser + 1).count { it is ChatItem.Question }
+                val pending = items.drop(lastUser + 1).filterIsInstance<ChatItem.Question>().any { it.state == "pending" }
+                if (pending) return@run ToolResult("RECUSADO: ainda há perguntas sem resposta. Aguarde o usuário.", SessionStatus.WAITING_USER)
+                if (rounds >= (if (interview) 4 else 1)) return@run ToolResult("RECUSADO: você já fez perguntas para este pedido. Use as respostas recebidas (ou uma suposição razoável) e continue a tarefa.")
+                null
+    }
 
     private fun shQuote(s: String) = "'" + s.replace("'", "'\\''") + "'"
 
