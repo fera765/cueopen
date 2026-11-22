@@ -2,7 +2,7 @@ name: voice-train
 on:
   workflow_dispatch:
   push:
-    paths: [".github/workflows/voice-train.yml"]
+    paths: [".github/workflows/voice-train.yml", "tools/voice_train/**"]
 permissions:
   contents: read
 env:
