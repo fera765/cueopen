@@ -34,7 +34,7 @@ object WfEmail {
         var s = esc(s0)
         val codes = mutableListOf<String>()
         s = Regex("`([^`]+)`").replace(s) { codes += it.groupValues[1]; "\u0000${codes.size - 1}\u0000" }
-        s = Regex("!\\[([^\\]]*)\\]\\((https?://[^)\\s]+)\\)").replace(s) { "<img src=\"${it.groupValues[2]}\" alt=\"${it.groupValues[1]}\" style=\"max-width:100%;border-radius:8px\">" }
+        s = Regex("!\\[([^\\]]*)\\]\\((https?://[^)\\s]+)\\)").replace(s) { "<img src=\"${it.groupValues[2]}\" alt=\"${it.groupValues[1]}\" style=\"display:block;width:100%;max-width:560px;height:auto;border-radius:10px;margin:4px 0 8px\">" }
         s = Regex("\\[([^\\]]+)\\]\\((https?://[^)\\s]+|mailto:[^)\\s]+)\\)").replace(s) { "<a href=\"${it.groupValues[2]}\" style=\"color:#2563eb;text-decoration:underline\">${it.groupValues[1]}</a>" }
         s = Regex("&lt;(https?://[^\\s&]+)&gt;").replace(s) { "<a href=\"${it.groupValues[1]}\" style=\"color:#2563eb\">${it.groupValues[1]}</a>" }
         s = Regex("(?<![\"=>])\\bhttps?://[^\\s<]+[^\\s<.,;:!?)]").replace(s) { "<a href=\"${it.value}\" style=\"color:#2563eb\">${it.value}</a>" }
@@ -116,4 +116,21 @@ object WfEmail {
     /** Versão em texto (sem marcações) para clientes que não mostram HTML. */
     fun plainText(md: String): String = md.replace(Regex("```\\w*\\n?"), "").replace(Regex("\\*\\*|__|~~|`"), "")
         .replace(Regex("\\[([^\\]]+)\\]\\(([^)]+)\\)"), "$1 ($2)").replace(Regex("(?m)^#{1,6} "), "").replace(Regex("(?m)^\\|?\\s*:?-{2,}.*$\\n?"), "").trim()
+
+    private val ITEM_LINK = Regex("\\[([^\\]]+)\\]\\((https?://[^)\\s]+)\\)")
+
+    /** Links de itens (lista, título ou parágrafo) que ainda não têm foto na mesma linha. */
+    fun linkedItemsWithoutImage(md: String): List<String> = md.lines().filter { !it.contains("![") && !it.trimStart().startsWith("|") }
+        .mapNotNull { l -> ITEM_LINK.find(l)?.groupValues?.get(2) }.distinct().take(12)
+
+    /** Coloca a foto antes do texto de cada item com link (e-mail de notícias/produtos nunca sem imagem). */
+    fun withImages(md: String, imgs: Map<String, String>): String = md.lines().joinToString("\n") { l ->
+        val m = ITEM_LINK.find(l)
+        val img = m?.let { imgs[it.groupValues[2]] }
+        if (img == null || l.contains("![") || l.trimStart().startsWith("|")) l
+        else {
+            val lead = Regex("^(\\s*(?:[-*+]|\\d+[.)]|#{1,6})\\s+)").find(l)?.value.orEmpty()
+            lead + "![" + m.groupValues[1].replace("]", "") + "](" + img + ") " + l.removePrefix(lead)
+        }
+    }
 }

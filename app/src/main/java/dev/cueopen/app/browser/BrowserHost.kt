@@ -1297,7 +1297,14 @@ class BrowserHost(private val appCtx: Context, private val sessionId: String = "
               var text=(document.body?document.body.innerText:'').replace(/\n{3,}/g,'\n\n');
               var main=document.querySelector("main,[role=main],article")||document.body;
               var links=[].slice.call(document.querySelectorAll("a[href]")).filter(function(a){return a.innerText.trim()}).slice(0,80).map(function(a){return {text:a.innerText.trim().replace(/\s+/g," ").slice(0,100),href:a.href}});
-              return JSON.stringify({url:location.href,title:document.title,text:text,headings:headings.slice(0,80),landmark:main?main.tagName.toLowerCase():"body",links:links,elements:out.slice(0,180)});
+              var mt=function(k){var m=document.querySelector('meta[property="'+k+'"],meta[name="'+k+'"]');return m?(m.content||''):'';};
+              var tiles=[],seenT={};
+              [].slice.call(document.querySelectorAll('a[href]')).forEach(function(a){if(tiles.length>=24)return;var im=a.querySelector('img')||(a.closest('li,article,div')||a).querySelector('img');if(!im)return;
+                var r=im.getBoundingClientRect();if(r.width<70||r.height<50)return;var src=im.currentSrc||im.getAttribute('data-src')||im.src||'';if(!/^https?:/.test(src)||/logo|sprite|icon|1x1/i.test(src))return;
+                var box=a.closest('li,article,[class*=card],[class*=product],[class*=item]')||a;var t=(a.getAttribute('title')||a.innerText||im.alt||'').trim().replace(/\s+/g,' ');if(t.length<4||seenT[a.href])return;seenT[a.href]=1;
+                var pr=(box.innerText||'').match(/R\$\s?[\d.]+(,\d{2})?|US\$\s?[\d.,]+|€\s?[\d.,]+/);tiles.push({t:t.slice(0,120),u:a.href,i:src,p:pr?pr[0]:''});});
+              return JSON.stringify({url:location.href,title:document.title,text:text,headings:headings.slice(0,80),landmark:main?main.tagName.toLowerCase():"body",links:links,elements:out.slice(0,180),
+                ogImage:mt('og:image')||mt('twitter:image'),ogType:mt('og:type'),price:mt('product:price:amount'),tiles:tiles});
             })()
         """.trimIndent()
         val tab = onMain { activeTab()?.also { lastReadTabId = it.id } }
@@ -1315,7 +1322,16 @@ class BrowserHost(private val appCtx: Context, private val sessionId: String = "
             val empty = o.optString("text").isBlank() && els.length() == 0
             buildString {
                 if (reload != null) append("⚠ PÁGINA RECARREGADA: $reload. Scripts injetados (browser_js), campos preenchidos e o estado da página se perderam; refaça esses passos se precisar deles.\n\n")
-                append("Aba: ${tab.id}\nURL: ${o.optString("url")}\nTítulo: ${o.optString("title")}\n\n--- Conteúdo ---\n")
+                append("Aba: ${tab.id}\nURL: ${o.optString("url")}\nTítulo: ${o.optString("title")}\n")
+                o.optString("ogImage").takeIf { dev.cueopen.app.web.PageMeta.isGoodImage(it) }?.let { append("Imagem principal: $it\n") }
+                o.optString("price").takeIf { it.isNotBlank() }?.let { append("Preço: $it\n") }
+                o.optJSONArray("tiles")?.takeIf { it.length() > 0 }?.let { t ->
+                    append("\n--- Itens com foto (para cards: title, image, url, price) ---\n")
+                    for (k in 0 until t.length()) { val x = t.getJSONObject(k)
+                        if (!dev.cueopen.app.web.PageMeta.isGoodImage(x.optString("i"))) continue
+                        append("- ${x.optString("t")}" + (x.optString("p").takeIf { it.isNotBlank() }?.let { " · $it" } ?: "") + "\n  url: ${x.optString("u")}\n  imagem: ${x.optString("i")}\n") }
+                }
+                append("\n--- Conteúdo ---\n")
                 if (empty) append("$EMPTY_PAGE_MARK\n")
                 append("--- Estrutura (headings) ---\n")
                 val hs = o.optJSONArray("headings") ?: JSONArray()

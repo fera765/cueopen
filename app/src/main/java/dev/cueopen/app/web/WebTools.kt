@@ -39,7 +39,7 @@ object WebTools {
                     (if (code == 404) " Não adivinhe caminhos (/contato, /sobre…): abra a página inicial do site e siga os links que ela mostra." else "")
                 body.trimStart().startsWith("{") || body.trimStart().startsWith("[") -> body.take(maxChars)
                 body.startsWith("[conteúdo") -> body
-                else -> WebExtract.mainText(body, url, maxChars).let { t ->
+                else -> (runCatching { PageMeta.extract(body, url).block() }.getOrDefault("") + WebExtract.mainText(body, url, maxChars)).let { t ->
                     if (t.length < 300) "$t\n\n[Pouco texto extraído: a página provavelmente depende de JavaScript ou login. Use browser_navigate + browser_read.]" else t
                 }
             }
@@ -114,6 +114,8 @@ object WebTools {
         }
         val got = HybridSearch.race(engines, firstMin = 3, graceMs = 700, totalMs = 10_000)
         var hits = SearchApi.merge(got.map { it.second }, n)
+        // Foto de cada resultado (cards de produto/notícia nunca sem imagem): completa pela og:image da página.
+        if (hits.isNotEmpty()) hits = ImageEnricher.fill(hits)
         if (hits.isEmpty() && engines.none { it.first == "DuckDuckGo (HTTP)" })
             hits = SearchApi.merge(listOf(withContext(Dispatchers.IO) { duckHttp(query) }), n)
         if (hits.isEmpty()) return "Nenhum resultado na busca (Google, Bing e DuckDuckGo). Tente outros termos, mais curtos."

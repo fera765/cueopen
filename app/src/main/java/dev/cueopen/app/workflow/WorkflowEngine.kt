@@ -311,7 +311,17 @@ object WorkflowEngine {
                 // E-mail sai sempre em HTML formatado (Markdown → HTML com estilos inline) + versão em texto.
                 val sendCampos = if (WfQuality.isEmailSend(node)) {
                     val keys = runCatching { WfConnectors.fields(app.store, kind, r("conector").trim(), r("acao").trim(), r("conexao").trim()).map { it.key }.toSet() }.getOrDefault(emptySet())
-                    WfEmail.prepare(campos, keys)
+                    // Itens com link (notícias/produtos) ganham a foto da página antes de virar HTML.
+                    val bodyKey = listOf("body_text", "body", "corpo", "text").firstOrNull { (campos[it] as? kotlinx.serialization.json.JsonPrimitive)?.content?.isNotBlank() == true }
+                    val withImgs = bodyKey?.let { k ->
+                        val md = (campos[k] as kotlinx.serialization.json.JsonPrimitive).content
+                        val links = if (WfEmail.looksHtml(md)) emptyList() else WfEmail.linkedItemsWithoutImage(md)
+                        if (links.isEmpty()) campos else {
+                            val imgs = withTimeoutOrNull(8_000) { links.map { u -> u to dev.cueopen.app.web.ImageEnricher.imageFor(u) } }?.mapNotNull { (u, i) -> i?.let { u to it } }?.toMap().orEmpty()
+                            JsonObject(campos + (k to kotlinx.serialization.json.JsonPrimitive(WfEmail.withImages(md, imgs))))
+                        }
+                    } ?: campos
+                    WfEmail.prepare(withImgs, keys)
                 } else campos
                 if (run.trigger == "test" && WfQuality.isExternalSend("connector", node.config))
                     return simulated(node, "${r("conector").trim()} · ${r("acao").trim()}", sendCampos.toString())
@@ -469,6 +479,8 @@ object WorkflowEngine {
                     }
                     if (detail.isBlank()) detail = if (view.isNotBlank()) WfView.plainText(view).take(6_000) else text
                 }
+                // Cards do UI kit com link ganham a foto da página; card que segue sem foto sai.
+                if (view.isNotBlank()) view = runCatching { dev.cueopen.app.web.ImageEnricher.enrichCardsJson(view) }.getOrDefault(view)
                 // Portão de conteúdo: nada vazio, sem {{…}} sobrando, sem JSON cru para o usuário.
                 WfQuality.contentProblem("O título da notificação", title)?.let { return NodeResult(error = it) }
                 WfQuality.contentProblem("O texto da notificação", text)?.let { return NodeResult(error = it) }

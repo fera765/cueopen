@@ -29,14 +29,15 @@ object SearchApi {
     val EXTRACT_JS = """
 (function(){try{
 var out=[],seen={};
-function add(t,u,s){t=(t||'').trim();u=(u||'').trim();if(!t||!u||seen[u])return;if(!/^https?:/.test(u)&&u.indexOf('/url?')!==0)return;seen[u]=1;out.push({t:t,u:u,s:(s||'').replace(/\s+/g,' ').trim().slice(0,300)});}
+function im(b){if(!b)return '';var l=b.querySelectorAll('img');for(var k=0;k<l.length;k++){var x=l[k].getAttribute('data-src')||l[k].getAttribute('data-lazysrc')||l[k].getAttribute('src')||'';if(/^https?:/.test(x)&&!/logo|favicon|sprite|1x1/i.test(x))return x;}return '';}
+function add(t,u,s,i){t=(t||'').trim();u=(u||'').trim();if(!t||!u||seen[u])return;if(!/^https?:/.test(u)&&u.indexOf('/url?')!==0)return;seen[u]=1;out.push({t:t,u:u,s:(s||'').replace(/\s+/g,' ').trim().slice(0,300),i:i||''});}
 var h=location.hostname;
 if(h.indexOf('google.')>=0){
  document.querySelectorAll('a h3').forEach(function(h3){var a=h3.closest('a');if(!a)return;var box=a.closest('div.g,div.MjjYud,div[data-hveid],div.Gx5Zad')||a.parentElement;
   var sn='';if(box){var e=box.querySelector('div.VwiC3b,div[data-sncf],span.aCOpRe,div.BNeawe.s3v9rd,div[style*="-webkit-line-clamp"]');sn=e?e.innerText:'';}
-  add(h3.innerText,a.getAttribute('href')||a.href,sn);});
+  add(h3.innerText,a.getAttribute('href')||a.href,sn,im(box));});
 }else if(h.indexOf('bing.')>=0){
- document.querySelectorAll('li.b_algo').forEach(function(li){var a=li.querySelector('h2 a');if(!a)return;var p=li.querySelector('.b_caption p,.b_lineclamp2,.b_lineclamp3,.b_algoSlug');add(a.innerText,a.href,p?p.innerText:'');});
+ document.querySelectorAll('li.b_algo').forEach(function(li){var a=li.querySelector('h2 a');if(!a)return;var p=li.querySelector('.b_caption p,.b_lineclamp2,.b_lineclamp3,.b_algoSlug');add(a.innerText,a.href,p?p.innerText:'',im(li));});
 }else{
  document.querySelectorAll('.result').forEach(function(r){if(r.classList.contains('result--ad'))return;var a=r.querySelector('a.result__a');if(!a)return;var p=r.querySelector('.result__snippet');add(a.innerText,a.getAttribute('href'),p?p.innerText:'');});
 }
@@ -58,7 +59,7 @@ return JSON.stringify({hits:out.slice(0,15),blocked:block&&out.length===0});
             val hits = (o["hits"]?.jsonArray ?: emptyList()).mapNotNull { h ->
                 val x = h as? JsonObject ?: return@mapNotNull null
                 val u = cleanUrl(str(x, "u"), e) ?: return@mapNotNull null
-                SearchHit(str(x, "t").trim(), u, str(x, "s").trim())
+                SearchHit(str(x, "t").trim(), u, str(x, "s").trim(), str(x, "i").trim().takeIf { PageMeta.isGoodImage(it) }.orEmpty())
             }.filter { it.title.isNotBlank() && !isEngineInternal(it.url) }.distinctBy { it.url }
             Page(hits, o["blocked"]?.jsonPrimitive?.content == "true")
         }.getOrDefault(Page(emptyList(), false))
@@ -96,7 +97,7 @@ return JSON.stringify({hits:out.slice(0,15),blocked:block&&out.length===0});
 
     fun format(query: String, hits: List<SearchHit>, sources: String): String =
         "Resultados para \"$query\" ($sources; abra os relevantes com web_fetch):\n" + hits.mapIndexed { i, h ->
-            "${i + 1}. ${h.title}\n   ${h.url}" + (if (h.snippet.isNotBlank()) "\n   ${h.snippet.take(240)}" else "")
+            "${i + 1}. ${h.title}\n   ${h.url}" + (if (h.snippet.isNotBlank()) "\n   ${h.snippet.take(240)}" else "") + (if (h.image.isNotBlank()) "\n   imagem: ${h.image}" else "")
         }.joinToString("\n")
 
     /** Cache curto (mesma busca em sequência = instantânea). */

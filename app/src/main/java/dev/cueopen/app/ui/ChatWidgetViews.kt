@@ -293,6 +293,7 @@ fun CueWidgetView(w: CueWidget, onSend: ((String) -> Unit)?) {
             if (w.text.isNotBlank()) { Spacer(Modifier.height(6.dp)); Text(w.text, fontSize = 14.sp, color = c.ink, lineHeight = 20.sp) }
             w.bullets.forEach { Spacer(Modifier.height(4.dp)); Text("• $it", fontSize = 13.sp, color = c.ink2, lineHeight = 18.sp) }
         }
+        is CueWidget.Cards -> CueCards(w)
         is CueWidget.Divider -> Row(Modifier.fillMaxWidth().padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
             Box(Modifier.weight(1f).height(1.dp).background(c.line))
             if (w.label.isNotBlank()) { Text(w.label.uppercase(), fontSize = 10.sp, color = c.ink3, modifier = Modifier.padding(horizontal = 10.dp)); Box(Modifier.weight(1f).height(1.dp).background(c.line)) }
@@ -367,6 +368,46 @@ private fun ChartCanvas(w: CueWidget.Chart, tone: (String) -> Color) {
                 if (s.name.isNotBlank()) Row(verticalAlignment = Alignment.CenterVertically) {
                     Box(Modifier.size(9.dp).clip(RoundedCornerShape(2.dp)).background(palette[si % palette.size])); Spacer(Modifier.width(4.dp))
                     Text(s.name, fontSize = 11.sp, color = c.ink3)
+                }
+            }
+        }
+    }
+}
+
+
+/** Carrossel de cards com foto. Foto ausente → busca a og:image da página; sem foto mesmo assim → o card some. */
+@Composable
+fun CueCards(w: CueWidget.Cards) {
+    val c = Cue.c
+    val uri = androidx.compose.ui.platform.LocalUriHandler.current
+    val resolved = remember(w) { mutableStateMapOf<String, String>() }   // url → foto ("" = não achou)
+    LaunchedEffect(w) {
+        w.items.filter { !dev.cueopen.app.web.PageMeta.isGoodImage(it.image) }.forEach { it2 ->
+            launch { resolved[it2.url] = runCatching { dev.cueopen.app.web.ImageEnricher.imageFor(it2.url) }.getOrNull().orEmpty() }
+        }
+    }
+    val shown = w.items.mapNotNull { i ->
+        val img = if (dev.cueopen.app.web.PageMeta.isGoodImage(i.image)) i.image else resolved[i.url]
+        when { img == null -> i to null; img.isBlank() -> null; else -> i to img }   // null = ainda procurando
+    }
+    if (shown.isEmpty()) return
+    Column(Modifier.fillMaxWidth()) {
+        if (w.title.isNotBlank()) Text(w.title, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = c.ink, modifier = Modifier.padding(bottom = 8.dp))
+        Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            shown.forEach { (i, img) ->
+                Column(Modifier.width(212.dp).clip(RoundedCornerShape(14.dp)).background(c.surface).border(1.dp, c.line, RoundedCornerShape(14.dp))
+                    .clickable { runCatching { uri.openUri(i.url) } }) {
+                    Box(Modifier.fillMaxWidth().height(124.dp).background(c.surface2)) {
+                        if (img != null) coil.compose.AsyncImage(model = img, contentDescription = i.title, contentScale = androidx.compose.ui.layout.ContentScale.Crop, modifier = Modifier.fillMaxSize())
+                        if (i.badge.isNotBlank()) Text(i.badge.take(18), fontSize = 10.sp, color = Color.White, modifier = Modifier.padding(8.dp).clip(RoundedCornerShape(6.dp)).background(Color(0xAA000000)).padding(horizontal = 6.dp, vertical = 2.dp))
+                    }
+                    Column(Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                        Text(i.title, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = c.ink, maxLines = 2, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
+                        if (i.price.isNotBlank()) Text(i.price, fontSize = 15.sp, fontWeight = FontWeight.Bold, color = c.accent)
+                        if (i.subtitle.isNotBlank()) Text(i.subtitle, fontSize = 12.sp, color = c.ink2, maxLines = 2, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
+                        val host = i.source.ifBlank { runCatching { java.net.URI(i.url).host.removePrefix("www.") }.getOrDefault("") }
+                        if (host.isNotBlank()) Text(host, fontSize = 11.sp, color = c.ink3, maxLines = 1)
+                    }
                 }
             }
         }

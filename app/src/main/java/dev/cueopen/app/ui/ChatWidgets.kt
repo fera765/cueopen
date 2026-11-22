@@ -37,6 +37,9 @@ sealed class CueWidget {
     data class Tabs(val tabs: List<Pair<String, String>>) : CueWidget()
     data class Summary(val title: String, val text: String, val bullets: List<String>) : CueWidget()
     data class Divider(val label: String) : CueWidget()
+    /** Cards com FOTO (produtos, notícias, lugares…): item sem foto válida não aparece. */
+    data class Cards(val title: String, val items: List<CardItem>) : CueWidget()
+    data class CardItem(val title: String, val subtitle: String, val image: String, val url: String, val price: String, val source: String, val badge: String)
     /** Composição: vários componentes num só bloco (relatório final). */
     data class Group(val title: String, val blocks: List<CueWidget>) : CueWidget()
     data class Opt(val name: String, val items: List<String>, val tone: String)
@@ -54,7 +57,7 @@ object CueUi {
 
     /** Tipos conhecidos — basta ver o "type" para mostrar o esqueleto certo durante o stream. */
     val TYPES = setOf("buttons", "choices", "chart", "calculator", "calc", "table", "stats", "steps", "progress", "callout", "note", "keyvalue", "kv", "connector", "painel",
-        "checklist", "timeline", "badges", "compare", "files", "accordion", "tabs", "summary", "divider", "report", "group")
+        "checklist", "timeline", "badges", "compare", "files", "accordion", "tabs", "summary", "divider", "report", "group", "cards", "products", "news", "produtos", "noticias")
 
     private fun JsonObject.str(vararg k: String, def: String = "") = k.firstNotNullOfOrNull { this[it] as? JsonPrimitive }?.contentOrNull ?: def
     private fun JsonObject.num(vararg k: String): Double? = k.firstNotNullOfOrNull { (this[it] as? JsonPrimitive)?.let { p -> p.doubleOrNull ?: p.contentOrNull?.toDoubleOrNull() } }
@@ -152,6 +155,11 @@ object CueUi {
         "tabs" -> CueWidget.Tabs(o.arr("tabs", "items")?.mapNotNull { it as? JsonObject }?.map { it.str("title", "label", def = "—") to it.str("text", "body", "content") }.orEmpty())
         "summary" -> CueWidget.Summary(o.str("title", def = "Resumo executivo"), o.str("text", "body"), strList(o.arr("bullets", "items")).filter { it.isNotBlank() })
         "divider" -> CueWidget.Divider(o.str("label", "text"))
+        "cards", "products", "news", "produtos", "noticias" -> CueWidget.Cards(o.str("title", "titulo"), o.arr("items", "cards", "products", "news", "results")?.mapNotNull { it as? JsonObject }?.map {
+            CueWidget.CardItem(it.str("title", "name", "titulo", "nome"), it.str("subtitle", "description", "snippet", "descricao", "resumo"),
+                it.str("image", "img", "thumbnail", "photo", "foto", "imagem"), it.str("url", "link", "href"), it.str("price", "preco", "preço"),
+                it.str("source", "site", "fonte", "store", "loja"), it.str("badge", "tag", "date", "data"))
+        }?.filter { it.title.isNotBlank() && it.url.startsWith("http") }?.take(20).orEmpty())
         "report", "group" -> CueWidget.Group(o.str("title"), o.arr("blocks", "items")?.mapNotNull { it as? JsonObject }?.take(12)?.mapNotNull { b ->
             val t = b.str("type").lowercase()
             // Sem recursão de grupos: um relatório não contém outro (limita profundidade e tamanho).

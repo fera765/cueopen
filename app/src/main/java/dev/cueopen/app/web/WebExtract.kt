@@ -44,7 +44,7 @@ object WebExtract {
         if (l.isBlank() && acc.endsWith("\n\n")) acc else acc.append(l).append('\n')
     }.toString().trim()
 
-    data class SearchHit(val title: String, val url: String, val snippet: String)
+    data class SearchHit(val title: String, val url: String, val snippet: String, val image: String = "")
 
     /** Resultados da página HTML do DuckDuckGo (links de redirecionamento são abertos para a URL real). */
     fun parseDuckDuckGo(html: String): List<SearchHit> {
