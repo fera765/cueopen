@@ -513,14 +513,14 @@ class BrowserHost(private val appCtx: Context, private val sessionId: String = "
         // scripts da página quando o WebView suporta; senão, injetado no início de cada carregamento.
         val docStart = runCatching {
             if (WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) {
-                WebViewCompat.addDocumentStartJavaScript(v, READINESS_JS, setOf("*")); true
+                WebViewCompat.addDocumentStartJavaScript(v, READINESS_JS + "\n" + dev.cueopen.app.web.LoadBoost.START_JS, setOf("*")); true
             } else false
         }.getOrDefault(false)
         v.webViewClient = object : WebViewClient() {
             override fun onPageStarted(view: WebView, url: String, favicon: Bitmap?) {
                 tab.diag.add("onPageStarted $url")
                 failedTabs.remove(tab.id)
-                if (!docStart) runCatching { view.evaluateJavascript(READINESS_JS, null) }
+                if (!docStart) runCatching { view.evaluateJavascript(READINESS_JS + "\n" + dev.cueopen.app.web.LoadBoost.START_JS, null) }
                 tab.progress = 0
                 if (tab.id == activeTabId) lastReadTabId = null
                 sync(view, loading = true)
@@ -558,8 +558,10 @@ class BrowserHost(private val appCtx: Context, private val sessionId: String = "
                 if (!isReload) runCatching { BrowserFeatures.applyUserScripts(view, url, sessionId) }
             }
             override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): android.webkit.WebResourceResponse? {
-                // só observa (não intercepta): alimenta o painel de rede
+                // alimenta o painel de rede; rastreadores/anúncios respondem vazio (carrega mais rápido)
                 val url = request.url.toString()
+                if (dev.cueopen.app.web.LoadBoost.shouldBlock(url, request.isForMainFrame))
+                    return android.webkit.WebResourceResponse("text/plain", "utf-8", 204, "No Content", emptyMap(), java.io.ByteArrayInputStream(ByteArray(0)))
                 if (!url.startsWith("data:")) addNet(NetEntry(netSeq.incrementAndGet(), url, request.method ?: "GET",
                     guessType(url, request.requestHeaders["Accept"], request.isForMainFrame), request.isForMainFrame, System.currentTimeMillis(),
                     requestHeaders = request.requestHeaders.toMap(), tabId = tab.id))
@@ -1278,35 +1280,7 @@ class BrowserHost(private val appCtx: Context, private val sessionId: String = "
     }
 
     suspend fun read(maxChars: Int = 9000, trackRepeat: Boolean = true): String {
-        val js = """
-            (function(){
-              var els=[].slice.call(document.querySelectorAll('a,button,input,textarea,select,[role=button],[onclick],summary,[role=link],[role=checkbox],[role=tab]'));
-              var out=[],i=0, headings=[];
-              [].slice.call(document.querySelectorAll("h1,h2,h3,h4,[role=heading]")).forEach(function(h){var t=(h.innerText||h.getAttribute("aria-label")||"").trim().replace(/\s+/g," ");if(t)headings.push({level:h.tagName.toLowerCase(),text:t.slice(0,180)});});
-              els.forEach(function(e){
-                var r=e.getBoundingClientRect(); if(r.width<2||r.height<2) return;
-                var st=getComputedStyle(e); if(st.visibility=='hidden'||st.display=='none') return;
-                e.setAttribute('data-cue',i);
-                var label=(e.innerText||e.value||e.placeholder||e.getAttribute('aria-label')||e.title||e.name||'').trim().replace(/\s+/g,' ').slice(0,80);
-                var tag=e.tagName.toLowerCase(); if(tag=='input') tag+='['+(e.type||'text')+']';
-                var href=e.href?(' -> '+String(e.href).slice(0,120)):'';
-                var role=e.getAttribute("role")||({A:"link",BUTTON:"button",INPUT:"textbox",TEXTAREA:"textbox",SELECT:"combobox"}[e.tagName]||tag);
-                var extra=e.disabled?" [disabled]":""; if(e.getAttribute("aria-expanded"))extra+=" [expanded="+e.getAttribute("aria-expanded")+"]";
-                out.push("["+i+"] "+role+" \""+label+"\""+extra+href); i++;
-              });
-              var text=(document.body?document.body.innerText:'').replace(/\n{3,}/g,'\n\n');
-              var main=document.querySelector("main,[role=main],article")||document.body;
-              var links=[].slice.call(document.querySelectorAll("a[href]")).filter(function(a){return a.innerText.trim()}).slice(0,80).map(function(a){return {text:a.innerText.trim().replace(/\s+/g," ").slice(0,100),href:a.href}});
-              var mt=function(k){var m=document.querySelector('meta[property="'+k+'"],meta[name="'+k+'"]');return m?(m.content||''):'';};
-              var tiles=[],seenT={};
-              [].slice.call(document.querySelectorAll('a[href]')).forEach(function(a){if(tiles.length>=24)return;var im=a.querySelector('img')||(a.closest('li,article,div')||a).querySelector('img');if(!im)return;
-                var r=im.getBoundingClientRect();if(r.width<70||r.height<50)return;var src=im.currentSrc||im.getAttribute('data-src')||im.src||'';if(!/^https?:/.test(src)||/logo|sprite|icon|1x1/i.test(src))return;
-                var box=a.closest('li,article,[class*=card],[class*=product],[class*=item]')||a;var t=(a.getAttribute('title')||a.innerText||im.alt||'').trim().replace(/\s+/g,' ');if(t.length<4||seenT[a.href])return;seenT[a.href]=1;
-                var pr=(box.innerText||'').match(/R\$\s?[\d.]+(,\d{2})?|US\$\s?[\d.,]+|€\s?[\d.,]+/);tiles.push({t:t.slice(0,120),u:a.href,i:src,p:pr?pr[0]:''});});
-              return JSON.stringify({url:location.href,title:document.title,text:text,headings:headings.slice(0,80),landmark:main?main.tagName.toLowerCase():"body",links:links,elements:out.slice(0,180),
-                ogImage:mt('og:image')||mt('twitter:image'),ogType:mt('og:type'),price:mt('product:price:amount'),tiles:tiles});
-            })()
-        """.trimIndent()
+        val js = SnapshotFormat.SNAPSHOT_JS
         val tab = onMain { activeTab()?.also { lastReadTabId = it.id } }
             ?: return "ERROR: não há aba ativa no browser."
         // Snapshot só depois que a página parou de carregar/mudar (evita ler só o "esqueleto" do site).
@@ -1331,15 +1305,10 @@ class BrowserHost(private val appCtx: Context, private val sessionId: String = "
                         if (!dev.cueopen.app.web.PageMeta.isGoodImage(x.optString("i"))) continue
                         append("- ${x.optString("t")}" + (x.optString("p").takeIf { it.isNotBlank() }?.let { " · $it" } ?: "") + "\n  url: ${x.optString("u")}\n  imagem: ${x.optString("i")}\n") }
                 }
-                append("\n--- Conteúdo ---\n")
-                if (empty) append("$EMPTY_PAGE_MARK\n")
-                append("--- Estrutura (headings) ---\n")
-                val hs = o.optJSONArray("headings") ?: JSONArray()
-                for (i in 0 until hs.length()) { val h=hs.optJSONObject(i) ?: continue; append("${h.optString("level")} ${h.optString("text")}\n") }
-                append("\n--- Conteúdo principal (${o.optString("landmark", "body")}) ---\n")
-                append(o.optString("text").take(maxChars))
-                append("\n\n--- Elementos interativos ---\n")
-                for (i in 0 until els.length()) append(els.getString(i)).append('\n')
+                if (empty) append("\n$EMPTY_PAGE_MARK\n")
+                val parsed = SnapshotFormat.parse(raw)
+                if (parsed != null) append("\n").append(SnapshotFormat.body(parsed, maxChars))
+                else append("\n--- Conteúdo principal ---\n").append(o.optString("text").take(maxChars))
                 // Rolagem (como o browser-use): diz quanto conteúdo ainda existe abaixo — evita reabrir a página
                 // para "ver mais" quando bastaria rolar.
                 if (state.viewport > 0 && state.scrollHeight > state.viewport) append(

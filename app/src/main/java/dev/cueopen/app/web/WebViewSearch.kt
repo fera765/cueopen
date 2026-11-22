@@ -45,31 +45,38 @@ object WebViewSearch {
         locks.getValue(e).withLock { searchLocked(ctx, e, query, timeoutMs) }
 
     private suspend fun searchLocked(ctx: Context, e: Engine, query: String, timeoutMs: Long): List<SearchHit> = withContext(Dispatchers.Main) {
-        val wv = runCatching { view(ctx, e) }.getOrNull() ?: return@withContext emptyList()
-        withTimeoutOrNull(timeoutMs) {
-            suspendCancellableCoroutine<Unit> { cont ->
-                wv.webViewClient = object : WebViewClient() {
-                    override fun shouldInterceptRequest(view: WebView?, req: WebResourceRequest?): android.webkit.WebResourceResponse? {
-                        val u = req?.url?.toString().orEmpty().lowercase()
-                        // Corta peso: imagens, fontes, vídeo e rastreadores não são necessários para ler a lista.
-                        return if (Regex("""\.(png|jpe?g|gif|webp|svg|woff2?|ttf|mp4|webm)(\?|$)|/gen_204|doubleclick|googletagmanager|/log\?""").containsMatchIn(u))
-                            android.webkit.WebResourceResponse("text/plain", "utf-8", java.io.ByteArrayInputStream(ByteArray(0))) else null
-                    }
-                    override fun onPageFinished(view: WebView?, url: String?) { if (cont.isActive) cont.resume(Unit) }
-                }
-                cont.invokeOnCancellation { runCatching { wv.stopLoading() } }
-                wv.loadUrl(SearchApi.url(e, query))
+        val wv = runCatching { view(ctx, e) }.getOrNull() ?: return@withContext emptyList<SearchHit>()
+        // Não espera o onPageFinished (sub-recursos atrasam): lê a lista assim que ela aparece no DOM.
+        var finished = false
+        wv.webViewClient = object : WebViewClient() {
+            override fun shouldInterceptRequest(view: WebView?, req: WebResourceRequest?): android.webkit.WebResourceResponse? {
+                val u = req?.url?.toString().orEmpty()
+                // Corta peso: imagens, fontes, vídeo e rastreadores não são necessários para ler a lista.
+                return if (LoadBoost.shouldBlockForSearch(u, req?.isForMainFrame == true))
+                    android.webkit.WebResourceResponse("text/plain", "utf-8", java.io.ByteArrayInputStream(ByteArray(0))) else null
             }
-            // A lista pode chegar depois do onPageFinished (JS do buscador): tenta algumas vezes.
-            var page = SearchApi.Page(emptyList(), false)
-            repeat(6) { i ->
-                page = SearchApi.parse(eval(wv, SearchApi.EXTRACT_JS), e)
-                if (page.hits.size >= 3 || page.blocked) return@withTimeoutOrNull page.hits
-                delay(if (i == 0) 150 else 350)
+            override fun onPageFinished(view: WebView?, url: String?) { finished = true }
+        }
+        var best = SearchApi.Page(emptyList(), false)
+        val got = withTimeoutOrNull(timeoutMs) {
+            // limpa a lista da busca anterior (WebView reaproveitada) para não ler resultado velho
+            eval(wv, "try{document.documentElement.innerHTML=''}catch(e){};1")
+            wv.loadUrl(SearchApi.url(e, query))
+            var afterFinish = 0
+            delay(250)
+            while (true) {
+                val page = SearchApi.parse(eval(wv, SearchApi.EXTRACT_JS), e)
+                if (page.hits.size >= best.hits.size) best = page
+                if (page.blocked || SearchPoll.done(page.hits.size, finished, afterFinish)) return@withTimeoutOrNull best.hits
+                if (finished) afterFinish++
+                delay(SearchPoll.interval(finished))
             }
-            page.hits
-        } ?: emptyList()
+            @Suppress("UNREACHABLE_CODE") best.hits
+        }
+        if (got == null) runCatching { wv.stopLoading() }
+        got ?: best.hits
     }
+
 
     private suspend fun eval(wv: WebView, js: String): String? = suspendCancellableCoroutine { c ->
         runCatching { wv.evaluateJavascript(js) { r -> if (c.isActive) c.resume(r) } }.onFailure { if (c.isActive) c.resume(null) }

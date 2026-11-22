@@ -343,7 +343,12 @@ object WorkflowEngine {
                     if (!Regex("^https?://[^\\s/]+\\.[^\\s]+").containsMatchIn(url)) return@withContext NodeResult(error = "URL inválida: ${url.take(200)}")
                     return@withContext simulated(node, "${method.uppercase()} $url", r("body"))
                 }
-                val res = http(r("method").ifBlank { "GET" }, r("url").trim(), r("headers"), r("body"), (r("timeout").toIntOrNull() ?: 30).coerceIn(1, 300))
+                var res = http(method, r("url").trim(), r("headers"), r("body"), (r("timeout").toIntOrNull() ?: 30).coerceIn(1, 300))
+                var attempt = 0
+                while (WfRetry.shouldRetry(method, res.error, attempt)) {
+                    kotlinx.coroutines.delay(WfRetry.backoffMs(attempt)); attempt++
+                    res = http(method, r("url").trim(), r("headers"), r("body"), (r("timeout").toIntOrNull() ?: 30).coerceIn(1, 300))
+                }
                 // "Continuar": o erro vira dado ({status, error}) para um nó Condição decidir o caminho.
                 if (res.error != null && node.config["onError"] == "continue")
                     NodeResult(res.output.ifBlank { buildJsonObject { put("status", 0); put("error", res.error) }.toString() })

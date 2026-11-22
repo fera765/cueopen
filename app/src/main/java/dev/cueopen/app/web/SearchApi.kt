@@ -85,14 +85,29 @@ return JSON.stringify({hits:out.slice(0,15),blocked:block&&out.length===0});
 
     /** Junta buscadores intercalando (1º do A, 1º do B, …) sem repetir link: mais cobertura no topo. */
     fun merge(lists: List<List<SearchHit>>, max: Int): List<SearchHit> {
-        val seen = HashSet<String>(); val out = mutableListOf<SearchHit>()
+        val seen = HashSet<String>(); val out = mutableListOf<SearchHit>(); val perHost = HashMap<String, Int>()
         val key = { h: SearchHit -> h.url.lowercase().removeSuffix("/").replace(Regex("^https?://(www\\.)?"), "") }
         var i = 0
         while (out.size < max && lists.any { i < it.size }) {
-            lists.forEach { l -> l.getOrNull(i)?.let { if (out.size < max && seen.add(key(it))) out += it } }
+            lists.forEach { l -> l.getOrNull(i)?.let {
+                val host = host(it.url)
+                if (out.size < max && !isJunk(it) && (perHost[host] ?: 0) < 2 && seen.add(key(it))) { out += it; perHost[host] = (perHost[host] ?: 0) + 1 }
+            } }
             i++
         }
+        // busca focada num site (site:, loja): completa com o que o limite por domínio segurou
+        if (out.size < max) lists.flatten().forEach { if (out.size < max && !isJunk(it) && seen.add(key(it))) out += it }
         return out
+    }
+
+    fun host(u: String): String = u.lowercase().substringAfter("://").substringBefore('/').substringBefore(':').removePrefix("www.").removePrefix("m.")
+
+    /** Links do próprio buscador, login, anúncios e títulos vazios não são resultados. */
+    fun isJunk(h: SearchHit): Boolean {
+        val host = host(h.url)
+        if (h.title.isBlank() || !h.url.startsWith("http")) return true
+        if (Regex("^(google|bing|duckduckgo)\\.[a-z.]+$").matches(host) && Regex("/(search|url|aclk|ck/a|y\\.js|l/)").containsMatchIn(h.url)) return true
+        return Regex("(^|\\.)(googleadservices|doubleclick)\\.|accounts\\.google\\.|/aclk\\?").containsMatchIn(h.url.lowercase())
     }
 
     fun format(query: String, hits: List<SearchHit>, sources: String): String =
