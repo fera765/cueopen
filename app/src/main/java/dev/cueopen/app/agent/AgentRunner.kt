@@ -3211,7 +3211,7 @@ class AgentRunner(
             appendLine("3f. Delegação de leitura: em investigações amplas com fontes independentes, use multi_agents com subtarefas delimitadas, escopo explícito e saída curta (conclusões + caminho/linhas/URLs + incertezas). Leituras triviais você mesmo faz; evidências críticas você valida na fonte principal. Se a ferramenta não estiver disponível, não afirme que delegou.")
 
             appendLine("4. Use `notes_write` para registrar o que precisa lembrar ao longo da tarefa: achados, progresso e próximos passos.")
-            appendLine("5. Fatos duradouros sobre o usuário ou o projeto vão em `memory_save`; para recuperar algo antigo, use `memory_search`.")
+            appendLine("5. Fatos duradouros sobre o usuário ou o projeto vão em `memory_save` (segundo cérebro: uma nota por fato, com título curto, categoria e ligações [[Título]] para notas relacionadas); para recuperar algo antigo, use `memory_search`, que traz também as notas ligadas.")
             appendLine("6. Para usar uma skill, chame `skill_load` com o nome dela e siga as instruções carregadas.")
             appendLine("6a. " + BrowserRedirect.PROMPT_LINE)
             appendLine("6b. Idioma: escreva TUDO no idioma do usuário — respostas, notas de status, planos, perguntas e relatórios.")
@@ -3446,7 +3446,7 @@ class AgentRunner(
             if (session.voiceReplies) appendLine("\nMODO ÁUDIO LIGADO nesta conversa: cada resposta final sua é convertida em áudio automaticamente (não chame reply_audio para isso). Escreva como quem fala: frases curtas e naturais, sem tabelas, listas longas, markdown ou links. Para desligar a pedido do usuário: reply_audio com always=false.")
             val memoryFacts = PromptContextPolicy.boundedFacts(
                 agentFacts = agent?.memory.orEmpty().takeLast(10),
-                recalledFacts = memories.map { it.text },
+                recalledFacts = ctxMgr.describeMemories(memories),
                 maxChars = contextPlan?.memoryChars ?: 2_400,
             )
             if (memoryFacts.isNotEmpty()) {
@@ -3826,9 +3826,10 @@ class AgentRunner(
             put("content", str("Texto da anotação")); put("append", bool("true = acrescenta; false = substitui tudo"))
         }, listOf("content")))
         if (allowMultiAgent) add(tool("memory_save", "Salva na memória de longo prazo um fato duradouro sobre o usuário ou o projeto, útil em conversas futuras. Cada memória tem no máximo ${ContextManager.MEMORY_MAX_CHARS} caracteres: um fato por memória.", buildJsonObject {
-            put("fact", str("O fato, em uma frase autossuficiente")); put("scope", str("global (vale para todos os agentes) ou agent (só este)")); put("tags", strArray("Palavras-chave"))
+            put("fact", str("O fato, em uma frase autossuficiente. Pode citar notas relacionadas como [[Título]]")); put("scope", str("global (vale para todos os agentes) ou agent (só este)")); put("tags", strArray("Palavras-chave"))
+            put("title", str("Título curto da nota (2 a 5 palavras), ex.: Tom · design")); put("kind", str("Categoria: ${MemoryGraph.KINDS.joinToString("/")}")); put("links", strArray("Notas relacionadas já existentes: título ou id (de memory_search)"))
         }, listOf("fact")))
-        add(tool("memory_search", "Busca fatos na memória de longo prazo.", buildJsonObject { put("query", str("O que procurar")) }, listOf("query")))
+        add(tool("memory_search", "Busca notas na memória de longo prazo (segundo cérebro). Cada resultado traz id, título, categoria e as notas ligadas (→ [[…]]).", buildJsonObject { put("query", str("O que procurar")) }, listOf("query")))
         add(tool("skill_load", "Carrega as instruções completas de uma skill da lista de skills disponíveis.", buildJsonObject { put("name", str("Nome da skill")) }, listOf("name")))
         if (builder) add(tool("connector_spec", "Devolve a especificação YAML completa do UI Connector SDK (campos, tipos, limites e guardrails), sem presets. Chame antes de escrever uma definição.", buildJsonObject {}))
         if (builder) add(tool("connector_validate", "Valida o parsing e a estrutura de uma definição YAML de UI Connector. Não executa o conector nem os guardrails estáticos do dry-run. Devolve OK ou erros acionáveis, com caminho e motivo.", buildJsonObject {
@@ -5561,10 +5562,11 @@ class AgentRunner(
                     val tags = a["tags"]?.jsonArray?.map { it.jsonPrimitive.content }.orEmpty()
                     val fact = s("fact").trim()
                     // OpenBot 0.73: em vez de cortar em silêncio, diz o limite para o agente salvar fatos menores.
-                    ContextManager.memoryTooLong(fact) ?: ctxMgr.saveMemory(fact, if (agentScoped) sess?.agentId else null, tags)
+                    ContextManager.memoryTooLong(fact) ?: ctxMgr.saveMemory(fact, if (agentScoped) sess?.agentId else null, tags,
+                        s("title"), s("kind"), a["links"]?.jsonArray?.map { it.jsonPrimitive.content }.orEmpty())
                 }
-                "memory_search" -> ctxMgr.searchMemories(s("query"), store.session(sessionId)?.agentId)
-                    .joinToString("\n") { "- ${it.text}" }.ifBlank { "Nada encontrado." }
+                "memory_search" -> ctxMgr.describeMemories(ctxMgr.searchMemories(s("query"), store.session(sessionId)?.agentId))
+                    .joinToString("\n") { "- $it" }.ifBlank { "Nada encontrado." }
                 "remember_legacy" -> {
                     val sess = store.session(sessionId)
                     val ag = store.agent(sess?.agentId)

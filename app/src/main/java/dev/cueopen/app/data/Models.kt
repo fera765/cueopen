@@ -356,6 +356,10 @@ data class MemoryItem(
     val createdAt: Long = now(),
     val lastUsedAt: Long = now(),
     val uses: Int = 0,
+    /** Segundo cérebro: título da nota (vazio = derivado do texto), categoria e ligações explícitas (ids). */
+    val title: String = "",
+    val kind: String = "",
+    val links: List<String> = emptyList(),
 )
 
 @Serializable

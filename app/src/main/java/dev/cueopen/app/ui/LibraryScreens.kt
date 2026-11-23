@@ -749,6 +749,8 @@ fun MemoryScreen(nav: NavController) {
     var selecting by remember { mutableStateOf(false) }
     var selected by remember { mutableStateOf(setOf<String>()) }
     var confirmDelete by remember { mutableStateOf(false) }
+    // Segundo cérebro: abre sempre no grafo; a lista fica a um toque.
+    var graph by androidx.compose.runtime.saveable.rememberSaveable { mutableStateOf(true) }
     androidx.activity.compose.BackHandler(enabled = selecting) { selecting = false; selected = emptySet() }
     if (confirmDelete) AlertDialog(onDismissRequest = { confirmDelete = false },
         title = { Text("Excluir ${selected.size} memória${if (selected.size == 1) "" else "s"}?") },
@@ -757,7 +759,10 @@ fun MemoryScreen(nav: NavController) {
         dismissButton = { TextButton({ confirmDelete = false }) { Text("Cancelar") } })
     Scaffold(containerColor = c.bg, topBar = {
         CueTopBar("Memória", { if (selecting) { selecting = false; selected = emptySet() } else nav.popBackStack() }) {
-            if (!selecting && st.memories.isNotEmpty()) TextButton({ selecting = true; selected = emptySet() }) {
+            if (!selecting) IconButton({ graph = !graph }) {
+                Icon(if (graph) Icons.Rounded.ViewList else Icons.Rounded.Hub, if (graph) "Ver em lista" else "Ver segundo cérebro", tint = c.ink)
+            }
+            if (!graph && !selecting && st.memories.isNotEmpty()) TextButton({ selecting = true; selected = emptySet() }) {
                 Icon(Icons.Rounded.DeleteSweep, null, Modifier.size(18.dp), tint = c.err); Spacer(Modifier.width(4.dp)); Text("Excluir…", color = c.err)
             }
         }
@@ -771,6 +776,7 @@ fun MemoryScreen(nav: NavController) {
             }
         }
     }) { pad ->
+        if (graph) { MemoryBrainView(st.memories, st.agents, Modifier.padding(pad)) { app.store.deleteMemory(it) }; return@Scaffold }
         LazyColumn(Modifier.padding(pad), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             item {
                 // card de destaque
@@ -818,7 +824,14 @@ fun MemoryScreen(nav: NavController) {
                         Checkbox(isSel, { v -> selected = if (v) selected + m.id else selected - m.id }, colors = CheckboxDefaults.colors(checkedColor = c.err))
                         Text(if (isSel) "Selecionada" else "Toque para selecionar", fontSize = 12.sp, color = c.ink3)
                     }
-                    Text(m.text, fontSize = 14.sp, lineHeight = 20.sp)
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Box(Modifier.size(8.dp).clip(CircleShape).background(memoryKindColor(dev.cueopen.app.agent.MemoryGraph.kindOf(m))))
+                        Spacer(Modifier.width(6.dp))
+                        Text(dev.cueopen.app.agent.MemoryGraph.titleOf(m), fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = c.ink2, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    }
+                    Text(dev.cueopen.app.agent.MemoryGraph.plain(m.text), fontSize = 14.sp, lineHeight = 20.sp)
+                    if (m.links.isNotEmpty()) Text("→ " + m.links.mapNotNull { id -> st.memories.firstOrNull { it.id == id } }.joinToString(", ") { "[[${dev.cueopen.app.agent.MemoryGraph.titleOf(it)}]]" },
+                        fontSize = 12.sp, color = c.accent, maxLines = 2, overflow = TextOverflow.Ellipsis)
                     Spacer(Modifier.height(8.dp))
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Box(Modifier.clip(CircleShape).background(if (agentName != null) c.accentSoft else c.surface2).padding(horizontal = 10.dp, vertical = 4.dp)) {
