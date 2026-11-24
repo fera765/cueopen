@@ -1,5 +1,6 @@
-NOTICE.txt 189
+NOTICE.txt 169
 README.md 10762
+SOURCE.txt 22
 config.json 4634
 default-voice.safetensors 256136
 model.q8.gguf 74553568

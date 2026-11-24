@@ -1,0 +1,1 @@
+Phonon (Gradium) — fonte: ldenoue/phonon-40m-en. Licença original (CC BY-NC 4.0 nos modelos 40m; Apache 2.0 no 31m). Cópia sem modificações, usada pelo Fluwy Bot.

@@ -1,2 +1,1 @@
-Phonon 40m pt — Gradium (https://huggingface.co/gradium/phonon-40m-pt). Licença CC BY-NC 4.0: uso não comercial.
-Cópia sem modificações, usada pelo app Fluwy Bot para falar offline.
+Phonon (Gradium) — fonte: ldenoue/phonon-40m-pt. Licença original (CC BY-NC 4.0 nos modelos 40m; Apache 2.0 no 31m). Cópia sem modificações, usada pelo Fluwy Bot.
