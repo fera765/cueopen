@@ -14,3 +14,9 @@
 -dontwarn java.beans.**
 -dontobfuscate
 -keep class com.caverock.androidsvg.** { *; }
+
+# Voz Phonon (JNA)
+-keep class com.sun.jna.** { *; }
+-keep class * implements com.sun.jna.** { *; }
+-keep class dev.cueopen.app.voice.phonon.** { *; }
+-dontwarn java.awt.**

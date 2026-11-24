@@ -1,0 +1,48 @@
+name: Phonon model (voices branch)
+
+# Copia o modelo gradium/phonon-40m-pt (CC BY-NC 4.0, acesso com termos aceitos) para a branch "voices",
+# de onde o app baixa no 1º uso. Precisa do secret HF_TOKEN (token de leitura de uma conta que aceitou os termos).
+on:
+  workflow_dispatch:
+  push:
+    paths: ['.github/phonon-model.trigger']
+
+permissions:
+  contents: write
+
+jobs:
+  copy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Baixar do Hugging Face
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          set -euo pipefail
+          test -n "$HF_TOKEN" || { echo "Falta o secret HF_TOKEN"; exit 1; }
+          pip install -q "huggingface_hub>=0.25"
+          python - <<'EOF'
+          from huggingface_hub import snapshot_download
+          snapshot_download("gradium/phonon-40m-pt", local_dir="out/phonon-40m-pt",
+              allow_patterns=["config.json", "tokenizer.json", "model.q8.gguf", "voices/*", "embeddings/*", "default-voice.safetensors", "LICENSE*", "README.md"])
+          EOF
+          cd out/phonon-40m-pt
+          rm -rf .cache
+          cat > NOTICE.txt <<'EOF'
+          Phonon 40m pt — Gradium (https://huggingface.co/gradium/phonon-40m-pt). Licença CC BY-NC 4.0: uso não comercial.
+          Cópia sem modificações, usada pelo app Fluwy Bot para falar offline.
+          EOF
+          find . -type f ! -name manifest.txt | sed 's|^\./||' | sort | while read -r f; do echo "$f $(stat -c%s "$f")"; done > manifest.txt
+          cat manifest.txt
+          find . -type f -size +95M -print | grep . && { echo "arquivo acima de 95 MB"; exit 1; } || true
+
+      - name: Publicar na branch voices
+        run: |
+          set -euo pipefail
+          git clone --depth 1 --branch voices "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}" vb
+          rm -rf vb/phonon-40m-pt && cp -r out/phonon-40m-pt vb/
+          cd vb
+          git config user.name "github-actions[bot]"; git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add phonon-40m-pt
+          git commit -m "Phonon 40m pt (Gradium, CC BY-NC 4.0)" || echo "sem mudanças"
+          git push origin voices

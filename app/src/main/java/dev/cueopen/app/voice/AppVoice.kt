@@ -76,7 +76,7 @@ object AppVoice {
     fun choose(ctx: Context, id: String) { val s = spec(id) ?: return; prefs(ctx).edit().putString("voice_${s.lang}", id).apply(); preload(ctx, s.lang) }
     fun hasAny(ctx: Context) = CATALOG.any { installedVariant(ctx, it.id) != null }
     /** Voz do app ligada (senão usa a voz do Android). */
-    fun enabled(ctx: Context) = prefs(ctx).getBoolean("enabled", true) && hasAny(ctx)
+    fun enabled(ctx: Context) = prefs(ctx).getBoolean("enabled", true) && (hasAny(ctx) || PhononVoice.active(ctx))
     fun setEnabled(ctx: Context, on: Boolean) { prefs(ctx).edit().putBoolean("enabled", on).apply() }
     fun speed(ctx: Context) = prefs(ctx).getFloat("speed", 1.0f)
     fun setSpeed(ctx: Context, v: Float) { prefs(ctx).edit().putFloat("speed", v.coerceIn(0.7f, 1.5f)).apply() }
@@ -102,7 +102,7 @@ object AppVoice {
                 if (v.name.startsWith("piper-")) v.deleteRecursively()
             }
             ctx.getSharedPreferences("dii_voice", Context.MODE_PRIVATE).edit().clear().apply()
-            preload(ctx, "pt")
+            if (PhononVoice.active(ctx)) PhononVoice.preload(ctx) else preload(ctx, "pt")
         }
     }
     private fun preload(ctx: Context, lang: String) { scope.launch { runCatching { engine(ctx, lang) } } }
@@ -253,6 +253,7 @@ object AppVoice {
      */
     fun startStream(ctx: Context, lang: String = "pt", onDone: (() -> Unit)? = null): Channel<String>? {
         stop()
+        if (lang == "pt" && PhononVoice.active(ctx)) startPhonon(ctx, onDone)?.let { return it }
         val (t, s) = engine(ctx, lang) ?: return null
         val sr = t.sampleRate()
         val q = Channel<String>(Channel.UNLIMITED); queue = q
@@ -291,6 +292,49 @@ object AppVoice {
         return q
     }
 
+    @Volatile private var phononGen = 0
+
+    /**
+     * Phonon: cada frase sai em quadros de 80 ms direto para o alto-falante (o 1º som sai em dezenas de ms),
+     * enquanto a próxima frase da IA ainda está chegando.
+     */
+    private fun startPhonon(ctx: Context, onDone: (() -> Unit)?): Channel<String>? {
+        val app = ctx.applicationContext
+        val sr = PhononVoice.SR
+        val q = Channel<String>(Channel.UNLIMITED); queue = q
+        val audio = Channel<FloatArray>(Channel.UNLIMITED)
+        val my = ++phononGen
+        _speaking.value = true
+        playJob = scope.launch {
+            val tr = newTrack(sr).also { track = it; it.play() }
+            tr.write(FloatArray(sr * 6 / 100), 0, sr * 6 / 100, AudioTrack.WRITE_BLOCKING)  // 60 ms: acorda o alto-falante
+            val gen = launch(PhononVoice.thread) {
+                val t = PhononVoice.engine(app)
+                if (t != null) for (text in q) {
+                    for (piece in chunks(PhononVoice.prepare(text))) {
+                        if (!isActive || phononGen != my) break
+                        runCatching { t.speak(piece) { pcm -> if (phononGen != my || !isActive) false else { audio.trySend(pcm.copyOf()); true } } }
+                        if (!isActive || phononGen != my) break
+                        gap(piece, sr)?.let { audio.trySend(it.copyOf(it.size * 6 / 10)) }
+                    }
+                }
+                audio.close()
+            }
+            var written = 0L
+            try {
+                for (buf in audio) { if (!isActive) break; tr.write(buf, 0, buf.size, AudioTrack.WRITE_BLOCKING); written += buf.size }
+                tr.stop()
+                val end = System.currentTimeMillis() + 3_000
+                while (isActive && System.currentTimeMillis() < end && (tr.playbackHeadPosition.toLong() and 0xffffffffL) < written) delay(20)
+            } finally {
+                if (phononGen == my) phononGen++; audio.cancel(); gen.cancel(); runCatching { tr.release() }; if (track === tr) track = null
+                _speaking.value = false
+                onDone?.invoke()
+            }
+        }
+        return q
+    }
+
     /** Pausa natural entre frases (fim de frase ~250 ms, vírgula ~120 ms). */
     private fun gap(piece: String, sr: Int): FloatArray? = when (piece.trimEnd().lastOrNull()) {
         '.', '!', '?', '…' -> FloatArray(sr / 4)
@@ -300,6 +344,7 @@ object AppVoice {
 
     /** Para de falar na hora (interrupção). */
     fun stop() {
+        phononGen++
         queue?.close(); queue = null
         playJob?.cancel(); playJob = null
         runCatching { track?.pause(); track?.flush() }

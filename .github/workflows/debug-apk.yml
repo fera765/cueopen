@@ -55,6 +55,39 @@ jobs:
           curl -fsSL -o app/libs/sherpa-onnx-1.10.46.aar https://github.com/k2-fsa/sherpa-onnx/releases/download/v1.10.46/sherpa-onnx-1.10.46.aar
           unzip -l app/libs/sherpa-onnx-1.10.46.aar | grep -E "jni/(arm64|x86_64)" | head
 
+      - name: Cache do motor Phonon
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            phonon-libs
+          key: phonon-xn-ptts-v1-${{ hashFiles('.github/phonon-ref') }}
+
+      - name: Motor Phonon (libptts_ffi arm64, rápida + compatível)
+        run: |
+          set -euo pipefail
+          REF=$(cat .github/phonon-ref)
+          if [ ! -f phonon-libs/libptts_ffi.so ] || [ ! -f phonon-libs/PhononTTS.kt ]; then
+            git clone https://github.com/gradium-ai/xn-ptts /tmp/xn-ptts
+            git -C /tmp/xn-ptts checkout "$REF"
+            cargo install cargo-ndk --locked
+            export ANDROID_NDK_HOME="$ANDROID_NDK_LATEST_HOME"
+            mkdir -p phonon-libs
+            (cd /tmp/xn-ptts && ./android/build.sh)
+            cp /tmp/xn-ptts/android/jniLibs/arm64-v8a/libptts_ffi.so phonon-libs/libptts_ffi.so
+            (cd /tmp/xn-ptts && ARM64_FEATURES= ./android/build.sh)
+            cp /tmp/xn-ptts/android/jniLibs/arm64-v8a/libptts_ffi.so phonon-libs/libptts_ffi_compat.so
+            cp /tmp/xn-ptts/android/PhononTTS.kt phonon-libs/PhononTTS.kt
+          fi
+          mkdir -p app/src/main/jniLibs/arm64-v8a app/src/main/java/dev/cueopen/app/voice/phonon
+          cp phonon-libs/libptts_ffi.so phonon-libs/libptts_ffi_compat.so app/src/main/jniLibs/arm64-v8a/
+          sed -e '0,/^package .*/s//package dev.cueopen.app.voice.phonon/' \
+              -e 's/"ptts_ffi"/dev.cueopen.app.voice.PhononVoice.libName/' \
+              phonon-libs/PhononTTS.kt > app/src/main/java/dev/cueopen/app/voice/phonon/PhononTTS.kt
+          grep -q "PhononVoice.libName" app/src/main/java/dev/cueopen/app/voice/phonon/PhononTTS.kt
+          ls -la app/src/main/jniLibs/arm64-v8a/
+
       - name: Run JVM unit tests and assemble debug APK
         run: gradle testDebugUnitTest assembleDebug --stacktrace
 
