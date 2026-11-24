@@ -89,8 +89,7 @@ object ToolCallHistoryNormalizer {
 
     fun canonicalizeToolCall(element: JsonElement): CanonicalToolCall? = runCatching {
         val call = element.jsonObject
-        // Alguns provedores omitem o id: gera um estável a partir do conteúdo em vez de descartar a chamada.
-        val id = call["id"]?.jsonPrimitive?.content?.takeIf { it.isNotBlank() } ?: ("call_" + Integer.toHexString(element.toString().hashCode()))
+        val id = call["id"]?.jsonPrimitive?.content?.takeIf { it.isNotBlank() } ?: return@runCatching null
         val function = call["function"]?.jsonObject ?: return@runCatching null
         val name = function["name"]?.jsonPrimitive?.content?.takeIf { it.isNotBlank() } ?: return@runCatching null
         val rawArguments = function["arguments"] ?: return@runCatching null
@@ -107,24 +106,14 @@ object ToolCallHistoryNormalizer {
     }.getOrNull()
 
     /**
-     * Conserta os defeitos comuns de argumentos vindos de modelos: vazio, cercas ```json, texto antes/depois do objeto,
-     * vírgula sobrando e JSON cortado no fim (fecha aspas e chaves/colchetes abertos). Se não der, o parse falha como antes.
+     * Conserta só defeitos de forma que não mudam o significado: vazio, cercas ```json, texto em volta de um objeto completo
+     * e vírgula sobrando. JSON cortado NÃO é completado (um comando pela metade poderia ser executado): segue inválido.
      */
     fun repairArgs(raw: String): String {
         var t = raw.trim().removePrefix("```json").removePrefix("```").removeSuffix("```").trim()
         if (t.isEmpty() || t == "null") return "{}"
-        val start = t.indexOf('{'); if (start > 0) t = t.substring(start)
-        val stack = ArrayDeque<Char>(); var inStr = false; var esc = false; var end = -1
-        for ((i, ch) in t.withIndex()) {
-            if (inStr) { if (esc) esc = false else if (ch == '\\') esc = true else if (ch == '"') inStr = false; continue }
-            when (ch) { '"' -> inStr = true; '{', '[' -> stack.addLast(ch); '}', ']' -> { stack.removeLastOrNull(); if (stack.isEmpty()) { end = i; break } } }
-        }
-        if (end >= 0) t = t.substring(0, end + 1)
-        else {
-            if (inStr) t += "\""
-            t = t.trimEnd().removeSuffix(",").removeSuffix(":").trimEnd()
-            while (stack.isNotEmpty()) t += if (stack.removeLast() == '{') "}" else "]"
-        }
+        val start = t.indexOf('{'); val end = t.lastIndexOf('}')
+        if (start >= 0 && end > start) t = t.substring(start, end + 1)
         return t.replace(Regex(",\\s*([}\\]])"), "$1")
     }
 
