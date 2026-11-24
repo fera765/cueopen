@@ -55,7 +55,7 @@ fun LiveVoiceScreen(nav: NavController) {
     val ctx = LocalContext.current
     val app = CueApp.instance
     val scope = rememberCoroutineScope()
-    data class Turn(val me: Boolean, val text: String)
+    data class Turn(val me: Boolean, val text: String, val cut: Boolean = false)
     val turns = remember { mutableStateListOf<Turn>() }
     var phase by remember { mutableStateOf("pronto") }  // pronto · ouvindo · pensando · falando
     var partial by remember { mutableStateOf("") }
@@ -70,6 +70,8 @@ fun LiveVoiceScreen(nav: NavController) {
     val sessionId = remember { "live-" + System.currentTimeMillis() }
     var recognizer by remember { mutableStateOf<SpeechRecognizer?>(null) }
     var muted by remember { mutableStateOf(false) }
+    var listening by remember { mutableStateOf(false) }
+    var answerJob by remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
     var callStart by remember { mutableLongStateOf(0L) }
     var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
     LaunchedEffect(callStart) { while (callStart > 0) { now = System.currentTimeMillis(); kotlinx.coroutines.delay(1000) } }
@@ -81,13 +83,14 @@ fun LiveVoiceScreen(nav: NavController) {
     lateinit var listen: () -> Unit
 
     fun answer(text: String) {
+        AppVoice.stop(); answerJob?.cancel()
         phase = "pensando"
-        scope.launch {
+        answerJob = scope.launch {
             if (useAgent) {
                 // Agente: fala cada mensagem dele assim que fica completa (andamento + resposta final).
                 val s = app.store.session(sessionId) ?: dev.cueopen.app.data.Session(id = sessionId, title = "Live Audio").also(app.store::upsertSession)
                 val before = s.items.map { it.id }.toSet(); val spoken = HashSet<String>()
-                val voice = AppVoice.startStream(ctx, AppVoice.detectLang(text)) { scope.launch { if (active && phase == "falando") listen() } }
+                val voice = AppVoice.startStream(ctx, AppVoice.detectLang(text)) { scope.launch { if (active && phase == "falando") { phase = "ouvindo"; if (!listening) listen() } } }
                 fun flush(all: Boolean) {
                     val items = app.store.session(s.id)?.items.orEmpty()
                     items.forEachIndexed { i, it ->
@@ -101,15 +104,15 @@ fun LiveVoiceScreen(nav: NavController) {
                 val job = runCatching { app.agent.send(s.id, text) }.getOrNull()
                 while (job?.isActive == true && active) { flush(false); kotlinx.coroutines.delay(300) }
                 flush(true); voice?.close()
-                if (voice == null || spoken.isEmpty()) { if (active) listen() else phase = "pronto" }
+                if (voice == null || spoken.isEmpty()) { if (active) { phase = "ouvindo"; if (!listening) listen() } else phase = "pronto" }
                 return@launch
             }
             // Modo rápido em STREAMING: a IA manda o texto aos poucos e cada trecho já vai sendo falado.
-            val history = turns.takeLast(10).joinToString("\n") { (if (it.me) "Usuário: " else "Assistente: ") + it.text }
+            val history = turns.takeLast(10).joinToString("\n") { (if (it.me) "Usuário: " else "Assistente: ") + it.text + (if (it.cut) " [interrompida pelo usuário aqui]" else "") }
             val prompt = "Você é a assistente de voz do app, numa ligação em tempo real em português do Brasil (responda em inglês só se o usuário falar em inglês). " +
                 "Responda como fala natural de telefone: curto (1 a 3 frases), direto, sem markdown, listas, emojis ou links. Comece pela resposta, sem rodeios. " +
-                "Se precisar de uma ação no celular ou na internet, diga em uma frase que pode fazer no modo Agente.\n\nConversa até agora:\n$history\n\nAssistente:"
-            val voice = if (active) AppVoice.startStream(ctx, AppVoice.detectLang(text)) { scope.launch { if (active && phase == "falando") listen() } } else null
+                "Se o usuário te interrompeu, aceite a correção dele na hora, sem repetir o que já disse. Se precisar de uma ação no celular ou na internet, diga em uma frase que pode fazer no modo Agente.\n\nConversa até agora:\n$history\n\nAssistente:"
+            val voice = if (active) AppVoice.startStream(ctx, AppVoice.detectLang(text)) { scope.launch { if (active && phase == "falando") { phase = "ouvindo"; if (!listening) listen() } } } else null
             val idx = turns.size; turns += Turn(false, "…")
             val buf = StringBuilder(); val shown = StringBuilder(); var pieces = 0
             fun send(piece: String) {
@@ -142,8 +145,27 @@ fun LiveVoiceScreen(nav: NavController) {
             if (voice == null) {
                 phase = "pronto"
                 if (active) turns += Turn(false, "(Baixe uma voz em Configurações › Voz do app para ouvir as respostas.)")
-            } else if (pieces == 0 && active) listen()
+            } else if (pieces == 0 && active) { phase = "ouvindo"; if (!listening) listen() }
         }
+        // Ligação de verdade: o microfone continua aberto enquanto ela pensa e fala.
+        if (active) scope.launch { kotlinx.coroutines.delay(150); if (active && !listening) listen() }
+    }
+
+    /** O que o microfone ouviu é só o eco da própria voz? (compara com o que acabou de ser falado) */
+    fun isEcho(heard: String): Boolean {
+        if (System.currentTimeMillis() - AppVoice.lastSpokenAt > 2500 && !AppVoice.speaking.value) return false
+        val said = Regex("[\\p{L}\\p{N}]+").findAll(AppVoice.recentSpoken().lowercase()).map { it.value }.toSet()
+        val w = Regex("[\\p{L}\\p{N}]+").findAll(heard.lowercase()).map { it.value }.toList()
+        if (w.isEmpty()) return true
+        return w.count { it in said }.toFloat() / w.size >= 0.6f
+    }
+
+    /** Você começou a falar por cima: ela para na hora e passa a ouvir. */
+    fun bargeIn() {
+        AppVoice.stop(); answerJob?.cancel()
+        val i = turns.indexOfLast { !it.me }
+        if (i >= 0 && i == turns.lastIndex && !turns[i].cut) turns[i] = turns[i].copy(cut = true)
+        phase = "ouvindo"
     }
 
     listen = listen@{
@@ -151,8 +173,9 @@ fun LiveVoiceScreen(nav: NavController) {
         if (muted) { phase = "mudo"; return@listen }
         if (!granted) { perm.launch(Manifest.permission.RECORD_AUDIO); return@listen }
         val r = runCatching { SpeechRecognizers.create(ctx) }.getOrNull() ?: run { phase = "pronto"; return@listen }
-        recognizer = r
-        phase = "ouvindo"; partial = ""
+        recognizer = r; listening = true
+        if (phase != "pensando" && phase != "falando") phase = "ouvindo"
+        partial = ""
         r.setRecognitionListener(object : RecognitionListener {
             override fun onReadyForSpeech(params: Bundle?) {}
             override fun onBeginningOfSpeech() {}
@@ -160,18 +183,23 @@ fun LiveVoiceScreen(nav: NavController) {
             override fun onBufferReceived(buffer: ByteArray?) {}
             override fun onEndOfSpeech() { level = 0f }
             override fun onError(error: Int) {
-                // Silêncio/sem fala: volta a ouvir enquanto a conversa estiver ativa.
-                if (active && (error == SpeechRecognizer.ERROR_NO_MATCH || error == SpeechRecognizer.ERROR_SPEECH_TIMEOUT)) scope.launch { listen() }
+                listening = false
+                // Silêncio/sem fala/ocupado: volta a ouvir enquanto a ligação estiver ativa.
+                if (active && error != SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS) scope.launch { kotlinx.coroutines.delay(if (error == SpeechRecognizer.ERROR_NO_MATCH || error == SpeechRecognizer.ERROR_SPEECH_TIMEOUT) 0 else 400); if (active && !listening) listen() }
                 else if (phase == "ouvindo") phase = "pronto"
             }
             override fun onResults(results: Bundle?) {
                 val t = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull()?.trim().orEmpty()
-                partial = ""
-                if (t.isBlank()) { if (active) scope.launch { listen() }; return }
+                partial = ""; listening = false
+                if (t.isBlank() || isEcho(t)) { if (active) scope.launch { listen() }; return }
+                if (phase == "falando" || phase == "pensando") bargeIn()
                 turns += Turn(true, t); answer(t)
             }
             override fun onPartialResults(partialResults: Bundle?) {
-                partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull()?.let { partial = it }
+                val p = partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull() ?: return
+                // Interrupção: 2+ palavras que não são o eco da própria voz → ela para e escuta.
+                if ((phase == "falando" || phase == "pensando") && p.trim().split(Regex("\\s+")).size >= 2 && !isEcho(p)) bargeIn()
+                if (phase == "ouvindo") partial = p
             }
             override fun onEvent(eventType: Int, params: Bundle?) {}
         })
@@ -186,15 +214,27 @@ fun LiveVoiceScreen(nav: NavController) {
         })
     }
 
-    DisposableEffect(Unit) { onDispose { active = false; AppVoice.stop(); stopListening() } }
+    val audio = remember { ctx.getSystemService(android.content.Context.AUDIO_SERVICE) as android.media.AudioManager }
+    /** Modo ligação: cancelamento de eco/ruído do aparelho e saída no alto-falante, para falar e ouvir ao mesmo tempo. */
+    fun callAudio(on: Boolean) = runCatching {
+        AppVoice.callMode = on
+        audio.mode = if (on) android.media.AudioManager.MODE_IN_COMMUNICATION else android.media.AudioManager.MODE_NORMAL
+        if (android.os.Build.VERSION.SDK_INT >= 31) {
+            if (on) audio.availableCommunicationDevices.firstOrNull { it.type == android.media.AudioDeviceInfo.TYPE_BLUETOOTH_SCO || it.type == android.media.AudioDeviceInfo.TYPE_WIRED_HEADSET }
+                ?.let { audio.setCommunicationDevice(it) }
+                ?: audio.availableCommunicationDevices.firstOrNull { it.type == android.media.AudioDeviceInfo.TYPE_BUILTIN_SPEAKER }?.let { audio.setCommunicationDevice(it) }
+            else audio.clearCommunicationDevice()
+        } else @Suppress("DEPRECATION") { audio.isSpeakerphoneOn = on }
+    }
+    DisposableEffect(Unit) { onDispose { active = false; answerJob?.cancel(); AppVoice.stop(); stopListening(); callAudio(false) } }
 
     fun startCall() {
-        active = true; callStart = System.currentTimeMillis(); turns.clear()
+        active = true; callStart = System.currentTimeMillis(); turns.clear(); callAudio(true)
         phase = "falando"
-        val hello = if (AppVoice.speak(ctx, "Oi! Pode falar, estou ouvindo.") { scope.launch { if (active) listen() } }) true else { listen(); false }
-        if (hello) turns += Turn(false, "Oi! Pode falar, estou ouvindo.")
+        val hello = if (AppVoice.speak(ctx, "Oi! Pode falar, estou ouvindo.") { scope.launch { if (active) { phase = "ouvindo"; if (!listening) listen() } } }) true else { listen(); false }
+        if (hello) { turns += Turn(false, "Oi! Pode falar, estou ouvindo."); listen() }
     }
-    fun hangUp() { active = false; AppVoice.stop(); stopListening(); phase = "pronto"; callStart = 0L }
+    fun hangUp() { active = false; answerJob?.cancel(); AppVoice.stop(); stopListening(); listening = false; callAudio(false); phase = "pronto"; callStart = 0L }
 
     Scaffold(containerColor = c.bg, topBar = {
         CueTopBar("Live Audio", { hangUp(); nav.popBackStack() }) {

@@ -25,11 +25,8 @@ import java.util.zip.ZipInputStream
 object AppVoice {
     data class Spec(val id: String, val name: String, val lang: String, val gender: String, val desc: String,
                     val ns: Float, val nw: Float, val ls: Float, val fullMb: Int, val liteMb: Int)
-    val CATALOG = listOf(
-        Spec("cadu", "Cadu", "pt", "masculina", "Português do Brasil · natural e clara", 0.5f, 0.5f, 1.08f, 59, 14),
-        Spec("faber", "Faber", "pt", "masculina", "Português do Brasil · grave e calma", 0.333f, 0.5f, 1.08f, 59, 14),
-        Spec("lessac", "Lessac", "en", "feminina", "Inglês americano · narração", 0.333f, 0.8f, 1.0f, 59, 14),
-        Spec("ryan", "Ryan", "en", "masculina", "Inglês americano · firme", 0.333f, 0.8f, 1.15f, 59, 14),
+    val CATALOG = listOf<Spec>(
+        // Piper removido: as vozes agora são do Phonon (pt e en).
     )
     enum class Variant(val tag: String, val label: String) { FULL("fp32", "Padrão"), LITE("int8", "Leve") }
     /**
@@ -76,33 +73,22 @@ object AppVoice {
     fun choose(ctx: Context, id: String) { val s = spec(id) ?: return; prefs(ctx).edit().putString("voice_${s.lang}", id).apply(); preload(ctx, s.lang) }
     fun hasAny(ctx: Context) = CATALOG.any { installedVariant(ctx, it.id) != null }
     /** Voz do app ligada (senão usa a voz do Android). */
-    fun enabled(ctx: Context) = prefs(ctx).getBoolean("enabled", true) && (hasAny(ctx) || PhononVoice.active(ctx))
+    fun enabled(ctx: Context) = prefs(ctx).getBoolean("enabled", true) && PhononVoice.active(ctx)
     fun setEnabled(ctx: Context, on: Boolean) { prefs(ctx).edit().putBoolean("enabled", on).apply() }
     fun speed(ctx: Context) = prefs(ctx).getFloat("speed", 1.0f)
     fun setSpeed(ctx: Context, v: Float) { prefs(ctx).edit().putFloat("speed", v.coerceIn(0.7f, 1.5f)).apply() }
 
     /** Idioma provável do texto (para escolher a voz). */
-    fun detectLang(text: String): String {
-        val w = Regex("[\\p{L}']+").findAll(text.lowercase()).map { it.value }.take(80).toList()
-        val pt = setOf("de", "que", "não", "você", "para", "com", "uma", "os", "as", "é", "está", "eu", "isso", "mais", "por", "seu", "sua", "como", "já", "também", "olá", "oi", "obrigado")
-        val en = setOf("the", "and", "you", "is", "to", "of", "it", "that", "for", "with", "are", "this", "your", "i'm", "can", "hello", "hi", "thanks", "what", "have")
-        return if (w.count { it in en } > w.count { it in pt } + 1) "en" else "pt"
-    }
+    fun detectLang(text: String): String = SpeechText.detect(text)
 
     /** Ao abrir o app: remove a voz antiga (Dii) e já carrega a voz em português, se houver. */
     fun prewarm(ctx: Context) {
         scope.launch(Dispatchers.IO) {
             val root = File(ctx.filesDir, "voices")
-            root.listFiles()?.filter { it.name.contains("dii") || it.name.endsWith("-fp32") || it.name == "espeak-ng-data" }?.forEach { it.deleteRecursively() }
-            // Migração: espeak que veio dentro de cada voz → pasta única.
-            // Pacotes antigos (sem a correção do 1º som) saem; o espeak deles vira a pasta única se ainda não houver.
-            root.listFiles()?.filter { it.isDirectory && (it.name.startsWith("piper-") || it.name.startsWith("piper2-")) }?.forEach { v ->
-                val own = File(v, "espeak-ng-data")
-                if (own.isDirectory) { if (!File(espeakDir(ctx), "phontab").isFile) own.renameTo(espeakDir(ctx)) else own.deleteRecursively() }
-                if (v.name.startsWith("piper-")) v.deleteRecursively()
-            }
+            // Vozes antigas (Dii, Piper, espeak) saem: o app fala só com o Phonon.
+            root.listFiles()?.filter { f -> listOf("dii", "piper", "espeak").any { f.name.contains(it) } || f.name.endsWith("-fp32") }?.forEach { it.deleteRecursively() }
             ctx.getSharedPreferences("dii_voice", Context.MODE_PRIVATE).edit().clear().apply()
-            if (PhononVoice.active(ctx)) PhononVoice.preload(ctx) else preload(ctx, "pt")
+            PhononVoice.preload(ctx)
         }
     }
     private fun preload(ctx: Context, lang: String) { scope.launch { runCatching { engine(ctx, lang) } } }
@@ -226,13 +212,20 @@ object AppVoice {
 
     // ───────── Fala em streaming ─────────
     private var playJob: Job? = null
+    /** Em ligação (voz ao vivo): saída pelo canal de comunicação, com cancelamento de eco do aparelho. */
+    @Volatile var callMode = false
+    /** O que a voz falou por último (para ignorar o próprio eco no microfone). */
+    private val recent = StringBuilder()
+    @Volatile var lastSpokenAt = 0L; private set
+    fun recentSpoken(): String = synchronized(recent) { recent.toString() }
+    private fun remember(t: String) = synchronized(recent) { recent.append(' ').append(t); if (recent.length > 600) recent.delete(0, recent.length - 600) }
     private var track: AudioTrack? = null
     private var queue: Channel<String>? = null
 
     private fun newTrack(sr: Int): AudioTrack {
         val min = AudioTrack.getMinBufferSize(sr, AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_FLOAT)
         return AudioTrack.Builder()
-            .setAudioAttributes(AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_ASSISTANT).setContentType(AudioAttributes.CONTENT_TYPE_SPEECH).build())
+            .setAudioAttributes(AudioAttributes.Builder().setUsage(if (callMode) AudioAttributes.USAGE_VOICE_COMMUNICATION else AudioAttributes.USAGE_ASSISTANT).setContentType(AudioAttributes.CONTENT_TYPE_SPEECH).build())
             .setAudioFormat(AudioFormat.Builder().setSampleRate(sr).setEncoding(AudioFormat.ENCODING_PCM_FLOAT).setChannelMask(AudioFormat.CHANNEL_OUT_MONO).build())
             .setBufferSizeInBytes(maxOf(min, sr / 10 * 4))
             .setTransferMode(AudioTrack.MODE_STREAM)
@@ -253,7 +246,7 @@ object AppVoice {
      */
     fun startStream(ctx: Context, lang: String = "pt", onDone: (() -> Unit)? = null): Channel<String>? {
         stop()
-        if (lang == "pt" && PhononVoice.active(ctx)) startPhonon(ctx, onDone)?.let { return it }
+        if (PhononVoice.active(ctx)) startPhonon(ctx, lang, onDone)?.let { return it }
         val (t, s) = engine(ctx, lang) ?: return null
         val sr = t.sampleRate()
         val q = Channel<String>(Channel.UNLIMITED); queue = q
@@ -298,7 +291,7 @@ object AppVoice {
      * Phonon: cada frase sai em quadros de 80 ms direto para o alto-falante (o 1º som sai em dezenas de ms),
      * enquanto a próxima frase da IA ainda está chegando.
      */
-    private fun startPhonon(ctx: Context, onDone: (() -> Unit)?): Channel<String>? {
+    private fun startPhonon(ctx: Context, lang: String, onDone: (() -> Unit)?): Channel<String>? {
         val app = ctx.applicationContext
         val sr = PhononVoice.SR
         val q = Channel<String>(Channel.UNLIMITED); queue = q
@@ -309,13 +302,20 @@ object AppVoice {
             val tr = newTrack(sr).also { track = it; it.play() }
             tr.write(FloatArray(sr * 6 / 100), 0, sr * 6 / 100, AudioTrack.WRITE_BLOCKING)  // 60 ms: acorda o alto-falante
             val gen = launch(PhononVoice.thread) {
-                val t = PhononVoice.engine(app)
-                if (t != null) for (text in q) {
-                    for (piece in chunks(PhononVoice.prepare(text))) {
-                        if (!isActive || phononGen != my) break
-                        runCatching { t.speak(piece) { pcm -> if (phononGen != my || !isActive) false else { audio.trySend(pcm.copyOf()); true } } }
-                        if (!isActive || phononGen != my) break
-                        gap(piece, sr)?.let { audio.trySend(it.copyOf(it.size * 6 / 10)) }
+                var cur = lang
+                for (text in q) {
+                    // Cada frase no seu idioma: o normalizador do Phonon daquele idioma lê números, datas e símbolos.
+                    for (seg in SpeechText.segments(text, SpeechText.detect(text, cur))) {
+                        cur = seg.lang
+                        val l = PhononVoice.resolve(app, seg.lang) ?: continue
+                        val t = PhononVoice.engine(app, l) ?: continue
+                        for (piece in chunks(seg.text)) {
+                            if (!isActive || phononGen != my) break
+                            remember(piece)
+                            runCatching { t.speak(piece) { pcm -> if (phononGen != my || !isActive) false else { audio.trySend(pcm.copyOf()); lastSpokenAt = System.currentTimeMillis(); true } } }
+                            if (!isActive || phononGen != my) break
+                            gap(piece, sr)?.let { audio.trySend(it.copyOf(it.size * 6 / 10)) }
+                        }
                     }
                 }
                 audio.close()
@@ -369,12 +369,17 @@ object AppVoice {
 
     /** Gera um WAV (respostas em áudio no chat). */
     fun synthesizeToWav(ctx: Context, text: String, out: File): Long? {
-        val lang = detectLang(text)
-        val (t, s) = engine(ctx, lang) ?: return null
-        val sr = t.sampleRate()
+        if (!PhononVoice.active(ctx)) return null
+        val app = ctx.applicationContext
+        val sr = PhononVoice.SR
         val all = ArrayList<FloatArray>()
         all += FloatArray(sr / 5)  // silêncio inicial: o player não corta a 1ª sílaba
-        synchronized(engineLock) { chunks(prepare(text, s)).forEach { p -> all += t.generate(p, 0, speed(ctx)).samples; gap(p, sr)?.let { all += it } } }
+        kotlinx.coroutines.runBlocking(PhononVoice.thread) {
+            for (seg in SpeechText.segments(text)) {
+                val t = PhononVoice.resolve(app, seg.lang)?.let { PhononVoice.engine(app, it) } ?: continue
+                for (p in chunks(seg.text)) { runCatching { t.speak(p) { pcm -> all += pcm.copyOf(); true } }; gap(p, sr)?.let { all += it } }
+            }
+        }
         val n = all.sumOf { it.size }
         if (n == 0) return null
         out.parentFile?.mkdirs()
