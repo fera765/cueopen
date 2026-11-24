@@ -111,7 +111,7 @@ return JSON.stringify({hits:out.slice(0,15),blocked:block&&out.length===0});
     }
 
     fun format(query: String, hits: List<SearchHit>, sources: String): String =
-        "Resultados para \"$query\" ($sources; abra os relevantes com web_fetch):\n" + hits.mapIndexed { i, h ->
+        "Resultados para \"$query\" (${if (sources.isBlank()) "" else "$sources; "}abra os relevantes com web_fetch):\n" + hits.mapIndexed { i, h ->
             "${i + 1}. ${h.title}\n   ${h.url}" + (if (h.snippet.isNotBlank()) "\n   ${h.snippet.take(240)}" else "") + (if (h.image.isNotBlank()) "\n   imagem: ${h.image}" else "")
         }.joinToString("\n")
 

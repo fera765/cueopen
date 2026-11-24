@@ -89,12 +89,13 @@ object ToolCallHistoryNormalizer {
 
     fun canonicalizeToolCall(element: JsonElement): CanonicalToolCall? = runCatching {
         val call = element.jsonObject
-        val id = call["id"]?.jsonPrimitive?.content?.takeIf { it.isNotBlank() } ?: return@runCatching null
+        // Alguns provedores omitem o id: gera um estável a partir do conteúdo em vez de descartar a chamada.
+        val id = call["id"]?.jsonPrimitive?.content?.takeIf { it.isNotBlank() } ?: ("call_" + Integer.toHexString(element.toString().hashCode()))
         val function = call["function"]?.jsonObject ?: return@runCatching null
         val name = function["name"]?.jsonPrimitive?.content?.takeIf { it.isNotBlank() } ?: return@runCatching null
         val rawArguments = function["arguments"] ?: return@runCatching null
         val arguments = if (rawArguments is JsonPrimitive && rawArguments.isString) {
-            json.parseToJsonElement(rawArguments.content)
+            runCatching { json.parseToJsonElement(rawArguments.content) }.getOrElse { json.parseToJsonElement(repairArgs(rawArguments.content)) }
         } else rawArguments
         if (arguments !is JsonObject) return@runCatching null
         val argsJson = arguments.toString()
@@ -104,6 +105,28 @@ object ToolCallHistoryNormalizer {
         val normalizedCall = JsonObject(call.toMutableMap().apply { put("function", normalizedFunction) })
         CanonicalToolCall(id, name, argsJson, redactToolCall(normalizedCall))
     }.getOrNull()
+
+    /**
+     * Conserta os defeitos comuns de argumentos vindos de modelos: vazio, cercas ```json, texto antes/depois do objeto,
+     * vírgula sobrando e JSON cortado no fim (fecha aspas e chaves/colchetes abertos). Se não der, o parse falha como antes.
+     */
+    fun repairArgs(raw: String): String {
+        var t = raw.trim().removePrefix("```json").removePrefix("```").removeSuffix("```").trim()
+        if (t.isEmpty() || t == "null") return "{}"
+        val start = t.indexOf('{'); if (start > 0) t = t.substring(start)
+        val stack = ArrayDeque<Char>(); var inStr = false; var esc = false; var end = -1
+        for ((i, ch) in t.withIndex()) {
+            if (inStr) { if (esc) esc = false else if (ch == '\\') esc = true else if (ch == '"') inStr = false; continue }
+            when (ch) { '"' -> inStr = true; '{', '[' -> stack.addLast(ch); '}', ']' -> { stack.removeLastOrNull(); if (stack.isEmpty()) { end = i; break } } }
+        }
+        if (end >= 0) t = t.substring(0, end + 1)
+        else {
+            if (inStr) t += "\""
+            t = t.trimEnd().removeSuffix(",").removeSuffix(":").trimEnd()
+            while (stack.isNotEmpty()) t += if (stack.removeLast() == '{') "}" else "]"
+        }
+        return t.replace(Regex(",\\s*([}\\]])"), "$1")
+    }
 
     private fun redactToolCall(element: JsonElement): JsonElement {
         val call = runCatching { element.jsonObject }.getOrNull() ?: return element

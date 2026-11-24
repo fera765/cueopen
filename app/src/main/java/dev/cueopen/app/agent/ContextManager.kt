@@ -200,6 +200,28 @@ class ContextManager(private val store: Store, private val sandbox: Sandbox, pri
         updated
     }.getOrDefault(s)
 
+    /**
+     * Quando a compactação normal não libera espaço (o peso está nas mensagens recentes, que ela preserva):
+     * encurta resultados grandes de ferramentas também no fim do histórico e, se ainda não couber, fica só com as 4 últimas.
+     */
+    fun hardShrink(s: Session): Session = runCatching {
+        val budget = store.settings.contextBudget
+        fun size(l: List<LlmMessage>) = estimateTokens(l) + estimateTokens(s.summary)
+        var llm = ToolCallHistoryNormalizer.normalize(s.llm).map { m ->
+            val c = m.content ?: return@map m
+            if (m.role == "tool" && c.length > 3_000) m.copy(content = c.take(1_200) + "\n[… ${c.length - 2_400} caracteres omitidos para caber no contexto; releia o trecho se precisar …]\n" + c.takeLast(1_200)) else m
+        }
+        if (size(llm) >= budget * 7 / 10) {
+            var cut = (llm.size - 4).coerceAtLeast(0)
+            while (cut > 0 && cut < llm.size && llm[cut].role == "tool") cut--
+            if (cut > 0) llm = llm.subList(cut, llm.size).toList()
+        }
+        val summary = if (estimateTokens(s.summary) > budget / 3) s.summary.takeLast(budget) else s.summary
+        val updated = s.copy(llm = llm, summary = summary, compactions = s.compactions + 1)
+        store.editSession(s.id) { it.copy(llm = updated.llm, summary = updated.summary, compactions = updated.compactions) }
+        updated
+    }.getOrDefault(s)
+
     /** Tamanho logo após a última compactação, por sessão (histerese). */
     private val postCompactSize = java.util.concurrent.ConcurrentHashMap<String, Int>()
     /** Quantas limpezas de resultados já houve na sessão (a releitura de um trecho limpo volta a valer). */

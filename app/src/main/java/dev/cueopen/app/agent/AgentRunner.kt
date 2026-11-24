@@ -1613,6 +1613,7 @@ class AgentRunner(
         val fileToolFailureGuard = AgentFileToolFailureGuard()
         val repeatGuard = RepeatedToolFailureGuard()
         var uselessCompactions = 0
+        var roundNo = 0; var lastEpoch = ctxMgr.clearEpochOf(sessionId); var epochChangedAt = -100
         val controlTools = setOf("tools_load", "sleep", "set_schedule", "ask_user", "ask_question", "ask_secure", "finish", "complete_step", "notes_write", "notes_read")
         while (scope.isActive) {
             val workerUsed = if (tokenBudgetOverride != null) {
@@ -1643,7 +1644,12 @@ class AgentRunner(
                 // Guarda pós-compactação (OpenClaw): se o agente repetir o mesmo loop logo depois, interrompe.
                 if (s.compactions > before) toolLoops.armPostCompaction()
                 // OpenBot 0.71: compactar sem liberar espaço vira ciclo (um chat chegou a 559 compactações). Na 3ª, para.
-                val tokensAfter = ctxMgr.estimateTokens(s.llm) + ctxMgr.estimateTokens(s.summary)
+                var tokensAfter = ctxMgr.estimateTokens(s.llm) + ctxMgr.estimateTokens(s.summary)
+                // O resumo não liberou espaço (o peso está no fim do histórico): corte forte antes de desistir.
+                if (CompactionProgress.useless(tokensBefore, tokensAfter, store.settings.contextBudget)) {
+                    s = ctxMgr.hardShrink(s)
+                    tokensAfter = ctxMgr.estimateTokens(s.llm) + ctxMgr.estimateTokens(s.summary)
+                }
                 if (CompactionProgress.useless(tokensBefore, tokensAfter, store.settings.contextBudget)) {
                     if (++uselessCompactions >= CompactionProgress.MAX_USELESS) {
                         runCatching { dev.cueopen.app.diag.ErrorLog.log("agent", "Compactação sem efeito $uselessCompactions vezes ($tokensBefore → $tokensAfter tokens; orçamento ${store.settings.contextBudget}); turno encerrado.", sessionId, "compact") }
@@ -2128,6 +2134,9 @@ class AgentRunner(
                         store.editSession(sessionId) { it.copy(status = SessionStatus.WAITING_USER) }
                         return
                     }
+                roundNo++
+                val epochNow = ctxMgr.clearEpochOf(sessionId) + (store.session(sessionId)?.compactions ?: 0)
+                if (epochNow != lastEpoch) { lastEpoch = epochNow; epochChangedAt = roundNo }
                 for (call in reply.toolCalls) {
                     if (call.name in controlTools) continue
                     val repeatable = isRepeatableTool(call.name)
@@ -2141,6 +2150,8 @@ class AgentRunner(
                     ) ?: continue
                     // Depois de compactar, o conteúdo dos arquivos saiu do contexto: relê-los é necessário, não loop.
                     if (trip.kind == ToolLoopDetector.Kind.POST_COMPACTION && call.name in POST_COMPACTION_READS) continue
+                    // Resultados antigos foram limpos do contexto há pouco: reler o que sumiu é necessário, não loop.
+                    if (call.name in POST_COMPACTION_READS && roundNo - epochChangedAt <= 10) continue
                     tripped = call.name
                     trippedKind = trip.kind
                     trippedRepeatable = trippedRepeatable && repeatable && trip.kind == ToolLoopDetector.Kind.SAME_CALL
@@ -5632,8 +5643,10 @@ class AgentRunner(
         val commandFailed = Regex("""\[exit ([1-9]\d*)\]""").containsMatchIn(out)
         val isError = out.startsWith("ERROR:") || out.startsWith("TIMEOUT:") || out.startsWith("PARTIAL:") || out.startsWith("ERRO:") || commandFailed
         // Marcadores de falha específicos de ferramentas (não começam com ERRO:) também viram log.
-        val markerError = Regex("""(MARKET_ERROR|WALLET_RPC_ERROR|GUARDRAIL|No such file|not found|não encontrad|Recusado|Acesso negado)""")
-            .containsMatchIn(out.take(400))
+        // Só na 1ª linha e fora de ferramentas que devolvem conteúdo de terceiros (busca, página, arquivo): ali a palavra é dado, não falha.
+        val contentTool = call.name.startsWith("web_") || call.name in setOf("file_read", "notes_read", "memory_search", "knowledge_search")
+        val markerError = !contentTool && Regex("""(MARKET_ERROR|WALLET_RPC_ERROR|GUARDRAIL|No such file|not found|não encontrad|Recusado|Acesso negado)""")
+            .containsMatchIn(out.lineSequence().firstOrNull().orEmpty().take(400))
         val accessibilityTool = call.name.startsWith("device_accessibility_") && call.name != "device_accessibility_open_app"
         val safeExecutionOutput = if (accessibilityTool)
             "Resultado Android transitório omitido dos diagnósticos; nenhum conteúdo de tela foi salvo."
