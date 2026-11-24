@@ -20,7 +20,7 @@ import java.util.concurrent.Executors
 object PhononVoice {
     const val ID = "phonon-40m-pt"
     private const val BASE = "https://github.com/fera765/cueopen/raw/voices/$ID/"
-    const val DEFAULT_VOICE = "pt_br_Isadora"
+    const val DEFAULT_VOICE = "Isadora"
     const val SR = 24_000
 
     /** Biblioteca nativa: a rápida exige dotprod+fp16 (ARMv8.2); sem isso usa a compatível. Lida pelo PhononTTS (Native.load). */
@@ -105,7 +105,7 @@ object PhononVoice {
             val cores = Runtime.getRuntime().availableProcessors()
             android.system.Os.setenv("RAYON_NUM_THREADS", (cores / 2).coerceIn(2, 4).toString(), true)
             val t = PhononTTS(dir(ctx).absolutePath, "pt")
-            runCatching { t.setVoice(want) }.onFailure { runCatching { t.setVoice(t.voices.firstOrNull { it.startsWith("pt_br") } ?: t.voices.first()) } }
+            runCatching { t.setVoice(want) }.onFailure { runCatching { t.setVoice(t.voices.firstOrNull { it.contains("Isadora") } ?: t.voices.firstOrNull { it.startsWith("pt_br") } ?: t.voices.first()) } }
             // Aquece (1ª chamada aloca buffers): a 1ª resposta de verdade já sai rápida.
             runCatching { t.speak("Oi.") { false } }
             tts = t; loadedVoice = want; t
