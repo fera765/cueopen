@@ -23,8 +23,8 @@ jobs:
           pip install -q "huggingface_hub>=0.25"
           python - <<'EOF'
           from huggingface_hub import snapshot_download
-          snapshot_download("gradium/phonon-40m-pt", local_dir="out/phonon-40m-pt",
-              allow_patterns=["config.json", "tokenizer.json", "model.q8.gguf", "voices/*", "embeddings/*", "default-voice.safetensors", "LICENSE*", "README.md"])
+          import os; snapshot_download("gradium/phonon-40m-pt" if os.environ.get("HF_TOKEN") else "ldenoue/phonon-40m-pt", local_dir="out/phonon-40m-pt",
+              allow_patterns=["*.gguf", "config.json", "tokenizer.json", "model.q8.gguf", "voices/*", "embeddings/*", "default-voice.safetensors", "LICENSE*", "README.md"])
           EOF
           cd out/phonon-40m-pt
           rm -rf .cache
