@@ -1,0 +1,6 @@
+NOTICE.txt 189
+README.md 10762
+config.json 4634
+default-voice.safetensors 256136
+model.q8.gguf 74553568
+tokenizer.json 279034
