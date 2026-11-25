@@ -1002,7 +1002,7 @@ function slimTech(v, depth = 0) {
  * Resultado de uma ação no formato para agentes: {status, duration_ms, connector, action, version, summary, data, note}.
  * [budget] em bytes do JSON compacto (~2 KB por padrão); full=true devolve tudo (ainda decodificado).
  */
-function shapeResult(output, meta, { full = false, budget = 4096 } = {}) {
+function shapeResult(output, meta, { full = false, budget = 2048 } = {}) {
     const base = { status: 'ok', connector: meta.connector, action: meta.action, duration_ms: meta.durationMs, version: meta.version }
     if (full) {
         const opts = { full: true, maxStr: 0, maxItems: Infinity, maxDepth: 40 }
