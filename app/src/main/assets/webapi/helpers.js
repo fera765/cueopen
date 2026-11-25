@@ -20,6 +20,8 @@ api.blocked = () => {
   if (document.querySelector('iframe[src*="recaptcha"], iframe[src*="hcaptcha"], .g-recaptcha, .h-captcha, #captcha-form')) return 'captcha na página';
   if (/cf-chl|challenge-platform/.test(document.documentElement.innerHTML.slice(0, 20000)) || /just a moment|verificando se você é humano|verify you are human/.test(t)) return 'cloudflare: verificação';
   if (/amazon\./.test(u) && (/validatecaptcha|errors\/validatecaptcha/.test(u) || /digite os caracteres|type the characters|robot check/.test(t))) return 'amazon: captcha';
+  if (/if this persists, please email us|blocked by network security|you've been blocked|acesso negado|access denied|request blocked/.test(t)) return 'site bloqueou o acesso automático';
+  if (/amazon\./.test(u) && /algo deu errado|something went wrong/.test(t) && !document.querySelector("[data-component-type='s-search-result']")) return 'amazon: bloqueio temporário';
   if (/are you a robot|você é um robô|confirme que você é humano|account-verification|security check/.test(t)) return 'verificação anti-robô';
   return '';
 };

@@ -494,10 +494,20 @@ private fun WebApiHubTab(nav: NavController) {
         }.toString()) }
         var out by remember(a.slug) { mutableStateOf("") }
         var busy by remember(a.slug) { mutableStateOf(false) }
+        var blockedUrl by remember(a.slug) { mutableStateOf<String?>(null) }
         AlertDialog(onDismissRequest = { trying = null }, title = { Text("Testar " + a.slug) },
             text = { Column(Modifier.verticalScroll(rememberScrollState())) {
                 OutlinedTextField(args, { args = it }, label = { Text("args (JSON)") }, modifier = Modifier.fillMaxWidth(), textStyle = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace))
                 if (busy) LinearProgressIndicator(Modifier.fillMaxWidth().padding(top = 8.dp))
+                blockedUrl?.let { bu ->
+                    Text("O site pediu verificação humana (captcha). Resolva uma vez no Browser — é a mesma sessão das APIs — e teste de novo.", fontSize = 12.sp, color = c.err, modifier = Modifier.padding(top = 8.dp))
+                    Button({
+                        val host = runCatching { java.net.URI(bu).host.orEmpty().removePrefix("www.") }.getOrDefault("")
+                        val login = dev.cueopen.app.data.BrowserLogin(name = "Verificação · $host", url = bu, domain = host)
+                        app.store.upsertBrowserLogin(login); trying = null
+                        nav.navigate("browserlogin/${login.id}")
+                    }) { Text("Resolver verificação") }
+                }
                 if (out.isNotBlank()) Text(out.take(6_000), fontSize = 11.sp, fontFamily = FontFamily.Monospace, modifier = Modifier.padding(top = 8.dp))
             } },
             confirmButton = { TextButton(enabled = !busy, onClick = {
@@ -506,6 +516,8 @@ private fun WebApiHubTab(nav: NavController) {
                 busy = true
                 scope.launch {
                     val r = dev.cueopen.app.browser.WebApiHub.call(ctx, a, o)
+                    blockedUrl = runCatching { kotlinx.serialization.json.Json.parseToJsonElement(r).let { it as kotlinx.serialization.json.JsonObject }
+                        .takeIf { it["blocked"]?.toString() == "true" }?.get("url")?.let { (it as kotlinx.serialization.json.JsonPrimitive).content } }.getOrNull()
                     out = runCatching { kotlinx.serialization.json.Json { prettyPrint = true }.let { j -> j.encodeToString(kotlinx.serialization.json.JsonElement.serializer(), j.parseToJsonElement(r)) } }.getOrDefault(r)
                     busy = false
                 }

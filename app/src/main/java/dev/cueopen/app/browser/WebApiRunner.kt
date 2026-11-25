@@ -112,6 +112,12 @@ object WebApiRunner {
                     var n = 0
                     while (n++ < 60 && unwrap(eval(v, "!!document.querySelector('$sel')")) != "true") delay(150)
                 }
+                // Página de verificação (captcha/anti-robô): não tenta contornar — avisa para o usuário resolver uma vez no Browser (mesma sessão).
+                val blocked = unwrap(eval(v, "(function(){$HELPERS;try{return api.blocked()}catch(e){return ''}})()")).orEmpty()
+                if (blocked.isNotBlank()) return@withTimeoutOrNull buildJsonObject {
+                    put("api", a.slug); put("ok", false); put("blocked", true); put("args", full); put("url", v.url.orEmpty()); put("error", blocked)
+                    put("hint", "O site pediu verificação humana. O usuário pode resolver uma vez em Browser › API Hub › Testar › Resolver verificação (a sessão é a mesma); depois a API volta a funcionar.")
+                }.toString()
                 // 3) Roda o código da API; o resultado volta por window.__wa (evaluateJavascript não espera Promise).
                 eval(v, "window.__wa=null;(async()=>{$HELPERS;const args=$argsJs;try{const r=await (async function(args,api){\n${a.code}\n})(args,api);" +
                     "window.__wa=JSON.stringify({ok:true,url:location.href,data:r===undefined?null:r})}catch(e){window.__wa=JSON.stringify({ok:false,url:location.href,error:String(e&&e.message||e)})}})();1")

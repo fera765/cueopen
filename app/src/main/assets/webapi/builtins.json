@@ -23,7 +23,11 @@
   ],
   "code": "await api.wait('#rso, #search', 6000);\nconst seen = new Set(); const results = [];\nfor (const h of api.all('#search a h3, #rso a h3')) {\n  const a = h.closest('a'); if (!a) continue;\n  let url = a.href; try { const u = new URL(url); if (u.pathname === '/url') url = u.searchParams.get('q') || u.searchParams.get('url') || url; } catch (e) {}\n  if (!/^https?:/.test(url) || /google\\.[a-z.]+\\/(search|aclk)/.test(url) || seen.has(url)) continue; seen.add(url);\n  const box = a.closest('div.g, div[data-hveid], div.MjjYud') || a.parentElement;\n  const sn = box ? api.text(box, '.VwiC3b, [data-sncf], .yXK7lf, div[style*=\"line-clamp\"]') : '';\n  results.push({ position: results.length + 1, title: api.text(h), url, display_url: (()=>{try{return new URL(url).origin}catch(e){return ''}})(), snippet: sn });\n}\nconst page = Number(args.page || 1);\nreturn { query: args.query, page, count: results.length, has_more: !!api.one('#pnnext, a[aria-label=\"Mais resultados\"], a[aria-label=\"Next page\"]') || results.length >= 8, next_page: page + 1, results };",
   "builtin": true,
-  "source": "nativa"
+  "source": "nativa",
+  "fallbacks": [
+   "bing_search",
+   "duckduckgo_search"
+  ]
  },
  {
   "slug": "bing_search",
@@ -47,9 +51,13 @@
     "default": "1"
    }
   ],
-  "code": "const results = api.all('#b_results > li.b_algo').map((li, i) => ({ position: i + 1, title: api.text(li, 'h2'), url: api.attr(li, 'h2 a', 'href'), snippet: api.text(li, '.b_caption p, p') })).filter(r => r.url);\nconst page = Number(args.page || 1);\nreturn { query: args.query, page, count: results.length, has_more: !!api.one('a.sb_pagN'), next_page: page + 1, results };",
+  "code": "const dec = u => { try { const x = new URL(u, location.href); if (/bing\\.com$/.test(x.hostname) && x.pathname.startsWith('/ck/')) { const v = x.searchParams.get('u') || ''; if (v.startsWith('a1')) return atob(v.slice(2).replace(/-/g, '+').replace(/_/g, '/')); } return x.href; } catch (e) { return u; } };\nconst results = api.all('#b_results > li.b_algo').map(li => {\n  const a = (li.querySelector('a h2') || {}).parentElement || li.querySelector('h2 a') || li.querySelector('a[href]');\n  const cite = api.text(li, 'cite');\n  return { title: api.text(li, 'h2'), url: a ? dec(a.getAttribute('href')) : '', display_url: cite, snippet: api.text(li, '.b_caption p, .b_lineclamp2, .b_lineclamp3, p') };\n}).filter(r => r.title && /^https?:/.test(r.url)).map((r, i) => Object.assign({ position: i + 1 }, r));\nconst page = Number(args.page || 1);\nreturn { query: args.query, page, count: results.length, has_more: !!api.one('a.sb_pagN, a[title=\"Próxima página\"], a[aria-label=\"Próxima página\"]') || results.length >= 8, next_page: page + 1, results };",
   "builtin": true,
-  "source": "nativa"
+  "source": "nativa",
+  "fallbacks": [
+   "duckduckgo_search",
+   "google_search"
+  ]
  },
  {
   "slug": "duckduckgo_search",
@@ -75,7 +83,11 @@
   ],
   "code": "const results = api.all('.result:not(.result--ad)').map((r, i) => { let url = api.attr(r, 'a.result__a', 'href'); try { const u = new URL(url, location.href); url = u.searchParams.get('uddg') || u.href; } catch (e) {} return { position: i + 1, title: api.text(r, 'a.result__a'), url, snippet: api.text(r, '.result__snippet') }; }).filter(r => r.title);\nconst page = Number(args.page || 1);\nreturn { query: args.query, page, count: results.length, has_more: !!api.one('.nav-link input[value=\"Next\"], input[value=\"Próxima\"]') || results.length >= 20, next_page: page + 1, results };",
   "builtin": true,
-  "source": "nativa"
+  "source": "nativa",
+  "fallbacks": [
+   "bing_search",
+   "google_search"
+  ]
  },
  {
   "slug": "google_news",
@@ -101,7 +113,10 @@
   ],
   "code": "await api.wait('article', 8000);\nconst results = api.all('article').slice(0, Number(args.max || 20)).map((a, i) => { const link = a.querySelector('a[href^=\"./read\"], a[href^=\"./articles\"], a[href*=\"/read/\"]'); return { position: i + 1, title: api.text(a, 'a.JtKRv, h3, h4') || api.text(link), url: link ? api.abs(link.getAttribute('href')) : '', source: api.text(a, '.vr1PYe, [data-n-tid]'), time: api.attr(a, 'time', 'datetime') }; }).filter(r => r.title);\nreturn { query: args.query, count: results.length, results };",
   "builtin": true,
-  "source": "nativa"
+  "source": "nativa",
+  "fallbacks": [
+   "bing_news"
+  ]
  },
  {
   "slug": "mercadolivre_search",
@@ -153,7 +168,10 @@
   ],
   "code": "const results = api.all(\"[data-component-type='s-search-result']\").map((c, i) => { const a = c.querySelector('h2 a, a.a-link-normal.s-link-style, a.a-link-normal[href*=\"/dp/\"]'); return { position: i + 1, asin: c.getAttribute('data-asin'), title: api.text(c, 'h2'), url: a ? api.abs(a.getAttribute('href')).split('/ref=')[0] : '', price: api.num(api.text(c, '.a-price .a-offscreen')), currency: 'BRL', rating: api.num((api.text(c, '.a-icon-alt') || '').split(' ')[0]), reviews: api.num(api.text(c, '[aria-label$=\"avaliações\"], .s-underline-text')) }; }).filter(r => r.title);\nconst page = Number(args.page || 1);\nreturn { query: args.query, page, count: results.length, has_more: !!api.one('a.s-pagination-next'), next_page: page + 1, results };",
   "builtin": true,
-  "source": "nativa"
+  "source": "nativa",
+  "fallbacks": [
+   "mercadolivre_search"
+  ]
  },
  {
   "slug": "youtube_search",
@@ -235,7 +253,7 @@
     "default": "1"
    }
   ],
-  "code": "const rows = api.all(\"[data-testid='results-list'] > div\");\nconst results = rows.map((r, i) => { const a = r.querySelector('.search-title a, h3 a'); return { position: i + 1, name: api.text(a), url: a ? api.abs(a.getAttribute('href')) : '', description: api.text(r, '.search-match, span.Text__StyledText-sc-17v1xeu-0'), language: api.text(r, '[aria-label$=\"language\"]'), stars: api.text(r, 'a[href$=\"/stargazers\"]') }; }).filter(r => r.url);\nconst page = Number(args.page || 1);\nreturn { query: args.query, page, count: results.length, has_more: !!api.one('a[rel=\"next\"]'), next_page: page + 1, results };",
+  "code": "const rows = api.all(\"[data-testid='results-list'] > div\");\nconst results = rows.map(r => {\n  const a = r.querySelector('.search-title a, h3 a'); const name = api.text(a);\n  const desc = Array.from(r.querySelectorAll('span, div, p')).map(e => api.text(e)).find(t => t.length > 15 && t !== name && !t.startsWith(name) && !/^\\d/.test(t)) || '';\n  return { name, url: a ? api.abs(a.getAttribute('href')) : '', description: desc, language: api.text(r, '[aria-label$=\"language\"]'), stars: api.text(r, 'a[href$=\"/stargazers\"]'), updated: api.attr(r, 'relative-time, [datetime]', 'datetime') };\n}).filter(r => r.url).map((r, i) => Object.assign({ position: i + 1 }, r));\nconst page = Number(args.page || 1);\nreturn { query: args.query, page, count: results.length, has_more: !!api.one('a[rel=\"next\"]'), next_page: page + 1, results };",
   "builtin": true,
   "source": "nativa"
  },
@@ -268,6 +286,32 @@
    }
   ],
   "code": "let j; try { j = JSON.parse(document.body.innerText); } catch (e) { j = await api.fetchJson(location.href); }\nconst d = (j && j.data) || {};\nconst results = (d.children || []).map((c, i) => { const p = c.data || {}; return { position: i + 1, title: p.title, subreddit: p.subreddit_name_prefixed, url: 'https://www.reddit.com' + p.permalink, link: p.url, score: p.score, comments: p.num_comments, created: p.created_utc ? new Date(p.created_utc * 1000).toISOString() : null }; });\nreturn { query: args.query, count: results.length, has_more: !!d.after, next_page: d.after || null, results };",
+  "builtin": true,
+  "source": "nativa"
+ },
+ {
+  "slug": "bing_news",
+  "name": "Bing Notícias",
+  "description": "Notícias recentes do Bing para um termo (título, link, fonte, quando).",
+  "urlTemplate": "https://www.bing.com/news/search?q=${enc(args.query)}&setlang=pt-BR&cc=BR",
+  "waitFor": ".news-card, .newsitem, a.title",
+  "params": [
+   {
+    "name": "query",
+    "type": "string",
+    "description": "Texto da busca",
+    "required": true,
+    "default": ""
+   },
+   {
+    "name": "max",
+    "type": "integer",
+    "description": "Máximo de notícias",
+    "required": false,
+    "default": "20"
+   }
+  ],
+  "code": "await api.wait('.news-card, .newsitem, a.title', 8000);\nconst cards = api.all('.news-card, .newsitem, .news_fbcard');\nconst results = cards.slice(0, Number(args.max || 20)).map(c => { const a = c.querySelector('a.title, a[href]'); return { title: api.text(a) || api.attr(c, null, 'data-title') || c.getAttribute('data-title') || '', url: c.getAttribute('url') || c.getAttribute('data-url') || (a ? a.href : ''), source: c.getAttribute('data-author') || api.text(c, '.source a, .source'), time: api.text(c, 'span[aria-label], .source span:last-child'), snippet: api.text(c, '.snippet') }; })\n  .filter(r => r.title && /^https?:/.test(r.url)).map((r, i) => Object.assign({ position: i + 1 }, r));\nreturn { query: args.query, count: results.length, results };",
   "builtin": true,
   "source": "nativa"
  }
