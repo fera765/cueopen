@@ -46,7 +46,7 @@ private fun ago(t: Long?): String {
 fun BrowserHubScreen(nav: NavController) {
     val c = Cue.c
     var tab by remember { mutableIntStateOf(0) }
-    val tabs = listOf("Browsers", "Sessões", "User Scripts", "Configurações")
+    val tabs = listOf("Browsers", "Sessões", "API Hub", "Scripts", "Configurações")
     Scaffold(containerColor = c.bg, topBar = { CueTopBar("Browser", { nav.popBackStack() }) }) { pad ->
         Column(Modifier.padding(pad)) {
             Row(Modifier.horizontalScroll(rememberScrollState()).padding(horizontal = 16.dp, vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -55,7 +55,8 @@ fun BrowserHubScreen(nav: NavController) {
             when (tab) {
                 0 -> AgentBrowsersTab(nav)
                 1 -> LoginsTab(nav)
-                2 -> UserScriptsTab(nav)
+                2 -> WebApiHubTab(nav)
+                3 -> UserScriptsTab(nav)
                 else -> BrowserSettingsTab()
             }
         }
@@ -418,4 +419,97 @@ private fun BrowserSettingsTab() {
             st.browserLogins.forEach { l -> app.store.editBrowserLogin(l.id) { it.copy(status = "expired") } }
         }) { Text("Sair de todas") } },
         dismissButton = { TextButton({ confirm = false }) { Text("Cancelar") } })
+}
+
+/**
+ * Web API Hub: scrapers que viram API JSON para os agentes (webapi_call). Rodam num WebView à parte, com a sessão e o proxy do browser.
+ * Nativas vêm com o app; novas são criadas pela IA (conversa de criação) e testadas antes de salvar.
+ */
+@Composable
+private fun WebApiHubTab(nav: NavController) {
+    val c = Cue.c
+    val app = CueApp.instance
+    val ctx = androidx.compose.ui.platform.LocalContext.current
+    val st by app.store.state.collectAsStateWithLifecycle()
+    val apis = remember(st.webApis) { dev.cueopen.app.browser.WebApiHub.all(ctx) }
+    val scope = rememberCoroutineScope()
+    var aiDialog by remember { mutableStateOf(false) }
+    var trying by remember { mutableStateOf<dev.cueopen.app.data.WebApi?>(null) }
+    LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        item {
+            Text("APIs prontas sobre sites: os agentes chamam com webapi_call e recebem JSON (com paginação). Rodam num navegador separado, com os mesmos logins e o mesmo proxy do Browser.",
+                fontSize = 13.sp, color = c.ink2)
+            Spacer(Modifier.height(8.dp))
+            Button({ aiDialog = true }) { Icon(Icons.Rounded.AutoAwesome, null); Spacer(Modifier.width(6.dp)); Text("Criar API com IA") }
+        }
+        items(apis, key = { it.slug }) { a ->
+            Surface(shape = RoundedCornerShape(16.dp), color = c.surface2, modifier = Modifier.fillMaxWidth()) {
+                Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) {
+                            Text(a.name, fontWeight = FontWeight.SemiBold)
+                            Text(a.slug + (if (a.builtin) " · nativa" else " · " + a.source), fontSize = 11.sp, color = c.ink3, fontFamily = FontFamily.Monospace)
+                        }
+                        Switch(a.enabled, { on ->
+                            val saved = app.store.state.value.webApis.firstOrNull { it.slug == a.slug } ?: a
+                            app.store.upsertWebApi(saved.copy(enabled = on))
+                        })
+                    }
+                    Text(a.description, fontSize = 12.sp, color = c.ink2)
+                    Text("args: " + a.params.joinToString { it.name + (if (it.required) "*" else "") }, fontSize = 11.sp, color = c.ink3)
+                    if (a.runs > 0) Text("${a.runs} execuções · ${a.errors} erros" + (if (a.lastError.isNotBlank()) " · último: " + a.lastError.take(80) else ""),
+                        fontSize = 11.sp, color = if (a.lastError.isNotBlank()) c.err else c.ink3)
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        TextButton({ trying = a }) { Text("Testar") }
+                        TextButton({
+                            val sess = dev.cueopen.app.data.Session(title = "API: " + a.slug, webApiBuilder = true)
+                            app.store.upsertSession(sess)
+                            app.agent.send(sess.id, "Melhore/corrija a Web API \"${a.slug}\" do hub (salve com o mesmo slug). Template atual: ${a.urlTemplate}\nCódigo atual:\n${a.code}")
+                            nav.navigate("chat/${sess.id}")
+                        }) { Text("Ajustar com IA") }
+                        if (!a.builtin || app.store.state.value.webApis.any { it.slug == a.slug && !it.builtin })
+                            TextButton({ app.store.deleteWebApi(a.slug) }) { Text(if (a.builtin) "Restaurar" else "Remover", color = c.err) }
+                    }
+                }
+            }
+        }
+    }
+    if (aiDialog) {
+        var what by remember { mutableStateOf("") }
+        AlertDialog(onDismissRequest = { aiDialog = false }, title = { Text("Criar Web API com IA") },
+            text = { OutlinedTextField(what, { what = it }, minLines = 3, modifier = Modifier.fillMaxWidth(),
+                placeholder = { Text("Ex.: API que busca produtos no Mercado Livre e devolve título, preço, frete e vendedor, com paginação") }) },
+            confirmButton = { TextButton(enabled = what.isNotBlank(), onClick = {
+                aiDialog = false
+                val sess = dev.cueopen.app.data.Session(title = "API: " + what.trim().take(40), webApiBuilder = true)
+                app.store.upsertSession(sess)
+                app.agent.send(sess.id, "Crie, teste e salve no hub uma Web API (scraper via WebView que devolve JSON) para: " + what.trim())
+                nav.navigate("chat/${sess.id}")
+            }) { Text("Criar") } },
+            dismissButton = { TextButton({ aiDialog = false }) { Text("Cancelar") } })
+    }
+    trying?.let { a ->
+        var args by remember(a.slug) { mutableStateOf(kotlinx.serialization.json.buildJsonObject {
+            a.params.forEach { p -> put(p.name, kotlinx.serialization.json.JsonPrimitive(p.default.ifBlank { if (p.name == "query") "notebook" else "" })) }
+        }.toString()) }
+        var out by remember(a.slug) { mutableStateOf("") }
+        var busy by remember(a.slug) { mutableStateOf(false) }
+        AlertDialog(onDismissRequest = { trying = null }, title = { Text("Testar " + a.slug) },
+            text = { Column(Modifier.verticalScroll(rememberScrollState())) {
+                OutlinedTextField(args, { args = it }, label = { Text("args (JSON)") }, modifier = Modifier.fillMaxWidth(), textStyle = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace))
+                if (busy) LinearProgressIndicator(Modifier.fillMaxWidth().padding(top = 8.dp))
+                if (out.isNotBlank()) Text(out.take(6_000), fontSize = 11.sp, fontFamily = FontFamily.Monospace, modifier = Modifier.padding(top = 8.dp))
+            } },
+            confirmButton = { TextButton(enabled = !busy, onClick = {
+                val o = runCatching { kotlinx.serialization.json.Json.parseToJsonElement(args) as kotlinx.serialization.json.JsonObject }.getOrNull()
+                if (o == null) { out = "args não é um objeto JSON"; return@TextButton }
+                busy = true
+                scope.launch {
+                    val r = dev.cueopen.app.browser.WebApiHub.call(ctx, a, o)
+                    out = runCatching { kotlinx.serialization.json.Json { prettyPrint = true }.let { j -> j.encodeToString(kotlinx.serialization.json.JsonElement.serializer(), j.parseToJsonElement(r)) } }.getOrDefault(r)
+                    busy = false
+                }
+            }) { Text("Executar") } },
+            dismissButton = { TextButton({ trying = null }) { Text("Fechar") } })
+    }
 }

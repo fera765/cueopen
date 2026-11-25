@@ -304,6 +304,11 @@ class Store(context: Context) {
     }
     fun deleteUserScript(id: String) = update { it.copy(userScripts = it.userScripts.filterNot { u -> u.id == id }) }
     fun editUserScript(id: String, fn: (UserScript) -> UserScript) = update { st -> st.copy(userScripts = st.userScripts.map { if (it.id == id) fn(it) else it }) }
+
+    fun upsertWebApi(w: WebApi) = update { st ->
+        st.copy(webApis = if (st.webApis.any { it.slug == w.slug }) st.webApis.map { if (it.slug == w.slug) w.copy(id = it.id) else it } else st.webApis + w)
+    }
+    fun deleteWebApi(slug: String) = update { it.copy(webApis = it.webApis.filterNot { w -> w.slug == slug }) }
 }
 
 internal fun AppState.withConnectorLastErrorCleared(id: String): AppState {

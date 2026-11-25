@@ -1,0 +1,274 @@
+[
+ {
+  "slug": "google_search",
+  "name": "Google · busca",
+  "description": "Resultados orgânicos do Google com paginação (título, link, site, trecho).",
+  "urlTemplate": "https://www.google.com/search?q=${enc(args.query)}&hl=pt-BR&num=10&start=${(Number(args.page||1)-1)*10}",
+  "waitFor": "#search, #rso",
+  "params": [
+   {
+    "name": "query",
+    "type": "string",
+    "description": "Texto da busca",
+    "required": true,
+    "default": ""
+   },
+   {
+    "name": "page",
+    "type": "integer",
+    "description": "Página (1, 2, 3…)",
+    "required": false,
+    "default": "1"
+   }
+  ],
+  "code": "await api.wait('#rso, #search', 6000);\nconst seen = new Set(); const results = [];\nfor (const h of api.all('#search a h3, #rso a h3')) {\n  const a = h.closest('a'); if (!a) continue;\n  let url = a.href; try { const u = new URL(url); if (u.pathname === '/url') url = u.searchParams.get('q') || u.searchParams.get('url') || url; } catch (e) {}\n  if (!/^https?:/.test(url) || /google\\.[a-z.]+\\/(search|aclk)/.test(url) || seen.has(url)) continue; seen.add(url);\n  const box = a.closest('div.g, div[data-hveid], div.MjjYud') || a.parentElement;\n  const sn = box ? api.text(box, '.VwiC3b, [data-sncf], .yXK7lf, div[style*=\"line-clamp\"]') : '';\n  results.push({ position: results.length + 1, title: api.text(h), url, display_url: (()=>{try{return new URL(url).origin}catch(e){return ''}})(), snippet: sn });\n}\nconst page = Number(args.page || 1);\nreturn { query: args.query, page, count: results.length, has_more: !!api.one('#pnnext, a[aria-label=\"Mais resultados\"], a[aria-label=\"Next page\"]') || results.length >= 8, next_page: page + 1, results };",
+  "builtin": true,
+  "source": "nativa"
+ },
+ {
+  "slug": "bing_search",
+  "name": "Bing · busca",
+  "description": "Resultados do Bing com paginação.",
+  "urlTemplate": "https://www.bing.com/search?q=${enc(args.query)}&setlang=pt-BR&first=${(Number(args.page||1)-1)*10+1}",
+  "waitFor": "#b_results",
+  "params": [
+   {
+    "name": "query",
+    "type": "string",
+    "description": "Texto da busca",
+    "required": true,
+    "default": ""
+   },
+   {
+    "name": "page",
+    "type": "integer",
+    "description": "Página (1, 2, 3…)",
+    "required": false,
+    "default": "1"
+   }
+  ],
+  "code": "const results = api.all('#b_results > li.b_algo').map((li, i) => ({ position: i + 1, title: api.text(li, 'h2'), url: api.attr(li, 'h2 a', 'href'), snippet: api.text(li, '.b_caption p, p') })).filter(r => r.url);\nconst page = Number(args.page || 1);\nreturn { query: args.query, page, count: results.length, has_more: !!api.one('a.sb_pagN'), next_page: page + 1, results };",
+  "builtin": true,
+  "source": "nativa"
+ },
+ {
+  "slug": "duckduckgo_search",
+  "name": "DuckDuckGo · busca",
+  "description": "Resultados do DuckDuckGo (versão HTML) com paginação.",
+  "urlTemplate": "https://html.duckduckgo.com/html/?q=${enc(args.query)}&s=${(Number(args.page||1)-1)*30}&kl=br-pt",
+  "waitFor": ".result",
+  "params": [
+   {
+    "name": "query",
+    "type": "string",
+    "description": "Texto da busca",
+    "required": true,
+    "default": ""
+   },
+   {
+    "name": "page",
+    "type": "integer",
+    "description": "Página (1, 2, 3…)",
+    "required": false,
+    "default": "1"
+   }
+  ],
+  "code": "const results = api.all('.result:not(.result--ad)').map((r, i) => { let url = api.attr(r, 'a.result__a', 'href'); try { const u = new URL(url, location.href); url = u.searchParams.get('uddg') || u.href; } catch (e) {} return { position: i + 1, title: api.text(r, 'a.result__a'), url, snippet: api.text(r, '.result__snippet') }; }).filter(r => r.title);\nconst page = Number(args.page || 1);\nreturn { query: args.query, page, count: results.length, has_more: !!api.one('.nav-link input[value=\"Next\"], input[value=\"Próxima\"]') || results.length >= 20, next_page: page + 1, results };",
+  "builtin": true,
+  "source": "nativa"
+ },
+ {
+  "slug": "google_news",
+  "name": "Google Notícias",
+  "description": "Notícias recentes do Google News (Brasil) para um termo.",
+  "urlTemplate": "https://news.google.com/search?q=${enc(args.query)}&hl=pt-BR&gl=BR&ceid=BR:pt-419",
+  "waitFor": "article",
+  "params": [
+   {
+    "name": "query",
+    "type": "string",
+    "description": "Texto da busca",
+    "required": true,
+    "default": ""
+   },
+   {
+    "name": "max",
+    "type": "integer",
+    "description": "Máximo de notícias",
+    "required": false,
+    "default": "20"
+   }
+  ],
+  "code": "await api.wait('article', 8000);\nconst results = api.all('article').slice(0, Number(args.max || 20)).map((a, i) => { const link = a.querySelector('a[href^=\"./read\"], a[href^=\"./articles\"], a[href*=\"/read/\"]'); return { position: i + 1, title: api.text(a, 'a.JtKRv, h3, h4') || api.text(link), url: link ? api.abs(link.getAttribute('href')) : '', source: api.text(a, '.vr1PYe, [data-n-tid]'), time: api.attr(a, 'time', 'datetime') }; }).filter(r => r.title);\nreturn { query: args.query, count: results.length, results };",
+  "builtin": true,
+  "source": "nativa"
+ },
+ {
+  "slug": "mercadolivre_search",
+  "name": "Mercado Livre · produtos",
+  "description": "Produtos do Mercado Livre: título, preço, link, frete grátis, imagem; com paginação.",
+  "urlTemplate": "https://lista.mercadolivre.com.br/${enc(String(args.query).trim().replace(/\\s+/g,'-'))}${Number(args.page||1)>1?'_Desde_'+((Number(args.page)-1)*48+1):''}_NoIndex_True",
+  "waitFor": "li.ui-search-layout__item, .poly-card",
+  "params": [
+   {
+    "name": "query",
+    "type": "string",
+    "description": "Texto da busca",
+    "required": true,
+    "default": ""
+   },
+   {
+    "name": "page",
+    "type": "integer",
+    "description": "Página (1, 2, 3…)",
+    "required": false,
+    "default": "1"
+   }
+  ],
+  "code": "await api.wait('li.ui-search-layout__item, .poly-card', 8000);\nconst cards = api.all('li.ui-search-layout__item').length ? api.all('li.ui-search-layout__item') : api.all('.poly-card');\nconst results = cards.map((c, i) => {\n  const a = c.querySelector('a.poly-component__title, h2 a, a.ui-search-link, a[href*=\"mercadolivre.com.br\"]');\n  const frac = api.text(c, '.poly-price__current .andes-money-amount__fraction, .andes-money-amount__fraction');\n  const cents = api.text(c, '.poly-price__current .andes-money-amount__cents');\n  return { position: i + 1, title: api.text(a) || api.text(c, 'h2, h3'), url: a ? a.href.split('#')[0] : '', price: frac ? api.num(frac + (cents ? ',' + cents : '')) : null, currency: 'BRL',\n    free_shipping: /frete grátis|chegará grátis|envio grátis/i.test(c.innerText), seller: api.text(c, '.poly-component__seller'), image: api.attr(c, 'img', 'data-src') || api.attr(c, 'img', 'src') };\n}).filter(r => r.title && r.url);\nconst page = Number(args.page || 1);\nreturn { query: args.query, page, count: results.length, has_more: !!api.one('li.andes-pagination__button--next:not(.andes-pagination__button--disabled)'), next_page: page + 1, results };",
+  "builtin": true,
+  "source": "nativa"
+ },
+ {
+  "slug": "amazon_br_search",
+  "name": "Amazon Brasil · produtos",
+  "description": "Produtos da Amazon.com.br: título, preço, avaliação e link; com paginação.",
+  "urlTemplate": "https://www.amazon.com.br/s?k=${enc(args.query)}&page=${Number(args.page||1)}",
+  "waitFor": "[data-component-type='s-search-result']",
+  "params": [
+   {
+    "name": "query",
+    "type": "string",
+    "description": "Texto da busca",
+    "required": true,
+    "default": ""
+   },
+   {
+    "name": "page",
+    "type": "integer",
+    "description": "Página (1, 2, 3…)",
+    "required": false,
+    "default": "1"
+   }
+  ],
+  "code": "const results = api.all(\"[data-component-type='s-search-result']\").map((c, i) => { const a = c.querySelector('h2 a, a.a-link-normal.s-link-style, a.a-link-normal[href*=\"/dp/\"]'); return { position: i + 1, asin: c.getAttribute('data-asin'), title: api.text(c, 'h2'), url: a ? api.abs(a.getAttribute('href')).split('/ref=')[0] : '', price: api.num(api.text(c, '.a-price .a-offscreen')), currency: 'BRL', rating: api.num((api.text(c, '.a-icon-alt') || '').split(' ')[0]), reviews: api.num(api.text(c, '[aria-label$=\"avaliações\"], .s-underline-text')) }; }).filter(r => r.title);\nconst page = Number(args.page || 1);\nreturn { query: args.query, page, count: results.length, has_more: !!api.one('a.s-pagination-next'), next_page: page + 1, results };",
+  "builtin": true,
+  "source": "nativa"
+ },
+ {
+  "slug": "youtube_search",
+  "name": "YouTube · vídeos",
+  "description": "Vídeos do YouTube: título, canal, link, duração e visualizações.",
+  "urlTemplate": "https://m.youtube.com/results?search_query=${enc(args.query)}&hl=pt",
+  "waitFor": "ytm-video-with-context-renderer, ytm-compact-video-renderer",
+  "params": [
+   {
+    "name": "query",
+    "type": "string",
+    "description": "Texto da busca",
+    "required": true,
+    "default": ""
+   },
+   {
+    "name": "max",
+    "type": "integer",
+    "description": "Máximo de vídeos",
+    "required": false,
+    "default": "20"
+   }
+  ],
+  "code": "await api.wait('ytm-video-with-context-renderer, ytm-compact-video-renderer', 8000); await api.scroll(2);\nconst items = api.all('ytm-video-with-context-renderer, ytm-compact-video-renderer');\nconst results = items.slice(0, Number(args.max || 20)).map((v, i) => { const a = v.querySelector('a[href*=\"/watch\"]'); return { position: i + 1, title: api.text(v, 'h3, .media-item-headline'), url: a ? api.abs(a.getAttribute('href')).replace('m.youtube.com', 'www.youtube.com') : '', channel: api.text(v, '.media-item-byline, ytm-badge-and-byline-renderer span'), duration: api.text(v, 'ytm-thumbnail-overlay-time-status-renderer, .badge-shape-wiz__text'), meta: api.text(v, 'ytm-badge-and-byline-renderer') }; }).filter(r => r.url);\nreturn { query: args.query, count: results.length, results };",
+  "builtin": true,
+  "source": "nativa"
+ },
+ {
+  "slug": "wikipedia_search",
+  "name": "Wikipédia · artigos",
+  "description": "Busca artigos na Wikipédia (pt por padrão) e devolve título, link e trecho.",
+  "urlTemplate": "https://${args.lang||'pt'}.wikipedia.org/w/index.php?search=${enc(args.query)}&fulltext=1&ns0=1&limit=20&offset=${(Number(args.page||1)-1)*20}",
+  "params": [
+   {
+    "name": "query",
+    "type": "string",
+    "description": "Texto da busca",
+    "required": true,
+    "default": ""
+   },
+   {
+    "name": "page",
+    "type": "integer",
+    "description": "Página (1, 2, 3…)",
+    "required": false,
+    "default": "1"
+   },
+   {
+    "name": "lang",
+    "type": "string",
+    "description": "Idioma da Wikipédia (pt, en…)",
+    "required": false,
+    "default": "pt"
+   }
+  ],
+  "code": "if (api.one('#firstHeading') && !api.one('.mw-search-results')) return { query: args.query, count: 1, results: [{ position: 1, title: api.text(api.one('#firstHeading')), url: location.href.split('#')[0], snippet: api.text(api.one('#mw-content-text p:not(.mw-empty-elt)')) }] };\nconst results = api.all('.mw-search-result').map((r, i) => ({ position: i + 1, title: api.text(r, '.mw-search-result-heading a'), url: api.abs(api.attr(r, '.mw-search-result-heading a', 'href')), snippet: api.text(r, '.searchresult') }));\nconst page = Number(args.page || 1);\nreturn { query: args.query, page, count: results.length, has_more: !!api.one('a.mw-nextlink'), next_page: page + 1, results };",
+  "builtin": true,
+  "source": "nativa"
+ },
+ {
+  "slug": "github_search",
+  "name": "GitHub · repositórios",
+  "description": "Repositórios do GitHub: nome, link, descrição, linguagem e estrelas; com paginação.",
+  "urlTemplate": "https://github.com/search?q=${enc(args.query)}&type=repositories&p=${Number(args.page||1)}",
+  "waitFor": "[data-testid='results-list']",
+  "params": [
+   {
+    "name": "query",
+    "type": "string",
+    "description": "Texto da busca",
+    "required": true,
+    "default": ""
+   },
+   {
+    "name": "page",
+    "type": "integer",
+    "description": "Página (1, 2, 3…)",
+    "required": false,
+    "default": "1"
+   }
+  ],
+  "code": "const rows = api.all(\"[data-testid='results-list'] > div\");\nconst results = rows.map((r, i) => { const a = r.querySelector('.search-title a, h3 a'); return { position: i + 1, name: api.text(a), url: a ? api.abs(a.getAttribute('href')) : '', description: api.text(r, '.search-match, span.Text__StyledText-sc-17v1xeu-0'), language: api.text(r, '[aria-label$=\"language\"]'), stars: api.text(r, 'a[href$=\"/stargazers\"]') }; }).filter(r => r.url);\nconst page = Number(args.page || 1);\nreturn { query: args.query, page, count: results.length, has_more: !!api.one('a[rel=\"next\"]'), next_page: page + 1, results };",
+  "builtin": true,
+  "source": "nativa"
+ },
+ {
+  "slug": "reddit_search",
+  "name": "Reddit · posts",
+  "description": "Posts do Reddit sobre um tema: título, subreddit, link e pontuação (via JSON público, com a sessão do app).",
+  "urlTemplate": "https://www.reddit.com/search.json?q=${enc(args.query)}&sort=${args.sort||'relevance'}&limit=25${args.after?'&after='+enc(args.after):''}",
+  "params": [
+   {
+    "name": "query",
+    "type": "string",
+    "description": "Texto da busca",
+    "required": true,
+    "default": ""
+   },
+   {
+    "name": "sort",
+    "type": "string",
+    "description": "relevance, new, top ou comments",
+    "required": false,
+    "default": "relevance"
+   },
+   {
+    "name": "after",
+    "type": "string",
+    "description": "Cursor da próxima página (next_page da chamada anterior)",
+    "required": false,
+    "default": ""
+   }
+  ],
+  "code": "let j; try { j = JSON.parse(document.body.innerText); } catch (e) { j = await api.fetchJson(location.href); }\nconst d = (j && j.data) || {};\nconst results = (d.children || []).map((c, i) => { const p = c.data || {}; return { position: i + 1, title: p.title, subreddit: p.subreddit_name_prefixed, url: 'https://www.reddit.com' + p.permalink, link: p.url, score: p.score, comments: p.num_comments, created: p.created_utc ? new Date(p.created_utc * 1000).toISOString() : null }; });\nreturn { query: args.query, count: results.length, has_more: !!d.after, next_page: d.after || null, results };",
+  "builtin": true,
+  "source": "nativa"
+ }
+]

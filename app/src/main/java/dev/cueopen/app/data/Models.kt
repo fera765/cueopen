@@ -334,6 +334,8 @@ data class Session(
     val connectorBuilder: Boolean = false,
     /** Sessão aberta pelo "Criar com IA" dos User Scripts: ferramentas userscript_test/userscript_propose. */
     val scriptBuilder: Boolean = false,
+    /** Conversa que cria Web APIs do hub. */
+    val webApiBuilder: Boolean = false,
     /** Seção (time de Agents) a que este chat pertence; null = chat comum. */
     val sectionId: String? = null,
     /** Chat de edição vinculado a um único UI Connector; não habilita ferramentas gerais nem outros conectores. */
@@ -617,6 +619,8 @@ data class AppState(
     val browserLogins: List<BrowserLogin> = emptyList(),
     /** Seção Browser: scripts do usuário injetados nos browsers dos agentes, por domínio. */
     val userScripts: List<UserScript> = emptyList(),
+    /** Web API Hub: APIs criadas pelo usuário/IA e ajustes das nativas (mesmo slug sobrepõe a nativa). */
+    val webApis: List<WebApi> = emptyList(),
     /** Fluwy Pages: páginas que os agentes criam e atualizam (documento, kanban, checklist, tabela, HTML). */
     val pages: List<dev.cueopen.app.pages.FluwyPage> = emptyList(),
 )
@@ -639,6 +643,36 @@ data class BrowserLogin(
     val status: String = "active",
     /** Vazio = todos os agentes podem usar. */
     val allowedAgentIds: List<String> = emptyList(),
+)
+
+/** Parâmetro de uma Web API do hub (vira argumento da ferramenta para a LLM). */
+@Serializable
+data class WebApiParam(val name: String, val type: String = "string", val description: String = "", val required: Boolean = false, val default: String = "")
+
+/**
+ * Web API Scraper: uma "API" feita sobre um site. Roda num WebView próprio (fora do browser das sessões), com a mesma
+ * sessão/cookies e o mesmo proxy. [urlTemplate] é um template literal JS com `args` (ex.: `https://site/busca?q=${enc(args.q)}`);
+ * [code] é o corpo de uma função async (args, api) que lê a página carregada e devolve um objeto JSON.
+ */
+@Serializable
+data class WebApi(
+    val id: String = newId(),
+    val slug: String,
+    val name: String,
+    val description: String = "",
+    val urlTemplate: String,
+    val code: String,
+    val params: List<WebApiParam> = emptyList(),
+    /** Seletor CSS que indica que a página está pronta (opcional). */
+    val waitFor: String = "",
+    val enabled: Boolean = true,
+    val builtin: Boolean = false,
+    val source: String = "manual",
+    val runs: Int = 0,
+    val errors: Int = 0,
+    val lastError: String = "",
+    val lastRunAt: Long? = null,
+    val updatedAt: Long = System.currentTimeMillis(),
 )
 
 @Serializable
