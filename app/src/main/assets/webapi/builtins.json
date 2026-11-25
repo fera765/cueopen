@@ -33,7 +33,7 @@
   "slug": "bing_search",
   "name": "Bing · busca",
   "description": "Resultados do Bing com paginação.",
-  "urlTemplate": "https://www.bing.com/search?format=rss&q=${enc(args.query)}&setlang=pt-BR&cc=BR&count=10&first=${(Number(args.page||1)-1)*10+1}",
+  "urlTemplate": "https://www.bing.com/search?format=rss&q=${enc(args.query)}&setlang=pt-BR&cc=BR&count=${Math.min(50, Number(args.page||1)*10)}",
   "waitFor": "",
   "params": [
    {
@@ -51,7 +51,7 @@
     "default": "1"
    }
   ],
-  "code": "const items = await api.rss();\nconst results = items.filter(r => r.title && /^https?:/.test(r.url)).map((r, i) => ({ position: i + 1, title: r.title, url: r.url, display_url: (() => { try { return new URL(r.url).origin } catch (e) { return '' } })(), snippet: r.snippet, date: r.date }));\nconst page = Number(args.page || 1);\nreturn { query: args.query, page, count: results.length, has_more: results.length >= 8, next_page: page + 1, results };",
+  "code": "const page = Number(args.page || 1);\n// O Bing ignora o deslocamento (first) para acesso sem histórico: pede page*10 itens e devolve a fatia da página.\nconst all = (await api.rss()).filter(r => r.title && /^https?:/.test(r.url));\nif (!all.length) throw new Error('feed vazio: ' + (await api.fetchText()).replace(/\\s+/g, ' ').slice(0, 160));\nconst results = all.slice((page - 1) * 10, page * 10).map((r, i) => ({ position: (page - 1) * 10 + i + 1, title: r.title, url: r.url, display_url: (() => { try { return new URL(r.url).origin } catch (e) { return '' } })(), snippet: r.snippet, date: r.date }));\nreturn { query: args.query, page, count: results.length, has_more: page < 5 && all.length >= page * 10 - 2, next_page: page + 1, results };",
   "builtin": true,
   "source": "nativa",
   "fallbacks": [
@@ -311,7 +311,7 @@
     "default": "20"
    }
   ],
-  "code": "const dec = u => { try { const x = new URL(u); return x.searchParams.get('url') || u; } catch (e) { return u; } };\nconst items = await api.rss();\nconst results = items.slice(0, Number(args.max || 20)).filter(r => r.title).map((r, i) => ({ position: i + 1, title: r.title, url: dec(r.url), source: r.source, date: r.date, snippet: r.snippet }));\nreturn { query: args.query, count: results.length, results };",
+  "code": "const dec = u => { try { const x = new URL(u); return x.searchParams.get('url') || u; } catch (e) { return u; } };\nconst items = await api.rss();\nif (!items.length) throw new Error('feed vazio: ' + (await api.fetchText()).replace(/\\s+/g, ' ').slice(0, 200));\nconst results = items.slice(0, Number(args.max || 20)).filter(r => r.title).map((r, i) => ({ position: i + 1, title: r.title, url: dec(r.url), source: r.source, date: r.date, snippet: r.snippet }));\nreturn { query: args.query, count: results.length, results };",
   "builtin": true,
   "source": "nativa"
  }
