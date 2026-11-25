@@ -171,9 +171,12 @@ var GM={info:GM_info,addStyle:function(c){return Promise.resolve(GM_addStyle(c))
  xmlHttpRequest:function(d){return new Promise(function(res,rej){var o=Object.assign({},d);o.onload=function(r){d.onload&&d.onload(r);res(r);};o.onerror=function(r){d.onerror&&d.onerror(r);rej(r);};GM_xmlhttpRequest(o);});},
  openInTab:GM_openInTab,setClipboard:GM_setClipboard,notification:GM_notification,log:GM_log,registerMenuCommand:GM_registerMenuCommand};
 ${script.requireCode}
-;(function(){
+;var __run=function(){(function(){
 ${script.code}
-})();
+})();};
+// Página ainda sem <body> (injeção antecipada): roda no DOMContentLoaded, a não ser que o script peça document-start.
+if(${if (script.runAt == "document-start") "false" else "true"}&&!document.body&&document.readyState==='loading'){document.addEventListener('DOMContentLoaded',function(){try{__run();}catch(e){GM_log('erro:',String((e&&e.message)||e));}},{once:true});return 'ok';}
+__run();
 return 'ok';}catch(e){return 'err:'+String((e&&e.message)||e).slice(0,200);}})()"""
     }
 

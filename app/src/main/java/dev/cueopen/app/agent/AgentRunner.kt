@@ -3373,6 +3373,8 @@ class AgentRunner(
                 appendLine("2. Escrever: url_template é um template literal JS com args e enc() (= encodeURIComponent), ex.: https://site/busca?q=\${enc(args.query)}&page=\${Number(args.page||1)}. code é o corpo de async function(args, api); devolva { query, page, count, has_more, next_page, results: [{position, title, url, …}] }.")
                 appendLine("   api: wait(sel,ms), all(sel,root), one(sel,root), text(el,sel), attr(el,sel,nome), abs(url), num(texto→número), fetchText/fetchJson(url), scroll(vezes), sleep(ms).")
                 appendLine("3. Provar: webapi_test com args reais (teste também page 2 se houver paginação). Só passa com ok:true e results não vazio.")
+                appendLine("Ferramentas: browser_js espera Promise (pode usar async/await e fetch) e devolve o erro lançado; se vier '(sem valor…)', termine o código com uma expressão. Se o mesmo script falhar 2 vezes, mude a abordagem (outro seletor, ler outerHTML de um item, browser_network) em vez de repetir variações.")
+                appendLine("Links opacos (ex.: google.com/goto?url=…, rastreadores) não se decodificam: use o href final de um elemento, data-* com a URL, ou devolva o link como está com display_url.")
                 appendLine("4. Entregar: webapi_save com o mesmo código/template, params descritos e finish com 1–2 frases.")
                 appendLine("APIs já no hub:\n" + dev.cueopen.app.browser.WebApiHub.catalog(ctx))
             }

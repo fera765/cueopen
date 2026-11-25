@@ -1,32 +1,5 @@
 [
  {
-  "slug": "google_search",
-  "name": "Google · busca",
-  "description": "Resultados orgânicos do Google com paginação (título, link, site, trecho).",
-  "urlTemplate": "https://www.google.com/search?q=${enc(args.query)}&hl=pt-BR&gl=br&start=${(Number(args.page||1)-1)*10}",
-  "waitFor": "#search",
-  "params": [
-   {
-    "name": "query",
-    "type": "string",
-    "description": "Texto da busca",
-    "required": true,
-    "default": ""
-   },
-   {
-    "name": "page",
-    "type": "integer",
-    "description": "Página (1, 2, 3…)",
-    "required": false,
-    "default": "1"
-   }
-  ],
-  "code": "const page = Number(args.page || 1);\nconst seen = new Set(); const results = [];\nfor (const h of api.all('#search a h3, #rso a h3')) {\n  const a = h.closest('a'); if (!a) continue;\n  let url = a.href; try { const u = new URL(url); if (u.pathname === '/url') url = u.searchParams.get('q') || u.searchParams.get('url') || url; } catch (e) {}\n  if (!/^https?:/.test(url) || /google\\.[a-z.]+\\/(search|aclk)/.test(url) || seen.has(url)) continue; seen.add(url);\n  const box = a.closest('div.g, div.MjjYud, div[data-hveid]') || a.parentElement;\n  results.push({ position: (page - 1) * 10 + results.length + 1, title: api.text(h), url, display_url: api.text(box, 'cite'), snippet: api.text(box, '.VwiC3b, [data-sncf], div[style*=\"line-clamp\"]') });\n}\nreturn { query: args.query, page, count: results.length, has_more: !!api.one('#pnnext, a[aria-label=\"Próxima página\"], a[aria-label=\"Mais resultados\"]'), next_page: page + 1, results };",
-  "builtin": true,
-  "source": "nativa",
-  "desktop": true
- },
- {
   "slug": "bing_search",
   "name": "Bing · busca",
   "description": "Resultados do Bing com paginação real (título, link, site, trecho).",
@@ -52,85 +25,6 @@
   "builtin": true,
   "source": "nativa",
   "desktop": true
- },
- {
-  "slug": "duckduckgo_search",
-  "name": "DuckDuckGo · busca",
-  "description": "Resultados do DuckDuckGo (versão HTML) com paginação.",
-  "urlTemplate": "https://lite.duckduckgo.com/lite/?q=${enc(args.query)}&kl=br-pt&s=${(Number(args.page||1)-1)*25}&dc=${(Number(args.page||1)-1)*25+1}",
-  "waitFor": "",
-  "params": [
-   {
-    "name": "query",
-    "type": "string",
-    "description": "Texto da busca",
-    "required": true,
-    "default": ""
-   },
-   {
-    "name": "page",
-    "type": "integer",
-    "description": "Página (1, 2, 3…)",
-    "required": false,
-    "default": "1"
-   }
-  ],
-  "code": "const page = Number(args.page || 1);\nconst links = api.all('a.result-link');\nconst results = links.map(a => { const tr = a.closest('tr'); const sn = tr && tr.nextElementSibling ? api.text(tr.nextElementSibling, '.result-snippet') : ''; let url = a.getAttribute('href'); try { const u = new URL(url, location.href); url = u.searchParams.get('uddg') || u.href; } catch (e) {} return { title: api.text(a), url, snippet: sn }; })\n  .filter(r => r.title && /^https?:/.test(r.url)).map((r, i) => Object.assign({ position: (page - 1) * 25 + i + 1 }, r));\nreturn { query: args.query, page, count: results.length, has_more: !!api.one('input.navbutton[value*=\"Next\"], input[value*=\"Próx\"]') || results.length >= 20, next_page: page + 1, results };",
-  "builtin": true,
-  "source": "nativa",
-  "desktop": true
- },
- {
-  "slug": "google_news",
-  "name": "Google Notícias",
-  "description": "Notícias recentes do Google News (Brasil) para um termo.",
-  "urlTemplate": "https://news.google.com/search?q=${enc(args.query)}&hl=pt-BR&gl=BR&ceid=BR:pt-419",
-  "waitFor": "article",
-  "params": [
-   {
-    "name": "query",
-    "type": "string",
-    "description": "Texto da busca",
-    "required": true,
-    "default": ""
-   },
-   {
-    "name": "max",
-    "type": "integer",
-    "description": "Máximo de notícias",
-    "required": false,
-    "default": "20"
-   }
-  ],
-  "code": "await api.wait('article', 8000);\nconst results = api.all('article').slice(0, Number(args.max || 20)).map((a, i) => { const link = a.querySelector('a[href^=\"./read\"], a[href^=\"./articles\"], a[href*=\"/read/\"]'); return { position: i + 1, title: api.text(a, 'a.JtKRv, h3, h4') || api.text(link), url: link ? api.abs(link.getAttribute('href')) : '', source: api.text(a, '.vr1PYe, [data-n-tid]'), time: api.attr(a, 'time', 'datetime') }; }).filter(r => r.title);\nreturn { query: args.query, count: results.length, results };",
-  "builtin": true,
-  "source": "nativa"
- },
- {
-  "slug": "mercadolivre_search",
-  "name": "Mercado Livre · produtos",
-  "description": "Produtos do Mercado Livre: título, preço, link, frete grátis, imagem; com paginação.",
-  "urlTemplate": "https://lista.mercadolivre.com.br/${enc(String(args.query).trim().replace(/\\s+/g,'-'))}${Number(args.page||1)>1?'_Desde_'+((Number(args.page)-1)*48+1):''}_NoIndex_True",
-  "waitFor": "li.ui-search-layout__item, .poly-card",
-  "params": [
-   {
-    "name": "query",
-    "type": "string",
-    "description": "Texto da busca",
-    "required": true,
-    "default": ""
-   },
-   {
-    "name": "page",
-    "type": "integer",
-    "description": "Página (1, 2, 3…)",
-    "required": false,
-    "default": "1"
-   }
-  ],
-  "code": "await api.wait('li.ui-search-layout__item, .poly-card', 8000);\nconst cards = api.all('li.ui-search-layout__item').length ? api.all('li.ui-search-layout__item') : api.all('.poly-card');\nconst results = cards.map((c, i) => {\n  const a = c.querySelector('a.poly-component__title, h2 a, a.ui-search-link, a[href*=\"mercadolivre.com.br\"]');\n  const frac = api.text(c, '.poly-price__current .andes-money-amount__fraction, .andes-money-amount__fraction');\n  const cents = api.text(c, '.poly-price__current .andes-money-amount__cents');\n  return { position: i + 1, title: api.text(a) || api.text(c, 'h2, h3'), url: a ? a.href.split('#')[0] : '', price: frac ? api.num(frac + (cents ? ',' + cents : '')) : null, currency: 'BRL',\n    free_shipping: /frete grátis|chegará grátis|envio grátis/i.test(c.innerText), seller: api.text(c, '.poly-component__seller'), image: api.attr(c, 'img', 'data-src') || api.attr(c, 'img', 'src') };\n}).filter(r => r.title && r.url);\nconst page = Number(args.page || 1);\nreturn { query: args.query, page, count: results.length, has_more: !!api.one('li.andes-pagination__button--next:not(.andes-pagination__button--disabled)'), next_page: page + 1, results };",
-  "builtin": true,
-  "source": "nativa"
  },
  {
   "slug": "amazon_br_search",
@@ -239,38 +133,6 @@
    }
   ],
   "code": "const rows = api.all(\"[data-testid='results-list'] > div\");\nconst results = rows.map(r => {\n  const a = r.querySelector('.search-title a, h3 a'); const name = api.text(a);\n  const desc = Array.from(r.querySelectorAll('span, div, p')).map(e => api.text(e)).find(t => t.length > 15 && t !== name && !t.startsWith(name) && !/^\\d/.test(t)) || '';\n  return { name, url: a ? api.abs(a.getAttribute('href')) : '', description: desc, language: api.text(r, '[aria-label$=\"language\"]'), stars: api.text(r, 'a[href$=\"/stargazers\"]'), updated: api.attr(r, 'relative-time, [datetime]', 'datetime') };\n}).filter(r => r.url).map((r, i) => Object.assign({ position: i + 1 }, r));\nconst page = Number(args.page || 1);\nreturn { query: args.query, page, count: results.length, has_more: !!api.one('a[rel=\"next\"]'), next_page: page + 1, results };",
-  "builtin": true,
-  "source": "nativa"
- },
- {
-  "slug": "reddit_search",
-  "name": "Reddit · posts",
-  "description": "Posts do Reddit sobre um tema: título, subreddit, link e pontuação (via JSON público, com a sessão do app).",
-  "urlTemplate": "https://www.reddit.com/search.json?q=${enc(args.query)}&sort=${args.sort||'relevance'}&limit=25${args.after?'&after='+enc(args.after):''}",
-  "params": [
-   {
-    "name": "query",
-    "type": "string",
-    "description": "Texto da busca",
-    "required": true,
-    "default": ""
-   },
-   {
-    "name": "sort",
-    "type": "string",
-    "description": "relevance, new, top ou comments",
-    "required": false,
-    "default": "relevance"
-   },
-   {
-    "name": "after",
-    "type": "string",
-    "description": "Cursor da próxima página (next_page da chamada anterior)",
-    "required": false,
-    "default": ""
-   }
-  ],
-  "code": "let j; try { j = JSON.parse(document.body.innerText); } catch (e) { j = await api.fetchJson(location.href); }\nconst d = (j && j.data) || {};\nconst results = (d.children || []).map((c, i) => { const p = c.data || {}; return { position: i + 1, title: p.title, subreddit: p.subreddit_name_prefixed, url: 'https://www.reddit.com' + p.permalink, link: p.url, score: p.score, comments: p.num_comments, created: p.created_utc ? new Date(p.created_utc * 1000).toISOString() : null }; });\nreturn { query: args.query, count: results.length, has_more: !!d.after, next_page: d.after || null, results };",
   "builtin": true,
   "source": "nativa"
  },
