@@ -156,13 +156,10 @@ fun HomeScreen(nav: NavController, initialDraft: String? = null, initialAgent: S
     ModalNavigationDrawer(
         drawerState = drawer,
         drawerContent = {
-            Row(Modifier.fillMaxHeight()) {
-                ModalDrawerSheet(drawerContainerColor = c.bg, modifier = Modifier.width(310.dp)) {
-                    SessionDrawer(nav, drawerSnapshot.sessions, st.agents, drawerSnapshot.connectedConnectorCount, drawer.isOpen, onClose = { scope.launch { drawer.close() } }, onNew = {
-                        draft = ""; scope.launch { drawer.close() }
-                    })
-                }
-                ShortcutRail(nav, st.agents, drawerSnapshot.connectedConnectorCount) { scope.launch { drawer.close() } }
+            ModalDrawerSheet(drawerContainerColor = c.bg, modifier = Modifier.width(310.dp)) {
+                SessionDrawer(nav, drawerSnapshot.sessions, st.agents, drawerSnapshot.connectedConnectorCount, drawer.isOpen, onClose = { scope.launch { drawer.close() } }, onNew = {
+                    draft = ""; scope.launch { drawer.close() }
+                })
             }
         },
     ) {
@@ -667,13 +664,10 @@ fun WithSessionDrawer(nav: NavController, content: @Composable (openDrawer: () -
         drawerState = drawer,
         gesturesEnabled = drawer.isOpen,
         drawerContent = {
-            Row(Modifier.fillMaxHeight()) {
-                ModalDrawerSheet(drawerContainerColor = Cue.c.bg, modifier = Modifier.width(310.dp)) {
-                    if (drawer.isOpen || drawer.isAnimationRunning) SessionDrawer(nav, st.sessions, st.agents, st.connectors.count { it.connectedAt != null }, drawer.isOpen,
-                        onClose = { scope.launch { drawer.close() } },
-                        onNew = { scope.launch { drawer.close() }; nav.navigate("home") { popUpTo(0) { inclusive = true }; launchSingleTop = true } })
-                }
-                if (drawer.isOpen || drawer.isAnimationRunning) ShortcutRail(nav, st.agents, st.connectors.count { it.connectedAt != null }) { scope.launch { drawer.close() } }
+            ModalDrawerSheet(drawerContainerColor = Cue.c.bg, modifier = Modifier.width(310.dp)) {
+                if (drawer.isOpen || drawer.isAnimationRunning) SessionDrawer(nav, st.sessions, st.agents, st.connectors.count { it.connectedAt != null }, drawer.isOpen,
+                    onClose = { scope.launch { drawer.close() } },
+                    onNew = { scope.launch { drawer.close() }; nav.navigate("home") { popUpTo(0) { inclusive = true }; launchSingleTop = true } })
             }
         },
     ) { content { scope.launch { drawer.open() } } }
@@ -743,6 +737,28 @@ private fun SessionDrawer(nav: NavController, sessions: List<Session>, agents: L
             if (query.isNotEmpty()) Icon(Icons.Rounded.Close, "Limpar", Modifier.size(18.dp).clickable { query = "" }, tint = c.ink3)
         }
         Spacer(Modifier.height(12.dp))
+        // Atalhos sempre visíveis em grade (antes ficavam escondidos num menu recolhido).
+        val shortcuts = listOf(
+            DrawerShortcut(Icons.Rounded.Groups, "Agents", agents.size.takeIf { it > 0 }?.toString(), 0xFF7C5CFF) { go("agents") },
+            DrawerShortcut(Icons.Rounded.Cable, "Conectores", connectedConnectorCount.takeIf { it > 0 }?.toString(), 0xFF2F9E6E) { go("connectors") },
+            DrawerShortcut(Icons.Rounded.AutoAwesome, "Skills", tint = 0xFFE0A100) { go("skills") },
+            DrawerShortcut(Icons.Rounded.Schedule, "Agenda", tint = 0xFF2D7FF9) { go("scheduled") },
+            DrawerShortcut(Icons.Rounded.FolderOpen, "Arquivos", tint = 0xFFFF6B3D) { go("files") },
+            DrawerShortcut(Icons.Rounded.Psychology, "Memória", tint = 0xFFD94E8F) { go("memory") },
+            DrawerShortcut(Icons.Rounded.LibraryBooks, "Knowledge", tint = 0xFF0FA3B1) { go("knowledge") },
+            DrawerShortcut(Icons.Rounded.Language, "Browser", tint = 0xFF3B82F6) { go("browserhub") },
+            DrawerShortcut(Icons.Rounded.AccountTree, "Fluxos", tint = 0xFF2FBF71) { go("workflows") },
+            DrawerShortcut(Icons.Rounded.RecordVoiceOver, "Live Audio", tint = 0xFF9B7BFF) { go("live") },
+            DrawerShortcut(Icons.Rounded.Computer, "Linux", tint = 0xFF64748B) { go("sandbox") },
+            DrawerShortcut(Icons.Rounded.AccountBalanceWallet, "Cofre", tint = 0xFF9945FF) { go("vault") },
+        )
+        shortcuts.chunked(5).forEach { row ->
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                row.forEach { sc -> ShortcutTile(sc, Modifier.weight(1f)) }
+                repeat(5 - row.size) { Spacer(Modifier.weight(1f)) }
+            }
+            Spacer(Modifier.height(6.dp))
+        }
         Divider()
         val live by CueApp.instance.store.state.collectAsStateWithLifecycle()
         val sections = live.sections.filterNot { it.archived }
@@ -782,33 +798,6 @@ private fun SessionDrawer(nav: NavController, sessions: List<Session>, agents: L
                 }
             }
         }
-    }
-}
-
-/** Coluna de atalhos à direita da sidebar (abre junto com ela): Agents, Conectores, Skills, Agenda etc. */
-@Composable
-private fun ShortcutRail(nav: NavController, agents: List<AgentProfile>, connectedConnectorCount: Int, onClose: () -> Unit) {
-    val c = Cue.c
-    fun go(r: String) { onClose(); nav.navigate(r) }
-    val shortcuts = listOf(
-            DrawerShortcut(Icons.Rounded.Groups, "Agents", agents.size.takeIf { it > 0 }?.toString(), 0xFF7C5CFF) { go("agents") },
-            DrawerShortcut(Icons.Rounded.Cable, "Conectores", connectedConnectorCount.takeIf { it > 0 }?.toString(), 0xFF2F9E6E) { go("connectors") },
-            DrawerShortcut(Icons.Rounded.AutoAwesome, "Skills", tint = 0xFFE0A100) { go("skills") },
-            DrawerShortcut(Icons.Rounded.Schedule, "Agenda", tint = 0xFF2D7FF9) { go("scheduled") },
-            DrawerShortcut(Icons.Rounded.FolderOpen, "Arquivos", tint = 0xFFFF6B3D) { go("files") },
-            DrawerShortcut(Icons.Rounded.Psychology, "Memória", tint = 0xFFD94E8F) { go("memory") },
-            DrawerShortcut(Icons.Rounded.LibraryBooks, "Knowledge", tint = 0xFF0FA3B1) { go("knowledge") },
-            DrawerShortcut(Icons.Rounded.Language, "Browser", tint = 0xFF3B82F6) { go("browserhub") },
-            DrawerShortcut(Icons.Rounded.AccountTree, "Fluxos", tint = 0xFF2FBF71) { go("workflows") },
-            DrawerShortcut(Icons.Rounded.RecordVoiceOver, "Live Audio", tint = 0xFF9B7BFF) { go("live") },
-            DrawerShortcut(Icons.Rounded.Computer, "Linux", tint = 0xFF64748B) { go("sandbox") },
-            DrawerShortcut(Icons.Rounded.AccountBalanceWallet, "Cofre", tint = 0xFF9945FF) { go("vault") },
-        )
-    Column(Modifier.width(76.dp).fillMaxHeight().statusBarsPadding().padding(top = 10.dp, bottom = 10.dp, start = 4.dp, end = 4.dp)
-        .clip(RoundedCornerShape(22.dp)).background(c.bg.copy(alpha = 0.92f)).border(1.dp, c.line, RoundedCornerShape(22.dp))
-        .verticalScroll(rememberScrollState()).padding(vertical = 6.dp),
-        horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(2.dp)) {
-        shortcuts.forEach { sc -> ShortcutTile(sc, Modifier.fillMaxWidth()) }
     }
 }
 
