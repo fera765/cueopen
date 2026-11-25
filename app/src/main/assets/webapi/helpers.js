@@ -1,5 +1,12 @@
 const enc = encodeURIComponent;
-const sleep = ms => new Promise(r => setTimeout(r, ms));
+// Espera que funciona mesmo se o WebView congelar timers: setTimeout OU um laço de MessageChannel (o que vier primeiro).
+const sleep = ms => new Promise(r => {
+  let done = false; const t0 = Date.now(); const fin = () => { if (!done) { done = true; r(); } };
+  setTimeout(fin, ms);
+  const ch = new MessageChannel();
+  ch.port1.onmessage = () => { if (done) return; if (Date.now() - t0 >= ms) fin(); else ch.port2.postMessage(0); };
+  ch.port2.postMessage(0);
+});
 const api = {
   sleep,
   wait: async (sel, ms = 8000) => { const t = Date.now(); while (Date.now() - t < ms) { const e = document.querySelector(sel); if (e) return e; await sleep(150); } return null; },

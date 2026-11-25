@@ -37,20 +37,7 @@ object WebApiHub {
     suspend fun call(ctx: Context, a: WebApi, args: JsonObject): String {
         val missing = a.params.filter { it.required && (args[it.name] as? JsonPrimitive)?.content.isNullOrBlank() }.map { it.name }
         if (missing.isNotEmpty()) return """{"api":"${a.slug}","ok":false,"error":"faltam argumentos: ${missing.joinToString()}"}"""
-        var out = WebApiRunner.run(ctx, a, args)
-        // Bloqueada (captcha) ou vazia: tenta as reservas na ordem e diz de onde veio.
-        if (!out.contains("\"ok\":true") || !Regex("\"results\":\\[\\s*\\{").containsMatchIn(out)) {
-            for (fb in a.fallbacks) {
-                val alt = find(ctx, fb)?.takeIf { it.enabled } ?: continue
-                val altArgs = JsonObject(args.filterKeys { k -> alt.params.any { it.name == k } })
-                val r = WebApiRunner.run(ctx, alt, altArgs)
-                if (r.contains("\"ok\":true") && Regex("\"results\":\\[\\s*\\{").containsMatchIn(r)) {
-                    val why = Regex("\"error\":\"([^\"]*)").find(out)?.groupValues?.get(1) ?: "sem resultados"
-                    out = r.replaceFirst("{", "{\"fallback_from\":\"${a.slug}\",\"fallback_reason\":${JsonPrimitive(why)},")
-                    break
-                }
-            }
-        }
+        val out = WebApiRunner.run(ctx, a, args)
         val ok = out.contains("\"ok\":true")
         val store = CueApp.instance.store
         val err = if (ok) "" else Regex("\"error\":\"([^\"]*)").find(out)?.groupValues?.get(1).orEmpty()

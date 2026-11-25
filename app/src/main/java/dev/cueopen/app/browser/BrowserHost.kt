@@ -1461,9 +1461,32 @@ class BrowserHost(private val appCtx: Context, private val sessionId: String = "
         }
     }
 
+    /**
+     * browser_js: roda o código com eval (aceita instruções e expressão final), ESPERA Promise (async/await, fetch)
+     * e devolve o erro lançado em vez de "null". Sem valor de retorno, diz isso explicitamente para o agente mudar a abordagem.
+     */
     suspend fun runJs(code: String): String {
         val tab = onMain { activeTab() } ?: return "ERROR: não há aba ativa no browser."
-        return eval(code, tab = tab)
+        val key = "__fjs" + System.nanoTime()
+        val q = org.json.JSONObject.quote(code)
+        val ser = "function(v){try{return v===undefined?'__UNDEF__':(typeof v==='string'?v:JSON.stringify(v))}catch(e){return String(v)}}"
+        val start = eval("(function(){var S=$ser;try{var r=(0,eval)($q);" +
+            "if(r&&typeof r.then==='function'){window['$key']=null;r.then(function(v){window['$key']={v:S(v)}},function(e){window['$key']={e:String(e&&e.stack||e)}});return '__PROMISE__'}" +
+            "return S(r)}catch(e){return 'ERROR (exceção no script): '+String(e&&e.message||e)}})()", tab = tab)
+        val out = if (start != "__PROMISE__") start else {
+            var got: String? = null
+            val deadline = System.currentTimeMillis() + 25_000
+            while (got == null && System.currentTimeMillis() < deadline) {
+                kotlinx.coroutines.delay(120)
+                val r = eval("(function(){var x=window['$key'];if(!x)return '__WAIT__';delete window['$key'];return x.e!==undefined?'ERROR (Promise rejeitada): '+x.e:x.v})()", tab = tab)
+                if (r != "__WAIT__") got = r
+            }
+            got ?: "timeout: a Promise não terminou em 25s (algo no código ficou esperando para sempre)"
+        }
+        return when (out) {
+            "__UNDEF__", "null", "" -> "(sem valor: o código não devolveu nada. Termine com uma expressão, ex.: JSON.stringify(resultado), ou use return dentro de uma função)"
+            else -> out
+        }
     }
 
     private suspend fun awaitLoadIfNavigating(tab: BrowserTab) {

@@ -665,8 +665,8 @@ data class WebApi(
     val params: List<WebApiParam> = emptyList(),
     /** Seletor CSS que indica que a página está pronta (opcional). */
     val waitFor: String = "",
-    /** APIs reserva (slugs) quando esta for bloqueada (captcha) ou vier vazia. */
-    val fallbacks: List<String> = emptyList(),
+    /** Abre o site como navegador de computador (alguns sites só paginam na versão desktop). */
+    val desktop: Boolean = false,
     val enabled: Boolean = true,
     val builtin: Boolean = false,
     val source: String = "manual",

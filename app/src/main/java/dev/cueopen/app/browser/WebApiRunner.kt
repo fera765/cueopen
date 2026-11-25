@@ -39,6 +39,8 @@ import kotlin.coroutines.resume
  */
 object WebApiRunner {
     private val lock = Mutex()
+    private var mobileUa: String? = null
+    private const val DESKTOP_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
     private var wv: WebView? = null
     @Volatile private var finished = false
     private val json = Json { ignoreUnknownKeys = true }
@@ -70,6 +72,12 @@ object WebApiRunner {
         wv = v
     }
 
+    /** WebView solto (fora de janela) tem timers congelados: setTimeout nunca dispara. Põe no palco off-screen e religa. */
+    private fun keepAlive(v: WebView) {
+        if (!v.isAttachedToWindow) runCatching { OffscreenStage.attach(v, 1080, 2400) }
+        runCatching { v.onResume(); v.resumeTimers() }
+    }
+
     private suspend fun eval(v: WebView, js: String): String? = suspendCancellableCoroutine { c ->
         runCatching { v.evaluateJavascript(js) { r -> if (c.isActive) c.resume(r) } }.onFailure { if (c.isActive) c.resume(null) }
     }
@@ -86,11 +94,16 @@ object WebApiRunner {
             val HELPERS = helpers(ctx)
             val started = System.currentTimeMillis()
             val v = runCatching { view(ctx) }.getOrElse { return@withContext err(a, args, "WebView indisponível: ${it.message}") }
+            keepAlive(v)
+            if (mobileUa == null) mobileUa = v.settings.userAgentString
+            val wantUa = if (a.desktop) DESKTOP_UA else mobileUa
+            if (v.settings.userAgentString != wantUa) v.settings.userAgentString = wantUa
             // Defaults dos parâmetros entram nos args.
             val full = JsonObject(a.params.filter { it.default.isNotBlank() && it.name !in args }.associate { p ->
                 p.name to (p.default.toLongOrNull()?.let { JsonPrimitive(it) } ?: JsonPrimitive(p.default))
             } + args)
             val argsJs = full.toString()
+            var stage = "montar a URL"
             val out = withTimeoutOrNull(timeoutMs) {
                 // 1) URL a partir do template (em JS, para aceitar expressões como (args.page-1)*10).
                 if (v.url.isNullOrBlank()) { finished = false; v.loadUrl("about:blank"); var n = 0; while (!finished && n++ < 20) delay(50) }
@@ -99,6 +112,7 @@ object WebApiRunner {
                 if (url == null || url.startsWith("ERR:") || !Regex("^https?://", RegexOption.IGNORE_CASE).containsMatchIn(url))
                     return@withTimeoutOrNull err(a, full, "URL inválida a partir do template: ${url ?: "(vazia)"}")
                 // 2) Carrega e espera o DOM.
+                stage = "carregar $url"
                 finished = false
                 v.loadUrl(url)
                 delay(300)
@@ -107,6 +121,7 @@ object WebApiRunner {
                     if (finished || (ready.startsWith("interactive") || ready.startsWith("complete")) && !ready.contains("about:blank")) break
                     delay(150)
                 }
+                stage = "esperar o seletor wait_for (${a.waitFor})"
                 if (a.waitFor.isNotBlank()) {
                     val sel = a.waitFor.replace("\\", "\\\\").replace("'", "\\'")
                     var n = 0
@@ -118,6 +133,7 @@ object WebApiRunner {
                     put("api", a.slug); put("ok", false); put("blocked", true); put("args", full); put("url", v.url.orEmpty()); put("error", blocked)
                     put("hint", "O site pediu verificação humana. O usuário pode resolver uma vez em Browser › API Hub › Testar › Resolver verificação (a sessão é a mesma); depois a API volta a funcionar.")
                 }.toString()
+                stage = "rodar o código (algum await não terminou: confira api.wait/fetch/seletores)"
                 // 3) Roda o código da API; o resultado volta por window.__wa (evaluateJavascript não espera Promise).
                 eval(v, "window.__wa=null;(async()=>{$HELPERS;const args=$argsJs;try{const r=await (async function(args,api){\n${a.code}\n})(args,api);" +
                     "window.__wa=JSON.stringify({ok:true,url:location.href,data:r===undefined?null:r})}catch(e){window.__wa=JSON.stringify({ok:false,url:location.href,error:String(e&&e.message||e)})}})();1")
@@ -127,7 +143,7 @@ object WebApiRunner {
                 if (o["ok"]?.jsonPrimitive?.contentOrNull != "true") return@withTimeoutOrNull err(a, full, o["error"]?.jsonPrimitive?.contentOrNull ?: "erro no código", o["url"]?.jsonPrimitive?.contentOrNull)
                 envelope(a, full, o["url"]?.jsonPrimitive?.contentOrNull.orEmpty(), o["data"], System.currentTimeMillis() - started)
             }
-            if (out == null) { runCatching { v.stopLoading() }; err(a, full, "tempo esgotado (${timeoutMs / 1000}s)") } else out
+            if (out == null) { runCatching { v.stopLoading() }; err(a, full, "tempo esgotado (${timeoutMs / 1000}s) na etapa: $stage", runCatching { v.url }.getOrNull()) } else out
         }
     }
 
