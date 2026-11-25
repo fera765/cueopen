@@ -32,9 +32,9 @@
  {
   "slug": "bing_search",
   "name": "Bing · busca",
-  "description": "Resultados do Bing com paginação.",
-  "urlTemplate": "https://www.bing.com/search?format=rss&q=${enc(args.query)}&setlang=pt-BR&cc=BR&count=${Math.min(50, Number(args.page||1)*10)}",
-  "waitFor": "",
+  "description": "Resultados do Bing (página + feed RSS combinados, ~10–15 links). Para mais resultados use google_search ou duckduckgo_search com page.",
+  "urlTemplate": "https://www.bing.com/search?q=${enc(args.query)}&setlang=pt-BR&cc=BR",
+  "waitFor": "#b_results",
   "params": [
    {
     "name": "query",
@@ -42,16 +42,9 @@
     "description": "Texto da busca",
     "required": true,
     "default": ""
-   },
-   {
-    "name": "page",
-    "type": "integer",
-    "description": "Página (1, 2, 3…)",
-    "required": false,
-    "default": "1"
    }
   ],
-  "code": "const page = Number(args.page || 1);\n// O Bing ignora o deslocamento (first) para acesso sem histórico: pede page*10 itens e devolve a fatia da página.\nconst all = (await api.rss()).filter(r => r.title && /^https?:/.test(r.url));\nif (!all.length) throw new Error('feed vazio: ' + (await api.fetchText()).replace(/\\s+/g, ' ').slice(0, 160));\nconst results = all.slice((page - 1) * 10, page * 10).map((r, i) => ({ position: (page - 1) * 10 + i + 1, title: r.title, url: r.url, display_url: (() => { try { return new URL(r.url).origin } catch (e) { return '' } })(), snippet: r.snippet, date: r.date }));\nreturn { query: args.query, page, count: results.length, has_more: page < 5 && all.length >= page * 10 - 2, next_page: page + 1, results };",
+  "code": "const dec = u => { try { const x = new URL(u, location.href); if (/bing\\.com$/.test(x.hostname) && x.pathname.startsWith('/ck/')) { const v = x.searchParams.get('u') || ''; if (v.startsWith('a1')) return atob(v.slice(2).replace(/-/g, '+').replace(/_/g, '/')); } return x.href; } catch (e) { return u; } };\nconst html = api.all('#b_results > li.b_algo').map(li => {\n  const a = (li.querySelector('a h2') || {}).parentElement || li.querySelector('h2 a') || li.querySelector('a[href]');\n  return { title: api.text(li, 'h2'), url: a ? dec(a.getAttribute('href')) : '', snippet: api.text(li, '.b_caption p, .b_lineclamp2, .b_lineclamp3, p') };\n});\n// O Bing mobile mostra poucos itens: completa com o feed RSS da mesma busca (sem duplicar).\nlet rss = []; try { rss = await api.rss(location.origin + '/search?format=rss&setlang=pt-BR&cc=BR&q=' + enc(args.query)); } catch (e) {}\nconst seen = new Set(); const results = [];\nfor (const r of html.concat(rss)) { if (!r.title || !/^https?:/.test(r.url) || seen.has(r.url)) continue; seen.add(r.url);\n  results.push({ position: results.length + 1, title: r.title, url: r.url, display_url: (() => { try { return new URL(r.url).origin } catch (e) { return '' } })(), snippet: r.snippet || '' }); }\nreturn { query: args.query, count: results.length, has_more: false, results };",
   "builtin": true,
   "source": "nativa",
   "fallbacks": [
@@ -293,8 +286,8 @@
   "slug": "bing_news",
   "name": "Bing Notícias",
   "description": "Notícias recentes do Bing para um termo (título, link, fonte, quando).",
-  "urlTemplate": "https://www.bing.com/news/search?format=rss&q=${enc(args.query)}&setlang=pt-BR&cc=BR",
-  "waitFor": "",
+  "urlTemplate": "https://www.bing.com/news/search?q=${enc(args.query)}&setlang=pt-BR&cc=BR",
+  "waitFor": ".newscard, a.title",
   "params": [
    {
     "name": "query",
@@ -311,7 +304,7 @@
     "default": "20"
    }
   ],
-  "code": "const dec = u => { try { const x = new URL(u); return x.searchParams.get('url') || u; } catch (e) { return u; } };\nconst items = await api.rss();\nif (!items.length) throw new Error('feed vazio: ' + (await api.fetchText()).replace(/\\s+/g, ' ').slice(0, 200));\nconst results = items.slice(0, Number(args.max || 20)).filter(r => r.title).map((r, i) => ({ position: i + 1, title: r.title, url: dec(r.url), source: r.source, date: r.date, snippet: r.snippet }));\nreturn { query: args.query, count: results.length, results };",
+  "code": "await api.wait('.newscard', 8000);\nconst results = api.all('.newscard').slice(0, Number(args.max || 20)).map(c => { const a = c.querySelector('a.title'); return { title: api.text(a) || c.getAttribute('data-title') || '', url: c.getAttribute('data-url') || (a ? a.href : ''), source: c.getAttribute('data-author') || api.text(c, '.source a, .source > span'), time: api.text(c, '.source span[aria-label], .source span:last-child'), snippet: api.text(c, '.snippet') }; })\n  .filter(r => r.title && /^https?:/.test(r.url)).map((r, i) => Object.assign({ position: i + 1 }, r));\nreturn { query: args.query, count: results.length, results };",
   "builtin": true,
   "source": "nativa"
  }
