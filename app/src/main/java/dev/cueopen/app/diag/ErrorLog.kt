@@ -83,7 +83,8 @@ object ErrorLog {
         section("ATIVIDADE (ferramentas, Web API e modelo — mais recentes por último)", ActivityLog.readAll(ctx).takeLast(250_000))
         section("ÚLTIMO CRASH", runCatching { lastCrashFile(ctx).takeIf { it.exists() }?.readText() }.getOrNull())
         runCatching {
-            File(ctx.filesDir, "connector-debug").listFiles()?.sortedBy { it.name }?.forEach { f ->
+            // Só conectores usados nos últimos 3 dias: logs velhos repetidos só escondiam o que importa.
+            File(ctx.filesDir, "connector-debug").listFiles()?.filter { System.currentTimeMillis() - it.lastModified() < 3 * 86_400_000L }?.sortedBy { it.name }?.forEach { f ->
                 section("CONECTOR · ${f.name.removePrefix("connector-").removeSuffix(".debug.log")} (últimas linhas)", f.readText().takeLast(4_000))
             }
         }

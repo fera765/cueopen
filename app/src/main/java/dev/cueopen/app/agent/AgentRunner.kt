@@ -3255,15 +3255,21 @@ class AgentRunner(
             }
             "webapi_test" -> {
                 val args = webApiArgs(a["args"]) ?: return ToolResult("ERRO: args precisa ser um objeto JSON.")
+                // Teste às cegas em série (o log mostrou 15 seguidos, até em example.com): limite e orientação.
+                val nTests = webApiTests.merge(sessionId, 1, Int::plus) ?: 1
+                if (nTests > 12) return ToolResult("RECUSADO: 12 testes nesta conversa sem salvar. Pare e explique ao usuário o que está bloqueando (seletor, bloqueio do site, dado que não existe) em vez de testar mais variações.", SessionStatus.WAITING_USER)
+                if (Regex("^https?://(www\\.)?example\\.(com|org)").containsMatchIn(s("url_template"))) return ToolResult("RECUSADO: teste na página real do site-alvo, não em example.com. Para chamar uma API JSON do site, use o template da página do próprio site e api.fetchJson no código.")
                 val draft = dev.cueopen.app.data.WebApi(slug = "teste", name = "teste", urlTemplate = s("url_template"), code = s("code"), waitFor = s("wait_for"))
                 val out = dev.cueopen.app.browser.WebApiRunner.run(ctx, draft, args)
                 val passed = out.contains("\"ok\":true") && Regex("\"results\":\\[\\s*\\{").containsMatchIn(out)
                 if (passed) webApiPassed[sessionId] = (s("url_template") + "\u0000" + s("code")).hashCode()
-                return ToolResult((if (passed) "PASSOU" else "FALHOU (precisa ok:true e results com itens)") + ":\n" + out.take(12_000))
+                return ToolResult((if (passed) "PASSOU" else "FALHOU (precisa ok:true e results com itens)") + " (teste $nTests/12)" +
+                    (if (!passed && nTests % 3 == 0) ". Três falhas seguidas: inspecione a página com browser_navigate + browser_js no ponto exato antes de testar de novo." else "") + ":\n" + out.take(12_000))
             }
             "webapi_save" -> {
                 val slug = s("slug").trim()
                 if (!dev.cueopen.app.browser.WebApiHub.validSlug(slug)) return ToolResult("ERRO: slug inválido (minúsculas, números e _, 3–40, começando por letra).")
+                webApiTests.remove(sessionId)
                 if (webApiPassed[sessionId] != (s("url_template") + "\u0000" + s("code")).hashCode()) return ToolResult("RECUSADO: rode webapi_test com este mesmo url_template e code até PASSAR antes de salvar.")
                 val params = runCatching { kotlinx.serialization.json.Json { ignoreUnknownKeys = true }.decodeFromString<List<dev.cueopen.app.data.WebApiParam>>(s("params").ifBlank { "[]" }) }
                     .getOrElse { return ToolResult("ERRO: params não é uma lista JSON válida: ${it.message?.take(160)}") }
@@ -3285,6 +3291,7 @@ class AgentRunner(
 
     /** Última versão de Web API que passou no teste, por sessão (salvar exige teste aprovado do mesmo código). */
     private val webApiPassed = java.util.concurrent.ConcurrentHashMap<String, Int>()
+    private val webApiTests = java.util.concurrent.ConcurrentHashMap<String, Int>()
     /** args do webapi_*: aceita objeto JSON ou string com JSON. */
     private fun webApiArgs(e: kotlinx.serialization.json.JsonElement?): JsonObject? = when {
         e == null || e is kotlinx.serialization.json.JsonNull -> JsonObject(emptyMap())

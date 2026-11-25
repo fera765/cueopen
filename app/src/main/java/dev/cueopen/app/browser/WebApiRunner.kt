@@ -77,7 +77,8 @@ object WebApiRunner {
         }
         val res = out ?: err(a, full, "tempo esgotado (${timeoutMs / 1000}s) na etapa: $stage")
         val ok = res.contains("\"ok\":true")
-        val count = Regex("\"count\":(\\d+)").find(res)?.groupValues?.get(1)
+        val count = runCatching { (Json.parseToJsonElement(res).jsonObject["results"] as? kotlinx.serialization.json.JsonArray)?.size?.toString() }.getOrNull()
+            ?: Regex("\"count\":(\\d+)").find(res)?.groupValues?.get(1) ?: "sem campo results"
         dev.cueopen.app.diag.ActivityLog.webApi(a.slug, ok, System.currentTimeMillis() - started,
             Regex("\"url\":\"([^\"]*)").find(res)?.groupValues?.get(1) ?: "-",
             if (ok) "args=$argsJs resultados=${count ?: "?"}" else "args=$argsJs etapa=$stage erro=" + (Regex("\"error\":\"([^\"]*)").find(res)?.groupValues?.get(1) ?: ""))

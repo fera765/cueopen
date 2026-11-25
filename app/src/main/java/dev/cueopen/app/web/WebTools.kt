@@ -28,15 +28,20 @@ object WebTools {
         }
     }
 
+    private val recentFetch = java.util.concurrent.ConcurrentHashMap<String, Long>()
+
     suspend fun fetch(url: String, maxChars: Int): String = withContext(Dispatchers.IO) {
         if (!url.startsWith("http://") && !url.startsWith("https://")) return@withContext "ERRO: informe uma URL http(s) completa."
+        // Mesma página lida de novo em menos de 2 min: o conteúdo já está no contexto do agente.
+        val now = System.currentTimeMillis()
+        recentFetch.put(url, now)?.let { prev -> if (now - prev < 120_000) return@withContext "[Você leu esta página há ${(now - prev) / 1000}s e o conteúdo está acima no seu contexto. Não leia de novo: use o que já tem ou abra outra página.]" }
         YouTubeTranscript.videoId(url)?.let { id -> youtube(id, maxChars)?.let { return@withContext it } }
         runCatching {
             val (code, body) = get(url)
             when {
                 code == 403 || code == 429 || code == 503 -> "ERRO: o site bloqueou a leitura direta (HTTP $code). Abra com browser_navigate."
                 code >= 400 -> "ERRO: HTTP $code em $url. Não repita esta URL; procure outro endereço." +
-                    (if (code == 404) " Não adivinhe caminhos (/contato, /sobre…): abra a página inicial do site e siga os links que ela mostra." else "")
+                    (if (code == 404) " Não adivinhe caminhos (/contato, /sobre…): use um dos links reais abaixo." + realLinks(url) else "")
                 body.trimStart().startsWith("{") || body.trimStart().startsWith("[") -> body.take(maxChars)
                 body.startsWith("[conteúdo") -> body
                 else -> (runCatching { PageMeta.extract(body, url).block() }.getOrDefault("") + WebExtract.mainText(body, url, maxChars)).let { t ->
@@ -45,6 +50,19 @@ object WebTools {
             }
         }.getOrElse { "ERRO: falha ao abrir $url (${it.javaClass.simpleName}). Tente browser_navigate." }
     }
+
+    /** 404 num caminho chutado: lê a página inicial do site e devolve os links que existem de verdade (contato, sobre, atendimento…). */
+    private fun realLinks(url: String): String = runCatching {
+        val home = Regex("^(https?://[^/]+)").find(url)?.groupValues?.get(1) ?: return ""
+        val (code, html) = get(home)
+        if (code >= 400) return ""
+        val links = Regex("<a[^>]+href=[\"']([^\"'#]+)[\"'][^>]*>([\\s\\S]{0,120}?)</a>", RegexOption.IGNORE_CASE).findAll(html).mapNotNull { m ->
+            val href = m.groupValues[1].trim(); val text = m.groupValues[2].replace(Regex("<[^>]+>"), " ").replace(Regex("\\s+"), " ").trim()
+            val abs = runCatching { java.net.URL(java.net.URL(home + "/"), href).toString() }.getOrNull() ?: return@mapNotNull null
+            if (Regex("(?i)contat|contact|fale|atendimento|sobre|about|suporte|support|whatsapp|sac").containsMatchIn(href + " " + text)) "- ${text.take(50).ifBlank { "link" }}: $abs" else null
+        }.distinct().take(10).toList()
+        if (links.isEmpty()) "\nPágina inicial: $home (abra com web_fetch e siga os links)." else "\nLinks reais encontrados na página inicial:\n" + links.joinToString("\n")
+    }.getOrDefault("")
 
     /** Transcrição pela legenda do vídeo; null = sem legenda acessível (segue a leitura normal da página). */
     private fun youtube(id: String, maxChars: Int): String? = runCatching {
@@ -118,7 +136,16 @@ object WebTools {
         if (hits.isNotEmpty()) hits = ImageEnricher.fill(hits)
         if (hits.isEmpty() && engines.none { it.first == "DuckDuckGo (HTTP)" })
             hits = SearchApi.merge(listOf(withContext(Dispatchers.IO) { duckHttp(query) }), n)
-        if (hits.isEmpty()) return "Nenhum resultado na busca (Google, Bing e DuckDuckGo). Tente outros termos, mais curtos."
+        if (hits.isEmpty()) {
+            // Agentes juntam várias buscas numa só ("A" site oficial + "B" site oficial): nenhum buscador acha isso.
+            // Divide em buscas simples (sem aspas e sem "site oficial") e devolve cada uma.
+            val parts = query.split(Regex("\\s\\+\\s|\\s+\\|\\s+")).map { it.replace("\"", "").replace(Regex("(?i)\\bsite oficial\\b"), "").trim() }.filter { it.length >= 3 }
+            val simple = query.replace("\"", "").replace(Regex("(?i)\\bsite oficial\\b"), "").trim()
+            if (parts.size > 1) return parts.take(4).joinToString("\n\n") { "### " + it + "\n" + search(it, (n / parts.size).coerceAtLeast(3)) } +
+                "\n\n(Dica: faça uma busca por assunto/empresa; juntar várias com + não retorna nada.)"
+            if (simple != query && simple.length >= 3) return search(simple, n)
+            return "Nenhum resultado na busca (Google, Bing e DuckDuckGo). Tente outros termos, mais curtos."
+        }
         return SearchApi.format(query, hits, got.filter { it.second.isNotEmpty() }.joinToString(" + ") { it.first }).also { cache.put("$n|$query", it) }
     }
 }
