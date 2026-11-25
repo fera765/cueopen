@@ -3078,6 +3078,39 @@ class AgentRunner(
         else null
     }
 
+    /** Ferramentas do Web API Hub (fora do runTool: o método já está no limite de tamanho da JVM). */
+    private suspend fun webApiTool(sessionId: String, name: String, a: JsonObject): ToolResult {
+        fun s(k: String) = a[k]?.jsonPrimitive?.contentOrNull.orEmpty()
+        when (name) {
+            "webapi_list" -> return ToolResult("Web APIs do hub (chame com webapi_call(api, args); * = obrigatório):\n" + dev.cueopen.app.browser.WebApiHub.catalog(ctx))
+            "webapi_call" -> {
+                val api = dev.cueopen.app.browser.WebApiHub.find(ctx, s("api"))?.takeIf { it.enabled }
+                    ?: return ToolResult("ERRO: API \"${s("api")}\" não existe ou está desligada. Disponíveis:\n" + dev.cueopen.app.browser.WebApiHub.catalog(ctx))
+                val args = webApiArgs(a["args"]) ?: return ToolResult("ERRO: args precisa ser um objeto JSON, ex.: {\"query\":\"…\",\"page\":1}")
+                return ToolResult(dev.cueopen.app.browser.WebApiHub.call(ctx, api, args).take(40_000))
+            }
+            "webapi_test" -> {
+                val args = webApiArgs(a["args"]) ?: return ToolResult("ERRO: args precisa ser um objeto JSON.")
+                val draft = dev.cueopen.app.data.WebApi(slug = "teste", name = "teste", urlTemplate = s("url_template"), code = s("code"), waitFor = s("wait_for"))
+                val out = dev.cueopen.app.browser.WebApiRunner.run(ctx, draft, args)
+                val passed = out.contains("\"ok\":true") && Regex("\"results\":\\[\\s*\\{").containsMatchIn(out)
+                if (passed) webApiPassed[sessionId] = (s("url_template") + "\u0000" + s("code")).hashCode()
+                return ToolResult((if (passed) "PASSOU" else "FALHOU (precisa ok:true e results com itens)") + ":\n" + out.take(12_000))
+            }
+            "webapi_save" -> {
+                val slug = s("slug").trim()
+                if (!dev.cueopen.app.browser.WebApiHub.validSlug(slug)) return ToolResult("ERRO: slug inválido (minúsculas, números e _, 3–40, começando por letra).")
+                if (webApiPassed[sessionId] != (s("url_template") + "\u0000" + s("code")).hashCode()) return ToolResult("RECUSADO: rode webapi_test com este mesmo url_template e code até PASSAR antes de salvar.")
+                val params = runCatching { kotlinx.serialization.json.Json { ignoreUnknownKeys = true }.decodeFromString<List<dev.cueopen.app.data.WebApiParam>>(s("params").ifBlank { "[]" }) }
+                    .getOrElse { return ToolResult("ERRO: params não é uma lista JSON válida: ${it.message?.take(160)}") }
+                store.upsertWebApi(dev.cueopen.app.data.WebApi(slug = slug, name = s("name").ifBlank { slug }, description = s("description"), urlTemplate = s("url_template"),
+                    code = s("code"), waitFor = s("wait_for"), params = params, source = "ia"))
+                return ToolResult("OK: Web API \"$slug\" salva no hub e ativa. Qualquer agente chama com webapi_call(api=\"$slug\", args={…}).")
+            }
+        }
+        return ToolResult("ERRO: ferramenta desconhecida $name")
+    }
+
     /** Última versão de Web API que passou no teste, por sessão (salvar exige teste aprovado do mesmo código). */
     private val webApiPassed = java.util.concurrent.ConcurrentHashMap<String, Int>()
     /** args do webapi_*: aceita objeto JSON ou string com JSON. */
@@ -4555,31 +4588,7 @@ class AgentRunner(
                 if (!out.startsWith("ERROR")) scriptPolicy(sessionId).onInspect()
                 return ToolResult(out + if (selectors.isEmpty() && s("text").isBlank()) "\n(Dica: passe selectors e/ou text para localizar o alvo.)" else "")
             }
-            "webapi_list" -> return ToolResult("Web APIs do hub (chame com webapi_call(api, args); * = obrigatório):\n" + dev.cueopen.app.browser.WebApiHub.catalog(ctx))
-            "webapi_call" -> {
-                val api = dev.cueopen.app.browser.WebApiHub.find(ctx, s("api"))?.takeIf { it.enabled }
-                    ?: return ToolResult("ERRO: API \"${s("api")}\" não existe ou está desligada. Disponíveis:\n" + dev.cueopen.app.browser.WebApiHub.catalog(ctx))
-                val args = webApiArgs(a["args"]) ?: return ToolResult("ERRO: args precisa ser um objeto JSON, ex.: {\"query\":\"…\",\"page\":1}")
-                return ToolResult(dev.cueopen.app.browser.WebApiHub.call(ctx, api, args).take(40_000))
-            }
-            "webapi_test" -> {
-                val args = webApiArgs(a["args"]) ?: return ToolResult("ERRO: args precisa ser um objeto JSON.")
-                val draft = dev.cueopen.app.data.WebApi(slug = "teste", name = "teste", urlTemplate = s("url_template"), code = s("code"), waitFor = s("wait_for"))
-                val out = dev.cueopen.app.browser.WebApiRunner.run(ctx, draft, args)
-                val passed = out.contains("\"ok\":true") && Regex("\"results\":\\[\\s*\\{").containsMatchIn(out)
-                if (passed) webApiPassed[sessionId] = (s("url_template") + "\u0000" + s("code")).hashCode()
-                return ToolResult((if (passed) "PASSOU" else "FALHOU (precisa ok:true e results com itens)") + ":\n" + out.take(12_000))
-            }
-            "webapi_save" -> {
-                val slug = s("slug").trim()
-                if (!dev.cueopen.app.browser.WebApiHub.validSlug(slug)) return ToolResult("ERRO: slug inválido (minúsculas, números e _, 3–40, começando por letra).")
-                if (webApiPassed[sessionId] != (s("url_template") + "\u0000" + s("code")).hashCode()) return ToolResult("RECUSADO: rode webapi_test com este mesmo url_template e code até PASSAR antes de salvar.")
-                val params = runCatching { kotlinx.serialization.json.Json { ignoreUnknownKeys = true }.decodeFromString<List<dev.cueopen.app.data.WebApiParam>>(s("params").ifBlank { "[]" }) }
-                    .getOrElse { return ToolResult("ERRO: params não é uma lista JSON válida: ${it.message?.take(160)}") }
-                store.upsertWebApi(dev.cueopen.app.data.WebApi(slug = slug, name = s("name").ifBlank { slug }, description = s("description"), urlTemplate = s("url_template"),
-                    code = s("code"), waitFor = s("wait_for"), params = params, source = "ia"))
-                return ToolResult("OK: Web API \"$slug\" salva no hub e ativa. Qualquer agente chama com webapi_call(api=\"$slug\", args={…}).")
-            }
+            "webapi_list", "webapi_call", "webapi_test", "webapi_save" -> return webApiTool(sessionId, call.name, a)
             "userscript_test" -> {
                 val code = s("code"); val url = s("url").trim(); val verify = s("verify").trim().trimEnd(';')
                 val (meta, err) = dev.cueopen.app.browser.UserScriptMeta.parse(code)
