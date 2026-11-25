@@ -76,27 +76,14 @@ object WebApiRunner {
     /** evaluateJavascript devolve a string JSON-encodada: desembrulha. */
     private fun unwrap(r: String?): String? = r?.takeIf { it != "null" }?.let { runCatching { json.parseToJsonElement(it).jsonPrimitive.contentOrNull }.getOrNull() ?: it }
 
-    private const val HELPERS = """
-const enc = encodeURIComponent;
-const sleep = ms => new Promise(r => setTimeout(r, ms));
-const api = {
-  sleep,
-  wait: async (sel, ms = 8000) => { const t = Date.now(); while (Date.now() - t < ms) { const e = document.querySelector(sel); if (e) return e; await sleep(150); } return null; },
-  all: (sel, root = document) => Array.from(root.querySelectorAll(sel)),
-  one: (sel, root = document) => root.querySelector(sel),
-  text: (el, sel) => { const e = sel ? (el && el.querySelector(sel)) : el; return e ? (e.innerText || e.textContent || '').replace(/\s+/g, ' ').trim() : ''; },
-  attr: (el, sel, a) => { const e = sel ? (el && el.querySelector(sel)) : el; return e ? (e.getAttribute(a) || '') : ''; },
-  abs: u => { try { return new URL(u, location.href).href; } catch (e) { return u || ''; } },
-  num: s => { const m = String(s || '').replace(/\./g, '').replace(',', '.').match(/-?\d+(\.\d+)?/); return m ? Number(m[0]) : null; },
-  fetchText: async (u, opt) => (await fetch(u, Object.assign({ credentials: 'include' }, opt || {}))).text(),
-  fetchJson: async (u, opt) => (await fetch(u, Object.assign({ credentials: 'include' }, opt || {}))).json(),
-  scroll: async (times = 3) => { for (let i = 0; i < times; i++) { window.scrollTo(0, document.body.scrollHeight); await sleep(500); } },
-};
-"""
+    /** Funções `api.*`, `enc` e `sleep` (assets/webapi/helpers.js — o mesmo arquivo usado no teste em Chrome do CI). */
+    @Volatile private var helpersJs: String? = null
+    private fun helpers(ctx: Context): String = helpersJs ?: ctx.assets.open("webapi/helpers.js").bufferedReader().readText().also { helpersJs = it }
 
     /** Executa a API. Devolve o JSON final (texto) ou {"ok":false,"error":…}. */
     suspend fun run(ctx: Context, a: WebApi, args: JsonObject, timeoutMs: Long = 30_000): String = lock.withLock {
         withContext(Dispatchers.Main) {
+            val HELPERS = helpers(ctx)
             val started = System.currentTimeMillis()
             val v = runCatching { view(ctx) }.getOrElse { return@withContext err(a, args, "WebView indisponível: ${it.message}") }
             // Defaults dos parâmetros entram nos args.
