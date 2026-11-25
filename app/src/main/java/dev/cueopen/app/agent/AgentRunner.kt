@@ -534,6 +534,45 @@ class AgentRunner(
     }
     private val sectionColors = listOf(0xFFFF6B3DL, 0xFF4D8DFFL, 0xFF2FBF71L, 0xFFFFC53DL, 0xFFB57BFFL, 0xFFFF5C8AL, 0xFF2EC4C4L, 0xFF9C978EL)
 
+    /** Agente da biblioteca pelo id ou pelo nome (sem acento/caixa). Coordenadores de outras seções não entram. */
+    private fun libraryAgent(key: String): AgentProfile? {
+        if (key.isBlank()) return null
+        fun norm(x: String) = java.text.Normalizer.normalize(x, java.text.Normalizer.Form.NFD).replace(Regex("\\p{M}+"), "").lowercase().replace(Regex("[^a-z0-9]+"), " ").trim()
+        val k = norm(key)
+        val pool = store.state.value.agents.filterNot { it.name.startsWith("Coordenador ·") }
+        return pool.firstOrNull { it.id == key } ?: pool.firstOrNull { norm(it.name) == k }
+    }
+
+    /** Lista do time no texto do coordenador (refeita quando entra alguém novo). */
+    private fun rosterOf(sec: Section): String = sec.agentIds.mapNotNull { store.agent(it) }
+        .joinToString("\n") { "- ${it.name}: ${it.mission.ifBlank { it.instructions.lineSequence().drop(1).firstOrNull().orEmpty() }}" }
+
+    /**
+     * Adiciona um agente (da biblioteca ou recém-criado) a uma seção: entra em agentIds, a lista "Seu time" do coordenador
+     * é refeita e o coordenador é avisado no chat da seção — passa a poder delegar para ele na hora.
+     */
+    fun addAgentToSection(sectionId: String, agentId: String): String {
+        val sec = store.section(sectionId) ?: return "Seção não encontrada."
+        val ag = store.agent(agentId) ?: return "Agente não encontrado."
+        if (agentId in sec.agentIds) return "${ag.name} já faz parte da seção."
+        val updated = sec.copy(agentIds = sec.agentIds + agentId)
+        store.upsertSection(updated)
+        store.agent(sec.coordinatorAgentId)?.let { coord ->
+            val ins = coord.instructions
+            val start = ins.indexOf("Seu time:\n")
+            val newIns = if (start >= 0) {
+                val end = ins.indexOf("\nUse team_plan", start).takeIf { it > 0 } ?: ins.length
+                ins.substring(0, start) + "Seu time:\n" + rosterOf(updated) + ins.substring(end)
+            } else ins + "\nSeu time:\n" + rosterOf(updated)
+            store.upsertAgent(coord.copy(instructions = newIns))
+        }
+        store.session(sec.sessionId)?.let { chat ->
+            store.editSession(chat.id) { it.copy(llm = it.llm + LlmMessage("user", "[Sistema] ${ag.name} entrou no time desta seção" +
+                (if (ag.mission.isNotBlank()) " (função: ${ag.mission})" else "") + ". Você já pode delegar tarefas para ele com team_delegate.")) }
+        }
+        return "${ag.name} adicionado à seção ${sec.name}."
+    }
+
     private fun createSection(
         sessionId: String, name: String, description: String, coordinatorInstructions: String,
         agentsJson: String, firstTask: String, capsCsv: String, suggestWallet: Boolean,
@@ -553,11 +592,14 @@ class AgentRunner(
         if (arr.isEmpty() || arr.size > 12) return ToolResult("ERRO: informe de 1 a 12 agentes.")
         val faces = dev.cueopen.app.ui.mascot.Mascots.builtinIds
         val sectionId = newId()
+        val reused = mutableSetOf<String>()
         val members = arr.mapIndexedNotNull { idx, el ->
             val o = el as? JsonObject ?: return@mapIndexedNotNull null
             fun f(k: String) = runCatching { o[k]?.jsonPrimitive?.contentOrNull }.getOrNull().orEmpty().trim()
             fun bo(k: String, d: Boolean) = runCatching { o[k]?.jsonPrimitive?.booleanOrNull }.getOrNull() ?: d
             val n = f("name").ifBlank { "Agente ${idx + 1}" }.take(40)
+            // Biblioteca primeiro: agente que já existe (pelo id em "existing" ou pelo mesmo nome) é reaproveitado, não duplicado.
+            libraryAgent(f("existing").ifBlank { n })?.let { found -> reused += found.id; return@mapIndexedNotNull found }
             val role = f("role")
             AgentProfile(
                 name = n, face = faces[(idx + 1) % faces.size], color = sectionColors[idx % sectionColors.size],
@@ -584,7 +626,7 @@ class AgentRunner(
                 if (coordinatorInstructions.isNotBlank()) appendLine("Regras definidas pelo usuário: $coordinatorInstructions")
             }.trim(),
         )
-        members.forEach { store.upsertAgent(it) }
+        members.filter { it.id !in reused }.forEach { store.upsertAgent(it) }
         store.upsertAgent(coordinator)
         val chat = Session(title = "📁 $title", agentId = coordinator.id, sectionId = sectionId)
         store.upsertSession(chat)
@@ -1694,6 +1736,7 @@ class AgentRunner(
                 safeOutput.coerceAtMost(8192L).toInt()
             } ?: 8192
             var currentReplyTokenLimit = replyTokenLimit
+            val llmT0 = System.currentTimeMillis()
             val replyRaw = run {
                 var attempt = 0
                 while (true) {
@@ -1796,6 +1839,8 @@ class AgentRunner(
             // Nomes de ferramenta "de hábito" (grep, read_file, fetch…) viram a ferramenta real exposta.
             val reply = replyRaw.copy(toolCalls = replyRaw.toolCalls.map { tc -> squadFixArgs(sessionId, tc.copy(name = ToolAliases.resolve(tc.name, exposedToolNames))) })
             val modelId = stepModel(agent)
+            dev.cueopen.app.diag.ActivityLog.llm(sessionId, modelId, true, System.currentTimeMillis() - llmT0,
+                "tokens in=${reply.usage.prompt} out=${reply.usage.completion} · ferramentas=" + reply.toolCalls.joinToString(",") { it.name }.ifBlank { "nenhuma (texto)" })
             dev.cueopen.app.llm.UsageLedger.record(ctx, store.agent(store.session(sessionId)?.agentId)?.name ?: "Sem agent", modelId,
                 dev.cueopen.app.llm.ProviderCatalog.activeId(store.settings), reply.usage.prompt.toLong(), reply.usage.completion.toLong())
             autoResumeRound.remove(sessionId)  // o modelo voltou a responder: zera a escada de retomadas
@@ -3128,6 +3173,14 @@ class AgentRunner(
         return ToolResult("ERRO: ferramenta desconhecida $name")
     }
 
+    private fun logActivity(sessionId: String, tool: String, step: ChatItem.Step, error: Boolean, out: String) =
+        dev.cueopen.app.diag.ActivityLog.tool(sessionId, tool, step.args, error, System.currentTimeMillis() - step.time, out)
+
+    /** Pílula do API Hub mostra qual API foi usada: "API Hub · google_search". */
+    private fun stepTitle(tool: String, argsJson: String, default: String): String =
+        if (tool != "webapi_call") default
+        else "API Hub · " + (runCatching { kotlinx.serialization.json.Json.parseToJsonElement(argsJson).jsonObject["api"]?.jsonPrimitive?.contentOrNull }.getOrNull() ?: "?")
+
     /** Última versão de Web API que passou no teste, por sessão (salvar exige teste aprovado do mesmo código). */
     private val webApiPassed = java.util.concurrent.ConcurrentHashMap<String, Int>()
     /** args do webapi_*: aceita objeto JSON ou string com JSON. */
@@ -3713,7 +3766,9 @@ class AgentRunner(
         else agentIn
         if (allowMultiAgent && sectionId == null) add(tool("create_section",
             "Cria uma seção na sidebar: um time de Agents com um coordenador e um chat próprio. Use apenas quando o usuário pedir explicitamente uma seção, time ou equipe de agentes. " +
-                "Cada agente recebe nome, descrição e regras fixas exatamente como o usuário pediu. Depois de criar, o app mostra um card de autorização para o usuário escolher as permissões; aguarde ele ativar antes de qualquer outra ação.",
+                "Cada agente recebe nome, descrição e regras fixas exatamente como o usuário pediu. Depois de criar, o app mostra um card de autorização para o usuário escolher as permissões; aguarde ele ativar antes de qualquer outra ação. " +
+                "REUTILIZE a biblioteca: se um agente necessário já existe, coloque no agents_json só {\"existing\": \"<nome exato>\"} (ele entra na seção sem duplicar); crie novo só o que não existir." +
+                store.state.value.agents.filterNot { it.name.startsWith("Coordenador ·") }.take(80).joinToString("", prefix = " Biblioteca atual:") { "\n- ${it.name}: ${it.mission.take(60)}" },
             buildJsonObject {
                 put("name", str("Nome da seção, como o usuário pediu (ex.: Direct Response)"))
                 put("description", str("Objetivo da seção em 1-2 frases"))
@@ -4894,7 +4949,8 @@ class AgentRunner(
             }
         }
 
-        val (title, kind) = ToolActivityLabels.of(call.name)
+        val (title0, kind) = ToolActivityLabels.of(call.name)
+        val title = stepTitle(call.name, call.argsJson, title0)
         val argPreview = ToolActivityLabels.preview(call.name, ::s, ::i, cwd)
         val step = ChatItem.Step(tool = call.name, title = title, args = argPreview)
         val executionArguments = if (call.name == "device_accessibility_type") buildJsonObject {
@@ -5734,6 +5790,7 @@ class AgentRunner(
             } else "Erro: ${detail.take(300)}"
             val safeDetail = if (accessibilityTool) "Falha Android; conteúdo de tela omitido por privacidade." else detail
             executions.fail(executionId, safeDetail)
+            logActivity(sessionId, call.name, step, true, safeDetail)
             runCatching { dev.cueopen.app.diag.ErrorLog.log(errorSource(call.name), safeDetail, sessionId, call.name) }
             store.replaceItem(sessionId, step.copy(result = safeDetail, status = StepStatus.ERROR))
             return ToolResult(toolOutput)
@@ -5751,6 +5808,7 @@ class AgentRunner(
             "Resultado Android transitório omitido dos diagnósticos; nenhum conteúdo de tela foi salvo."
         else out
         if (isError) executions.fail(executionId, safeExecutionOutput) else executions.finish(executionId, safeExecutionOutput)
+        logActivity(sessionId, call.name, step, isError || markerError, safeExecutionOutput)
         // Saídas esperadas de testes do terminal (grep sem achado, `test` falso, curl checando se um servidor já está de pé)
         // não são falhas do app: não entram no log de erros.
         val benignProbe = call.name == "shell" && Regex("""\[exit (1|7|22)\]""").containsMatchIn(out) &&

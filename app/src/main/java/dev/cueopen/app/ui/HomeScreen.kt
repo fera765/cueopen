@@ -989,6 +989,8 @@ private fun SectionRow(
     var expanded by androidx.compose.runtime.saveable.rememberSaveable(sec.id) { mutableStateOf(false) }
     var menu by remember { mutableStateOf(false) }
     var confirm by remember { mutableStateOf<String?>(null) } // "delete" | "restart" | "clear"
+    var addAgent by remember { mutableStateOf(false) }
+    if (addAgent) AddAgentToSectionDialog(sec, agents) { addAgent = false }
     val chats = sessions.filter { it.sectionId == sec.id }
     val busy = chats.any { it.status == SessionStatus.RUNNING }
     val waiting = chats.any { it.status == SessionStatus.WAITING_USER }
@@ -1016,6 +1018,7 @@ private fun SectionRow(
             DropdownMenuItem(text = { Text("Abrir") }, leadingIcon = { Icon(Icons.Rounded.ChatBubbleOutline, null) }, onClick = { menu = false; onOpen(sec.sessionId) })
             DropdownMenuItem(text = { Text("Limpar contexto") }, leadingIcon = { Icon(Icons.Rounded.CleaningServices, null) }, onClick = { menu = false; confirm = "clear" })
             DropdownMenuItem(text = { Text("Reiniciar") }, leadingIcon = { Icon(Icons.Rounded.RestartAlt, null) }, onClick = { menu = false; confirm = "restart" })
+            DropdownMenuItem(text = { Text("Adicionar agente") }, leadingIcon = { Icon(Icons.Rounded.PersonAdd, null) }, onClick = { menu = false; addAgent = true })
             if (sec.archived) DropdownMenuItem(text = { Text("Restaurar") }, leadingIcon = { Icon(Icons.Rounded.Unarchive, null) }, onClick = { menu = false; app.agent.restoreSection(sec.id) })
             else DropdownMenuItem(text = { Text("Arquivar") }, leadingIcon = { Icon(Icons.Rounded.Archive, null) }, onClick = { menu = false; app.agent.archiveSection(sec.id) })
             DropdownMenuItem(text = { Text("Excluir seção", color = c.err) }, leadingIcon = { Icon(Icons.Rounded.DeleteOutline, null, tint = c.err) }, onClick = { menu = false; confirm = "delete" })
@@ -1074,4 +1077,61 @@ private fun SectionRow(
             dismissButton = { TextButton({ confirm = null }) { Text("Cancelar") } },
         )
     }
+}
+
+/** Adicionar agente à seção: escolhe da biblioteca (busca) ou cria um novo; entra no time e o coordenador é avisado. */
+@Composable
+private fun AddAgentToSectionDialog(sec: dev.cueopen.app.data.Section, agents: List<AgentProfile>, onDone: () -> Unit) {
+    val c = Cue.c
+    val app = CueApp.instance
+    var query by remember { mutableStateOf("") }
+    var creating by remember { mutableStateOf(false) }
+    var name by remember { mutableStateOf("") }
+    var role by remember { mutableStateOf("") }
+    var notice by remember { mutableStateOf<String?>(null) }
+    val pool = remember(agents, sec, query) {
+        agents.filter { it.id != sec.coordinatorAgentId && it.id !in sec.agentIds && !it.name.startsWith("Coordenador ·") }
+            .filter { query.isBlank() || it.name.contains(query, true) || it.mission.contains(query, true) }
+    }
+    AlertDialog(onDismissRequest = onDone, title = { Text(if (creating) "Novo agente" else "Adicionar agente · ${sec.name}") },
+        text = {
+            Column(Modifier.heightIn(max = 460.dp)) {
+                notice?.let { Text(it, fontSize = 12.sp, color = c.ok, modifier = Modifier.padding(bottom = 6.dp)) }
+                if (creating) {
+                    OutlinedTextField(name, { name = it }, label = { Text("Nome") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                    Spacer(Modifier.height(8.dp))
+                    OutlinedTextField(role, { role = it }, label = { Text("Função / o que ele faz") }, minLines = 3, modifier = Modifier.fillMaxWidth())
+                } else {
+                    OutlinedTextField(query, { query = it }, placeholder = { Text("Buscar na biblioteca") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                    Spacer(Modifier.height(6.dp))
+                    if (pool.isEmpty()) Text("Nenhum agente disponível fora da seção.", fontSize = 13.sp, color = c.ink3)
+                    androidx.compose.foundation.lazy.LazyColumn(Modifier.weight(1f, fill = false)) {
+                        items(pool, key = { it.id }) { a ->
+                            Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp)).clickable {
+                                notice = app.agent.addAgentToSection(sec.id, a.id)
+                            }.padding(vertical = 8.dp, horizontal = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                                Icon(Icons.Rounded.PersonAdd, null, Modifier.size(18.dp), tint = c.accent)
+                                Spacer(Modifier.width(10.dp))
+                                Column(Modifier.weight(1f)) {
+                                    Text(a.name, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                    if (a.mission.isNotBlank()) Text(a.mission, fontSize = 12.sp, color = c.ink3, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            if (creating) TextButton(enabled = name.isNotBlank(), onClick = {
+                val ag = AgentProfile(name = name.trim().take(40), mission = role.trim(),
+                    instructions = "Você é ${name.trim()}, membro da seção \"${sec.name}\"." + (if (role.isNotBlank()) "\nFunção: ${role.trim()}" else "") +
+                        "\nVocê recebe tarefas do coordenador da seção. Entregue resultados concretos e verificáveis (links, números, arquivos). Trabalhe apenas com dados reais; se faltar algo, diga exatamente o que falta.")
+                app.store.upsertAgent(ag)
+                notice = app.agent.addAgentToSection(sec.id, ag.id)
+                creating = false; name = ""; role = ""
+            }) { Text("Criar e adicionar") }
+            else TextButton({ creating = true }) { Text("Criar novo agente") }
+        },
+        dismissButton = { TextButton(if (creating) ({ creating = false }) else onDone) { Text(if (creating) "Voltar" else "Fechar") } })
 }

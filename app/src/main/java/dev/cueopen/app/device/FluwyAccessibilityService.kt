@@ -80,11 +80,24 @@ class FluwyAccessibilityService : AccessibilityService() {
         AccessibilityAutomationBridge.connect(this)
     }
 
+    /**
+     * Apps de banco (Nubank e outros) bloqueiam a abertura quando há um serviço de acessibilidade de fora da loja ligado
+     * ("app perigoso"). Ao detectar um deles em primeiro plano, o serviço se desliga sozinho e avisa como religar.
+     * O Android não permite esconder um serviço ligado, então desligar é a única forma de o banco abrir.
+     */
+    private fun bankGuard(pkg: String?) {
+        if (pkg == null || !BankApps.isBank(pkg) || !BankApps.autoOff(this)) return
+        runCatching { BankApps.notifyDisabled(this, pkg) }
+        runCatching { AccessibilityAutomationBridge.disconnect(this) }
+        disableSelf()
+    }
+
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         // Conteúdo/foco gera eventos benignos frequentes. Em uma transição, retenha snapshots da
         // janela que realmente está ativa; locate() revalida árvore, alvo e fingerprint antes de agir.
         if (event?.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED ||
             event?.eventType == AccessibilityEvent.TYPE_WINDOWS_CHANGED) {
+            bankGuard(event.packageName?.toString())
             val current = runCatching { activeWindow() }.getOrNull() ?: return
             snapshots.removeWhere { saved ->
                 !AccessibilitySnapshotPolicy.keepAfterWindowEvent(

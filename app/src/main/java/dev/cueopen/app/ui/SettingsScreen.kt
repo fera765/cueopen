@@ -150,9 +150,15 @@ fun SettingsScreen(nav: NavController) {
                     }
                 }
             }) { Icon(Icons.Rounded.Download, null, Modifier.size(16.dp)); Spacer(Modifier.width(6.dp)); Text("Baixar dados (JSON)") }
-            SectionLabel("Logs de erros")
+            SectionLabel("Apps de banco")
+            var bankGuard by remember { mutableStateOf(dev.cueopen.app.device.BankApps.autoOff(nav.context)) }
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("Desligar a acessibilidade do Fluwy ao abrir app de banco (Nubank e outros recusam abrir com ela ligada)", Modifier.weight(1f), fontSize = 13.sp, color = c.ink2)
+                Switch(bankGuard, { bankGuard = it; dev.cueopen.app.device.BankApps.setAutoOff(nav.context, it) })
+            }
+            SectionLabel("Logs (erros e atividade)")
             Text(
-                "Guarda as FALHAS reais do app — IA/provedores, agentes e ferramentas, conectores, skills, hub de apps, Linux, browser e crashes — nunca o conteúdo das conversas. Baixe o diagnóstico completo e envie aqui no Claude para eu corrigir.",
+                "Registra as FALHAS e a ATIVIDADE do app: cada ferramenta executada (argumentos, status, tempo e resultado), cada chamada de Web API do API Hub (URL, etapa, tempo), cada chamada ao modelo, além de conectores, hub, Linux, browser e crashes — com um resumo de falhas por ferramenta. O texto das conversas não entra. Baixe o diagnóstico completo e envie aqui no Claude para eu corrigir.",
                 fontSize = 12.sp, color = c.ink2
             )
             if (logBytes < 0L) {

@@ -78,11 +78,13 @@ object ErrorLog {
             if (body.isNullOrBlank()) return
             sb.append("===== ").append(title).append(" =====\n").append(body.trim()).append("\n\n")
         }
+        section("RESUMO POR FERRAMENTA (execuções · falhas · tempo médio)", ActivityLog.summary(ctx))
         section("ERROS (todas as origens)", readAll(ctx))
+        section("ATIVIDADE (ferramentas, Web API e modelo — mais recentes por último)", ActivityLog.readAll(ctx).takeLast(250_000))
         section("ÚLTIMO CRASH", runCatching { lastCrashFile(ctx).takeIf { it.exists() }?.readText() }.getOrNull())
         runCatching {
             File(ctx.filesDir, "connector-debug").listFiles()?.sortedBy { it.name }?.forEach { f ->
-                section("CONECTOR · ${f.name.removePrefix("connector-").removeSuffix(".debug.log")}", f.readText().takeLast(20_000))
+                section("CONECTOR · ${f.name.removePrefix("connector-").removeSuffix(".debug.log")} (últimas linhas)", f.readText().takeLast(4_000))
             }
         }
         runCatching {
@@ -103,6 +105,7 @@ object ErrorLog {
         synchronized(lock) {
             runCatching { File(directory, FILE).delete() }
             runCatching { File(directory, LAST_CRASH_FILE).delete() }
+            runCatching { File(directory, "activity_log.txt").delete() }
         }
     }
 }

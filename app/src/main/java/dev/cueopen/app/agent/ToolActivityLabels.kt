@@ -54,6 +54,10 @@ object ToolActivityLabels {
         "page_update" -> "Atualizando página" to Activity.Kind.EDITOR
         "page_read", "page_list" -> "Lendo páginas" to Activity.Kind.EDITOR
         "web_search" -> "Buscando na web" to Activity.Kind.SEARCH
+        "webapi_call" -> "API Hub" to Activity.Kind.SEARCH
+        "webapi_list" -> "API Hub · catálogo" to Activity.Kind.SEARCH
+        "webapi_test" -> "API Hub · testando" to Activity.Kind.SEARCH
+        "webapi_save" -> "API Hub · salvando" to Activity.Kind.SEARCH
         "web_fetch" -> "Lendo página" to Activity.Kind.SEARCH
         else -> (if (tool.startsWith("mcp_")) "Conector · " + tool.substringAfter("__") else tool) to Activity.Kind.THINKING
     }
@@ -80,6 +84,8 @@ object ToolActivityLabels {
         "page_create" -> s("title").take(60)
         "page_update", "page_read" -> s("page_id")
         "web_search" -> s("query").take(80)
+        "webapi_call" -> s("args").take(80)
+        "webapi_save" -> s("slug")
         "web_fetch" -> s("url").take(80)
         "send_file" -> s("channel") + " · " + s("path").substringAfterLast('/')
         "device_share_file" -> s("app") + " · " + s("path").substringAfterLast('/')

@@ -103,6 +103,7 @@ class CueApp : Application() {
         // Backup importado: troca o perfil do browser antes de qualquer WebView existir.
         dev.cueopen.app.backup.DataTransfer.applyStagedBrowserData(this)
         dev.cueopen.app.diag.ErrorLog.init(this)
+        dev.cueopen.app.diag.ActivityLog.init(this)
         // Chave Demo opcional da CoinGecko (gratuita) para o mercado, se o usuário tiver configurado.
         runCatching {
             dev.cueopen.app.wallet.MarketApiConfig.geckoApiKey = getSharedPreferences("solana_wallet_settings", MODE_PRIVATE)

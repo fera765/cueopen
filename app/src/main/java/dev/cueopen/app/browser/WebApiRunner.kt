@@ -75,7 +75,14 @@ object WebApiRunner {
             if (o["ok"]?.jsonPrimitive?.contentOrNull != "true") return@withTimeoutOrNull err(a, full, o["error"]?.jsonPrimitive?.contentOrNull ?: "erro no código", o["url"]?.jsonPrimitive?.contentOrNull)
             envelope(a, full, o["url"]?.jsonPrimitive?.contentOrNull.orEmpty(), o["data"], System.currentTimeMillis() - started)
         }
-        out ?: err(a, full, "tempo esgotado (${timeoutMs / 1000}s) na etapa: $stage")
+        val res = out ?: err(a, full, "tempo esgotado (${timeoutMs / 1000}s) na etapa: $stage")
+        val ok = res.contains("\"ok\":true")
+        val count = Regex("\"count\":(\\d+)").find(res)?.groupValues?.get(1)
+        dev.cueopen.app.diag.ActivityLog.webApi(a.slug, ok, System.currentTimeMillis() - started,
+            Regex("\"url\":\"([^\"]*)").find(res)?.groupValues?.get(1) ?: "-",
+            if (ok) "args=$argsJs resultados=${count ?: "?"}" else "args=$argsJs etapa=$stage erro=" + (Regex("\"error\":\"([^\"]*)").find(res)?.groupValues?.get(1) ?: ""))
+        if (!ok) runCatching { dev.cueopen.app.diag.ErrorLog.log("webapi", "${a.slug} falhou na etapa \"$stage\": " + res.take(600), null, a.slug) }
+        res
     }
 
     private fun envelope(a: WebApi, args: JsonObject, url: String, data: JsonElement?, ms: Long): String = buildJsonObject {

@@ -60,7 +60,7 @@ internal object OffscreenStage {
         val stage = (a.window?.decorView as? ViewGroup)?.findViewWithTag<FrameLayout>(TAG) ?: return
         val views = (0 until stage.childCount).mapNotNull { stage.getChildAt(it) as? WebView }
         if (views.isEmpty()) return
-        val target = virtualStage(a.applicationContext) ?: overlayStage(a.applicationContext) ?: return
+        val target = virtualStage(a.applicationContext) ?: return
         stage.removeAllViews()
         views.forEach { v -> runCatching { target.addView(v, FrameLayout.LayoutParams(v.width.coerceAtLeast(360), v.height.coerceAtLeast(480))); v.onResume() } }
     }
@@ -97,7 +97,7 @@ internal object OffscreenStage {
         if (v.parent === vStage && vPresentation?.isShowing == true) return true
         (v.parent as? ViewGroup)?.removeView(v)
         // Em primeiro plano: atrás da UI. Fora dele (ou sem Activity): display virtual, que não depende de permissão.
-        val stage = (if (foreground) activityStage() else null) ?: virtualStage(v.context) ?: overlayStage(v.context) ?: activityStage() ?: return false
+        val stage = (if (foreground) activityStage() else null) ?: virtualStage(v.context) ?: activityStage() ?: return false
         return runCatching {
             stage.addView(v, FrameLayout.LayoutParams(width, height))
             v.onResume()
