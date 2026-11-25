@@ -33,7 +33,7 @@
   "slug": "bing_search",
   "name": "Bing · busca",
   "description": "Resultados do Bing com paginação.",
-  "urlTemplate": "https://www.bing.com/search?q=${enc(args.query)}&setlang=pt-BR&first=${(Number(args.page||1)-1)*10+1}",
+  "urlTemplate": "https://www.bing.com/search?q=${enc(args.query)}&setlang=pt-BR&cc=BR&count=20${Number(args.page||1)>1?'&first='+((Number(args.page)-1)*10+1)+'&FORM=PERE':''}",
   "waitFor": "#b_results",
   "params": [
    {
@@ -166,7 +166,7 @@
     "default": "1"
    }
   ],
-  "code": "const results = api.all(\"[data-component-type='s-search-result']\").map((c, i) => { const a = c.querySelector('h2 a, a.a-link-normal.s-link-style, a.a-link-normal[href*=\"/dp/\"]'); return { position: i + 1, asin: c.getAttribute('data-asin'), title: api.text(c, 'h2'), url: a ? api.abs(a.getAttribute('href')).split('/ref=')[0] : '', price: api.num(api.text(c, '.a-price .a-offscreen')), currency: 'BRL', rating: api.num((api.text(c, '.a-icon-alt') || '').split(' ')[0]), reviews: api.num(api.text(c, '[aria-label$=\"avaliações\"], .s-underline-text')) }; }).filter(r => r.title);\nconst page = Number(args.page || 1);\nreturn { query: args.query, page, count: results.length, has_more: !!api.one('a.s-pagination-next'), next_page: page + 1, results };",
+  "code": "const results = api.all(\"[data-component-type='s-search-result']\").map((c, i) => { const a = c.querySelector('h2 a, a.a-link-normal.s-link-style, a.a-link-normal[href*=\"/dp/\"]'); return { position: i + 1, asin: c.getAttribute('data-asin'), title: api.text(c, 'h2'), url: a ? api.abs(a.getAttribute('href')).split('/ref=')[0] : '', price: api.num(api.text(c, '.a-price .a-offscreen')), currency: 'BRL', rating: api.num((api.text(c, '.a-icon-alt') || '').split(' ')[0]), reviews: api.num(api.text(c, '[aria-label$=\"avaliações\"], .s-underline-text')) }; }).filter(r => r.title);\nconst page = Number(args.page || 1);\nreturn { query: args.query, page, count: results.length, has_more: !!api.one('a.s-pagination-next, a[aria-label*=\"Próxima\"], a[aria-label*=\"próxima\"]') || results.length >= 10, next_page: page + 1, results };",
   "builtin": true,
   "source": "nativa",
   "fallbacks": [

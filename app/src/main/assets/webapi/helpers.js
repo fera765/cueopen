@@ -22,6 +22,7 @@ api.blocked = () => {
   if (/amazon\./.test(u) && (/validatecaptcha|errors\/validatecaptcha/.test(u) || /digite os caracteres|type the characters|robot check/.test(t))) return 'amazon: captcha';
   if (/if this persists, please email us|blocked by network security|you've been blocked|acesso negado|access denied|request blocked/.test(t)) return 'site bloqueou o acesso automático';
   if (/amazon\./.test(u) && /algo deu errado|something went wrong/.test(t) && !document.querySelector("[data-component-type='s-search-result']")) return 'amazon: bloqueio temporário';
+  if (/mercadolivre\.com\.br\/gz\/account-verification|mercadolibre\.com.*account-verification/.test(u)) return 'mercado livre: pede login/verificação da conta';
   if (/are you a robot|você é um robô|confirme que você é humano|account-verification|security check/.test(t)) return 'verificação anti-robô';
   return '';
 };

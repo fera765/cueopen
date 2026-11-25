@@ -34,7 +34,8 @@ for (const a of apis) {
         const sig = e => e.tagName.toLowerCase() + (e.id ? '#' + e.id : '') + (typeof e.className === 'string' && e.className.trim() ? '.' + e.className.trim().split(/\s+/).slice(0, 3).join('.') : '') +
           Array.from(e.attributes).filter(x => /^data-|^role$|^aria-label$/.test(x.name)).slice(0, 3).map(x => `[${x.name}=${String(x.value).slice(0, 25)}]`).join('');
         const chain = e => { const out = []; for (let n = e, k = 0; n && n !== document.body && k < 7; n = n.parentElement, k++) out.push(sig(n)); return out.join(' < '); };
-        const links = Array.from(document.querySelectorAll('h2 a, a h2, h3 a, a h3, a[href*="/dp/"], a[href*="uddg"], a.result__a')).slice(0, 4);
+        let links = Array.from(document.querySelectorAll('h2 a, a h2, h3 a, a h3, a[href*="/dp/"], a[href*="uddg"], a.result__a')).slice(0, 4);
+        if (!links.length) links = Array.from(document.querySelectorAll('a[href^="http"]')).filter(a => (a.innerText || '').trim().length > 30).slice(0, 5);
         return { title: document.title, text: document.body ? document.body.innerText.replace(/\s+/g, ' ').slice(0, 300) : '', n: document.querySelectorAll('*').length,
           links: links.map(l => (l.innerText || '').slice(0, 50) + ' || ' + chain(l)) };
       }).catch(e => ({ err: String(e) }));
