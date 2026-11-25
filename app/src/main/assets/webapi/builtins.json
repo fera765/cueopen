@@ -30,7 +30,7 @@
   "slug": "bing_search",
   "name": "Bing · busca",
   "description": "Resultados do Bing com paginação real (título, link, site, trecho).",
-  "urlTemplate": "https://www.bing.com/search?q=${enc(args.query)}&setlang=pt-BR&cc=BR&first=${(Number(args.page||1)-1)*10+1}${Number(args.page||1)>1?'&FORM=PERE':''}",
+  "urlTemplate": "https://www.bing.com/search?q=${enc(args.query)}&setlang=pt-BR&cc=BR",
   "waitFor": "#b_results",
   "params": [
    {
@@ -48,7 +48,7 @@
     "default": "1"
    }
   ],
-  "code": "const dec = u => { try { const x = new URL(u, location.href); if (/bing\\.com$/.test(x.hostname) && x.pathname.startsWith('/ck/')) { const v = x.searchParams.get('u') || ''; if (v.startsWith('a1')) { let b = v.slice(2).replace(/-/g, '+').replace(/_/g, '/'); while (b.length % 4) b += '='; return atob(b); } } return x.href; } catch (e) { return u; } };\nconst page = Number(args.page || 1);\nconst results = api.all('#b_results > li.b_algo').map(li => {\n  const a = li.querySelector('h2 a') || (li.querySelector('a h2') || {}).parentElement;\n  return { title: api.text(li, 'h2'), url: a ? dec(a.getAttribute('href')) : '', display_url: api.text(li, 'cite'), snippet: api.text(li, '.b_caption p, .b_lineclamp2, .b_lineclamp3, .b_algoSlug, p') };\n}).filter(r => r.title && /^https?:/.test(r.url)).map((r, i) => Object.assign({ position: (page - 1) * 10 + i + 1 }, r));\nreturn { query: args.query, page, count: results.length, has_more: !!api.one('a.sb_pagN, a[title=\"Próxima página\"], a[aria-label=\"Próxima página\"]'), next_page: page + 1, results };",
+  "code": "const dec = u => { try { const x = new URL(u, location.href); if (/bing\\.com$/.test(x.hostname) && x.pathname.startsWith('/ck/')) { const v = x.searchParams.get('u') || ''; if (v.startsWith('a1')) { let b = v.slice(2).replace(/-/g, '+').replace(/_/g, '/'); while (b.length % 4) b += '='; return atob(b); } } return x.href; } catch (e) { return u; } };\nconst page = Number(args.page || 1);\n// Paginação seguindo o próprio link \"Próxima página\" do Bing (mesma sessão), como um usuário faria.\nlet doc = document;\nfor (let p = 1; p < page; p++) {\n  const next = doc.querySelector('a.sb_pagN, a[title=\"Próxima página\"], a[aria-label=\"Próxima página\"]');\n  if (!next) return { query: args.query, page, count: 0, has_more: false, next_page: null, results: [] };\n  const html = await api.fetchText(new URL(next.getAttribute('href'), location.href).href);\n  doc = new DOMParser().parseFromString(html, 'text/html');\n}\nconst results = Array.from(doc.querySelectorAll('#b_results > li.b_algo')).map(li => {\n  const a = li.querySelector('h2 a') || (li.querySelector('a h2') || {}).parentElement;\n  return { title: api.text(li, 'h2'), url: a ? dec(a.getAttribute('href')) : '', display_url: api.text(li, 'cite'), snippet: api.text(li, '.b_caption p, .b_lineclamp2, .b_lineclamp3, .b_algoSlug, p') };\n}).filter(r => r.title && /^https?:/.test(r.url)).map((r, i) => Object.assign({ position: (page - 1) * 10 + i + 1 }, r));\nreturn { query: args.query, page, count: results.length, has_more: !!doc.querySelector('a.sb_pagN, a[title=\"Próxima página\"], a[aria-label=\"Próxima página\"]'), next_page: page + 1, results };",
   "builtin": true,
   "source": "nativa",
   "desktop": true
