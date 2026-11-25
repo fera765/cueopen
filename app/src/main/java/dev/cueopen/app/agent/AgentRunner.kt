@@ -3140,6 +3140,53 @@ class AgentRunner(
         else null
     }
 
+    /** Ferramentas do criador de user scripts (fora do runTool: o método está no limite de tamanho da JVM). */
+    private suspend fun userscriptTool(sessionId: String, name: String, a: JsonObject): ToolResult {
+        fun s(k: String) = a[k]?.jsonPrimitive?.contentOrNull.orEmpty()
+        when (name) {
+            "userscript_test" -> {
+                val code = s("code"); val url = s("url").trim(); val verify = s("verify").trim().trimEnd(';')
+                val (meta, err) = dev.cueopen.app.browser.UserScriptMeta.parse(code)
+                if (meta == null) return ToolResult("ERRO no cabeçalho: $err\nFormato:\n${dev.cueopen.app.browser.UserScriptMeta.EXAMPLE}")
+                if (verify.isBlank()) return ToolResult("ERRO: informe verify — uma expressão JS que prove o efeito do script na página.")
+                if (!dev.cueopen.app.browser.UserScriptMatcher.matches(meta, url))
+                    return ToolResult("ERRO: a url $url não casa com @match/@include (${meta.whereLabel}). Ajuste o @match ou teste numa página certa.")
+                val policy = scriptPolicy(sessionId)
+                (policy.beforeTest(code) as? ScriptBuilderPolicy.Gate.Deny)?.let { deny ->
+                    if (deny.stop) { policy.newRound(); return ToolResult(deny.message, SessionStatus.WAITING_USER) }
+                    return ToolResult(deny.message)
+                }
+                val requireCode = if (meta.requires.isEmpty()) "" else runCatching { dev.cueopen.app.browser.UserScriptInstaller.downloadRequires(meta.requires) }
+                    .getOrElse { return ToolResult("ERRO: não consegui baixar um @require: ${it.message}") }
+                val nav = browserFor(sessionId).navigate(BrowserVisitLog.canonical(url))
+                if (nav.startsWith("ERROR")) return ToolResult(nav)
+                val r = browserFor(sessionId).runUserScriptForTest(dev.cueopen.app.browser.BrowserPolicies.fromMeta(meta, code, requireCode, "ia", null), verify)
+                val passed = ScriptBuilderPolicy.passed(r.sync, r.asyncErrors, r.verifyTruthy)
+                policy.afterTest(code, passed)
+                return ToolResult(buildString {
+                    appendLine(if (passed) "PASSOU ✓ (teste ${policy.testsRun}/${ScriptBuilderPolicy.MAX_TESTS}). Chame userscript_propose com ESTE MESMO código."
+                        else "FALHOU ✕ (teste ${policy.testsRun}/${ScriptBuilderPolicy.MAX_TESTS}).")
+                    appendLine("Execução: " + if (r.sync == "ok") "sem erro síncrono" else r.sync.removePrefix("err:"))
+                    if (r.asyncErrors.isNotEmpty()) appendLine("Erros na página após o script: " + r.asyncErrors.joinToString(" | "))
+                    if (r.logs.isNotEmpty()) appendLine("GM_log: " + r.logs.joinToString(" | "))
+                    appendLine("verify → " + (r.verifyError?.let { "ERRO: $it" } ?: "${r.verifyValue} (${if (r.verifyTruthy) "verdadeiro" else "falso/vazio"})"))
+                    if (!passed) append("Diagnostique a causa exata antes de mudar o código: use userscript_inspect/browser_js no ponto que falhou (o seletor acha algo? o elemento existe quando o script roda?).")
+                }.trimEnd())
+            }
+            "userscript_propose" -> {
+                val code = s("code")
+                val (meta, err) = dev.cueopen.app.browser.UserScriptMeta.parse(code)
+                if (meta == null) return ToolResult("ERRO no cabeçalho: $err")
+                if (!scriptPolicy(sessionId).canPropose(code))
+                    return ToolResult("RECUSADO: este código não é o que passou no userscript_test. Teste esta versão (com verify) e proponha exatamente o código aprovado.")
+                store.addItem(sessionId, ChatItem.UserScriptProposal(name = meta.name, version = meta.version, description = meta.description,
+                    where = meta.whereLabel, code = code))
+                return ToolResult("Card \"Instalar no Browser\" exibido. Diga ao usuário em 1-2 frases o que o script faz e onde roda, e finalize.")
+            }
+        }
+        return ToolResult("ERRO: ferramenta desconhecida $name")
+    }
+
     /** Ferramentas do Web API Hub (fora do runTool: o método já está no limite de tamanho da JVM). */
     private suspend fun webApiTool(sessionId: String, name: String, a: JsonObject): ToolResult {
         fun s(k: String) = a[k]?.jsonPrimitive?.contentOrNull.orEmpty()
@@ -4667,45 +4714,7 @@ class AgentRunner(
                 return ToolResult(out + if (selectors.isEmpty() && s("text").isBlank()) "\n(Dica: passe selectors e/ou text para localizar o alvo.)" else "")
             }
             "webapi_list", "webapi_call", "webapi_test", "webapi_save" -> return webApiTool(sessionId, call.name, a)
-            "userscript_test" -> {
-                val code = s("code"); val url = s("url").trim(); val verify = s("verify").trim().trimEnd(';')
-                val (meta, err) = dev.cueopen.app.browser.UserScriptMeta.parse(code)
-                if (meta == null) return ToolResult("ERRO no cabeçalho: $err\nFormato:\n${dev.cueopen.app.browser.UserScriptMeta.EXAMPLE}")
-                if (verify.isBlank()) return ToolResult("ERRO: informe verify — uma expressão JS que prove o efeito do script na página.")
-                if (!dev.cueopen.app.browser.UserScriptMatcher.matches(meta, url))
-                    return ToolResult("ERRO: a url $url não casa com @match/@include (${meta.whereLabel}). Ajuste o @match ou teste numa página certa.")
-                val policy = scriptPolicy(sessionId)
-                (policy.beforeTest(code) as? ScriptBuilderPolicy.Gate.Deny)?.let { deny ->
-                    if (deny.stop) { policy.newRound(); return ToolResult(deny.message, SessionStatus.WAITING_USER) }
-                    return ToolResult(deny.message)
-                }
-                val requireCode = if (meta.requires.isEmpty()) "" else runCatching { dev.cueopen.app.browser.UserScriptInstaller.downloadRequires(meta.requires) }
-                    .getOrElse { return ToolResult("ERRO: não consegui baixar um @require: ${it.message}") }
-                val nav = browserFor(sessionId).navigate(BrowserVisitLog.canonical(url))
-                if (nav.startsWith("ERROR")) return ToolResult(nav)
-                val r = browserFor(sessionId).runUserScriptForTest(dev.cueopen.app.browser.BrowserPolicies.fromMeta(meta, code, requireCode, "ia", null), verify)
-                val passed = ScriptBuilderPolicy.passed(r.sync, r.asyncErrors, r.verifyTruthy)
-                policy.afterTest(code, passed)
-                return ToolResult(buildString {
-                    appendLine(if (passed) "PASSOU ✓ (teste ${policy.testsRun}/${ScriptBuilderPolicy.MAX_TESTS}). Chame userscript_propose com ESTE MESMO código."
-                        else "FALHOU ✕ (teste ${policy.testsRun}/${ScriptBuilderPolicy.MAX_TESTS}).")
-                    appendLine("Execução: " + if (r.sync == "ok") "sem erro síncrono" else r.sync.removePrefix("err:"))
-                    if (r.asyncErrors.isNotEmpty()) appendLine("Erros na página após o script: " + r.asyncErrors.joinToString(" | "))
-                    if (r.logs.isNotEmpty()) appendLine("GM_log: " + r.logs.joinToString(" | "))
-                    appendLine("verify → " + (r.verifyError?.let { "ERRO: $it" } ?: "${r.verifyValue} (${if (r.verifyTruthy) "verdadeiro" else "falso/vazio"})"))
-                    if (!passed) append("Diagnostique a causa exata antes de mudar o código: use userscript_inspect/browser_js no ponto que falhou (o seletor acha algo? o elemento existe quando o script roda?).")
-                }.trimEnd())
-            }
-            "userscript_propose" -> {
-                val code = s("code")
-                val (meta, err) = dev.cueopen.app.browser.UserScriptMeta.parse(code)
-                if (meta == null) return ToolResult("ERRO no cabeçalho: $err")
-                if (!scriptPolicy(sessionId).canPropose(code))
-                    return ToolResult("RECUSADO: este código não é o que passou no userscript_test. Teste esta versão (com verify) e proponha exatamente o código aprovado.")
-                store.addItem(sessionId, ChatItem.UserScriptProposal(name = meta.name, version = meta.version, description = meta.description,
-                    where = meta.whereLabel, code = code))
-                return ToolResult("Card \"Instalar no Browser\" exibido. Diga ao usuário em 1-2 frases o que o script faz e onde roda, e finalize.")
-            }
+            "userscript_test", "userscript_propose" -> return userscriptTool(sessionId, call.name, a)
             "team_review" -> return ToolResult(teamReview(sessionId, s("task_id"), s("verdict"), s("note")))
             "team_message" -> return ToolResult(teamMessage(sessionId, s("agent"), s("message")))
             "team_stop" -> return ToolResult(teamStop(sessionId, s("agent"), s("reason")))
