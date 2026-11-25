@@ -5,7 +5,7 @@ const root = process.env.ASSETS || 'app/src/main/assets/webapi';
 const apis = JSON.parse(fs.readFileSync(`${root}/builtins.json`, 'utf8'));
 const helpers = fs.readFileSync(`${root}/helpers.js`, 'utf8');
 const only = process.argv.slice(2);
-const cases = { google_search: [{ query: 'openai noticias' }, { query: 'openai noticias', page: 2 }], wikipedia_search: [{ query: 'inteligência artificial' }],
+const cases = { bing_search: [{ query: 'notebook' }, { query: 'notebook', page: 2 }, { query: 'notebook', page: 3 }], google_search: [{ query: 'openai noticias' }, { query: 'openai noticias', page: 2 }], wikipedia_search: [{ query: 'inteligência artificial' }],
   github_search: [{ query: 'kotlin android' }, { query: 'kotlin android', page: 2 }] };
 const browser = await chromium.launch();
 const ctx = await browser.newContext({ ...devices['Pixel 7'], locale: 'pt-BR',

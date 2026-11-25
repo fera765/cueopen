@@ -14,6 +14,13 @@ const api = {
   scroll: async (times = 3) => { for (let i = 0; i < times; i++) { window.scrollTo(0, document.body.scrollHeight); await sleep(500); } },
 };
 /** Página de bloqueio (captcha/verificação anti-robô)? Devolve o motivo ou ''. */
+/** Lê um feed RSS/Atom (da URL atual ou de outra) e devolve [{title, url, snippet, date, source}]. */
+api.rss = async (u) => {
+  const xml = await api.fetchText(u || location.href);
+  const d = new DOMParser().parseFromString(xml, 'text/xml');
+  const tx = (el, sel) => { const e = el.getElementsByTagName(sel)[0]; return e ? (e.textContent || '').replace(/\s+/g, ' ').trim() : ''; };
+  return Array.from(d.getElementsByTagName('item')).map(it => ({ title: tx(it, 'title'), url: tx(it, 'link'), snippet: tx(it, 'description').replace(/<[^>]+>/g, ''), date: tx(it, 'pubDate'), source: tx(it, 'News:Source') || tx(it, 'source') }));
+};
 api.blocked = () => {
   const u = location.href, t = (document.title + ' ' + (document.body ? document.body.innerText.slice(0, 3000) : '')).toLowerCase();
   if (/google\.[a-z.]+\/sorry\//.test(u) || /tráfego incomum|unusual traffic/.test(t)) return 'google: verificação anti-robô';
