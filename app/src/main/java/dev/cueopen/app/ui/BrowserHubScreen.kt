@@ -68,7 +68,7 @@ private fun AgentBrowsersTab(nav: NavController) {
     val app = CueApp.instance
     val st by app.store.state.collectAsStateWithLifecycle()
     val c = Cue.c
-    val open = remember(st.sessions.size) { app.openBrowsers().filterKeys { it != BrowserFeatures.LOGIN_BROWSER_KEY } }
+    val open = remember(st.sessions.size) { app.openBrowsers().filterKeys { it != BrowserFeatures.LOGIN_BROWSER_KEY && it != dev.cueopen.app.browser.WebApiRunner.KEY } }
     LazyColumn(contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
         item {
             Text("Cada chat/agente tem o PRÓPRIO browser (abas, histórico e estado independentes). Só as sessões de login e os User Scripts abaixo são globais, e cada um respeita os agentes autorizados.",

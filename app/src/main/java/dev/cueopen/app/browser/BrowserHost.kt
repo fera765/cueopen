@@ -1138,6 +1138,9 @@ class BrowserHost(private val appCtx: Context, private val sessionId: String = "
             kotlinx.coroutines.delay(400)
         }
         val st = readiness(tab)
+        // Página de verificação anti-robô (captcha/deslize): esperar não adianta — diz isso direto.
+        val wall = eval("(function(){var t=(document.title+' '+(document.body?document.body.innerText.slice(0,1500):'')).toLowerCase();return /captcha|tráfego incomum|unusual traffic|deslize para|slide to verify|verify you are human|are you a robot|você é um robô/.test(t)})()", 2_000, tab) == "true"
+        if (wall) return "BLOQUEADO: o site mostrou uma verificação anti-robô (captcha). Esperar não resolve. Não tente contornar: use outra fonte (web_search, outro site) ou peça ao usuário para resolver no Browser."
         return "TIMEOUT: ${if (t != null) "o texto \"$t\" não apareceu" else "o texto \"$g\" não sumiu"} em ${limit / 1000}s " +
             "(página: readyState=${st.ready}, ${st.chars} caracteres, ${st.inflight} requisição(ões) pendente(s)). Leia o snapshot abaixo antes de decidir; não reabra a página."
     }
@@ -1179,6 +1182,10 @@ class BrowserHost(private val appCtx: Context, private val sessionId: String = "
         while (st.ready != "complete" && System.currentTimeMillis() < loadDeadline) { kotlinx.coroutines.delay(300); st = readiness(tab) }
         // 4) estabilidade
         st = waitForStable(tab, 8_000)
+        // Leitura vazia (readyState="" e 0 caracteres) = a medição caiu no meio de um redirecionamento (ex.: /contact → /pt/contact):
+        // mede de novo antes de declarar a página incompleta.
+        var again = 0
+        while (st.ready.isBlank() && st.chars == 0 && again++ < 6) { kotlinx.coroutines.delay(500); st = readiness(tab) }
         tab.diag.add("estável: readyState=${st.ready}, ${st.chars} caracteres, ${st.inflight} pendente(s)")
         if (tab.id == activeTabId) _ui.value = _ui.value.copy(loading = false)
         if (httpCode != null) {
@@ -1467,7 +1474,7 @@ class BrowserHost(private val appCtx: Context, private val sessionId: String = "
      * browser_js: roda o código com eval (aceita instruções e expressão final), ESPERA Promise (async/await, fetch)
      * e devolve o erro lançado em vez de "null". Sem valor de retorno, diz isso explicitamente para o agente mudar a abordagem.
      */
-    suspend fun runJs(code: String): String {
+    suspend fun runJs(code: String, promiseTimeoutMs: Long = 25_000): String {
         val tab = onMain { activeTab() } ?: return "ERROR: não há aba ativa no browser."
         val key = "__fjs" + System.nanoTime()
         val q = org.json.JSONObject.quote(code)
@@ -1477,13 +1484,13 @@ class BrowserHost(private val appCtx: Context, private val sessionId: String = "
             "return S(r)}catch(e){return 'ERROR (exceção no script): '+String(e&&e.message||e)}})()", tab = tab)
         val out = if (start != "__PROMISE__") start else {
             var got: String? = null
-            val deadline = System.currentTimeMillis() + 25_000
+            val deadline = System.currentTimeMillis() + promiseTimeoutMs
             while (got == null && System.currentTimeMillis() < deadline) {
                 kotlinx.coroutines.delay(120)
                 val r = eval("(function(){var x=window['$key'];if(!x)return '__WAIT__';delete window['$key'];return x.e!==undefined?'ERROR (Promise rejeitada): '+x.e:x.v})()", tab = tab)
                 if (r != "__WAIT__") got = r
             }
-            got ?: "timeout: a Promise não terminou em 25s (algo no código ficou esperando para sempre)"
+            got ?: "timeout: a Promise não terminou em ${promiseTimeoutMs / 1000}s (algo no código ficou esperando para sempre)"
         }
         return when (out) {
             "__UNDEF__", "null", "" -> "(sem valor: o código não devolveu nada. Termine com uma expressão, ex.: JSON.stringify(resultado), ou use return dentro de uma função)"

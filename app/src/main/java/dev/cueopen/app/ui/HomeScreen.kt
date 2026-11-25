@@ -293,6 +293,9 @@ private fun AgentSelector(agent: AgentProfile?, agents: List<AgentProfile>, onSe
     }
 }
 
+/** Colagem a partir deste tamanho vira arquivo anexado. */
+private const val PASTE_TO_FILE_CHARS = 3_000
+
 /** Caixa de composição (anexo, voz, enviar) — usada na Home e no Chat. */
 @Composable
 fun Composer(
@@ -332,6 +335,7 @@ fun Composer(
         }
     }
     var files by remember { mutableStateOf(listOf<Uri>()) }
+    val composerCtx = androidx.compose.ui.platform.LocalContext.current
     var fileNames by remember { mutableStateOf<Map<Uri, String>>(emptyMap()) }
     val ctx = LocalContext.current
     LaunchedEffect(files) {
@@ -577,9 +581,24 @@ fun Composer(
             if (editor.text.isEmpty()) Text(placeholder, color = c.ink3, fontSize = 16.sp)
             BasicTextField(
                 value = editor,
-                onValueChange = { next ->
+                onValueChange = { next0 ->
                     val oldRange = mentionRange
                     val oldText = editor.text
+                    // Texto muito longo colado de uma vez vira um arquivo anexado (como no Claude): o campo fica leve
+                    // e o agente recebe o conteúdo inteiro como arquivo, em vez de uma mensagem gigante.
+                    var next = next0
+                    if (next0.text.length - oldText.length >= PASTE_TO_FILE_CHARS) {
+                        val pre = oldText.commonPrefixWith(next0.text).length
+                        val suf = oldText.substring(pre).commonSuffixWith(next0.text.substring(pre)).length
+                        val chunk = next0.text.substring(pre, next0.text.length - suf)
+                        runCatching {
+                            val dir = java.io.File(composerCtx.cacheDir, "pasted").apply { mkdirs() }
+                            val f = java.io.File(dir, "texto-colado-" + java.text.SimpleDateFormat("HHmmss", java.util.Locale.ROOT).format(java.util.Date()) + ".txt")
+                            f.writeText(chunk)
+                            files = files + Uri.fromFile(f)
+                            next = TextFieldValue(oldText, selection = TextRange(pre))
+                        }
+                    }
                     editor = next
                     if (oldRange != null && (oldRange.end > next.text.length ||
                             oldRange.end > oldText.length ||
@@ -634,9 +653,9 @@ fun Composer(
                     }
                 }
             } else {
-                val enabled = value.isNotBlank()
+                val enabled = value.isNotBlank() || files.isNotEmpty()
                 Box(Modifier.size(40.dp).clip(CircleShape).background(if (enabled) c.ink else c.surface2)
-                    .clickable(enabled) { onSend(value.trim(), files); files = emptyList() }, contentAlignment = Alignment.Center) {
+                    .clickable(enabled) { onSend(value.trim().ifBlank { "Segue o conteúdo no arquivo anexado." }, files); files = emptyList() }, contentAlignment = Alignment.Center) {
                     Icon(Icons.Rounded.ArrowUpward, "Enviar", tint = if (enabled) c.bg else c.ink3)
                 }
             }

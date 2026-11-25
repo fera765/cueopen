@@ -521,8 +521,15 @@ private fun UserBubble(i: ChatItem.User) {
                     }
                 }
             }
-            Text(shown, Modifier.widthIn(max = 320.dp).clip(RoundedCornerShape(20.dp, 20.dp, 6.dp, 20.dp)).background(c.bubble).padding(horizontal = 14.dp, vertical = 10.dp),
-                style = MaterialTheme.typography.bodyLarge)
+            // Mensagem longa: mostra o começo e um "Ver mais"/"Ver menos" dentro do próprio card.
+            val long = remember(i.text) { i.text.length > 700 || i.text.count { it == '\n' } > 12 }
+            var expanded by remember(i.id) { mutableStateOf(false) }
+            Column(Modifier.widthIn(max = 320.dp).clip(RoundedCornerShape(20.dp, 20.dp, 6.dp, 20.dp)).background(c.bubble).padding(horizontal = 14.dp, vertical = 10.dp)) {
+                Text(shown, style = MaterialTheme.typography.bodyLarge,
+                    maxLines = if (long && !expanded) 10 else Int.MAX_VALUE, overflow = TextOverflow.Ellipsis)
+                if (long) Text(if (expanded) "Ver menos" else "Ver mais", fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = c.accent,
+                    modifier = Modifier.padding(top = 6.dp).clip(RoundedCornerShape(8.dp)).clickable { expanded = !expanded }.padding(vertical = 2.dp))
+            }
         }
     }
 }
