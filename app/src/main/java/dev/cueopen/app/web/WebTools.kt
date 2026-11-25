@@ -141,8 +141,11 @@ object WebTools {
             // Divide em buscas simples (sem aspas e sem "site oficial") e devolve cada uma.
             val parts = query.split(Regex("\\s\\+\\s|\\s+\\|\\s+")).map { it.replace("\"", "").replace(Regex("(?i)\\bsite oficial\\b"), "").trim() }.filter { it.length >= 3 }
             val simple = query.replace("\"", "").replace(Regex("(?i)\\bsite oficial\\b"), "").trim()
-            if (parts.size > 1) return parts.take(4).joinToString("\n\n") { "### " + it + "\n" + search(it, (n / parts.size).coerceAtLeast(3)) } +
-                "\n\n(Dica: faça uma busca por assunto/empresa; juntar várias com + não retorna nada.)"
+            if (parts.size > 1) {
+                val sb = StringBuilder()
+                for (part in parts.take(4)) sb.append("### ").append(part).append('\n').append(search(part, (n / parts.size).coerceAtLeast(3))).append("\n\n")
+                return sb.append("(Dica: faça uma busca por assunto/empresa; juntar várias com + não retorna nada.)").toString()
+            }
             if (simple != query && simple.length >= 3) return search(simple, n)
             return "Nenhum resultado na busca (Google, Bing e DuckDuckGo). Tente outros termos, mais curtos."
         }
