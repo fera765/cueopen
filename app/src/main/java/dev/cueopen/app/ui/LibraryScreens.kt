@@ -104,7 +104,7 @@ fun AgentsScreen(nav: NavController) {
 
 @OptIn(ExperimentalLayoutApi::class, ExperimentalMaterial3Api::class)
 @Composable
-fun AgentEditScreen(nav: NavController, id: String, botId: String? = null) {
+fun AgentEditScreen(nav: NavController, id: String, botId: String? = null, sectionId: String? = null) {
     val app = CueApp.instance
     val st by app.store.state.collectAsStateWithLifecycle()
     val existing = st.agents.firstOrNull { it.id == id }
@@ -138,7 +138,7 @@ fun AgentEditScreen(nav: NavController, id: String, botId: String? = null) {
     var walletAutonomousTransfer by remember(a.id) { mutableStateOf(walletPolicies.canAgentAutonomousTransfer(a.id)) }
     var walletDayTrade by remember(a.id) { mutableStateOf(walletPolicies.canAgentDayTrade(a.id)) }
     Scaffold(containerColor = c.bg, topBar = {
-        CueTopBar(if (existing == null) "Criar Agent" else a.name, { nav.popBackStack() }) {
+        CueTopBar(if (existing == null) (if (sectionId != null) "Criar Agent para a seção" else "Criar Agent") else a.name, { nav.popBackStack() }) {
             if (existing != null) IconButton({ app.store.deleteAgent(id); nav.popBackStack() }) { Icon(Icons.Rounded.Delete, "Excluir", tint = c.err) }
         }
     }) { pad ->
@@ -392,6 +392,8 @@ fun AgentEditScreen(nav: NavController, id: String, botId: String? = null) {
                     dayTrade = walletAccess && walletDayTrade
                 )
                 if (saved.autonomous) app.agent.startAutonomy()
+                // Aberto pelo "Adicionar agente" de uma seção: o agente salvo já entra no time.
+                sectionId?.let { app.agent.addAgentToSection(it, saved.id) }
                 nav.popBackStack()
             }
             Spacer(Modifier.height(24.dp))

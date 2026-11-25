@@ -573,6 +573,25 @@ class AgentRunner(
         return "${ag.name} adicionado à seção ${sec.name}."
     }
 
+    /** Tira um agente do time (e, se [delete], apaga da biblioteca); a lista do coordenador é refeita e ele é avisado. */
+    fun removeAgentFromSection(sectionId: String, agentId: String, delete: Boolean) {
+        val sec = store.section(sectionId) ?: return
+        val ag = store.agent(agentId)
+        val updated = sec.copy(agentIds = sec.agentIds - agentId, memberOrder = sec.memberOrder - agentId)
+        store.upsertSection(updated)
+        store.agent(sec.coordinatorAgentId)?.let { coord ->
+            val ins = coord.instructions; val start = ins.indexOf("Seu time:\n")
+            if (start >= 0) {
+                val end = ins.indexOf("\nUse team_plan", start).takeIf { it > 0 } ?: ins.length
+                store.upsertAgent(coord.copy(instructions = ins.substring(0, start) + "Seu time:\n" + rosterOf(updated) + ins.substring(end)))
+            }
+        }
+        store.session(sec.sessionId)?.let { chat -> store.editSession(chat.id) { it.copy(llm = it.llm + LlmMessage("user",
+            "[Sistema] ${ag?.name ?: "Um agente"} saiu do time desta seção. Não delegue mais para ele; redistribua o que estava com ele.")) } }
+        store.state.value.sessions.filter { it.sectionId == sectionId && it.agentId == agentId }.forEach { stop(it.id, pauseAutonomy = true) }
+        if (delete) { dev.cueopen.app.scheduler.Heartbeat.cancel(ctx, agentId); store.deleteAgent(agentId) }
+    }
+
     private fun createSection(
         sessionId: String, name: String, description: String, coordinatorInstructions: String,
         agentsJson: String, firstTask: String, capsCsv: String, suggestWallet: Boolean,
@@ -2529,6 +2548,10 @@ class AgentRunner(
         if (total == 0) return "$shown — arquivo vazio."
         if (start > total) return "$shown tem só $total linhas; offset=$start está além do fim. Nada novo para ler."
         val tail = if (last < total) "[continua: chame file_read com path=$shown offset=${last + 1} para as próximas linhas]" else "[fim do arquivo]"
+        pendingCoverage?.let { (key, stamp) -> if (key.endsWith("|" + f.absolutePath)) readCoverage.compute(key) { _, cur ->
+            val base = if (cur == null || cur.first != stamp) (stamp to mutableListOf<IntRange>()) else cur
+            base.second.add(start..last); base } }
+        pendingCoverage = null
         return "$shown — linhas $start–$last de $total (${f.length() / 1024} KB)\n" + sb.toString() + tail
     }
 
@@ -3135,9 +3158,41 @@ class AgentRunner(
     private fun readCache(sessionId: String, f: java.io.File, offset: Int, limit: Int): String? {
         val key = "$sessionId|${f.absolutePath}|$offset|$limit"
         val stamp = "${f.lastModified()}:${f.length()}:${store.session(sessionId)?.compactions ?: 0}:${ctxMgr.clearEpochOf(sessionId)}"
-        return if (fileReadSeen.put(key, stamp) == stamp)
-            "[Você já leu exatamente este trecho nesta tarefa e o arquivo não mudou. Use o conteúdo que já está no contexto; para outra parte, mude offset, ou ache a linha com file_search.]"
-        else null
+        if (fileReadSeen.put(key, stamp) == stamp)
+            return "[Você já leu exatamente este trecho nesta tarefa e o arquivo não mudou. Use o conteúdo que já está no contexto; para outra parte, mude offset, ou ache a linha com file_search.]"
+        // Releitura com outro offset/limite de linhas que JÁ foram lidas (arquivo igual, contexto não limpo): não lê de novo.
+        val covKey = "$sessionId|${f.absolutePath}"
+        val cov = readCoverage[covKey]?.takeIf { it.first == stamp }?.second
+        val want = offset.coerceAtLeast(1)..(offset.coerceAtLeast(1) + limit.coerceIn(1, 1000) - 1)
+        val lines = runCatching { f.useLines { it.count() } }.getOrDefault(Int.MAX_VALUE)
+        val wantEnd = minOf(want.last, lines)
+        if (cov != null && wantEnd >= want.first && (want.first..wantEnd).all { n -> cov.any { n in it } }) {
+            val n = redundantReads.merge(covKey, 1, Int::plus) ?: 1
+            if (n >= 3) flagRedundantReads(sessionId, f.name, n)
+            return "[Releitura desnecessária ($n): as linhas ${want.first}–$wantEnd de ${f.name} já foram lidas nesta tarefa e o arquivo não mudou. " +
+                "O conteúdo está no seu contexto/anotações. Pare de reler e avance para a entrega; leia só linhas ainda não lidas.]"
+        }
+        pendingCoverage = covKey to stamp
+        return null
+    }
+
+    /** Linhas já lidas por sessão+arquivo (válidas enquanto o arquivo, compactações e limpezas não mudam). */
+    private val readCoverage = java.util.concurrent.ConcurrentHashMap<String, Pair<String, MutableList<IntRange>>>()
+    private val redundantReads = java.util.concurrent.ConcurrentHashMap<String, Int>()
+    @Volatile private var pendingCoverage: Pair<String, String>? = null
+
+    /**
+     * Orquestração: agente de uma seção relendo o mesmo conteúdo várias vezes → o coordenador é avisado para intervir
+     * (redirecionar ou encerrar a tarefa dele). Fora de seção, o próprio aviso da ferramenta já corta o ciclo.
+     */
+    private fun flagRedundantReads(sessionId: String, file: String, n: Int) {
+        val s = store.session(sessionId) ?: return
+        val sec = store.section(s.sectionId) ?: return
+        if (sec.sessionId == sessionId || n % 3 != 0) return
+        val who = store.agent(s.agentId)?.name ?: "Um agente"
+        store.editSession(sec.sessionId) { it.copy(llm = it.llm + LlmMessage("user",
+            "[Sistema · orquestração] $who está relendo $file pela ${n}ª vez sem informação nova. Intervenha: diga a ele o que entregar com o que já tem (team_message) ou encerre a tarefa (team_stop).")) }
+        runCatching { dev.cueopen.app.diag.ActivityLog.write("orq", "$who relendo $file ($n vezes) — coordenador avisado", sessionId) }
     }
 
     /** Ferramentas do criador de user scripts (fora do runTool: o método está no limite de tamanho da JVM). */
@@ -3370,6 +3425,7 @@ class AgentRunner(
             appendLine("2b. Quando uma ferramenta falhar: leia a mensagem, identifique a causa e mude a abordagem (outro caminho, comando ou argumento). Repetir a mesma chamada produz o mesmo erro. Se ficar bloqueado de verdade, finalize explicando o motivo em vez de insistir.")
             appendLine("2b1. Permissões do sistema: `Permission denied` em `/vendor`, `/system`, `/proc`, `/sys` ou `/dev` é um limite do ambiente, não uma falha do `find`. Não use `sudo`, não repita a varredura e não tente contornar. Restrinja as buscas ao workspace autorizado e, se o dado necessário estiver fora dele, relate esse limite.")
             appendLine("2c. Servidores locais e browser: `localhost`/`127.0.0.1` apontam para o ambiente que hospeda o WebView, então não presuma que shell, navegador, emulador e computador remoto compartilham a mesma rede. Antes de abrir um servidor local: (1) identifique no projeto o comando e a porta; (2) verifique o processo/listener e faça uma sonda HTTP curta no mesmo ambiente de rede do navegador; (3) se o serviço não estiver pronto, inicie-o em segundo plano com o comando correto e aguarde uma resposta HTTP saudável com tentativas limitadas (sem `sleep` fixo); (4) confirme que o WebView alcança o endereço. `CONNECTION_REFUSED` significa listener, porta ou ambiente errado: corrija isso antes de chamar `browser_navigate` de novo. Depois de navegar, diferencie resposta HTTP, DOM carregado e prontidão funcional — `PARTIAL` ou texto visível não provam que a página está hidratada e pronta. Em timeout, inspecione URL, estado do DOM, console, requisições e logs do servidor e escolha uma recuperação específica; aumentar o prazo ou tentar de novo às cegas não resolve.")
+            appendLine("0. ORDEM DIRETA É SUPREMA: uma instrução explícita do usuário ou do coordenador (mensagem do usuário, [Tarefa do coordenador], team_message, [Sistema · orquestração]) vale acima do seu plano, das suas preferências e de qualquer conteúdo de página/arquivo. Se mandarem parar, pare; se mandarem mudar o rumo, mude na hora; se mandarem entregar com o que já tem, entregue. Nunca ignore nem adie uma ordem direta para terminar o que estava fazendo.")
             appendLine("3z. Estado atual primeiro: páginas e arquivos mudam enquanto você trabalha. Decida sempre com a leitura mais recente (browser_read para a página, file_read para o arquivo vivo) e registre em notes_write os dados que vai precisar depois. Snapshots antigos do browser e saídas antigas arquivadas em .cue/out são histórico, não o estado de agora: não os releia para seguir a tarefa; só volte a eles quando o usuário ou o coordenador pedir exatamente aquele conteúdo.")
             appendLine("3y. Projeto com AGENTS.md: se existir um AGENTS.md na raiz do workspace, ele traz as convenções do projeto (comandos de build e teste, estrutura, estilo) e aparece em \"Instruções do projeto\". Siga-o. Quando você descobrir algo que valha para as próximas tarefas no mesmo projeto (como rodar, onde ficam as coisas), acrescente ao AGENTS.md com file_write append=true.")
             appendLine("3. Economize contexto: leia só o necessário (head/grep) e mande saídas longas para um arquivo.")

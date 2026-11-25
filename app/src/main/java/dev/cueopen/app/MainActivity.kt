@@ -233,10 +233,11 @@ fun CueNav(nav: NavHostController, startOnboarding: Boolean) {
         composable("agents") { AgentsScreen(nav) }
         composable("agentbots") { AgentBotsScreen(nav) }
         composable("importdata") { ImportDataScreen(nav) }
-        composable("agent/{id}?bot={bot}", arguments = listOf(
+        composable("agent/{id}?bot={bot}&section={section}", arguments = listOf(
             navArgument("id") { type = NavType.StringType },
             navArgument("bot") { type = NavType.StringType; nullable = true; defaultValue = null },
-        )) { e -> AgentEditScreen(nav, e.arguments!!.getString("id")!!, e.arguments?.getString("bot")) }
+            navArgument("section") { type = NavType.StringType; nullable = true; defaultValue = null },
+        )) { e -> AgentEditScreen(nav, e.arguments!!.getString("id")!!, e.arguments?.getString("bot"), e.arguments?.getString("section")) }
         composable("skills") { SkillsScreen(nav) }
         composable("skill/{id}") { e -> SkillEditScreen(nav, e.arguments!!.getString("id")!!) }
         composable("scheduled") { ScheduledScreen(nav) }

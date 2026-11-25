@@ -788,7 +788,7 @@ private fun SessionDrawer(nav: NavController, sessions: List<Session>, agents: L
             if (sections.isNotEmpty()) {
                 item { SectionLabel("Seções") }
                 items(sections, key = { "sec-" + it.id }) { sec ->
-                    SectionRow(sec, live.sessions, live.agents, onOpen = { go("chat/$it") }, onOpenAgent = { go("agent/$it") })
+                    SectionRow(sec, live.sessions, live.agents, onOpen = { go("chat/$it") }, onOpenAgent = { go("agent/$it") }, onCreateAgent = { go("agent/new?section=$it") })
                 }
             }
             if (archivedSections.isNotEmpty()) {
@@ -802,7 +802,7 @@ private fun SessionDrawer(nav: NavController, sessions: List<Session>, agents: L
                     }
                 }
                 if (showArchived) items(archivedSections, key = { "arch-" + it.id }) { sec ->
-                    SectionRow(sec, live.sessions, live.agents, onOpen = { go("chat/$it") }, onOpenAgent = { go("agent/$it") })
+                    SectionRow(sec, live.sessions, live.agents, onOpen = { go("chat/$it") }, onOpenAgent = { go("agent/$it") }, onCreateAgent = { go("agent/new?section=$it") })
                 }
             }
             groups.forEach { (g, list) ->
@@ -982,7 +982,7 @@ val slashCommands = listOf(
 @Composable
 private fun SectionRow(
     sec: dev.cueopen.app.data.Section, sessions: List<Session>, agents: List<AgentProfile>,
-    onOpen: (String) -> Unit, onOpenAgent: (String) -> Unit,
+    onOpen: (String) -> Unit, onOpenAgent: (String) -> Unit, onCreateAgent: (String) -> Unit = {},
 ) {
     val c = Cue.c
     val app = CueApp.instance
@@ -990,7 +990,8 @@ private fun SectionRow(
     var menu by remember { mutableStateOf(false) }
     var confirm by remember { mutableStateOf<String?>(null) } // "delete" | "restart" | "clear"
     var addAgent by remember { mutableStateOf(false) }
-    if (addAgent) AddAgentToSectionDialog(sec, agents) { addAgent = false }
+    var removing by remember { mutableStateOf<AgentProfile?>(null) }
+    if (addAgent) AddAgentToSectionDialog(sec, agents, onCreate = { addAgent = false; onCreateAgent(sec.id) }) { addAgent = false }
     val chats = sessions.filter { it.sectionId == sec.id }
     val busy = chats.any { it.status == SessionStatus.RUNNING }
     val waiting = chats.any { it.status == SessionStatus.WAITING_USER }
@@ -1048,10 +1049,20 @@ private fun SectionRow(
                     Text(a.name, fontSize = 14.sp, modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis)
                     // agente trabalhando agora: ponto verde pulsando (um por agente ativo)
                     if (chat?.status == SessionStatus.RUNNING) PulsingDot(c.ok) else StatusDot(chat?.status ?: SessionStatus.IDLE)
+                    IconButton({ removing = a }, Modifier.size(28.dp)) { Icon(Icons.Rounded.Close, "Remover ${a.name}", Modifier.size(16.dp), tint = c.ink3) }
                 }
             }
         }
     }
+    }
+    removing?.let { ag ->
+        AlertDialog(onDismissRequest = { removing = null }, title = { Text("Remover ${ag.name}?") },
+            text = { Text("Tirar da seção mantém o agente na sua biblioteca. Excluir apaga o agente de vez (de todas as seções).") },
+            confirmButton = { Row {
+                TextButton({ app.agent.removeAgentFromSection(sec.id, ag.id, delete = false); removing = null }) { Text("Tirar da seção") }
+                TextButton({ app.agent.removeAgentFromSection(sec.id, ag.id, delete = true); removing = null }) { Text("Excluir", color = c.err) }
+            } },
+            dismissButton = { TextButton({ removing = null }) { Text("Cancelar") } })
     }
     confirm?.let { kind ->
         val (title, body, action) = when (kind) {
@@ -1079,59 +1090,62 @@ private fun SectionRow(
     }
 }
 
-/** Adicionar agente à seção: escolhe da biblioteca (busca) ou cria um novo; entra no time e o coordenador é avisado. */
+/**
+ * Adicionar agente à seção: uma lista com rolagem — agentes da sua biblioteca e os agentes bots do catálogo.
+ * Um toque adiciona (bot do catálogo é instalado na biblioteca e já entra no time). "Criar novo agente" abre a tela
+ * completa de criação (boneco, estados, instruções, modelo, autonomia) e o agente salvo entra na seção.
+ */
 @Composable
-private fun AddAgentToSectionDialog(sec: dev.cueopen.app.data.Section, agents: List<AgentProfile>, onDone: () -> Unit) {
+private fun AddAgentToSectionDialog(sec: dev.cueopen.app.data.Section, agents: List<AgentProfile>, onCreate: () -> Unit, onDone: () -> Unit) {
     val c = Cue.c
     val app = CueApp.instance
     var query by remember { mutableStateOf("") }
-    var creating by remember { mutableStateOf(false) }
-    var name by remember { mutableStateOf("") }
-    var role by remember { mutableStateOf("") }
     var notice by remember { mutableStateOf<String?>(null) }
-    val pool = remember(agents, sec, query) {
+    val library = remember(agents, sec, query) {
         agents.filter { it.id != sec.coordinatorAgentId && it.id !in sec.agentIds && !it.name.startsWith("Coordenador ·") }
             .filter { query.isBlank() || it.name.contains(query, true) || it.mission.contains(query, true) }
     }
-    AlertDialog(onDismissRequest = onDone, title = { Text(if (creating) "Novo agente" else "Adicionar agente · ${sec.name}") },
+    val allBots = remember { dev.cueopen.app.agent.BotCatalog.all() }
+    val bots = remember(allBots, agents, query) {
+        val have = agents.map { it.name.lowercase() }.toSet()
+        dev.cueopen.app.agent.BotCatalog.search(allBots, query, null).filter { it.name.lowercase() !in have }
+    }
+    AlertDialog(onDismissRequest = onDone, title = { Text("Adicionar agente · ${sec.name}", maxLines = 2, overflow = TextOverflow.Ellipsis) },
         text = {
-            Column(Modifier.heightIn(max = 460.dp)) {
+            Column {
                 notice?.let { Text(it, fontSize = 12.sp, color = c.ok, modifier = Modifier.padding(bottom = 6.dp)) }
-                if (creating) {
-                    OutlinedTextField(name, { name = it }, label = { Text("Nome") }, singleLine = true, modifier = Modifier.fillMaxWidth())
-                    Spacer(Modifier.height(8.dp))
-                    OutlinedTextField(role, { role = it }, label = { Text("Função / o que ele faz") }, minLines = 3, modifier = Modifier.fillMaxWidth())
-                } else {
-                    OutlinedTextField(query, { query = it }, placeholder = { Text("Buscar na biblioteca") }, singleLine = true, modifier = Modifier.fillMaxWidth())
-                    Spacer(Modifier.height(6.dp))
-                    if (pool.isEmpty()) Text("Nenhum agente disponível fora da seção.", fontSize = 13.sp, color = c.ink3)
-                    androidx.compose.foundation.lazy.LazyColumn(Modifier.weight(1f, fill = false)) {
-                        items(pool, key = { it.id }) { a ->
-                            Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp)).clickable {
-                                notice = app.agent.addAgentToSection(sec.id, a.id)
-                            }.padding(vertical = 8.dp, horizontal = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-                                Icon(Icons.Rounded.PersonAdd, null, Modifier.size(18.dp), tint = c.accent)
-                                Spacer(Modifier.width(10.dp))
-                                Column(Modifier.weight(1f)) {
-                                    Text(a.name, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                    if (a.mission.isNotBlank()) Text(a.mission, fontSize = 12.sp, color = c.ink3, maxLines = 2, overflow = TextOverflow.Ellipsis)
-                                }
-                            }
+                OutlinedTextField(query, { query = it }, placeholder = { Text("Buscar agentes e bots") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                Spacer(Modifier.height(6.dp))
+                androidx.compose.foundation.lazy.LazyColumn(Modifier.fillMaxWidth().heightIn(max = 380.dp)) {
+                    if (library.isNotEmpty()) item { Text("SUA BIBLIOTECA", fontSize = 11.sp, fontWeight = FontWeight.SemiBold, color = c.ink3, modifier = Modifier.padding(vertical = 6.dp)) }
+                    items(library, key = { "a-" + it.id }) { a ->
+                        AddAgentRow(a.name, a.mission, { AgentFace(Color(a.color), a.face, 24.dp) }) { notice = app.agent.addAgentToSection(sec.id, a.id) }
+                    }
+                    if (bots.isNotEmpty()) item { Text("AGENTES BOTS (${bots.size})", fontSize = 11.sp, fontWeight = FontWeight.SemiBold, color = c.ink3, modifier = Modifier.padding(top = 10.dp, bottom = 6.dp)) }
+                    items(bots, key = { "b-" + it.id }) { b ->
+                        AddAgentRow(b.name, b.summary, { AgentFace(Color(dev.cueopen.app.agent.BotCatalog.colorFor(b)), dev.cueopen.app.agent.BotCatalog.faceFor(b), 24.dp) }) {
+                            val ag = dev.cueopen.app.agent.BotCatalog.draft(b, dev.cueopen.app.device.BrowserAutonomyPolicy.setEnabled(AgentProfile(name = ""), true))
+                            app.store.upsertAgent(ag)
+                            notice = app.agent.addAgentToSection(sec.id, ag.id)
                         }
                     }
+                    if (library.isEmpty() && bots.isEmpty()) item { Text("Nada encontrado. Crie um agente novo.", fontSize = 13.sp, color = c.ink3) }
                 }
             }
         },
-        confirmButton = {
-            if (creating) TextButton(enabled = name.isNotBlank(), onClick = {
-                val ag = AgentProfile(name = name.trim().take(40), mission = role.trim(),
-                    instructions = "Você é ${name.trim()}, membro da seção \"${sec.name}\"." + (if (role.isNotBlank()) "\nFunção: ${role.trim()}" else "") +
-                        "\nVocê recebe tarefas do coordenador da seção. Entregue resultados concretos e verificáveis (links, números, arquivos). Trabalhe apenas com dados reais; se faltar algo, diga exatamente o que falta.")
-                app.store.upsertAgent(ag)
-                notice = app.agent.addAgentToSection(sec.id, ag.id)
-                creating = false; name = ""; role = ""
-            }) { Text("Criar e adicionar") }
-            else TextButton({ creating = true }) { Text("Criar novo agente") }
-        },
-        dismissButton = { TextButton(if (creating) ({ creating = false }) else onDone) { Text(if (creating) "Voltar" else "Fechar") } })
+        confirmButton = { TextButton(onCreate) { Text("Criar novo agente") } },
+        dismissButton = { TextButton(onDone) { Text("Fechar") } })
+}
+
+@Composable
+private fun AddAgentRow(name: String, sub: String, face: @Composable () -> Unit, onAdd: () -> Unit) {
+    val c = Cue.c
+    Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp)).clickable(onClick = onAdd).padding(vertical = 8.dp, horizontal = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+        face(); Spacer(Modifier.width(10.dp))
+        Column(Modifier.weight(1f)) {
+            Text(name, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            if (sub.isNotBlank()) Text(sub, fontSize = 12.sp, color = c.ink3, maxLines = 2, overflow = TextOverflow.Ellipsis)
+        }
+        Icon(Icons.Rounded.PersonAdd, "Adicionar", Modifier.size(18.dp), tint = c.accent)
+    }
 }

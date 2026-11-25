@@ -255,7 +255,10 @@ class Store(context: Context) {
     fun deleteSection(id: String): List<String> {
         val sec = section(id) ?: return emptyList()
         val sessionIds = _state.value.sessions.filter { it.sectionId == id || it.id == sec.sessionId }.map { it.id }
-        val agentIds = (sec.agentIds + sec.coordinatorAgentId + sec.appAgentId).toSet()
+        // Só apaga agentes criados PARA esta seção e que não estão em outra; os da biblioteca reaproveitados ficam.
+        val inOthers = _state.value.sections.filter { it.id != id }.flatMap { it.agentIds + it.coordinatorAgentId + it.appAgentId }.toSet()
+        val created = sec.agentIds.filter { aid -> _state.value.agents.firstOrNull { it.id == aid }?.instructions?.contains("membro da seção \"${sec.name}\"") == true }
+        val agentIds = (created + sec.coordinatorAgentId + sec.appAgentId).filterNotNull().filter { it !in inOthers }.toSet()
         update { st -> st.copy(sections = st.sections.filterNot { it.id == id }, agents = st.agents.filterNot { it.id in agentIds }) }
         return sessionIds
     }

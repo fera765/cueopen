@@ -198,11 +198,16 @@ fun ChatScreen(nav: NavController, sessionId: String, onMenu: () -> Unit = {}) {
                 else android.widget.Toast.makeText(ctx, "Arquivo não encontrado: ${p.substringAfterLast('/')}", android.widget.Toast.LENGTH_SHORT).show()
             }
             androidx.compose.runtime.CompositionLocalProvider(LocalChatPersona provides ChatPersona.of(agent), LocalOpenFile provides openFile) {
+            val onOpenComputer: (String) -> Unit = remember(sessionId) { { tab -> nav.navigate("computer/$sessionId?tab=$tab") } }
+            val onOpenMedia: (String) -> Unit = remember { { mediaOpen = it } }
+            val onSendMsg: (String) -> Unit = remember(sessionId) { { msg -> app.agent.sendOrQueue(sessionId, msg) } }
+            val onReplyItem: (ChatItem.Assistant) -> Unit = remember { { replyingTo = it } }
             LazyColumn(Modifier.fillMaxSize(), state = list, contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                items(visibleItems, key = { it.id }) { item ->
-                    TimelineItem(item, onOpenComputer = { tab -> nav.navigate("computer/$sessionId?tab=$tab") }, onOpenMedia = { mediaOpen = it }, sessionId = sessionId, nav = nav,
-                        onSend = { msg -> app.agent.sendOrQueue(sessionId, msg) },
-                        onReply = { replyingTo = it })
+                // Rolagem leve em chats longos: callbacks estáveis (não recompõem todos os itens a cada token do stream)
+                // e contentType por tipo (o LazyColumn reaproveita a composição de itens do mesmo tipo).
+                items(visibleItems, key = { it.id }, contentType = { it::class }) { item ->
+                    TimelineItem(item, onOpenComputer = onOpenComputer, onOpenMedia = onOpenMedia, sessionId = sessionId, nav = nav,
+                        onSend = onSendMsg, onReply = onReplyItem)
                 }
                 if (running) item { ThinkingRow(act) }
                 if (session.status == SessionStatus.SLEEPING) item {
@@ -213,7 +218,14 @@ fun ChatScreen(nav: NavController, sessionId: String, onMenu: () -> Unit = {}) {
                 if (session.status == SessionStatus.DONE) item { DoneRow(onCopy = { copyText(ctx, lastAnswer(session)) }, onShare = { shareText(ctx, lastAnswer(session)) }) }
             }
             }
-            if (!follow) {
+            // Botão "ir para o fim" some enquanto um card de pergunta está na tela: ficava em cima das opções/botão de enviar.
+            val questionOnScreen by remember(visibleItems) {
+                derivedStateOf {
+                    val idx = visibleItems.indexOfLast { it is ChatItem.Question && it.state == "pending" }
+                    idx >= 0 && list.layoutInfo.visibleItemsInfo.any { it.index == idx }
+                }
+            }
+            if (!follow && !questionOnScreen) {
                 SmallFloatingActionButton({ follow = true }, Modifier.align(Alignment.BottomEnd).padding(16.dp), containerColor = c.ink, contentColor = c.bg) {
                     Icon(Icons.Rounded.KeyboardArrowDown, "Ir para o fim")
                 }
