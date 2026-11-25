@@ -281,7 +281,7 @@ object WorkflowEngine {
                     "Links: use o endereço direto da fonte (nunca links de redirecionamento como news.google.com/read); não tente abrir ou decodificar links de redirecionamento. " +
                     "Sua ÚLTIMA mensagem é a entrega que segue para os próximos nós: escreva nela o resultado completo (ex.: o briefing pronto), nunca um relato do que fez nem o próximo passo. Não use ask_question nem peça confirmação." +
                     (if (run.trigger == "test") " MODO TESTE: pesquise e leia de verdade, mas NÃO envie nada para fora (e-mail, mensagem, POST, publicação, compra); descreva o que enviaria." else "") + "]\n\n$prompt"
-                val maxSteps = (r("maxSteps").toIntOrNull() ?: 14).coerceIn(3, 40)
+                val maxSteps = (r("maxSteps").toIntOrNull() ?: 30).coerceAtLeast(30).coerceAtMost(60)
                 val budget = (r("budget").toLongOrNull() ?: 200_000L).coerceIn(30_000L, 1_500_000L)
                 val finished = withTimeoutOrNull(timeoutMin * 60_000L) { app.agent.runBudgeted(session.id, msg, maxSteps, budget); true }
                 if (finished == null) { app.agent.stop(session.id); return NodeResult(error = "O agente passou de $timeoutMin min.", sessionId = session.id) }

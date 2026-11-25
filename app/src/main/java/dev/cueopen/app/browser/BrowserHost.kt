@@ -92,6 +92,8 @@ class BrowserHost(private val appCtx: Context, private val sessionId: String = "
     }
     @Volatile private var activeTabId: String = savedSession.selectedTabId
     private var lastReadTabId: String? = null
+    /** Aba da última leitura, sem zerar em recargas automáticas: o marcador data-cue no DOM já diz se o índice vale. */
+    private var lastReadTabAny: String? = null
 
     private val _net = MutableStateFlow<List<NetEntry>>(emptyList())
     val net: StateFlow<List<NetEntry>> = _net
@@ -1281,7 +1283,7 @@ class BrowserHost(private val appCtx: Context, private val sessionId: String = "
 
     suspend fun read(maxChars: Int = 9000, trackRepeat: Boolean = true): String {
         val js = SnapshotFormat.SNAPSHOT_JS
-        val tab = onMain { activeTab()?.also { lastReadTabId = it.id } }
+        val tab = onMain { activeTab()?.also { lastReadTabId = it.id; lastReadTabAny = it.id } }
             ?: return "ERROR: não há aba ativa no browser."
         // Snapshot só depois que a página parou de carregar/mudar (evita ler só o "esqueleto" do site).
         val state = waitForStable(tab, 8_000)
@@ -1402,7 +1404,7 @@ class BrowserHost(private val appCtx: Context, private val sessionId: String = "
     }
 
     suspend fun click(index: Int): String {
-        val tab = onMain { activeTab()?.takeIf { lastReadTabId == it.id } }
+        val tab = onMain { activeTab()?.takeIf { lastReadTabId == it.id || lastReadTabAny == it.id } }
             ?: return staleRefRecovery(index, "a página ou a aba mudou desde a última leitura")
         val r = eval("""(function(){var e=document.querySelector('[data-cue="$index"]');if(!e)return 'elemento $index não encontrado: referência obsoleta; execute browser_read novamente, escolha um índice novo e não repita este';e.scrollIntoView({block:'center'});e.click();return 'ok: clicou em '+(e.innerText||e.value||e.tagName).slice(0,60);})()""", tab = tab)
         if (r.contains("não encontrado")) return staleRefRecovery(index, "a página mudou e o elemento sumiu")
@@ -1429,7 +1431,7 @@ class BrowserHost(private val appCtx: Context, private val sessionId: String = "
     }
 
     suspend fun type(index: Int, text: String, submit: Boolean): String {
-        val tab = onMain { activeTab()?.takeIf { lastReadTabId == it.id } }
+        val tab = onMain { activeTab()?.takeIf { lastReadTabId == it.id || lastReadTabAny == it.id } }
             ?: return staleRefRecovery(index, "a página ou a aba mudou desde a última leitura")
         val t = JSONObject.quote(text)
         val r = eval("""

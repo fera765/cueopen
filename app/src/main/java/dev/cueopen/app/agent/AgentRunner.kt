@@ -2434,6 +2434,23 @@ class AgentRunner(
         return true
     }
 
+    /**
+     * Caminho relativo que não existe na raiz do workspace, mas existe dentro de UMA pasta de projeto
+     * (ex.: "src/components" quando o projeto está em "barbearia/"): usa essa pasta. Workers recebiam caminhos
+     * do plano relativos ao projeto e erravam a raiz várias vezes seguidas.
+     */
+    private fun projectRelative(root: java.io.File, path: String, f: java.io.File?): java.io.File? {
+        if (f == null || f.exists()) return f
+        val rel = path.trim().removePrefix("/root/workspace/").removePrefix("./").trim('/')
+        if (rel.isBlank() || rel.startsWith("/") || rel.contains("..") || rel.startsWith(".cue")) return f
+        val hits = root.listFiles()?.filter { it.isDirectory && !it.name.startsWith(".") && it.name != "node_modules" }
+            ?.map { java.io.File(it, rel) }?.filter { it.exists() }.orEmpty()
+        return hits.singleOrNull() ?: f
+    }
+    private fun relNote(root: java.io.File, asked: String, f: java.io.File?): String =
+        if (f != null && f.exists() && !java.io.File(root, asked.trim().removePrefix("/root/workspace/").trim('/')).exists() && asked.isNotBlank())
+            "(caminho \"$asked\" resolvido para \"${f.relativeTo(root).path}\" — o projeto fica nessa pasta; use esse caminho daqui em diante)\n" else ""
+
     private fun today() = SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date())
 
     /**
@@ -3899,14 +3916,18 @@ class AgentRunner(
             add(tool("browser_back", "Volta para a página anterior.", buildJsonObject {}))
             add(tool("browser_js", "Executa JavaScript na página atual e devolve o resultado da expressão.", buildJsonObject { put("code", str("Código JS (uma expressão)")) }, listOf("code")))
         }
-        if (web) {
+        // Busca, leitura HTTP e Web APIs não usam o browser da sessão: valem também para workers e fluxos
+        // (sem elas, os nós de fluxo tentavam raspar sites com curl e estouravam o limite de passos).
+        if (agent?.useBrowser != false) {
             add(tool("web_search", "Busca na web (Google + Bing + DuckDuckGo ao mesmo tempo, em segundos, sem abrir o browser da sessão): devolve título, URL e trecho. Sempre use esta ferramenta para pesquisar — não abra buscadores com browser_navigate. Depois leia os relevantes com web_fetch. Use o browser só para sites com login, JavaScript pesado ou interação.",
                 buildJsonObject { put("query", str("Termos da busca")); put("max", int("Quantidade de resultados (padrão 8)")) }, listOf("query")))
-            add(tool("webapi_list", "Lista as Web APIs do hub (scrapers prontos sobre sites: Google, Bing, Mercado Livre, Amazon, YouTube, notícias…) com argumentos. Prefira-as a navegar no browser quando houver uma que sirva.", buildJsonObject {}))
+            add(tool("webapi_list", "Lista as Web APIs do hub (scrapers prontos sobre sites, criados pelo usuário) com argumentos. Prefira-as a navegar no browser quando houver uma que sirva.", buildJsonObject {}))
             add(tool("webapi_call", "Chama uma Web API do hub e recebe JSON estruturado (com paginação: passe page/next_page). Roda num WebView separado, com a sessão e o proxy do browser.",
                 buildJsonObject { put("api", str("slug da API (veja webapi_list)")); put("args", str("Argumentos em JSON, ex.: {\"query\":\"notebook\",\"page\":1}")) }, listOf("api")))
             add(tool("web_fetch", "Lê uma página por HTTP e devolve só o texto principal (sem menus/rodapés), bem menor que um snapshot do browser. Se vier pouco texto (site com JS/login), use browser_navigate.",
                 buildJsonObject { put("url", str("URL http(s) completa")); put("max_chars", int("Limite de caracteres (padrão 12000, máx. 40000)")) }, listOf("url")))
+        }
+        if (web) {
             add(tool("browser_network", "Mostra as requisições da página: método, URL, status, tempo, headers e os payloads fetch/XHR capturados (com limite de tamanho). Útil para descobrir de qual API um dado vem.", buildJsonObject { put("filter", str("Filtro opcional: texto contido na URL")) }))
             add(tool("browser_console", "Mostra as mensagens recentes do console JavaScript da página (erros, avisos e logs).", buildJsonObject {}))
         }
@@ -5327,9 +5348,9 @@ class AgentRunner(
                 "file_read" -> {
                     val path = s("path").trim()
                     // Além do workspace: leitura em ~/ e /root/ do sandbox desta conversa (skills instalam apps em ~/pasta).
-                    val target = AgentFilePathPolicy.readableWorkspace(
+                    val target = projectRelative(sandbox.workspaceFor(sessionId), path, AgentFilePathPolicy.readableWorkspace(
                         sandbox.workspaceFor(sessionId), sandbox.connectorsDir, path,
-                    ) ?: sandboxHomeFile(sessionId, path)
+                    ) ?: sandboxHomeFile(sessionId, path))
                     if (target == null) "ERRO: caminho inválido (recebido: \"${path.take(160)}\"). Use caminho relativo ao workspace ou /root/workspace/...; para conector, informe o ID completo em /root/connectors/<id>/workspace/.... Não tente caminhos absolutos Android ou caminhos alternativos fora dessas raízes."
                     else {
                         noteFileSeen(sessionId, target)  // leitura feita: libera novas edições e marca a versão vista
@@ -5349,7 +5370,7 @@ class AgentRunner(
                 "file_search" -> {
                     val root = sandbox.workspaceFor(sessionId)
                     val p = s("path").trim()
-                    val start = if (p.isBlank()) root else AgentFilePathPolicy.readableWorkspace(root, sandbox.connectorsDir, p, allowRoot = true)
+                    val start = if (p.isBlank()) root else projectRelative(root, p, AgentFilePathPolicy.readableWorkspace(root, sandbox.connectorsDir, p, allowRoot = true))
                     if ((start == null || !start.exists()) && ContextArchive.isArchivePath(p)) ContextArchive.MISSING
                     else if (start == null || !start.exists()) "ERRO: caminho não existe: $p. Omita path para buscar no workspace inteiro."
                     else kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) { FileSearch.search(root, start, s("pattern"), b("regex"), (i("max") ?: 50).coerceIn(5, 200)) }
@@ -5411,9 +5432,9 @@ class AgentRunner(
                 "file_list" -> {
                     val path = s("path").trim()
                     val root = sandbox.workspaceFor(sessionId)
-                    val d = if (path.isBlank()) root else AgentFilePathPolicy.readableWorkspace(
+                    val d = if (path.isBlank()) root else projectRelative(root, path, AgentFilePathPolicy.readableWorkspace(
                         root, sandbox.connectorsDir, path, allowRoot = true,
-                    ) ?: sandboxHomeFile(sessionId, path)
+                    ) ?: sandboxHomeFile(sessionId, path))
                     fun listing(dir: java.io.File) = dir.walkTopDown().maxDepth(3).filter { it != dir && !it.path.contains("/.cue/") && it.name != ".cue" }.take(300)
                         .joinToString("\n") { (if (it.isDirectory) "📁 " else "📄 ") + it.relativeTo(dir).path + if (it.isFile) " (${it.length()}b)" else "" }
                         .ifBlank { "(vazio)" }
@@ -5422,7 +5443,7 @@ class AgentRunner(
                         d == null -> "AVISO: '$path' está fora do workspace (só /root/workspace e /root/connectors/<id>/workspace são listáveis). " +
                             "Conteúdo de /root/workspace — use estes caminhos relativos:\n" + listing(root)
                         !d.exists() || !d.isDirectory -> "ERRO: diretório não existe: $path. Conteúdo de /root/workspace:\n" + listing(root)
-                        else -> listing(d)
+                        else -> relNote(root, path, d) + listing(d)
                     }
                 }
                 "browser_navigate" -> {

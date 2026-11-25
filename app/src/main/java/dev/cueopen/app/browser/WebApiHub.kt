@@ -17,7 +17,17 @@ object WebApiHub {
             .map { it.copy(id = "builtin-" + it.slug, builtin = true) }
     }.getOrDefault(emptyList()).also { cache = it }
 
+    /** Hub zerado a pedido do usuário (uma vez): apaga também as APIs salvas no aparelho. */
+    private fun resetOnce(ctx: Context) {
+        val p = ctx.getSharedPreferences("webapi_hub", Context.MODE_PRIVATE)
+        if (p.getBoolean("reset_v1", false)) return
+        val store = CueApp.instance.store
+        store.state.value.webApis.map { it.slug }.forEach(store::deleteWebApi)
+        p.edit().putBoolean("reset_v1", true).apply()
+    }
+
     fun all(ctx: Context): List<WebApi> {
+        resetOnce(ctx)
         val mine = CueApp.instance.store.state.value.webApis
         val bySlug = mine.associateBy { it.slug }
         // Cópia salva de uma nativa guarda só ligado/estatísticas; o código vem sempre da versão do app. Versão editada (builtin=false) vale inteira.

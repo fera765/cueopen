@@ -970,25 +970,46 @@ function mainList(v) {
     return best
 }
 
+// Encolhe primeiro os TEXTOS e só depois a QUANTIDADE de itens: pedir 10 e-mails e receber 2 fazia o agente
+// insistir com completo=true e se perder em JSON gigante.
 const LEVELS = [
     { maxStr: 500, maxItems: 10, maxDepth: 6 },
-    { maxStr: 300, maxItems: 5, maxDepth: 5 },
-    { maxStr: 200, maxItems: 3, maxDepth: 4 },
-    { maxStr: 120, maxItems: 3, maxDepth: 3 },
-    { maxStr: 80, maxItems: 2, maxDepth: 2 },
+    { maxStr: 200, maxItems: 10, maxDepth: 5 },
+    { maxStr: 100, maxItems: 10, maxDepth: 4 },
+    { maxStr: 60, maxItems: 10, maxDepth: 3 },
+    { maxStr: 120, maxItems: 5, maxDepth: 3 },
+    { maxStr: 80, maxItems: 3, maxDepth: 2 },
 ]
+
+// Campos técnicos que só ocupam espaço (e-mail: assinaturas, rotas, HTML bruto).
+const KEEP_HEADERS = new Set(['from', 'to', 'cc', 'subject', 'date', 'reply-to', 'message-id'])
+function slimTech(v, depth = 0) {
+    if (depth > 30) return v
+    if (Array.isArray(v)) return v.map((x) => slimTech(x, depth + 1))
+    if (!isObject(v)) return v
+    const out = {}
+    for (const [k, x] of Object.entries(v)) {
+        const lk = k.toLowerCase()
+        if (lk === 'headers' && isObject(x)) { out[k] = Object.fromEntries(Object.entries(x).filter(([h]) => KEEP_HEADERS.has(h.toLowerCase()))); continue }
+        if (/^(html|textashtml|raw|payload_raw)$/.test(lk) && typeof x === 'string' && x.length > 400) continue
+        if (/^(dkim|arc-|x-|received|authentication-results|received-spf)/.test(lk)) continue
+        out[k] = slimTech(x, depth + 1)
+    }
+    return out
+}
 
 /**
  * Resultado de uma ação no formato para agentes: {status, duration_ms, connector, action, version, summary, data, note}.
  * [budget] em bytes do JSON compacto (~2 KB por padrão); full=true devolve tudo (ainda decodificado).
  */
-function shapeResult(output, meta, { full = false, budget = 2048 } = {}) {
+function shapeResult(output, meta, { full = false, budget = 4096 } = {}) {
     const base = { status: 'ok', connector: meta.connector, action: meta.action, duration_ms: meta.durationMs, version: meta.version }
     if (full) {
         const opts = { full: true, maxStr: 0, maxItems: Infinity, maxDepth: 40 }
         const found = mainList(output)
         return { ...base, summary: found ? { count: found.list.length } : undefined, data: normalize(output, opts) ?? null }
     }
+    output = slimTech(output)
     const found = mainList(output)
     let result
     for (const lv of LEVELS) {
