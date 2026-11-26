@@ -50,9 +50,22 @@ object WebApiRunner {
             if (!Regex("^https?://", RegexOption.IGNORE_CASE).containsMatchIn(url))
                 return@withTimeoutOrNull err(a, full, "URL inválida a partir do template: ${url.take(200)}")
             // 2) Carrega com a espera completa do browser do app (redirecionamentos, SPA, conteúdo estável).
-            stage = "carregar $url"
-            val nav = h.navigate(url)
-            if (nav.startsWith("ERROR")) return@withTimeoutOrNull err(a, full, nav.lineSequence().first().take(300), url)
+            // Mesma página já aberta (ex.: WhatsApp Web carregado): não recarrega — chamadas seguidas ficam instantâneas.
+            val here = h.currentUrl()
+            fun base(u: String) = u.substringBefore('#').substringBefore('?').trimEnd('/')
+            if (base(here) != base(url) || here.isBlank()) {
+                stage = "carregar $url"
+                val nav = h.navigate(url)
+                if (nav.startsWith("ERROR")) return@withTimeoutOrNull err(a, full, nav.lineSequence().first().take(300), url)
+            }
+            // Bibliotecas (ex.: WA-JS): baixadas uma vez pelo app e injetadas só se ainda não estão na página.
+            for (lib in a.inject) {
+                stage = "injetar biblioteca $lib"
+                val key = "__inj_" + Integer.toHexString(lib.hashCode())
+                if (h.runJs("!!window['$key']") == "true") continue
+                val code = library(ctx, lib) ?: return@withTimeoutOrNull err(a, full, "não consegui baixar a biblioteca $lib", url)
+                h.evalRaw(code + "\n;window['$key']=true;1", 60_000)
+            }
             // Bloqueio anti-robô: não tenta contornar — avisa.
             val blocked = h.runJs("(function(){$helpers;try{return api.blocked()}catch(e){return ''}})()").let { if (it.startsWith("(sem valor")) "" else it }
             if (blocked.isNotBlank() && !blocked.startsWith("ERROR")) return@withTimeoutOrNull buildJsonObject {
@@ -84,6 +97,20 @@ object WebApiRunner {
             if (ok) "args=$argsJs resultados=${count ?: "?"}" else "args=$argsJs etapa=$stage erro=" + (Regex("\"error\":\"([^\"]*)").find(res)?.groupValues?.get(1) ?: ""))
         if (!ok) runCatching { dev.cueopen.app.diag.ErrorLog.log("webapi", "${a.slug} falhou na etapa \"$stage\": " + res.take(600), null, a.slug) }
         res
+    }
+
+    /** Baixa (e guarda por 24 h) uma biblioteca JS de URL https. */
+    private suspend fun library(ctx: Context, url: String): String? = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+        if (!url.startsWith("https://")) return@withContext null
+        val f = java.io.File(java.io.File(ctx.filesDir, "webapi-libs").apply { mkdirs() }, Integer.toHexString(url.hashCode()) + ".js")
+        if (f.isFile && f.length() > 1000 && System.currentTimeMillis() - f.lastModified() < 24 * 3_600_000L) return@withContext f.readText()
+        runCatching {
+            val req = okhttp3.Request.Builder().url(url).header("User-Agent", "Mozilla/5.0").build()
+            CueApp.instance.proxyHttpClient(dev.cueopen.app.proxy.ProxyScope.BROWSER, okhttp3.OkHttpClient()).newCall(req).execute().use { r ->
+                if (!r.isSuccessful) error("HTTP ${r.code}")
+                r.body!!.string().also { if (it.length > 1000) f.writeText(it) }
+            }
+        }.getOrElse { if (f.isFile) f.readText() else null }
     }
 
     private fun envelope(a: WebApi, args: JsonObject, url: String, data: JsonElement?, ms: Long): String = buildJsonObject {

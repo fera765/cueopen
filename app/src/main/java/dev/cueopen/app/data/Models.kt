@@ -667,6 +667,10 @@ data class WebApi(
     val waitFor: String = "",
     /** Abre o site como navegador de computador (alguns sites só paginam na versão desktop). */
     val desktop: Boolean = false,
+    /** Bibliotecas JS injetadas antes do código (URLs https; baixadas e guardadas pelo app). Ex.: WA-JS no WhatsApp Web. */
+    val inject: List<String> = emptyList(),
+    /** Ação com efeito fora do app (ex.: enviar mensagem): o agente só chama quando o usuário pediu explicitamente. */
+    val sensitive: Boolean = false,
     val enabled: Boolean = true,
     val builtin: Boolean = false,
     val source: String = "manual",

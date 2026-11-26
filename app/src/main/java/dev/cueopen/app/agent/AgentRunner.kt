@@ -3251,6 +3251,10 @@ class AgentRunner(
                 val api = dev.cueopen.app.browser.WebApiHub.find(ctx, s("api"))?.takeIf { it.enabled }
                     ?: return ToolResult("ERRO: API \"${s("api")}\" não existe ou está desligada. Disponíveis:\n" + dev.cueopen.app.browser.WebApiHub.catalog(ctx))
                 val args = webApiArgs(a["args"]) ?: return ToolResult("ERRO: args precisa ser um objeto JSON, ex.: {\"query\":\"…\",\"page\":1}")
+                // Ações com efeito fora do app (ex.: enviar WhatsApp): só quando o usuário pediu, nunca por iniciativa do agente,
+                // e nunca para vários destinatários de uma vez.
+                if (api.sensitive && args["confirmed"]?.jsonPrimitive?.contentOrNull != "true")
+                    return ToolResult("RECUSADO: ${api.slug} age em seu nome fora do app. Só chame com confirmed=true quando o usuário pediu explicitamente esta ação (destinatário e conteúdo). Se não pediu, pergunte antes.")
                 return ToolResult(dev.cueopen.app.browser.WebApiHub.call(ctx, api, args).take(40_000))
             }
             "webapi_test" -> {

@@ -40,3 +40,46 @@ api.blocked = () => {
   if (/are you a robot|você é um robô|confirme que você é humano|account-verification|security check/.test(t)) return 'verificação anti-robô';
   return '';
 };
+/**
+ * WhatsApp Web (WA-JS): espera a página e o WPP ficarem prontos, assume a janela se o WhatsApp estiver aberto em outra
+ * ("Usar nesta janela") e confirma o login. Lança erro claro se não houver sessão (falta ler o QR no Browser).
+ */
+api.waReady = async (ms = 45000) => {
+  const t0 = Date.now();
+  while (Date.now() - t0 < ms) {
+    const b = Array.from(document.querySelectorAll('button, div[role=button]')).find(x => /usar nesta janela|use here|usar aqui/i.test(x.innerText || ''));
+    if (b) b.click();
+    if (document.querySelector('canvas[aria-label*="QR"], div[data-ref] canvas, [data-testid="qrcode"]')) throw new Error('WhatsApp sem login: abra o Browser, vá em web.whatsapp.com (modo desktop) e leia o QR code com o celular.');
+    if (window.WPP && WPP.isReady) {
+      if (WPP.conn && WPP.conn.isAuthenticated && !WPP.conn.isAuthenticated()) throw new Error('WhatsApp sem login: leia o QR code em web.whatsapp.com no Browser do app.');
+      return true;
+    }
+    await sleep(400);
+  }
+  throw new Error('WhatsApp Web não ficou pronto a tempo (página carregando, sem internet ou WA-JS incompatível com esta versão do WhatsApp).');
+};
+/** Id de conversa a partir de número, id ou nome. */
+api.waChatId = async (to) => {
+  const s = String(to || '').trim();
+  if (!s) throw new Error('informe "to" (número com DDI, id do chat ou nome do contato)');
+  if (s.includes('@')) return s;
+  const digits = s.replace(/\D/g, '');
+  if (digits.length >= 10 && digits.length === s.replace(/[\s()+-]/g, '').length) return digits + '@c.us';
+  const chats = await WPP.chat.list();
+  const low = s.toLowerCase();
+  const hit = chats.find(c => ((c.name || c.formattedTitle || (c.contact && (c.contact.name || c.contact.pushname)) || '') + '').toLowerCase() === low)
+    || chats.find(c => ((c.name || c.formattedTitle || (c.contact && (c.contact.name || c.contact.pushname)) || '') + '').toLowerCase().includes(low));
+  if (!hit) throw new Error('nenhuma conversa com "' + s + '"');
+  return hit.id._serialized;
+};
+api.waChat = (c) => {
+  const msgs = c.msgs && c.msgs.getModelsArray ? c.msgs.getModelsArray() : [];
+  const last = msgs[msgs.length - 1];
+  return { id: c.id && c.id._serialized, name: c.name || c.formattedTitle || (c.contact && (c.contact.name || c.contact.pushname)) || (c.id && c.id.user) || '',
+    is_group: !!c.isGroup, unread: c.unreadCount || 0, archived: !!c.archive, pinned: !!c.pin, muted: !!(c.mute && c.mute.expiration),
+    last_time: c.t ? new Date(c.t * 1000).toISOString() : null, last_message: last ? api.waMsg(last) : null };
+};
+api.waMsg = (m) => ({ id: m.id && (m.id._serialized || m.id), from_me: !!(m.id && m.id.fromMe), author: (m.author && (m.author._serialized || m.author)) || (m.from && (m.from._serialized || m.from)) || null,
+  sender_name: (m.senderObj && (m.senderObj.name || m.senderObj.pushname)) || m.notifyName || null,
+  type: m.type, text: m.body && m.type === 'chat' ? m.body : (m.caption || (m.type !== 'chat' ? '[' + m.type + ']' : '')),
+  time: m.t ? new Date(m.t * 1000).toISOString() : null, ack: m.ack });

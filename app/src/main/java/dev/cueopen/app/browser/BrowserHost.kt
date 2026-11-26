@@ -1504,6 +1504,15 @@ class BrowserHost(private val appCtx: Context, private val sessionId: String = "
         }
     }
 
+    /** JS cru na aba ativa (biblioteca grande, sem embrulho). Não passa pela CSP da página. */
+    suspend fun evalRaw(js: String, timeoutMillis: Long = 30_000): String {
+        val tab = onMain { activeTab() } ?: return "ERROR: não há aba ativa no browser."
+        return eval(js, timeoutMillis, tab)
+    }
+
+    /** URL atual da aba ativa (vazio se não há aba). */
+    suspend fun currentUrl(): String = onMain { activeTab()?.webView?.url ?: activeTab()?.url }.orEmpty()
+
     private suspend fun awaitLoadIfNavigating(tab: BrowserTab) {
         kotlinx.coroutines.delay(800)
         // progress é método do WebView: só pode ser lido na main thread (evita o crash

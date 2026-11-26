@@ -40,7 +40,7 @@ object WebApiHub {
 
     /** Lista curta para a LLM: slug, descrição e parâmetros. */
     fun catalog(ctx: Context): String = enabled(ctx).joinToString("\n") { a ->
-        "- ${a.slug}: ${a.description} · args: " + a.params.joinToString(", ") { p -> p.name + ":" + p.type + (if (p.required) "*" else "") + (if (p.default.isNotBlank()) "=" + p.default else "") }
+        "- ${a.slug}${if (a.sensitive) " [AÇÃO EXTERNA: só com pedido explícito do usuário, confirmed=true]" else ""}: ${a.description} · args: " + a.params.joinToString(", ") { p -> p.name + ":" + p.type + (if (p.required) "*" else "") + (if (p.default.isNotBlank()) "=" + p.default else "") }
     }.ifBlank { "(nenhuma API ativa no hub)" }
 
     /** Executa e registra estatísticas. */
