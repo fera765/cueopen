@@ -3259,7 +3259,8 @@ class AgentRunner(
                 val nTests = webApiTests.merge(sessionId, 1, Int::plus) ?: 1
                 if (nTests > 12) return ToolResult("RECUSADO: 12 testes nesta conversa sem salvar. Pare e explique ao usuário o que está bloqueando (seletor, bloqueio do site, dado que não existe) em vez de testar mais variações.", SessionStatus.WAITING_USER)
                 if (Regex("^https?://(www\\.)?example\\.(com|org)").containsMatchIn(s("url_template"))) return ToolResult("RECUSADO: teste na página real do site-alvo, não em example.com. Para chamar uma API JSON do site, use o template da página do próprio site e api.fetchJson no código.")
-                val draft = dev.cueopen.app.data.WebApi(slug = "teste", name = "teste", urlTemplate = s("url_template"), code = s("code"), waitFor = s("wait_for"))
+                val draft = dev.cueopen.app.data.WebApi(slug = "teste", name = "teste", urlTemplate = s("url_template"), code = s("code"), waitFor = s("wait_for"),
+                    desktop = a["desktop"]?.jsonPrimitive?.booleanOrNull ?: false)
                 val out = dev.cueopen.app.browser.WebApiRunner.run(ctx, draft, args)
                 val passed = out.contains("\"ok\":true") && Regex("\"results\":\\[\\s*\\{").containsMatchIn(out)
                 if (passed) webApiPassed[sessionId] = (s("url_template") + "\u0000" + s("code")).hashCode()
@@ -3269,12 +3270,12 @@ class AgentRunner(
             "webapi_save" -> {
                 val slug = s("slug").trim()
                 if (!dev.cueopen.app.browser.WebApiHub.validSlug(slug)) return ToolResult("ERRO: slug inválido (minúsculas, números e _, 3–40, começando por letra).")
-                webApiTests.remove(sessionId)
                 if (webApiPassed[sessionId] != (s("url_template") + "\u0000" + s("code")).hashCode()) return ToolResult("RECUSADO: rode webapi_test com este mesmo url_template e code até PASSAR antes de salvar.")
                 val params = runCatching { kotlinx.serialization.json.Json { ignoreUnknownKeys = true }.decodeFromString<List<dev.cueopen.app.data.WebApiParam>>(s("params").ifBlank { "[]" }) }
                     .getOrElse { return ToolResult("ERRO: params não é uma lista JSON válida: ${it.message?.take(160)}") }
                 store.upsertWebApi(dev.cueopen.app.data.WebApi(slug = slug, name = s("name").ifBlank { slug }, description = s("description"), urlTemplate = s("url_template"),
-                    code = s("code"), waitFor = s("wait_for"), params = params, source = "ia"))
+                    code = s("code"), waitFor = s("wait_for"), params = params, source = "ia", desktop = a["desktop"]?.jsonPrimitive?.booleanOrNull ?: false))
+                webApiTests.remove(sessionId)
                 return ToolResult("OK: Web API \"$slug\" salva no hub e ativa. Qualquer agente chama com webapi_call(api=\"$slug\", args={…}).")
             }
         }
@@ -3283,6 +3284,13 @@ class AgentRunner(
 
     private fun logActivity(sessionId: String, tool: String, step: ChatItem.Step, error: Boolean, out: String) =
         dev.cueopen.app.diag.ActivityLog.tool(sessionId, tool, step.args, error, System.currentTimeMillis() - step.time, out)
+
+    /** Modo do browser da conversa: desktop (UA de computador) ou mobile. Vazio = mantém. */
+    private suspend fun browserMode(sessionId: String, mode: String) {
+        val want = when (mode.trim().lowercase()) { "desktop", "computador", "pc" -> true; "mobile", "celular" -> false; else -> return }
+        val b = browserFor(sessionId)
+        if (b.ui.value.desktop != want) kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) { b.setDesktop(want) }
+    }
 
     /** Pílula do API Hub mostra qual API foi usada: "API Hub · google_search". */
     private fun stepTitle(tool: String, argsJson: String, default: String): String =
@@ -3836,6 +3844,7 @@ class AgentRunner(
                     put("code", str("Corpo de uma função async (args, api) que lê a página e faz return { results: [...], count, has_more, next_page }"))
                     put("args", str("Argumentos de teste em JSON, ex.: {\"query\":\"tênis\",\"page\":2}"))
                     put("wait_for", str("Seletor CSS que indica página pronta (opcional)"))
+                    put("desktop", bool("true = abre o site como computador (WhatsApp Web e outros que redirecionam no celular)"))
                 }, listOf("url_template", "code", "args")))
             add(tool("webapi_save",
                 "Salva a Web API no hub (só depois de um webapi_test que PASSOU com o mesmo código e template). Vira uma ferramenta que qualquer agente chama com webapi_call.",
@@ -3843,7 +3852,7 @@ class AgentRunner(
                     put("slug", str("Identificador: minúsculas, números e _ (ex.: mercadolivre_ofertas)"))
                     put("name", str("Nome curto para o usuário"))
                     put("description", str("O que devolve, em 1 frase (a LLM decide por ela quando usar)"))
-                    put("url_template", str("O mesmo do teste")); put("code", str("O mesmo do teste")); put("wait_for", str("O mesmo do teste (opcional)"))
+                    put("url_template", str("O mesmo do teste")); put("code", str("O mesmo do teste")); put("wait_for", str("O mesmo do teste (opcional)")); put("desktop", bool("O mesmo do teste"))
                     put("params", str("JSON: [{\"name\":\"query\",\"type\":\"string\",\"description\":\"…\",\"required\":true,\"default\":\"\"}]"))
                 }, listOf("slug", "name", "description", "url_template", "code", "params")))
         }
@@ -4066,7 +4075,8 @@ class AgentRunner(
             buildJsonObject { put("pattern", str("Texto ou regex a procurar (sem diferenciar maiúsculas)")); put("path", str("Arquivo ou pasta (padrão: todo o workspace)")); put("regex", bool("true se pattern é regex")); put("max", int("Máximo de linhas (padrão 50)")) }, listOf("pattern")))
         add(tool("file_list", "Lista um diretório do workspace da tarefa ou, somente para leitura, de /root/connectors/<id>/workspace/.", buildJsonObject { put("path", str("Diretório relativo ao workspace, ou /root/workspace/, ou /root/connectors/<id>/workspace/")) }))
         if (web) {
-            add(tool("browser_navigate", "Abre uma URL (ou termos de busca) no browser. Erros HTTP 4xx/5xx e falhas de rede na página principal são erros, não conteúdo válido. Para localhost, valide antes o processo, a porta e a saúde HTTP no mesmo ambiente de rede do WebView; CONNECTION_REFUSED pede correção do listener ou do endereço, não uma nova tentativa. PARTIAL significa que há texto mas o carregamento não foi confirmado — a aplicação pode não estar pronta, então verifique DOM, console e um sinal funcional.", buildJsonObject { put("url", str("URL ou termos de busca")) }, listOf("url")))
+            add(tool("browser_navigate", "Abre uma URL (ou termos de busca) no browser. Erros HTTP 4xx/5xx e falhas de rede na página principal são erros, não conteúdo válido. Para localhost, valide antes o processo, a porta e a saúde HTTP no mesmo ambiente de rede do WebView; CONNECTION_REFUSED pede correção do listener ou do endereço, não uma nova tentativa. PARTIAL significa que há texto mas o carregamento não foi confirmado — a aplicação pode não estar pronta, então verifique DOM, console e um sinal funcional. Use mode=desktop para sites que só funcionam no computador (ex.: web.whatsapp.com redireciona para /mobile/ no celular).",
+                buildJsonObject { put("url", str("URL ou termos de busca")); put("mode", str("desktop ou mobile (opcional; vale para as próximas páginas desta conversa)")) }, listOf("url")))
             add(tool("browser_new_tab", "Cria uma aba no browser desta conversa e, opcionalmente, abre uma URL pública. O resultado informa o id da aba.", buildJsonObject { put("url", str("URL pública opcional")) }))
             add(tool("browser_select_tab", "Seleciona uma aba pelo id informado por browser_read ou browser_new_tab. As ferramentas seguintes passam a operar somente nessa aba.", buildJsonObject { put("tab_id", str("Id da aba")) }, listOf("tab_id")))
             add(tool("browser_close_tab", "Fecha a aba informada desta conversa. A última aba aberta não pode ser fechada.", buildJsonObject { put("tab_id", str("Id da aba")) }, listOf("tab_id")))
@@ -5577,6 +5587,7 @@ class AgentRunner(
                 "browser_navigate" -> {
                     // Caminhos do sandbox (/root, /public, /home ou file:///root/…) viram o arquivo real do aparelho:
                     // o WebView não enxerga o filesystem do proot (era a causa de net::ERR_FILE_NOT_FOUND).
+                    browserMode(sessionId, s("mode"))
                     val raw = SecretVault.resolve(sessionId, s("url")).trim()
                     val guest = raw.removePrefix("file://").let { if (raw.startsWith("file://")) it.substringBefore('?').substringBefore('#') else it }
                     val isSandboxPath = guest.startsWith("/root") || guest.startsWith("/public") || guest.startsWith("/home") || (raw.startsWith("file://") && !guest.startsWith("/data/") && !guest.startsWith("/storage/") && !guest.startsWith("/sdcard"))

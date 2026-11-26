@@ -219,9 +219,12 @@ class OpenRouter(private val settings: () -> Settings) {
         }
         if (code !in 200..299) {
             val msg = runCatching { json.parseToJsonElement(text).jsonObject["error"]?.jsonObject?.get("message")?.jsonPrimitive?.content }.getOrNull()
-            val retryable = LlmRetryPolicy.isTransientHttp(code, msg ?: text.take(300))
+            // Modelo descontinuado (HTTP 410 "Use Y instead"): repetir não adianta; diz exatamente o que trocar.
+            val deprecated = Regex("(?i)model\\s+(\\S+)\\s+has been deprecated.*?use\\s+(\\S+)\\s+instead").find(msg ?: text)
+            val retryable = deprecated == null && LlmRetryPolicy.isTransientHttp(code, msg ?: text.take(300))
             throw LlmRequestFailure(
-                "HTTP $code — ${msg ?: text.take(160)}",
+                if (deprecated != null) "HTTP $code — o modelo ${deprecated.groupValues[1]} foi descontinuado pelo provedor. Troque para ${deprecated.groupValues[2]} em Configurações › Modelos (principal ou reserva)."
+                else "HTTP $code — ${msg ?: text.take(160)}",
                 retryable = retryable,
                 retryAfterMillis = retryAfterMillis,
             )

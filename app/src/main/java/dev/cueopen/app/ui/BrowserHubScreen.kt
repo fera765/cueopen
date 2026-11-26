@@ -456,6 +456,15 @@ private fun WebApiHubTab(nav: NavController) {
                         })
                     }
                     Text(a.description, fontSize = 12.sp, color = c.ink2)
+                    // Modo do site nesta API: alguns só funcionam como computador (ex.: WhatsApp Web).
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        listOf(false to "Mobile", true to "Desktop").forEach { (d, label) ->
+                            Chip(label, selected = a.desktop == d) {
+                                val saved = app.store.state.value.webApis.firstOrNull { it.slug == a.slug } ?: a
+                                app.store.upsertWebApi(saved.copy(desktop = d))
+                            }
+                        }
+                    }
                     Text("args: " + a.params.joinToString { it.name + (if (it.required) "*" else "") }, fontSize = 11.sp, color = c.ink3)
                     if (a.runs > 0) Text("${a.runs} execuções · ${a.errors} erros" + (if (a.lastError.isNotBlank()) " · último: " + a.lastError.take(80) else ""),
                         fontSize = 11.sp, color = if (a.lastError.isNotBlank()) c.err else c.ink3)

@@ -1477,11 +1477,16 @@ class BrowserHost(private val appCtx: Context, private val sessionId: String = "
     suspend fun runJs(code: String, promiseTimeoutMs: Long = 25_000): String {
         val tab = onMain { activeTab() } ?: return "ERROR: não há aba ativa no browser."
         val key = "__fjs" + System.nanoTime()
-        val q = org.json.JSONObject.quote(code)
-        val ser = "function(v){try{return v===undefined?'__UNDEF__':(typeof v==='string'?v:JSON.stringify(v))}catch(e){return String(v)}}"
-        val start = eval("(function(){var S=$ser;try{var r=(0,eval)($q);" +
-            "if(r&&typeof r.then==='function'){window['$key']=null;r.then(function(v){window['$key']={v:S(v)}},function(e){window['$key']={e:String(e&&e.stack||e)}});return '__PROMISE__'}" +
-            "return S(r)}catch(e){return 'ERROR (exceção no script): '+String(e&&e.message||e)}})()", tab = tab)
+        val ser = "function(v){try{return v===undefined?'__UNDEF__':v===null?'__NULL__':(typeof v==='string'?v:JSON.stringify(v))}catch(e){return String(v)}}"
+        // Sem eval (sites com CSP rígida — WhatsApp Web, bancos — bloqueiam 'unsafe-eval'): o evaluateJavascript do app
+        // não passa pela CSP. 1) código como EXPRESSÃO; 2) se não for expressão (instruções soltas), roda como está e usa
+        // o valor de conclusão do próprio WebView.
+        val handle = "if(r&&typeof r.then==='function'){window['$key']=null;r.then(function(v){window['$key']={v:S(v)}},function(e){window['$key']={e:String(e&&e.stack||e)}});return '__PROMISE__'}return S(r)"
+        var start = eval("(function(){var S=$ser;try{var r=(\n$code\n);$handle}catch(e){return 'ERROR (exceção no script): '+String(e&&e.message||e)}})()", tab = tab)
+        if (start == "null") {
+            // Erro de sintaxe como expressão = são instruções: roda uma única vez, cru (valor de conclusão do WebView).
+            start = eval(code, tab = tab).let { if (it == "null") "__UNDEF__" else it }
+        }
         val out = if (start != "__PROMISE__") start else {
             var got: String? = null
             val deadline = System.currentTimeMillis() + promiseTimeoutMs
@@ -1493,6 +1498,7 @@ class BrowserHost(private val appCtx: Context, private val sessionId: String = "
             got ?: "timeout: a Promise não terminou em ${promiseTimeoutMs / 1000}s (algo no código ficou esperando para sempre)"
         }
         return when (out) {
+            "__NULL__" -> "null"
             "__UNDEF__", "null", "" -> "(sem valor: o código não devolveu nada. Termine com uma expressão, ex.: JSON.stringify(resultado), ou use return dentro de uma função)"
             else -> out
         }
