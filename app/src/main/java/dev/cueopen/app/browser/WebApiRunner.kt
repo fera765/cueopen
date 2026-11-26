@@ -33,7 +33,9 @@ object WebApiRunner {
     private fun host(): BrowserHost = CueApp.instance.browserFor(KEY)
 
     /** Executa a API. Devolve o JSON final (texto) ou {"ok":false,"error":…}. */
-    suspend fun run(ctx: Context, a: WebApi, args: JsonObject, timeoutMs: Long = 45_000): String = lock.withLock {
+    suspend fun run(ctx: Context, a: WebApi, args: JsonObject, timeoutMs0: Long = 45_000): String = lock.withLock {
+        // Com biblioteca injetada (WA-JS) a 1ª carga do WhatsApp Web pode levar ~30 s: mais folga.
+        val timeoutMs = if (a.inject.isNotEmpty()) maxOf(timeoutMs0, 120_000) else timeoutMs0
         val started = System.currentTimeMillis()
         val h = host()
         val helpers = helpers(ctx)
@@ -82,7 +84,7 @@ object WebApiRunner {
             // 4) Código da API — runJs aguarda a Promise e devolve o erro real.
             stage = "rodar o código (algum await não terminou: confira api.wait/fetch/seletores)"
             val r = h.runJs("(async()=>{$helpers;const args=$argsJs;try{const r=await (async function(args,api){\n${a.code}\n})(args,api);" +
-                "return JSON.stringify({ok:true,url:location.href,data:r===undefined?null:r})}catch(e){return JSON.stringify({ok:false,url:location.href,error:String(e&&e.message||e)})}})()", promiseTimeoutMs = 35_000)
+                "return JSON.stringify({ok:true,url:location.href,data:r===undefined?null:r})}catch(e){return JSON.stringify({ok:false,url:location.href,error:String(e&&e.message||e)})}})()", promiseTimeoutMs = if (a.inject.isNotEmpty()) 100_000 else 35_000)
             val o = runCatching { json.parseToJsonElement(r).jsonObject }.getOrNull()
                 ?: return@withTimeoutOrNull err(a, full, "o código não devolveu JSON: ${r.take(300)}", url)
             if (o["ok"]?.jsonPrimitive?.contentOrNull != "true") return@withTimeoutOrNull err(a, full, o["error"]?.jsonPrimitive?.contentOrNull ?: "erro no código", o["url"]?.jsonPrimitive?.contentOrNull)

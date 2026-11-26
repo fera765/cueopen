@@ -44,7 +44,7 @@ api.blocked = () => {
  * WhatsApp Web (WA-JS): espera a página e o WPP ficarem prontos, assume a janela se o WhatsApp estiver aberto em outra
  * ("Usar nesta janela") e confirma o login. Lança erro claro se não houver sessão (falta ler o QR no Browser).
  */
-api.waReady = async (ms = 45000) => {
+api.waReady = async (ms = 90000) => {
   const t0 = Date.now();
   while (Date.now() - t0 < ms) {
     const b = Array.from(document.querySelectorAll('button, div[role=button]')).find(x => /usar nesta janela|use here|usar aqui/i.test(x.innerText || ''));

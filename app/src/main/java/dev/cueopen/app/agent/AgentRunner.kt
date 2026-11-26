@@ -3264,7 +3264,7 @@ class AgentRunner(
                 if (nTests > 12) return ToolResult("RECUSADO: 12 testes nesta conversa sem salvar. Pare e explique ao usuário o que está bloqueando (seletor, bloqueio do site, dado que não existe) em vez de testar mais variações.", SessionStatus.WAITING_USER)
                 if (Regex("^https?://(www\\.)?example\\.(com|org)").containsMatchIn(s("url_template"))) return ToolResult("RECUSADO: teste na página real do site-alvo, não em example.com. Para chamar uma API JSON do site, use o template da página do próprio site e api.fetchJson no código.")
                 val draft = dev.cueopen.app.data.WebApi(slug = "teste", name = "teste", urlTemplate = s("url_template"), code = s("code"), waitFor = s("wait_for"),
-                    desktop = a["desktop"]?.jsonPrimitive?.booleanOrNull ?: false)
+                    desktop = a["desktop"]?.jsonPrimitive?.booleanOrNull ?: false, inject = s("inject").split(',').map { it.trim() }.filter { it.startsWith("https://") })
                 val out = dev.cueopen.app.browser.WebApiRunner.run(ctx, draft, args)
                 val passed = out.contains("\"ok\":true") && Regex("\"results\":\\[\\s*\\{").containsMatchIn(out)
                 if (passed) webApiPassed[sessionId] = (s("url_template") + "\u0000" + s("code")).hashCode()
@@ -3280,7 +3280,8 @@ class AgentRunner(
                 val params = runCatching { kotlinx.serialization.json.Json { ignoreUnknownKeys = true }.decodeFromString<List<dev.cueopen.app.data.WebApiParam>>(s("params").ifBlank { "[]" }) }
                     .getOrElse { return ToolResult("ERRO: params não é uma lista JSON válida: ${it.message?.take(160)}") }
                 store.upsertWebApi(dev.cueopen.app.data.WebApi(slug = slug, name = s("name").ifBlank { slug }, description = s("description"), urlTemplate = s("url_template"),
-                    code = s("code"), waitFor = s("wait_for"), params = params, source = "ia", desktop = a["desktop"]?.jsonPrimitive?.booleanOrNull ?: false))
+                    code = s("code"), waitFor = s("wait_for"), params = params, source = "ia", desktop = a["desktop"]?.jsonPrimitive?.booleanOrNull ?: false,
+                    inject = s("inject").split(',').map { it.trim() }.filter { it.startsWith("https://") }))
                 webApiTests.remove(sessionId)
                 return ToolResult("OK: Web API \"$slug\" salva no hub e ativa. Qualquer agente chama com webapi_call(api=\"$slug\", args={…}).")
             }
@@ -3855,6 +3856,7 @@ class AgentRunner(
                     put("args", str("Argumentos de teste em JSON, ex.: {\"query\":\"tênis\",\"page\":2}"))
                     put("wait_for", str("Seletor CSS que indica página pronta (opcional)"))
                     put("desktop", bool("true = abre o site como computador (WhatsApp Web e outros que redirecionam no celular)"))
+                    put("inject", str("URLs https de bibliotecas JS a injetar antes do código, separadas por vírgula (ex.: WA-JS no WhatsApp Web)"))
                 }, listOf("url_template", "code", "args")))
             add(tool("webapi_save",
                 "Salva a Web API no hub (só depois de um webapi_test que PASSOU com o mesmo código e template). Vira uma ferramenta que qualquer agente chama com webapi_call.",
@@ -3862,7 +3864,7 @@ class AgentRunner(
                     put("slug", str("Identificador: minúsculas, números e _ (ex.: mercadolivre_ofertas)"))
                     put("name", str("Nome curto para o usuário"))
                     put("description", str("O que devolve, em 1 frase (a LLM decide por ela quando usar)"))
-                    put("url_template", str("O mesmo do teste")); put("code", str("O mesmo do teste")); put("wait_for", str("O mesmo do teste (opcional)")); put("desktop", bool("O mesmo do teste"))
+                    put("url_template", str("O mesmo do teste")); put("code", str("O mesmo do teste")); put("wait_for", str("O mesmo do teste (opcional)")); put("desktop", bool("O mesmo do teste")); put("inject", str("O mesmo do teste"))
                     put("params", str("JSON: [{\"name\":\"query\",\"type\":\"string\",\"description\":\"…\",\"required\":true,\"default\":\"\"}]"))
                 }, listOf("slug", "name", "description", "url_template", "code", "params")))
         }
