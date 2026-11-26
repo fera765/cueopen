@@ -79,7 +79,61 @@ api.waChat = (c) => {
     is_group: !!c.isGroup, unread: c.unreadCount || 0, archived: !!c.archive, pinned: !!c.pin, muted: !!(c.mute && c.mute.expiration),
     last_time: c.t ? new Date(c.t * 1000).toISOString() : null, last_message: last ? api.waMsg(last) : null };
 };
-api.waMsg = (m) => ({ id: m.id && (m.id._serialized || m.id), from_me: !!(m.id && m.id.fromMe), author: (m.author && (m.author._serialized || m.author)) || (m.from && (m.from._serialized || m.from)) || null,
+api.waMsg = (m) => ({ id: m.id && (m.id._serialized || m.id), from_me: !!((m.id && m.id.fromMe) || m.fromMe || (typeof m.id === 'string' && m.id.startsWith('true_')) || (m.id && typeof m.id._serialized === 'string' && m.id._serialized.startsWith('true_'))), author: (m.author && (m.author._serialized || m.author)) || (m.from && (m.from._serialized || m.from)) || null,
   sender_name: (m.senderObj && (m.senderObj.name || m.senderObj.pushname)) || m.notifyName || null,
   type: m.type, text: m.body && m.type === 'chat' ? m.body : (m.caption || (m.type !== 'chat' ? '[' + m.type + ']' : '')),
   time: m.t ? new Date(m.t * 1000).toISOString() : null, ack: m.ack });
+
+/* ───────────── Requisições do próprio site (o site como caminho, nunca chamada direta de fora) ─────────────
+ * api.requests(padrão)       → URLs de fetch/XHR que a página já fez (Resource Timing).
+ * api.watch(padrão)          → passa a gravar respostas fetch/XHR cujo URL casa com o padrão (regex em texto).
+ * api.waitResponse(padrão,ms)→ espera a próxima resposta gravada que casa e devolve {url,status,json|text}.
+ * api.replay(urlOuPadrão,opt)→ refaz, DE DENTRO da página (mesmos cookies/sessão/origem), uma requisição que o site fez,
+ *                              opcionalmente trocando parâmetros: opt.params = {q: "novo termo", page: 2}.
+ */
+api.requests = (pattern) => {
+  const re = pattern ? new RegExp(pattern) : null;
+  return performance.getEntriesByType('resource').filter(e => /fetch|xmlhttprequest/.test(e.initiatorType) && (!re || re.test(e.name))).map(e => e.name);
+};
+api.watch = (pattern) => {
+  window.__fluwyNet = window.__fluwyNet || [];
+  window.__fluwyPat = window.__fluwyPat || [];
+  if (pattern && !window.__fluwyPat.includes(pattern)) window.__fluwyPat.push(pattern);
+  if (window.__fluwyHooked) return true;
+  window.__fluwyHooked = true;
+  const match = u => window.__fluwyPat.some(p => new RegExp(p).test(u));
+  const keep = (url, status, text) => { try { window.__fluwyNet.push({ url, status, text: String(text).slice(0, 2000000), t: Date.now() }); if (window.__fluwyNet.length > 60) window.__fluwyNet.shift(); } catch (e) {} };
+  const of = window.fetch;
+  window.fetch = async function (input, init) {
+    const res = await of.apply(this, arguments);
+    try { const u = typeof input === 'string' ? input : (input && input.url) || ''; if (match(u)) res.clone().text().then(t => keep(res.url || u, res.status, t)).catch(() => {}); } catch (e) {}
+    return res;
+  };
+  const oo = XMLHttpRequest.prototype.open, os = XMLHttpRequest.prototype.send;
+  XMLHttpRequest.prototype.open = function (m, u) { this.__fu = u; return oo.apply(this, arguments); };
+  XMLHttpRequest.prototype.send = function () {
+    this.addEventListener('load', () => { try { const u = this.responseURL || this.__fu || ''; if (match(u)) keep(u, this.status, this.responseType === '' || this.responseType === 'text' ? this.responseText : JSON.stringify(this.response)); } catch (e) {} });
+    return os.apply(this, arguments);
+  };
+  return true;
+};
+api.waitResponse = async (pattern, ms = 12000) => {
+  api.watch(pattern);
+  const re = new RegExp(pattern), t0 = Date.now(), since = t0 - 50;
+  while (Date.now() - t0 < ms) {
+    const hit = (window.__fluwyNet || []).filter(x => x.t >= since && re.test(x.url)).pop();
+    if (hit) { let json = null; try { json = JSON.parse(hit.text.replace(/^\)\]\}',?\s*/, '')); } catch (e) {} return { url: hit.url, status: hit.status, json, text: json ? null : hit.text }; }
+    await sleep(150);
+  }
+  throw new Error('a página não fez nenhuma requisição que case com ' + pattern + ' em ' + ms + 'ms');
+};
+api.replay = async (urlOrPattern, opt = {}) => {
+  let u = /^https?:/.test(urlOrPattern) ? urlOrPattern : api.requests(urlOrPattern).pop();
+  if (!u) throw new Error('a página ainda não fez requisição que case com ' + urlOrPattern);
+  const url = new URL(u, location.href);
+  Object.entries(opt.params || {}).forEach(([k, v]) => url.searchParams.set(k, v));
+  const r = await fetch(url.href, Object.assign({ credentials: 'include' }, opt.init || {}));
+  const text = await r.text();
+  let json = null; try { json = JSON.parse(text.replace(/^\)\]\}',?\s*/, '')); } catch (e) {}
+  return { url: url.href, status: r.status, json, text: json ? null : text };
+};

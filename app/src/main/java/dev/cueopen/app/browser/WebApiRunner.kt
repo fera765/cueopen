@@ -99,6 +99,12 @@ object WebApiRunner {
         res
     }
 
+    /** Requisições fetch/XHR que a página da API fez (para o criador enxergar de onde vêm os dados). */
+    suspend fun network(): String = lock.withLock {
+        host().runJs("(function(){var seen={};return performance.getEntriesByType('resource').filter(function(e){return /fetch|xmlhttprequest/.test(e.initiatorType)})" +
+            ".map(function(e){return e.initiatorType+' '+Math.round(e.transferSize/1024)+'KB '+e.name}).filter(function(x){var k=x.split('?')[0];if(seen[k])return false;seen[k]=1;return true}).slice(-30).join('\\n')})()")
+    }
+
     /** Baixa (e guarda por 24 h) uma biblioteca JS de URL https. */
     private suspend fun library(ctx: Context, url: String): String? = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
         if (!url.startsWith("https://")) return@withContext null

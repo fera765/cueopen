@@ -3268,7 +3268,9 @@ class AgentRunner(
                 val out = dev.cueopen.app.browser.WebApiRunner.run(ctx, draft, args)
                 val passed = out.contains("\"ok\":true") && Regex("\"results\":\\[\\s*\\{").containsMatchIn(out)
                 if (passed) webApiPassed[sessionId] = (s("url_template") + "\u0000" + s("code")).hashCode()
+                val net = runCatching { dev.cueopen.app.browser.WebApiRunner.network() }.getOrDefault("").takeIf { it.isNotBlank() && !it.startsWith("(sem valor") }
                 return ToolResult((if (passed) "PASSOU" else "FALHOU (precisa ok:true e results com itens)") + " (teste $nTests/12)" +
+                    (if (net != null) "\nRequisições fetch/XHR que a página fez (dados podem vir prontos daqui — use api.replay/api.waitResponse):\n${net.take(3000)}" else "") +
                     (if (!passed && nTests % 3 == 0) ". Três falhas seguidas: inspecione a página com browser_navigate + browser_js no ponto exato antes de testar de novo." else "") + ":\n" + out.take(12_000))
             }
             "webapi_save" -> {
@@ -3563,8 +3565,12 @@ class AgentRunner(
                 appendLine("Você transforma um site numa API que devolve JSON para LLMs. Roda num WebView separado com a sessão (cookies/logins) e o proxy do browser do app.")
                 appendLine("1. Descobrir: abra o site com browser_navigate e use browser_js/browser_snapshot/browser_network para achar a URL de busca/listagem (com paginação) e seletores estáveis (data-*, aria-*, ids; evite classes com hash). Se o site tiver um JSON público, use-o com api.fetchJson.")
                 appendLine("2. Escrever: url_template é um template literal JS com args e enc() (= encodeURIComponent), ex.: https://site/busca?q=\${enc(args.query)}&page=\${Number(args.page||1)}. code é o corpo de async function(args, api); devolva { query, page, count, has_more, next_page, results: [{position, title, url, …}] }.")
-                appendLine("   api: wait(sel,ms), all(sel,root), one(sel,root), text(el,sel), attr(el,sel,nome), abs(url), num(texto→número), fetchText/fetchJson(url), scroll(vezes), sleep(ms).")
+                appendLine("   api: wait(sel,ms), all(sel,root), one(sel,root), text(el,sel), attr(el,sel,nome), abs(url), num(texto→número), fetchText/fetchJson(url), scroll(vezes), sleep(ms), requests(padrão), watch(padrão), waitResponse(padrão,ms), replay(urlOuPadrão,{params}); WhatsApp: waReady(), waChatId(to), waChat(c), waMsg(m).")
                 appendLine("3. Provar: webapi_test com args reais (teste também page 2 se houver paginação). Só passa com ok:true e results não vazio.")
+                appendLine("DADOS DAS REQUISIÇÕES DO SITE (prefira quando existir): muitas páginas recebem os dados em JSON por fetch/XHR. Na descoberta, abra a página e use browser_network para ver essas requisições (URL, status, payload). " +
+                    "Se os dados estiverem lá, a API deve usar O SITE COMO CAMINHO: url_template = a página do site; no código, (a) api.replay('<padrão da URL>', {params:{q: args.query, page: args.page}}) refaz a requisição que o site já fez, de dentro da página, com os cookies/sessão dele; " +
+                    "ou (b) api.watch('<padrão>') + ação na própria página (digitar a busca, rolar, clicar em próxima) + await api.waitResponse('<padrão>') para capturar a resposta que o site recebeu. api.requests('<padrão>') lista as URLs já feitas. " +
+                    "NUNCA chame o endpoint da API diretamente de fora (template apontando para a API, curl, web_fetch): sempre a partir da página do site. O webapi_test mostra as requisições que a página fez — use isso. Se não houver requisição útil (HTML pronto), extraia do DOM.")
                 appendLine("Ferramentas: browser_js espera Promise (pode usar async/await e fetch) e devolve o erro lançado; se vier '(sem valor…)', termine o código com uma expressão. Se o mesmo script falhar 2 vezes, mude a abordagem (outro seletor, ler outerHTML de um item, browser_network) em vez de repetir variações.")
                 appendLine("Links opacos (ex.: google.com/goto?url=…, rastreadores) não se decodificam: use o href final de um elemento, data-* com a URL, ou devolva o link como está com display_url.")
                 appendLine("4. Entregar: webapi_save com o mesmo código/template, params descritos e finish com 1–2 frases.")
