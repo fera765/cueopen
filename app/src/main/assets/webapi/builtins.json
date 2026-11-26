@@ -133,20 +133,28 @@
   "source": "nativa"
  },
  {
-  "slug": "whatsapp_groups",
-  "name": "WhatsApp · grupos",
-  "description": "Lista os grupos: nome, id, participantes e se você é admin.",
   "urlTemplate": "https://web.whatsapp.com/",
-  "code": "await api.waReady();\nconst gs = await WPP.group.getAllGroups();\nconst me = WPP.conn.getMyUserId ? (WPP.conn.getMyUserId()._serialized) : '';\nconst results = gs.map(g => { const meta = g.groupMetadata || {}; const parts = meta.participants && meta.participants.getModelsArray ? meta.participants.getModelsArray() : [];\n  return { id: g.id._serialized, name: g.name || meta.subject || '', participants: parts.length, i_am_admin: parts.some(p => p.id && p.id._serialized === me && (p.isAdmin || p.isSuperAdmin)), unread: g.unreadCount || 0 }; });\nreturn { count: results.length, results };",
-  "params": [],
   "waitFor": "",
   "desktop": true,
   "inject": [
    "https://cdn.jsdelivr.net/npm/@wppconnect/wa-js/dist/wppconnect-wa.js"
   ],
-  "sensitive": false,
   "builtin": true,
-  "source": "nativa"
+  "source": "nativa",
+  "slug": "whatsapp_groups",
+  "name": "WhatsApp · grupos",
+  "description": "Lista os grupos: nome, id, participantes e se você é admin.",
+  "code": "await api.waReady();\nconst me = (() => { try { const u = WPP.conn.getMyUserId(); return u && (u._serialized || String(u)); } catch (e) { return ''; } })();\nlet gs = [];\ntry { gs = await WPP.group.getAllGroups(); } catch (e) {}\ngs = (gs || []).filter(Boolean);\nif (!gs.length) { try { gs = (await WPP.chat.list({ onlyGroups: true })).filter(Boolean); } catch (e) {} }\nconst max = Math.min(Number(args.max || 200), 500);\nconst results = [];\nfor (const g of gs.slice(0, max)) {\n  const id = g.id && (g.id._serialized || String(g.id)); if (!id) continue;\n  const meta = g.groupMetadata || {};\n  let parts = [];\n  try { parts = meta.participants && meta.participants.getModelsArray ? meta.participants.getModelsArray() : (meta.participants || []); } catch (e) {}\n  results.push({ id, name: g.name || g.formattedTitle || meta.subject || '', participants: parts.length,\n    i_am_admin: parts.some(x => x && x.id && (x.id._serialized || String(x.id)) === me && (x.isAdmin || x.isSuperAdmin)),\n    unread: g.unreadCount || 0 });\n}\nreturn { count: results.length, results };",
+  "params": [
+   {
+    "name": "max",
+    "type": "number",
+    "description": "Máximo de grupos (padrão 200)",
+    "required": false,
+    "default": "200"
+   }
+  ],
+  "sensitive": false
  },
  {
   "slug": "whatsapp_mark_read",
@@ -173,11 +181,18 @@
   "source": "nativa"
  },
  {
-  "slug": "whatsapp_send_text",
-  "name": "WhatsApp · enviar mensagem",
-  "description": "Envia UMA mensagem de texto para UMA conversa, com proteções anti-bloqueio: 'digitando…' antes, intervalo mínimo, limite por hora/dia, sem texto repetido para várias pessoas e só para conversas que já existem (a não ser allow_new).",
   "urlTemplate": "https://web.whatsapp.com/",
-  "code": "if (String(args.confirmed) !== 'true') throw new Error('envio recusado: só envie quando o usuário pedir explicitamente esta mensagem para este contato (confirmed=true).');\nawait api.waReady();\nconst text = String(args.text || '').trim();\nif (!text) throw new Error('texto vazio');\nif (text.length > 4000) throw new Error('texto longo demais (máx. 4000)');\nconst chatId = await api.waChatId(args.to);\nif (chatId.endsWith('@broadcast') || /,|;/.test(String(args.to))) throw new Error('um destinatário por vez: envio em massa não é permitido');\n// Proteções anti-bloqueio (ritmo humano; nada de disparo em massa).\nconst KEY = '__fluwy_wa_sends', now = Date.now();\nlet log = []; try { log = JSON.parse(localStorage.getItem(KEY) || '[]').filter(x => now - x.t < 86400000); } catch (e) {}\nconst last = log.length ? log[log.length - 1].t : 0;\nif (now - last < 12000) throw new Error('aguarde ' + Math.ceil((12000 - (now - last)) / 1000) + 's entre mensagens (ritmo humano)');\nif (log.filter(x => now - x.t < 3600000).length >= 20) throw new Error('limite de 20 mensagens por hora atingido');\nif (log.length >= 120) throw new Error('limite de 120 mensagens por dia atingido');\nconst h = text.toLowerCase().replace(/\\s+/g, ' ').slice(0, 200);\nconst same = new Set(log.filter(x => now - x.t < 3600000 && x.h === h && x.to !== chatId).map(x => x.to));\nif (same.size >= 2) throw new Error('mesmo texto já enviado para outras conversas na última hora: mensagens repetidas para várias pessoas são o principal motivo de bloqueio');\nlet chat = null; try { chat = await WPP.chat.get(chatId); } catch (e) {}\nif (!chat && String(args.allow_new) !== 'true') throw new Error('não há conversa com este contato; para iniciar uma nova use allow_new=true (só para quem espera sua mensagem)');\nif (!chat) { const ex = await WPP.contact.queryExists(chatId); if (!ex) throw new Error('este número não tem WhatsApp'); }\n// \"digitando…\" proporcional ao texto, com variação.\ntry { await WPP.chat.markIsComposing(chatId); } catch (e) {}\nawait sleep(Math.min(1200 + text.length * 35, 6000) + Math.floor(Math.random() * 900));\ntry { await WPP.chat.markIsPaused(chatId); } catch (e) {}\nconst r = await WPP.chat.sendTextMessage(chatId, text, { createChat: String(args.allow_new) === 'true' });\nlog.push({ t: Date.now(), to: chatId, h }); try { localStorage.setItem(KEY, JSON.stringify(log)); } catch (e) {}\nreturn { chat: chatId, results: [{ ok: true, id: r && r.id && (r.id._serialized || r.id), chat: chatId, sent_at: new Date().toISOString() }], sent_last_hour: log.filter(x => Date.now() - x.t < 3600000).length };",
+  "waitFor": "",
+  "desktop": true,
+  "inject": [
+   "https://cdn.jsdelivr.net/npm/@wppconnect/wa-js/dist/wppconnect-wa.js"
+  ],
+  "builtin": true,
+  "source": "nativa",
+  "slug": "whatsapp_send_text",
+  "name": "WhatsApp · enviar texto",
+  "description": "Envia UMA mensagem de texto para UMA conversa, com ritmo humano e limites anti-bloqueio. Só quando o usuário pedir.",
+  "code": "await api.waReady();\nconst chatId = await api.waChatId(args.to);\nconst text = String(args.text || '').trim();\nif (!text) throw new Error('texto vazio');\nif (text.length > 4000) throw new Error('texto longo demais (máx. 4000)');\nconst commit = await api.waGuard(args, chatId, text);\nawait api.waTyping(chatId, text.length);\nconst r = await WPP.chat.sendTextMessage(chatId, text, Object.assign({ createChat: String(args.allow_new) === 'true' }, api.waQuote(args)));\ncommit();\nreturn api.waSent(r, chatId);",
   "params": [
    {
     "name": "to",
@@ -194,9 +209,16 @@
     "default": ""
    },
    {
+    "name": "reply_to",
+    "type": "string",
+    "description": "Opcional: id da mensagem a responder (citar)",
+    "required": false,
+    "default": ""
+   },
+   {
     "name": "allow_new",
     "type": "boolean",
-    "description": "true = permite iniciar conversa com número novo (cuidado: é o que mais gera bloqueio)",
+    "description": "true = permite iniciar conversa nova (cuidado: é o que mais gera bloqueio)",
     "required": false,
     "default": "false"
    },
@@ -208,13 +230,560 @@
     "default": "false"
    }
   ],
+  "sensitive": true
+ },
+ {
+  "urlTemplate": "https://web.whatsapp.com/",
   "waitFor": "",
   "desktop": true,
   "inject": [
    "https://cdn.jsdelivr.net/npm/@wppconnect/wa-js/dist/wppconnect-wa.js"
   ],
-  "sensitive": true,
   "builtin": true,
-  "source": "nativa"
+  "source": "nativa",
+  "slug": "whatsapp_group_participants",
+  "name": "WhatsApp · participantes do grupo",
+  "description": "Lista participantes de um grupo (id, admin).",
+  "code": "await api.waReady();\nconst gid = await api.waChatId(args.group);\nif (!gid.endsWith('@g.us')) throw new Error('não é um grupo: ' + gid);\nconst ps = (await WPP.group.getParticipants(gid) || []).filter(Boolean);\nconst results = ps.map(x => ({ id: x.id && (x.id._serialized || String(x.id)), admin: !!(x.isAdmin || x.isSuperAdmin), super_admin: !!x.isSuperAdmin }));\nreturn { group: gid, count: results.length, results };",
+  "params": [
+   {
+    "name": "group",
+    "type": "string",
+    "description": "Id ou nome do grupo",
+    "required": true,
+    "default": ""
+   }
+  ],
+  "sensitive": false
+ },
+ {
+  "urlTemplate": "https://web.whatsapp.com/",
+  "waitFor": "",
+  "desktop": true,
+  "inject": [
+   "https://cdn.jsdelivr.net/npm/@wppconnect/wa-js/dist/wppconnect-wa.js"
+  ],
+  "builtin": true,
+  "source": "nativa",
+  "slug": "whatsapp_send_file",
+  "name": "WhatsApp · enviar arquivo/foto/vídeo/áudio",
+  "description": "Envia UM arquivo para UMA conversa: imagem, vídeo, áudio, documento ou figurinha. Use file_path (arquivo da área de trabalho) ou file (data URL/URL).",
+  "code": "await api.waReady();\nconst chatId = await api.waChatId(args.to);\nlet file = String(args.file || '');\nif (!file) throw new Error('informe file_path (arquivo da área de trabalho) ou file (data URL ou URL https)');\nif (/^https?:/i.test(file)) { const res = await fetch(file); if (!res.ok) throw new Error('não consegui baixar o arquivo: HTTP ' + res.status); file = await api.blobToDataUrl(await res.blob()); }\nif (!/^data:/.test(file)) throw new Error('file precisa ser data URL ou URL https');\nconst mime = (file.match(/^data:([^;,]+)/) || [])[1] || 'application/octet-stream';\nlet type = String(args.type || 'auto');\nif (type === 'auto') type = mime.startsWith('image/') ? 'image' : mime.startsWith('video/') ? 'video' : mime.startsWith('audio/') ? 'audio' : 'document';\nif (!['image','video','audio','document','sticker'].includes(type)) throw new Error('type inválido');\nconst caption = String(args.caption || '').slice(0, 1024);\nconst commit = await api.waGuard(args, chatId, 'file:' + type + ':' + file.length + ':' + caption);\nawait api.waTyping(chatId, caption.length + 20, type === 'audio');\nconst opts = Object.assign({ type, createChat: String(args.allow_new) === 'true' }, api.waQuote(args));\nif (caption && type !== 'audio' && type !== 'sticker') opts.caption = caption;\nif (args.filename) opts.filename = String(args.filename);\nif (type === 'audio' && String(args.voice) === 'true') opts.isPtt = true;\nconst r = await WPP.chat.sendFileMessage(chatId, file, opts);\ncommit();\nreturn api.waSent(r, chatId, { type, mime });",
+  "params": [
+   {
+    "name": "to",
+    "type": "string",
+    "description": "Número com DDI, id do chat ou nome do contato",
+    "required": true,
+    "default": ""
+   },
+   {
+    "name": "file_path",
+    "type": "string",
+    "description": "Arquivo da área de trabalho (até 16 MB)",
+    "required": false,
+    "default": ""
+   },
+   {
+    "name": "file",
+    "type": "string",
+    "description": "Alternativa: data URL ou URL https",
+    "required": false,
+    "default": ""
+   },
+   {
+    "name": "type",
+    "type": "string",
+    "description": "auto|image|video|audio|document|sticker",
+    "required": false,
+    "default": "auto"
+   },
+   {
+    "name": "caption",
+    "type": "string",
+    "description": "Legenda",
+    "required": false,
+    "default": ""
+   },
+   {
+    "name": "filename",
+    "type": "string",
+    "description": "Nome do arquivo (documentos)",
+    "required": false,
+    "default": ""
+   },
+   {
+    "name": "voice",
+    "type": "boolean",
+    "description": "true = áudio como mensagem de voz",
+    "required": false,
+    "default": "false"
+   },
+   {
+    "name": "reply_to",
+    "type": "string",
+    "description": "Opcional: id da mensagem a responder (citar)",
+    "required": false,
+    "default": ""
+   },
+   {
+    "name": "allow_new",
+    "type": "boolean",
+    "description": "true = permite iniciar conversa nova (cuidado: é o que mais gera bloqueio)",
+    "required": false,
+    "default": "false"
+   },
+   {
+    "name": "confirmed",
+    "type": "boolean",
+    "description": "true = o usuário pediu explicitamente este envio",
+    "required": true,
+    "default": "false"
+   }
+  ],
+  "sensitive": true
+ },
+ {
+  "urlTemplate": "https://web.whatsapp.com/",
+  "waitFor": "",
+  "desktop": true,
+  "inject": [
+   "https://cdn.jsdelivr.net/npm/@wppconnect/wa-js/dist/wppconnect-wa.js"
+  ],
+  "builtin": true,
+  "source": "nativa",
+  "slug": "whatsapp_send_location",
+  "name": "WhatsApp · enviar localização",
+  "description": "Envia UMA localização (lat/lng) para UMA conversa.",
+  "code": "await api.waReady();\nconst chatId = await api.waChatId(args.to);\nconst lat = Number(args.lat), lng = Number(args.lng);\nif (!isFinite(lat) || !isFinite(lng) || Math.abs(lat) > 90 || Math.abs(lng) > 180) throw new Error('lat/lng inválidos');\nconst commit = await api.waGuard(args, chatId, 'loc:' + lat.toFixed(4) + ',' + lng.toFixed(4));\nawait api.waTyping(chatId, 10);\nconst o = Object.assign({ lat, lng, createChat: String(args.allow_new) === 'true' }, api.waQuote(args));\nif (args.name) o.name = String(args.name); if (args.address) o.address = String(args.address); if (args.url) o.url = String(args.url);\nconst r = await WPP.chat.sendLocationMessage(chatId, o);\ncommit();\nreturn api.waSent(r, chatId, { lat, lng });",
+  "params": [
+   {
+    "name": "to",
+    "type": "string",
+    "description": "Número com DDI, id do chat ou nome do contato",
+    "required": true,
+    "default": ""
+   },
+   {
+    "name": "lat",
+    "type": "number",
+    "description": "Latitude",
+    "required": true,
+    "default": ""
+   },
+   {
+    "name": "lng",
+    "type": "number",
+    "description": "Longitude",
+    "required": true,
+    "default": ""
+   },
+   {
+    "name": "name",
+    "type": "string",
+    "description": "Nome do local",
+    "required": false,
+    "default": ""
+   },
+   {
+    "name": "address",
+    "type": "string",
+    "description": "Endereço",
+    "required": false,
+    "default": ""
+   },
+   {
+    "name": "url",
+    "type": "string",
+    "description": "Link opcional",
+    "required": false,
+    "default": ""
+   },
+   {
+    "name": "reply_to",
+    "type": "string",
+    "description": "Opcional: id da mensagem a responder (citar)",
+    "required": false,
+    "default": ""
+   },
+   {
+    "name": "allow_new",
+    "type": "boolean",
+    "description": "true = permite iniciar conversa nova (cuidado: é o que mais gera bloqueio)",
+    "required": false,
+    "default": "false"
+   },
+   {
+    "name": "confirmed",
+    "type": "boolean",
+    "description": "true = o usuário pediu explicitamente este envio",
+    "required": true,
+    "default": "false"
+   }
+  ],
+  "sensitive": true
+ },
+ {
+  "urlTemplate": "https://web.whatsapp.com/",
+  "waitFor": "",
+  "desktop": true,
+  "inject": [
+   "https://cdn.jsdelivr.net/npm/@wppconnect/wa-js/dist/wppconnect-wa.js"
+  ],
+  "builtin": true,
+  "source": "nativa",
+  "slug": "whatsapp_send_contact",
+  "name": "WhatsApp · enviar contato",
+  "description": "Envia UM cartão de contato (vCard) para UMA conversa.",
+  "code": "await api.waReady();\nconst chatId = await api.waChatId(args.to);\nconst num = String(args.contact || '').replace(/\\D/g, '');\nif (num.length < 8) throw new Error('contact precisa ser um número com DDI');\nconst commit = await api.waGuard(args, chatId, 'vcard:' + num);\nawait api.waTyping(chatId, 10);\nconst r = await WPP.chat.sendVCardContactMessage(chatId, { id: num + '@c.us', name: String(args.contact_name || num) });\ncommit();\nreturn api.waSent(r, chatId);",
+  "params": [
+   {
+    "name": "to",
+    "type": "string",
+    "description": "Número com DDI, id do chat ou nome do contato",
+    "required": true,
+    "default": ""
+   },
+   {
+    "name": "contact",
+    "type": "string",
+    "description": "Número do contato a compartilhar (com DDI)",
+    "required": true,
+    "default": ""
+   },
+   {
+    "name": "contact_name",
+    "type": "string",
+    "description": "Nome exibido",
+    "required": false,
+    "default": ""
+   },
+   {
+    "name": "allow_new",
+    "type": "boolean",
+    "description": "true = permite iniciar conversa nova (cuidado: é o que mais gera bloqueio)",
+    "required": false,
+    "default": "false"
+   },
+   {
+    "name": "confirmed",
+    "type": "boolean",
+    "description": "true = o usuário pediu explicitamente este envio",
+    "required": true,
+    "default": "false"
+   }
+  ],
+  "sensitive": true
+ },
+ {
+  "urlTemplate": "https://web.whatsapp.com/",
+  "waitFor": "",
+  "desktop": true,
+  "inject": [
+   "https://cdn.jsdelivr.net/npm/@wppconnect/wa-js/dist/wppconnect-wa.js"
+  ],
+  "builtin": true,
+  "source": "nativa",
+  "slug": "whatsapp_send_poll",
+  "name": "WhatsApp · enviar enquete",
+  "description": "Envia UMA enquete para UMA conversa.",
+  "code": "await api.waReady();\nconst chatId = await api.waChatId(args.to);\nconst name = String(args.question || '').trim();\nconst choices = String(args.options || '').split('|').map(s => s.trim()).filter(Boolean);\nif (!name) throw new Error('question vazia');\nif (choices.length < 2 || choices.length > 12) throw new Error('options: de 2 a 12 opções separadas por |');\nconst commit = await api.waGuard(args, chatId, 'poll:' + name);\nawait api.waTyping(chatId, name.length);\nconst r = await WPP.chat.sendCreatePollMessage(chatId, name, choices, { selectableCount: String(args.multiple) === 'true' ? 0 : 1 });\ncommit();\nreturn api.waSent(r, chatId);",
+  "params": [
+   {
+    "name": "to",
+    "type": "string",
+    "description": "Número com DDI, id do chat ou nome do contato",
+    "required": true,
+    "default": ""
+   },
+   {
+    "name": "question",
+    "type": "string",
+    "description": "Pergunta",
+    "required": true,
+    "default": ""
+   },
+   {
+    "name": "options",
+    "type": "string",
+    "description": "Opções separadas por |",
+    "required": true,
+    "default": ""
+   },
+   {
+    "name": "multiple",
+    "type": "boolean",
+    "description": "true = várias escolhas",
+    "required": false,
+    "default": "false"
+   },
+   {
+    "name": "allow_new",
+    "type": "boolean",
+    "description": "true = permite iniciar conversa nova (cuidado: é o que mais gera bloqueio)",
+    "required": false,
+    "default": "false"
+   },
+   {
+    "name": "confirmed",
+    "type": "boolean",
+    "description": "true = o usuário pediu explicitamente este envio",
+    "required": true,
+    "default": "false"
+   }
+  ],
+  "sensitive": true
+ },
+ {
+  "urlTemplate": "https://web.whatsapp.com/",
+  "waitFor": "",
+  "desktop": true,
+  "inject": [
+   "https://cdn.jsdelivr.net/npm/@wppconnect/wa-js/dist/wppconnect-wa.js"
+  ],
+  "builtin": true,
+  "source": "nativa",
+  "slug": "whatsapp_react",
+  "name": "WhatsApp · reagir",
+  "description": "Reage a uma mensagem com um emoji (vazio remove a reação).",
+  "code": "await api.waReady();\nif (String(args.confirmed) !== 'true') throw new Error('reação recusada: só quando o usuário pedir (confirmed=true)');\nconst id = String(args.message_id || ''); if (!id) throw new Error('message_id obrigatório');\nawait WPP.chat.sendReactionToMessage(id, String(args.emoji || '') || false);\nreturn { results: [{ ok: true, message_id: id, emoji: String(args.emoji || '') }] };",
+  "params": [
+   {
+    "name": "message_id",
+    "type": "string",
+    "description": "Id da mensagem",
+    "required": true,
+    "default": ""
+   },
+   {
+    "name": "emoji",
+    "type": "string",
+    "description": "Emoji (vazio = remover)",
+    "required": false,
+    "default": ""
+   },
+   {
+    "name": "confirmed",
+    "type": "boolean",
+    "description": "true = o usuário pediu explicitamente este envio",
+    "required": true,
+    "default": "false"
+   }
+  ],
+  "sensitive": true
+ },
+ {
+  "urlTemplate": "https://web.whatsapp.com/",
+  "waitFor": "",
+  "desktop": true,
+  "inject": [
+   "https://cdn.jsdelivr.net/npm/@wppconnect/wa-js/dist/wppconnect-wa.js"
+  ],
+  "builtin": true,
+  "source": "nativa",
+  "slug": "whatsapp_forward",
+  "name": "WhatsApp · encaminhar",
+  "description": "Encaminha UMA mensagem para UMA conversa.",
+  "code": "await api.waReady();\nconst chatId = await api.waChatId(args.to);\nconst id = String(args.message_id || ''); if (!id) throw new Error('message_id obrigatório');\nconst commit = await api.waGuard(args, chatId, 'fwd:' + id);\nawait WPP.chat.forwardMessage(chatId, id);\ncommit();\nreturn api.waSent(null, chatId, { message_id: id });",
+  "params": [
+   {
+    "name": "to",
+    "type": "string",
+    "description": "Número com DDI, id do chat ou nome do contato",
+    "required": true,
+    "default": ""
+   },
+   {
+    "name": "message_id",
+    "type": "string",
+    "description": "Id da mensagem a encaminhar",
+    "required": true,
+    "default": ""
+   },
+   {
+    "name": "confirmed",
+    "type": "boolean",
+    "description": "true = o usuário pediu explicitamente este envio",
+    "required": true,
+    "default": "false"
+   }
+  ],
+  "sensitive": true
+ },
+ {
+  "urlTemplate": "https://web.whatsapp.com/",
+  "waitFor": "",
+  "desktop": true,
+  "inject": [
+   "https://cdn.jsdelivr.net/npm/@wppconnect/wa-js/dist/wppconnect-wa.js"
+  ],
+  "builtin": true,
+  "source": "nativa",
+  "slug": "whatsapp_edit_message",
+  "name": "WhatsApp · editar mensagem",
+  "description": "Edita o texto de uma mensagem SUA (até 15 min após o envio).",
+  "code": "await api.waReady();\nif (String(args.confirmed) !== 'true') throw new Error('edição recusada: só quando o usuário pedir (confirmed=true)');\nconst id = String(args.message_id || ''), text = String(args.text || '').trim();\nif (!id || !text) throw new Error('message_id e text obrigatórios');\nawait WPP.chat.editMessage(id, text);\nreturn { results: [{ ok: true, message_id: id }] };",
+  "params": [
+   {
+    "name": "message_id",
+    "type": "string",
+    "description": "Id da mensagem",
+    "required": true,
+    "default": ""
+   },
+   {
+    "name": "text",
+    "type": "string",
+    "description": "Novo texto",
+    "required": true,
+    "default": ""
+   },
+   {
+    "name": "confirmed",
+    "type": "boolean",
+    "description": "true = o usuário pediu explicitamente este envio",
+    "required": true,
+    "default": "false"
+   }
+  ],
+  "sensitive": true
+ },
+ {
+  "urlTemplate": "https://web.whatsapp.com/",
+  "waitFor": "",
+  "desktop": true,
+  "inject": [
+   "https://cdn.jsdelivr.net/npm/@wppconnect/wa-js/dist/wppconnect-wa.js"
+  ],
+  "builtin": true,
+  "source": "nativa",
+  "slug": "whatsapp_delete_message",
+  "name": "WhatsApp · apagar mensagem",
+  "description": "Apaga uma mensagem (para todos se for sua e everyone=true). Irreversível.",
+  "code": "await api.waReady();\nif (String(args.confirmed) !== 'true') throw new Error('exclusão recusada: ação irreversível, só quando o usuário pedir (confirmed=true)');\nconst chatId = await api.waChatId(args.to), id = String(args.message_id || '');\nif (!id) throw new Error('message_id obrigatório');\nawait WPP.chat.deleteMessage(chatId, id, true, String(args.everyone) === 'true');\nreturn { results: [{ ok: true, chat: chatId, message_id: id }] };",
+  "params": [
+   {
+    "name": "to",
+    "type": "string",
+    "description": "Número com DDI, id do chat ou nome do contato",
+    "required": true,
+    "default": ""
+   },
+   {
+    "name": "message_id",
+    "type": "string",
+    "description": "Id da mensagem",
+    "required": true,
+    "default": ""
+   },
+   {
+    "name": "everyone",
+    "type": "boolean",
+    "description": "true = apagar para todos",
+    "required": false,
+    "default": "false"
+   },
+   {
+    "name": "confirmed",
+    "type": "boolean",
+    "description": "true = o usuário pediu explicitamente este envio",
+    "required": true,
+    "default": "false"
+   }
+  ],
+  "sensitive": true
+ },
+ {
+  "urlTemplate": "https://web.whatsapp.com/",
+  "waitFor": "",
+  "desktop": true,
+  "inject": [
+   "https://cdn.jsdelivr.net/npm/@wppconnect/wa-js/dist/wppconnect-wa.js"
+  ],
+  "builtin": true,
+  "source": "nativa",
+  "slug": "whatsapp_download_media",
+  "name": "WhatsApp · baixar mídia",
+  "description": "Baixa a mídia de uma mensagem (foto, vídeo, áudio, documento) e salva na área de trabalho.",
+  "code": "await api.waReady();\nconst id = String(args.message_id || ''); if (!id) throw new Error('message_id obrigatório');\nconst blob = await WPP.chat.downloadMedia(id);\nif (!blob) throw new Error('mensagem sem mídia');\nif (blob.size > 16 * 1024 * 1024) throw new Error('mídia maior que 16 MB');\nconst data = await api.blobToDataUrl(blob);\nlet fn = ''; try { const m = await WPP.chat.getMessageById(id); fn = (m && (m.filename || m.mediaData && m.mediaData.filename)) || ''; } catch (e) {}\nreturn { results: [{ ok: true, message_id: id, mime: blob.type, size: blob.size, filename: fn, data_url: data }] };",
+  "params": [
+   {
+    "name": "message_id",
+    "type": "string",
+    "description": "Id da mensagem com mídia",
+    "required": true,
+    "default": ""
+   },
+   {
+    "name": "save_as",
+    "type": "string",
+    "description": "Opcional: nome do arquivo na área de trabalho",
+    "required": false,
+    "default": ""
+   }
+  ],
+  "sensitive": false
+ },
+ {
+  "urlTemplate": "https://web.whatsapp.com/",
+  "waitFor": "",
+  "desktop": true,
+  "inject": [
+   "https://cdn.jsdelivr.net/npm/@wppconnect/wa-js/dist/wppconnect-wa.js"
+  ],
+  "builtin": true,
+  "source": "nativa",
+  "slug": "whatsapp_contact_info",
+  "name": "WhatsApp · info do contato",
+  "description": "Nome, recado, foto de perfil e se o número tem WhatsApp.",
+  "code": "await api.waReady();\nconst id = await api.waChatId(args.to);\nlet c = null; try { c = await WPP.contact.get(id); } catch (e) {}\nlet pic = null, status = null, exists = null, blocked = null;\ntry { pic = await WPP.contact.getProfilePictureUrl(id); } catch (e) {}\ntry { const s = await WPP.contact.getStatus(id); status = s && (s.status || s); } catch (e) {}\ntry { exists = !!(await WPP.contact.queryExists(id)); } catch (e) {}\ntry { blocked = !!WPP.blocklist.isBlocked(id); } catch (e) {}\nreturn { results: [{ id, name: c && (c.name || c.pushname || c.formattedName) || '', push_name: c && c.pushname || '', is_business: !!(c && c.isBusiness), status: typeof status === 'string' ? status : null, picture_url: pic || null, has_whatsapp: exists, blocked }] };",
+  "params": [
+   {
+    "name": "to",
+    "type": "string",
+    "description": "Número com DDI, id do chat ou nome do contato",
+    "required": true,
+    "default": ""
+   }
+  ],
+  "sensitive": false
+ },
+ {
+  "urlTemplate": "https://web.whatsapp.com/",
+  "waitFor": "",
+  "desktop": true,
+  "inject": [
+   "https://cdn.jsdelivr.net/npm/@wppconnect/wa-js/dist/wppconnect-wa.js"
+  ],
+  "builtin": true,
+  "source": "nativa",
+  "slug": "whatsapp_chat_action",
+  "name": "WhatsApp · organizar conversa",
+  "description": "Arquivar, desarquivar, fixar, desafixar, silenciar, reativar som ou marcar como não lida.",
+  "code": "await api.waReady();\nconst id = await api.waChatId(args.to), a = String(args.action || '');\nconst map = { archive: () => WPP.chat.archive(id), unarchive: () => WPP.chat.unarchive(id), pin: () => WPP.chat.pin(id), unpin: () => WPP.chat.unpin(id),\n  mute: () => WPP.chat.mute(id, { duration: Number(args.hours || 8) * 3600 }), unmute: () => WPP.chat.unmute(id), unread: () => WPP.chat.markIsUnread(id), read: () => WPP.chat.markIsRead(id) };\nif (!map[a]) throw new Error('action: ' + Object.keys(map).join('|'));\nawait map[a]();\nreturn { results: [{ ok: true, chat: id, action: a }] };",
+  "params": [
+   {
+    "name": "to",
+    "type": "string",
+    "description": "Número com DDI, id do chat ou nome do contato",
+    "required": true,
+    "default": ""
+   },
+   {
+    "name": "action",
+    "type": "string",
+    "description": "archive|unarchive|pin|unpin|mute|unmute|unread|read",
+    "required": true,
+    "default": ""
+   },
+   {
+    "name": "hours",
+    "type": "number",
+    "description": "Horas de silêncio (mute)",
+    "required": false,
+    "default": "8"
+   }
+  ],
+  "sensitive": false
  }
 ]

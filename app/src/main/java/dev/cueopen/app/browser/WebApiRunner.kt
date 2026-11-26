@@ -45,7 +45,9 @@ object WebApiRunner {
         val argsJs = full.toString()
         var stage = "montar a URL"
         val out = withTimeoutOrNull(timeoutMs) {
-            if (h.ui.value.desktop != a.desktop) kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) { runCatching { h.setDesktop(a.desktop) } }
+            // WhatsApp Web só funciona em modo desktop (no mobile redireciona para /mobile/): força, mesmo com o chip em Mobile.
+            val wantDesktop = a.desktop || a.urlTemplate.contains("web.whatsapp.com")
+            if (h.ui.value.desktop != wantDesktop) kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) { runCatching { h.setDesktop(wantDesktop) } }
             // 1) URL pelo template (precisa de uma página qualquer para rodar JS).
             if (h.runJs("1").startsWith("ERROR")) h.navigate("about:blank")
             val url = h.runJs("(function(){$helpers;const args=$argsJs;return `${a.urlTemplate}`})()").trim()

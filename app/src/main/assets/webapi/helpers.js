@@ -137,3 +137,37 @@ api.replay = async (urlOrPattern, opt = {}) => {
   let json = null; try { json = JSON.parse(text.replace(/^\)\]\}',?\s*/, '')); } catch (e) {}
   return { url: url.href, status: r.status, json, text: json ? null : text };
 };
+/**
+ * Proteção comum de TODOS os envios do WhatsApp (texto, mídia, localização, contato, enquete, encaminhar):
+ * pedido explícito (confirmed=true), um destinatário, ritmo humano (12 s), 20/h, 120/dia, sem conteúdo repetido
+ * para várias conversas e só conversas existentes (salvo allow_new). Registra o envio só depois de confirmado.
+ */
+api.waGuard = async (args, chatId, fingerprint) => {
+  if (String(args.confirmed) !== 'true') throw new Error('envio recusado: só envie quando o usuário pedir explicitamente esta ação para este contato (confirmed=true).');
+  if (chatId.endsWith('@broadcast') || /[,;]/.test(String(args.to || ''))) throw new Error('um destinatário por vez: envio em massa não é permitido');
+  const KEY = '__fluwy_wa_sends', now = Date.now();
+  let log = []; try { log = JSON.parse(localStorage.getItem(KEY) || '[]').filter(x => now - x.t < 86400000); } catch (e) {}
+  const last = log.length ? log[log.length - 1].t : 0;
+  if (now - last < 12000) throw new Error('aguarde ' + Math.ceil((12000 - (now - last)) / 1000) + 's entre envios (ritmo humano)');
+  if (log.filter(x => now - x.t < 3600000).length >= 20) throw new Error('limite de 20 envios por hora atingido');
+  if (log.length >= 120) throw new Error('limite de 120 envios por dia atingido');
+  const h = String(fingerprint || '').toLowerCase().replace(/\s+/g, ' ').slice(0, 200);
+  if (h && new Set(log.filter(x => now - x.t < 3600000 && x.h === h && x.to !== chatId).map(x => x.to)).size >= 2)
+    throw new Error('mesmo conteúdo já enviado para outras conversas na última hora: repetição para várias pessoas é o principal motivo de bloqueio');
+  let chat = null; try { chat = await WPP.chat.get(chatId); } catch (e) {}
+  if (!chat && String(args.allow_new) !== 'true') throw new Error('não há conversa com este contato; para iniciar uma nova use allow_new=true (só para quem espera sua mensagem)');
+  if (!chat && !chatId.endsWith('@g.us')) { const ex = await WPP.contact.queryExists(chatId); if (!ex) throw new Error('este número não tem WhatsApp'); }
+  return () => { log.push({ t: Date.now(), to: chatId, h }); try { localStorage.setItem(KEY, JSON.stringify(log)); } catch (e) {} };
+};
+/** "digitando…"/"gravando…" proporcional ao conteúdo, com variação. */
+api.waTyping = async (chatId, size, recording) => {
+  try { recording ? await WPP.chat.markIsRecording(chatId) : await WPP.chat.markIsComposing(chatId); } catch (e) {}
+  await sleep(Math.min(1200 + size * 35, 6000) + Math.floor(Math.random() * 900));
+  try { await WPP.chat.markIsPaused(chatId); } catch (e) {}
+};
+/** Resultado do envio no formato do hub. */
+api.waSent = (r, chatId, extra) => ({ chat: chatId, results: [Object.assign({ ok: true, id: r && (r.id && (r.id._serialized || r.id)) || null, chat: chatId, sent_at: new Date().toISOString() }, extra || {})] });
+/** Opções comuns: responder a uma mensagem (reply_to = id da mensagem). */
+api.waQuote = (args) => args.reply_to ? { quotedMsg: String(args.reply_to) } : {};
+/** Blob → data URL (para baixar mídia). */
+api.blobToDataUrl = (blob) => new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(r.result); r.onerror = rej; r.readAsDataURL(blob); });

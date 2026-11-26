@@ -49,6 +49,8 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.joinAll
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
@@ -3243,6 +3245,50 @@ class AgentRunner(
     }
 
     /** Ferramentas do Web API Hub (fora do runTool: o método já está no limite de tamanho da JVM). */
+
+    /** webapi_call com arquivos: file_path (área de trabalho) vira data URL em args.file; data_url de retorno é salvo em arquivo. */
+    private suspend fun webApiCallWithFiles(sessionId: String, api: dev.cueopen.app.data.WebApi, args0: JsonObject): String {
+        var args = args0
+        val fp = args["file_path"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
+        if (fp != null) {
+            val ws = workspace(sessionId).canonicalFile
+            val f = File(ws, fp).canonicalFile
+            if (!f.path.startsWith(ws.path)) return "ERRO: file_path fora da área de trabalho"
+            if (!f.isFile) return "ERRO: arquivo não encontrado: $fp"
+            if (f.length() > 16L * 1024 * 1024) return "ERRO: arquivo maior que 16 MB"
+            val mime = java.net.URLConnection.guessContentTypeFromName(f.name) ?: when (f.extension.lowercase()) {
+                "webp" -> "image/webp"; "opus", "ogg" -> "audio/ogg"; "m4a" -> "audio/mp4"; "pdf" -> "application/pdf"; else -> "application/octet-stream" }
+            val data = "data:$mime;base64," + android.util.Base64.encodeToString(f.readBytes(), android.util.Base64.NO_WRAP)
+            args = JsonObject(args - "file_path" + ("file" to JsonPrimitive(data)) + (if ("filename" in args) emptyMap() else mapOf("filename" to JsonPrimitive(f.name))))
+        }
+        val r = dev.cueopen.app.browser.WebApiHub.call(ctx, api, args)
+        if (!r.contains("\"data_url\"")) return r
+        // Mídia baixada: grava na área de trabalho e devolve só o caminho (base64 nunca vai para o modelo).
+        return runCatching {
+            val root = Json.parseToJsonElement(r).jsonObject
+            fun fix(e: JsonElement): JsonElement = when (e) {
+                is JsonObject -> {
+                    val du = e["data_url"]?.jsonPrimitive?.contentOrNull
+                    if (du == null) JsonObject(e.mapValues { fix(it.value) }) else {
+                        val mime = du.substringAfter("data:").substringBefore(";")
+                        val ext = android.webkit.MimeTypeMap.getSingleton().getExtensionFromMimeType(mime) ?: "bin"
+                        val want = args["save_as"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
+                            ?: e["filename"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
+                            ?: ("whatsapp_" + System.currentTimeMillis() + "." + ext)
+                        val name = want.replace(Regex("[\\\\/:*?\"<>|]"), "_")
+                        val dir = File(workspace(sessionId), "downloads").apply { mkdirs() }
+                        val out = File(dir, name)
+                        out.writeBytes(android.util.Base64.decode(du.substringAfter(","), android.util.Base64.DEFAULT))
+                        JsonObject(e - "data_url" + ("saved_to" to JsonPrimitive("downloads/" + name)))
+                    }
+                }
+                is kotlinx.serialization.json.JsonArray -> kotlinx.serialization.json.JsonArray(e.map { fix(it) })
+                else -> e
+            }
+            fix(root).toString()
+        }.getOrDefault(r.replace(Regex("data:[^\"]{200,}"), "[mídia omitida]"))
+    }
+
     private suspend fun webApiTool(sessionId: String, name: String, a: JsonObject): ToolResult {
         fun s(k: String) = a[k]?.jsonPrimitive?.contentOrNull.orEmpty()
         when (name) {
@@ -3255,7 +3301,7 @@ class AgentRunner(
                 // e nunca para vários destinatários de uma vez.
                 if (api.sensitive && args["confirmed"]?.jsonPrimitive?.contentOrNull != "true")
                     return ToolResult("RECUSADO: ${api.slug} age em seu nome fora do app. Só chame com confirmed=true quando o usuário pediu explicitamente esta ação (destinatário e conteúdo). Se não pediu, pergunte antes.")
-                return ToolResult(dev.cueopen.app.browser.WebApiHub.call(ctx, api, args).take(40_000))
+                return ToolResult(webApiCallWithFiles(sessionId, api, args).take(40_000))
             }
             "webapi_test" -> {
                 val args = webApiArgs(a["args"]) ?: return ToolResult("ERRO: args precisa ser um objeto JSON.")

@@ -504,9 +504,14 @@ private fun WebApiHubTab(nav: NavController) {
         var out by remember(a.slug) { mutableStateOf("") }
         var busy by remember(a.slug) { mutableStateOf(false) }
         var blockedUrl by remember(a.slug) { mutableStateOf<String?>(null) }
+        var confirmSend by remember(a.slug) { mutableStateOf(false) }
         AlertDialog(onDismissRequest = { trying = null }, title = { Text("Testar " + a.slug) },
             text = { Column(Modifier.verticalScroll(rememberScrollState())) {
                 OutlinedTextField(args, { args = it }, label = { Text("args (JSON)") }, modifier = Modifier.fillMaxWidth(), textStyle = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace))
+                if (a.sensitive) Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 8.dp)) {
+                    Checkbox(confirmSend, { confirmSend = it })
+                    Text("Confirmo esta ação (envio real em meu nome)", fontSize = 12.sp)
+                }
                 if (busy) LinearProgressIndicator(Modifier.fillMaxWidth().padding(top = 8.dp))
                 blockedUrl?.let { bu ->
                     Text("O site pediu verificação humana (captcha). Resolva uma vez no Browser — é a mesma sessão das APIs — e teste de novo.", fontSize = 12.sp, color = c.err, modifier = Modifier.padding(top = 8.dp))
@@ -522,9 +527,11 @@ private fun WebApiHubTab(nav: NavController) {
             confirmButton = { TextButton(enabled = !busy, onClick = {
                 val o = runCatching { kotlinx.serialization.json.Json.parseToJsonElement(args) as kotlinx.serialization.json.JsonObject }.getOrNull()
                 if (o == null) { out = "args não é um objeto JSON"; return@TextButton }
+                if (a.sensitive && !confirmSend) { out = "Marque \"Confirmo esta ação\" para executar um envio real."; return@TextButton }
+                val oc = if (a.sensitive) kotlinx.serialization.json.JsonObject(o + ("confirmed" to kotlinx.serialization.json.JsonPrimitive("true"))) else o
                 busy = true
                 scope.launch {
-                    val r = dev.cueopen.app.browser.WebApiHub.call(ctx, a, o)
+                    val r = dev.cueopen.app.browser.WebApiHub.call(ctx, a, oc)
                     blockedUrl = runCatching { kotlinx.serialization.json.Json.parseToJsonElement(r).let { it as kotlinx.serialization.json.JsonObject }
                         .takeIf { it["blocked"]?.toString() == "true" }?.get("url")?.let { (it as kotlinx.serialization.json.JsonPrimitive).content } }.getOrNull()
                     out = runCatching { kotlinx.serialization.json.Json { prettyPrint = true }.let { j -> j.encodeToString(kotlinx.serialization.json.JsonElement.serializer(), j.parseToJsonElement(r)) } }.getOrDefault(r)
