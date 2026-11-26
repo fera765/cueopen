@@ -13,9 +13,10 @@ await p.evaluate(lib + '\n;window.__inj=true;1');
 const t0 = Date.now(); let ready = false;
 while (Date.now() - t0 < 60000) { ready = await p.evaluate(() => !!(window.WPP && WPP.isReady)); if (ready) break; await p.waitForTimeout(1000); }
 console.log('WPP.isReady', ready, ((Date.now() - t0) / 1000) + 's', 'version', await p.evaluate(() => window.WPP && WPP.version));
-const need = { conn: ['isAuthenticated', 'getMyUserId'], chat: ['list', 'get', 'getMessages', 'sendTextMessage', 'markIsRead', 'markIsComposing', 'markIsPaused'], contact: ['list', 'queryExists'], group: ['getAllGroups'] };
+const need = { conn: ['isAuthenticated', 'getMyUserId'], chat: ['list', 'get', 'getMessages', 'getMessageById', 'sendTextMessage', 'sendFileMessage', 'sendLocationMessage', 'sendVCardContactMessage', 'sendReactionToMessage', 'sendCreatePollMessage', 'downloadMedia', 'deleteMessage', 'archive', 'unarchive', 'pin', 'unpin', 'mute', 'unmute', 'markIsRead', 'markIsUnread', 'markIsComposing', 'markIsRecording', 'markIsPaused', 'forwardMessage', 'editMessage', 'starMessage', 'find'], contact: ['list', 'get', 'queryExists', 'getProfilePictureUrl', 'getStatus'], group: ['getAllGroups', 'getParticipants', 'getGroupInfoFromInviteCode'], blocklist: ['all', 'isBlocked'], status: ['sendTextStatus', 'getMyStatus'] };
 const have = await p.evaluate((need) => Object.fromEntries(Object.entries(need).map(([ns, fns]) => [ns, fns.map(f => f + '=' + (window.WPP && WPP[ns] && typeof WPP[ns][f]))])), need);
 console.log('FUNCOES', JSON.stringify(have));
+console.log('CHAT_KEYS', await p.evaluate(() => Object.keys(WPP.chat).sort().join(',')));
 console.log('auth', await p.evaluate(() => { try { return WPP.conn.isAuthenticated() } catch (e) { return 'erro ' + e.message } }));
 const r = await p.evaluate(`(async()=>{${helpers};try{await api.waReady(20000);return 'pronto'}catch(e){return 'waReady: '+e.message}})()`);
 console.log('waReady sem login →', r);
