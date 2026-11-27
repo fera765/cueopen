@@ -445,7 +445,6 @@ private fun WebApiHubTab(nav: NavController) {
         val wa = apis.filter { it.slug.startsWith("whatsapp_") }
         if (wa.isNotEmpty()) item(key = "__wa__") { WhatsAppSection(wa, nav) { trying = it } }
         items(apis.filterNot { it.slug.startsWith("whatsapp_") }, key = { it.slug }) { a -> ApiRow(a, nav) { trying = it } }
-        }
     }
     if (aiDialog) {
         var what by remember { mutableStateOf("") }
