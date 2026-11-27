@@ -1,4 +1,4 @@
-# CueOpen Solana Wallet — Security and Recovery Plan
+# Fluwy Solana Wallet — Security and Recovery Plan
 
 ## Recovery-first design
 

@@ -8,14 +8,14 @@ plugins {
 }
 
 // Keystore de release deve ficar fora do repositório; a chave versionada antiga não é selecionada.
-val cueopenSigningPath = System.getenv("CUEOPEN_KEYSTORE_PATH")?.takeIf { it.isNotBlank() }
-val cueopenSigningStore = cueopenSigningPath?.let { rootProject.file(it) }
-if (cueopenSigningPath != null && cueopenSigningStore?.isFile != true) {
-    throw GradleException("CUEOPEN_KEYSTORE_PATH não aponta para uma keystore existente.")
+val fluwySigningPath = System.getenv("FLUWY_KEYSTORE_PATH")?.takeIf { it.isNotBlank() }
+val fluwySigningStore = fluwySigningPath?.let { rootProject.file(it) }
+if (fluwySigningPath != null && fluwySigningStore?.isFile != true) {
+    throw GradleException("FLUWY_KEYSTORE_PATH não aponta para uma keystore existente.")
 }
 
 android {
-    namespace = "dev.cueopen.app"
+    namespace = "dev.fluwy.app"
     compileSdk = 35
     defaultConfig {
         applicationId = "com.fluwy.bot"
@@ -38,19 +38,19 @@ android {
             keyPassword = "android"
         }
         // Chave estável lida de um caminho externo e credenciais locais; nunca use a chave versionada antiga.
-        create("cueopen") {
-            if (cueopenSigningStore != null) {
-                storeFile = cueopenSigningStore
-                storePassword = System.getenv("CUEOPEN_STORE_PASSWORD") ?: error("Defina CUEOPEN_STORE_PASSWORD para usar a keystore externa.")
-                keyAlias = System.getenv("CUEOPEN_KEY_ALIAS") ?: error("Defina CUEOPEN_KEY_ALIAS para usar a keystore externa.")
-                keyPassword = System.getenv("CUEOPEN_KEY_PASSWORD") ?: error("Defina CUEOPEN_KEY_PASSWORD para usar a keystore externa.")
+        create("fluwy") {
+            if (fluwySigningStore != null) {
+                storeFile = fluwySigningStore
+                storePassword = System.getenv("FLUWY_STORE_PASSWORD") ?: error("Defina FLUWY_STORE_PASSWORD para usar a keystore externa.")
+                keyAlias = System.getenv("FLUWY_KEY_ALIAS") ?: error("Defina FLUWY_KEY_ALIAS para usar a keystore externa.")
+                keyPassword = System.getenv("FLUWY_KEY_PASSWORD") ?: error("Defina FLUWY_KEY_PASSWORD para usar a keystore externa.")
             }
         }
     }
     buildTypes {
         debug {
             // Use a keystore externa aprovada em builds locais de entrega, quando configurada.
-            signingConfig = signingConfigs.getByName(if (cueopenSigningStore != null) "cueopen" else "ciDebug")
+            signingConfig = signingConfigs.getByName(if (fluwySigningStore != null) "fluwy" else "ciDebug")
         }
         release {
             // build otimizado: R8 (minify + otimização) deixa o Compose bem mais fluido que o debug
@@ -58,7 +58,7 @@ android {
             isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
             // Só configura assinatura quando a chave externa aprovada está disponível.
-            if (cueopenSigningStore != null) signingConfig = signingConfigs.getByName("cueopen")
+            if (fluwySigningStore != null) signingConfig = signingConfigs.getByName("fluwy")
         }
     }
     packaging {
@@ -77,16 +77,16 @@ android {
     lint { abortOnError = false; checkReleaseBuilds = false }
 }
 
-val requireCueOpenReleaseSigning by tasks.registering {
+val requireFluwyReleaseSigning by tasks.registering {
     doLast {
-        if (cueopenSigningStore == null) {
-            throw GradleException("Defina CUEOPEN_KEYSTORE_PATH para empacotar o release com a chave aprovada.")
+        if (fluwySigningStore == null) {
+            throw GradleException("Defina FLUWY_KEYSTORE_PATH para empacotar o release com a chave aprovada.")
         }
     }
 }
 tasks.configureEach {
     if (name == "assembleRelease" || name == "packageRelease" || name == "bundleRelease") {
-        dependsOn(requireCueOpenReleaseSigning)
+        dependsOn(requireFluwyReleaseSigning)
     }
 }
 

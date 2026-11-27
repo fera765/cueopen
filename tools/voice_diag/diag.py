@@ -5,8 +5,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "voice_lab3"))
 from normalize_pt import normalize
 from faster_whisper import WhisperModel
 
-PT = "Olá! Tudo bem por aí? Eu sou o Cue, seu assistente. Estou aqui pra ajudar com o que você precisar, é só falar!"
-EN = "Hello! How are you doing? I'm Cue, your assistant. I'm here to help with whatever you need, just ask!"
+PT = "Olá! Tudo bem por aí? Eu sou o Fluwy, seu assistente. Estou aqui pra ajudar com o que você precisar, é só falar!"
+EN = "Hello! How are you doing? I'm Fluwy, your assistant. I'm here to help with whatever you need, just ask!"
 P = {"cadu": (0.4, 0.5), "faber": (0.4, 0.8), "amy": (0.55, 0.5), "lessac": (0.8, 0.8), "ryan": (0.8, 0.5)}
 asr = WhisperModel("small", device="cpu", compute_type="int8")
 os.makedirs("out", exist_ok=True); rep = []

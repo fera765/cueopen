@@ -1,4 +1,4 @@
-# CueOpen
+# Fluwy
 
 Agente autônomo para Android (Kotlin + Jetpack Compose) com **computador próprio**: terminal Linux
 local (proot + Alpine, arquitetura do Acode) e **browser** (WebView) controlados pelo agente.
@@ -10,7 +10,7 @@ Sem login, sem nuvem: tudo fica no aparelho. LLM via OpenRouter com **thinking d
 3. `Run ▶` num aparelho arm64 (ou emulador x86_64). APK: `./gradlew assembleDebug`.
 4. No app: onboarding → cole a chave da OpenRouter → **Instalar** o sandbox (baixa o Alpine 3.21 minirootfs, ~3 MB + pacotes).
 
-## Engenharia reversa do Cue 26.18.2 (`tech.butterfly.app`)
+## Engenharia reversa do Fluwy 26.18.2 (`tech.butterfly.app`)
 | Item | Achado |
 |---|---|
 | Pacote / dono | `tech.butterfly.app` (Butterfly Effect / Manus), app interno `next_agent_android` |
@@ -25,8 +25,8 @@ Sem login, sem nuvem: tudo fica no aparelho. LLM via OpenRouter com **thinking d
 
 O código Dart está compilado/ofuscado (AOT), então o mapeamento foi feito por manifest, assets, rotas e ~10 mil strings de UI.
 
-## O que o CueOpen implementa (paridade de funcionamento)
-| Cue | CueOpen |
+## O que o Fluwy implementa (paridade de funcionamento)
+| Fluwy | Fluwy |
 |---|---|
 | Lista de tarefas + drawer com busca | ✅ agrupado por Hoje/Ontem/7 dias |
 | Composer "Assign a task or ask anything", anexos, voz | ✅ (voz = reconhecimento do Android) |

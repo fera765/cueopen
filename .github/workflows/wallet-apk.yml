@@ -1,4 +1,4 @@
-name: CueOpen APK (wallet branch)
+name: Fluwy APK (wallet branch)
 
 on:
   push:
@@ -72,14 +72,14 @@ jobs:
           test -n "$apk"
           test -s "$apk"
           mkdir -p out
-          cp "$apk" out/CueOpen-wallet-latest.apk
-          sha256sum out/CueOpen-wallet-latest.apk > out/SHA256SUMS.txt
+          cp "$apk" out/Fluwy-wallet-latest.apk
+          sha256sum out/Fluwy-wallet-latest.apk > out/SHA256SUMS.txt
           ls -lh out/
 
       - name: Publish APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: cueopen-wallet-latest-${{ github.run_number }}
+          name: fluwy-wallet-latest-${{ github.run_number }}
           path: out/
           if-no-files-found: error
           retention-days: 14

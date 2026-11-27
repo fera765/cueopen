@@ -1,4 +1,4 @@
-# CueOpen — Plano de conclusão da carteira Solana
+# Fluwy — Plano de conclusão da carteira Solana
 
 **Regra de trabalho:** não compilar o APK nem disparar o workflow de build enquanto as quatro tarefas abaixo não estiverem concluídas, revisadas e testadas. Cada tarefa só passa para concluída quando todos os critérios de aceite correspondentes forem satisfeitos; não marcar como feita apenas porque o código foi iniciado.
 

@@ -1,0 +1,45 @@
+package dev.fluwy.app.agent
+
+import java.io.File
+import java.nio.file.Files
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
+import org.junit.Test
+
+class ContextOutputRetentionPolicyTest {
+    @Test
+    fun referencedArchivesAreNeverPruned() {
+        val directory = Files.createTempDirectory("fluwy-context-out").toFile()
+        try {
+            val files = (0 until 45).map { index ->
+                File(directory, "o${index.toString(16)}_${1000 + index}.txt").apply {
+                    writeText("output $index")
+                    setLastModified(1_000L + index)
+                }
+            }
+            val referenced = setOf(files[0].name, files[5].name)
+
+            val deletions = ContextOutputRetentionPolicy.filesToDelete(files, referenced, keepUnreferenced = 40)
+
+            assertFalse(deletions.any { it.name in referenced })
+            assertEquals(3, deletions.size)
+            assertTrue(deletions.all { it.name in setOf(files[1].name, files[2].name, files[3].name) })
+        } finally {
+            directory.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun recentArchivesSurviveEvenWhenUnreferenced() {
+        val directory = Files.createTempDirectory("fluwy-context-recent").toFile()
+        try {
+            val now = 100L * 3_600_000L
+            val files = (0 until 5).map { i -> File(directory, "o$i${i}_$i.txt").apply { writeText("x$i"); setLastModified(now - i * 60_000L) } }
+            assertTrue(ContextOutputRetentionPolicy.filesToDelete(files, emptySet(), keepUnreferenced = 0, now = now).isEmpty())
+            assertEquals(5, ContextOutputRetentionPolicy.filesToDelete(files, emptySet(), keepUnreferenced = 0, now = now + 13 * 3_600_000L).size)
+        } finally {
+            directory.deleteRecursively()
+        }
+    }
+}

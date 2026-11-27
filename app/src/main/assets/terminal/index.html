@@ -16,15 +16,15 @@ var term=new Terminal({fontSize:13,fontFamily:'monospace',cursorBlink:true,scrol
   theme:{background:'#0f1115',foreground:'#e6e6e6',cursor:'#ff6b3d',selectionBackground:'#5a3a2e'}});
 var fit=new FitAddon.FitAddon(); term.loadAddon(fit); term.loadAddon(new WebLinksAddon.WebLinksAddon());
 term.open(document.getElementById('t')); fit.fit();
-term.onData(function(d){ if(window.CueBridge) CueBridge.input(d); });
-term.onResize(function(s){ if(window.CueBridge) CueBridge.resize(s.cols,s.rows); });
-document.addEventListener('click',function(){ term.focus(); if(window.CueBridge) CueBridge.showKeyboard(); });
-window.CueTerm={
+term.onData(function(d){ if(window.FluwyBridge) FluwyBridge.input(d); });
+term.onResize(function(s){ if(window.FluwyBridge) FluwyBridge.resize(s.cols,s.rows); });
+document.addEventListener('click',function(){ term.focus(); if(window.FluwyBridge) FluwyBridge.showKeyboard(); });
+window.FluwyTerm={
   write:function(s){ document.getElementById('msg').style.display='none'; term.write(s); },
   reset:function(){ term.reset(); },
   focus:function(){ term.focus(); },
   fail:function(m){ var el=document.getElementById('msg'); el.style.display='flex'; el.textContent=m; }
 };
 window.addEventListener('resize',function(){ setTimeout(function(){ fit.fit(); },60); });
-if(window.CueBridge) CueBridge.ready(term.cols, term.rows);
+if(window.FluwyBridge) FluwyBridge.ready(term.cols, term.rows);
 </script></body></html>

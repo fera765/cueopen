@@ -41,12 +41,12 @@ jobs:
           test -n "$apk"
           test -s "$apk"
           mkdir -p out
-          cp "$apk" out/CueOpen.apk
-          sha256sum out/CueOpen.apk > out/SHA256SUMS.txt
+          cp "$apk" out/Fluwy.apk
+          sha256sum out/Fluwy.apk > out/SHA256SUMS.txt
       - name: Upload APK and checksum
         uses: actions/upload-artifact@v4
         with:
-          name: cueopen-release-${{ github.run_number }}
+          name: fluwy-release-${{ github.run_number }}
           path: out/
           if-no-files-found: error
           retention-days: 14
