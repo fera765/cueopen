@@ -235,6 +235,9 @@ fun WorkflowsScreen(nav: NavController) {
                 val last = mine.maxByOrNull { it.startedAt }
                 val active = mine.filter { WorkflowEngine.isActive(it.status) }.maxByOrNull { it.startedAt }
                 val sched = w.nodes.firstOrNull { it.type == "trigger_schedule" }
+                // Gatilho por evento: escuta em tempo real (sem horário) — fica ativo/desligado, nunca "manual".
+                val event = w.nodes.firstOrNull { it.type == "trigger_whatsapp" || it.type == "trigger_webhook" }
+                val eventLabel = if (event?.type == "trigger_whatsapp") "Mensagem no WhatsApp" else "Webhook"
                 val accent = statusColor(active?.status, c) ?: c.accent
                 CueCard(onClick = { nav.navigate("workflow/${w.id}") }) {
                     Column {
@@ -245,13 +248,24 @@ fun WorkflowsScreen(nav: NavController) {
                             }
                             Spacer(Modifier.width(12.dp))
                             Column(Modifier.weight(1f)) {
-                                Text(w.name, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                Text("${w.nodes.size} nós · " + (sched?.let { WfLogic.scheduleLabel(it.config) + if (w.enabled) " · ativo" else " · desligado" } ?: "manual"),
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    if (w.enabled && (event != null || sched != null)) { LiveDot(Color(0xFF2EC27E)); Spacer(Modifier.width(6.dp)) }
+                                    Text(w.name, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                }
+                                Text("${w.nodes.size} nós · " + (event?.let { eventLabel + if (w.enabled) " · ativo, escutando" else " · desligado" }
+                                    ?: sched?.let { WfLogic.scheduleLabel(it.config) + if (w.enabled) " · ativo" else " · desligado" } ?: "manual"),
                                     fontSize = 12.sp, color = c.ink3, maxLines = 1, overflow = TextOverflow.Ellipsis)
                                 if (active == null && last != null) Text(runLabel(last), fontSize = 12.sp, color = statusColor(last.status, c) ?: c.ink3, maxLines = 1, overflow = TextOverflow.Ellipsis)
                             }
                             // Start / pausa / continuar / parar direto da lista.
                             when {
+                                // Evento: o botão liga/desliga a escuta (▶ ativa · ⏸ pausa), em vez de executar uma vez.
+                                active == null && event != null -> if (w.enabled) FilledTonalIconButton({
+                                    val v = WorkflowStore.upsert(w.copy(enabled = false)); WorkflowScheduler.sync(ctx, v)
+                                }) { Icon(Icons.Rounded.Pause, "Pausar escuta") } else FilledIconButton({
+                                    if (WfLogic.problems(w).any { !it.contains("não está ligado") }) nav.navigate("workflow/${w.id}")
+                                    else { val v = WorkflowStore.upsert(w.copy(enabled = true)); WorkflowScheduler.sync(ctx, v) }
+                                }, colors = IconButtonDefaults.filledIconButtonColors(containerColor = c.accent)) { Icon(Icons.Rounded.PlayArrow, "Ativar escuta", tint = Color.White) }
                                 active == null -> FilledIconButton({
                                     WorkflowEngine.start(w.id).onFailure { nav.navigate("workflow/${w.id}") }
                                 }, colors = IconButtonDefaults.filledIconButtonColors(containerColor = c.accent)) { Icon(Icons.Rounded.PlayArrow, "Executar", tint = Color.White) }
@@ -295,8 +309,8 @@ fun WorkflowsScreen(nav: NavController) {
                             Icon(Icons.Rounded.History, null, Modifier.size(14.dp), tint = c.ink3); Spacer(Modifier.width(4.dp))
                             Text("Última: " + (lastAt?.let { WfLogic.whenLabel(it, tick) } ?: "nunca"), fontSize = 12.sp, color = c.ink2, modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis)
                             Icon(Icons.Rounded.Schedule, null, Modifier.size(14.dp), tint = if (nextAt != null) c.accent else c.ink3); Spacer(Modifier.width(4.dp))
-                            Text("Próxima: " + when { nextAt != null -> WfLogic.whenLabel(nextAt, tick); sched == null -> "manual"; else -> "desligado" },
-                                fontSize = 12.sp, color = if (nextAt != null) c.accent else c.ink3, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            Text("Próxima: " + when { event != null -> if (w.enabled) "a cada evento" else "desligado"; nextAt != null -> WfLogic.whenLabel(nextAt, tick); sched == null -> "manual"; else -> "desligado" },
+                                fontSize = 12.sp, color = if (nextAt != null || (event != null && w.enabled)) c.accent else c.ink3, maxLines = 1, overflow = TextOverflow.Ellipsis)
                         }
                         if (sched != null) {
                             Spacer(Modifier.height(6.dp))
@@ -1252,4 +1266,12 @@ private fun RunsPanel(w: Workflow, runs: List<WfRun>, nav: NavController, onClos
             }
         }
     }
+}
+
+/** Ponto verde pulsando: fluxo ativo, escutando em tempo real. */
+@Composable
+private fun LiveDot(color: Color) {
+    val t = androidx.compose.animation.core.rememberInfiniteTransition(label = "live")
+    val a by t.animateFloat(0.35f, 1f, androidx.compose.animation.core.infiniteRepeatable(androidx.compose.animation.core.tween(900), androidx.compose.animation.core.RepeatMode.Reverse), label = "a")
+    Box(Modifier.size(9.dp).clip(CircleShape).background(color.copy(alpha = a)))
 }

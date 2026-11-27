@@ -3432,6 +3432,10 @@ class AgentRunner(
                 // e nunca para vários destinatários de uma vez.
                 if (api.sensitive && args["confirmed"]?.jsonPrimitive?.contentOrNull != "true")
                     return ToolResult("RECUSADO: ${api.slug} age em seu nome fora do app. Só chame com confirmed=true quando o usuário pediu explicitamente esta ação (destinatário e conteúdo). Se não pediu, pergunte antes.")
+                // Parâmetros conferidos antes de rodar: nome errado vira erro claro com a lista certa (antes era ignorado em silêncio).
+                val known = api.params.map { it.name }.toSet() + setOf("confirmed", "file_path", "path", "save_as", "timeout", "page")
+                val unknown = args.keys.filter { it !in known && !it.startsWith("__") }
+                if (unknown.isNotEmpty() && api.params.isNotEmpty()) return ToolResult("ERRO: argumento(s) desconhecido(s) para ${api.slug}: ${unknown.joinToString()}. Use exatamente estes:\n" + dev.cueopen.app.browser.WebApiHub.doc(api))
                 return ToolResult(webApiCallWithFiles(sessionId, api, args).take(40_000))
             }
             "webapi_probe" -> {
@@ -4230,6 +4234,8 @@ class AgentRunner(
             "workflow_json = {name, nodes:[{id, type, label, config}], edges:[{from, to, port}]} (ids curtos como t1, h1, a1; layout é automático). Tipos e config (valores em texto): " +
             "trigger_manual; trigger_schedule (mode=interval|daily|weekly, minutes, time HH:mm, weekday 1-7 — ou when=\"frase do usuário\", ex. \"a cada 2 minutos\", \"todo dia às 8h\", \"toda segunda 18:30\"; roda com o app aberto, em segundo plano ou fechado). " +
             "WHATSAPP (sem conector: é o API Hub): gatilho trigger_whatsapp (chat=nome/número/id da conversa ou grupo, scope=all|private|groups, keyword=palavras|separadas, from_me=true só se o usuário conversa consigo mesmo/no próprio número) — dispara NA HORA a cada mensagem, dados em {{t1.payload.text}}, .chat, .chat_name, .sender_name, .id; " +
+            "FLUXO LIGADO A UMA CONVERSA OU AGENTE: rode action=list (traz os títulos das conversas e os agentes) e pergunte com ask_question qual usar, com os nomes reais como opções — nunca invente. Dúvidas que mudam o fluxo (qual contato/grupo, qual conversa, responder sozinho ou só rascunho, base de conhecimento) também vão por ask_question ANTES de criar. " +
+            "Fluxo com trigger_whatsapp/trigger_webhook fica ATIVO assim que salvo e válido (escuta em tempo real); não diga ao usuário para executar manualmente. " +
             "NUNCA use trigger_schedule + agent lendo whatsapp_messages a cada minuto para \"monitorar\" WhatsApp (gasta IA a cada minuto e perde mensagens). " +
             "webapi (api=slug do hub ex. whatsapp_send_text, args=JSON com {{…}}) — chama qualquer Web API do hub; ações externas rodam de verdade só publicado (no teste são validadas sem enviar). " +
             "atendente (persona, knowledge=dados de treinamento/base de conhecimento, objective=atendimento|vendas|recuperar_pagamento|recuperar_cliente|suporte, history=nº de mensagens anteriores, reply=auto|draft, session=título de uma conversa do app para acordar e repassar, handoff=palavras que pedem humano) — " +
@@ -4335,7 +4341,8 @@ class AgentRunner(
             add(tool("web_search", "Busca na web (Google + Bing + DuckDuckGo ao mesmo tempo, em segundos, sem abrir o browser da sessão): devolve título, URL e trecho. Sempre use esta ferramenta para pesquisar — não abra buscadores com browser_navigate. Depois leia os relevantes com web_fetch. Use o browser só para sites com login, JavaScript pesado ou interação.",
                 buildJsonObject { put("query", str("Termos da busca")); put("max", int("Quantidade de resultados (padrão 8)")) }, listOf("query")))
             add(tool("webapi_list", "Lista as Web APIs do hub (scrapers prontos sobre sites, criados pelo usuário) com argumentos. Prefira-as a navegar no browser quando houver uma que sirva.", buildJsonObject {}))
-            add(tool("webapi_call", "Chama uma Web API do hub e recebe JSON estruturado (com paginação: passe page/next_page). Roda num WebView separado, com a sessão e o proxy do browser.",
+            add(tool("webapi_call", "Chama uma Web API do hub e recebe JSON estruturado (com paginação: passe page/next_page). Roda num WebView separado, com a sessão e o proxy do browser. " +
+                "args = objeto JSON com EXATAMENTE os nomes de parâmetro da API (veja webapi_list ou o bloco 'Web APIs do hub' do prompt); obrigatórios marcados. Ações externas (enviar, apagar) exigem confirmed=true só quando o usuário pediu. Binários (imagem/áudio) voltam como arquivo em webapi_files/.",
                 buildJsonObject { put("api", str("slug da API (veja webapi_list)")); put("args", str("Argumentos em JSON, ex.: {\"query\":\"notebook\",\"page\":1}")) }, listOf("api")))
             add(tool("web_fetch", "Lê uma página por HTTP e devolve só o texto principal (sem menus/rodapés), bem menor que um snapshot do browser. Se vier pouco texto (site com JS/login), use browser_navigate.",
                 buildJsonObject { put("url", str("URL http(s) completa")); put("max_chars", int("Limite de caracteres (padrão 12000, máx. 40000)")) }, listOf("url")))
@@ -6436,7 +6443,10 @@ class AgentRunner(
             repeat(25) { if (engine.isRunning(w.id)) kotlinx.coroutines.delay(200) }
         }
         when (val action = o.optString("action").trim().lowercase()) {
-            "list" -> st.flows.value.joinToString("\n") { "- " + describe(it) }.ifBlank { "Nenhum fluxo ainda." }
+            "list" -> st.flows.value.joinToString("\n") { "- " + describe(it) }.ifBlank { "Nenhum fluxo ainda." } +
+                "\n\nConversas do app (para atendente session= / agent): " + store.state.value.sessions.filter { !it.title.startsWith("[Workflow]") }.sortedByDescending { it.updatedAt }.take(15).joinToString(" | ") { it.title.take(60) }.ifBlank { "nenhuma" } +
+                "\nAgentes: " + store.state.value.agents.joinToString(" | ") { it.name }.ifBlank { "nenhum" } +
+                "\nSe o usuário pediu um fluxo ligado a uma conversa ou agente e não disse qual exatamente, pergunte com ask_question usando ESTES nomes como opções."
             "get" -> find()?.let { kotlinx.serialization.json.Json.encodeToString(dev.cueopen.app.workflow.Workflow.serializer(), it) } ?: notFound
             "create", "update" -> {
                 val j = org.json.JSONObject(o.optString("workflow_json").ifBlank { "{}" })
@@ -6486,7 +6496,11 @@ class AgentRunner(
                 if (base != null) stopActive(base)  // a versão antiga não continua rodando depois da edição
                 val saved = st.upsert(w)
                 val v = validation(saved)
-                "OK: rascunho salvo — " + describe(saved) + "\n" + (if (v.isEmpty()) "Validação: ok. Próximo passo: action=test id=${saved.id}."
+                // Gatilho por evento (Mensagem no WhatsApp / webhook): o fluxo já nasce ATIVO, escutando — não fica "manual".
+                val event = saved.nodes.any { it.type == "trigger_whatsapp" || it.type == "trigger_webhook" }
+                if (v.isEmpty() && event) { val on = st.upsert(saved.copy(enabled = true)); dev.cueopen.app.workflow.WorkflowScheduler.sync(ctx, on) }
+                "OK: rascunho salvo — " + describe(saved) + "\n" + (if (v.isEmpty() && event) "Validação: ok. ATIVO: dispara sozinho a cada evento (não precisa publicar nem executar manualmente). Rode action=test id=${saved.id} para conferir o caminho."
+                    else if (v.isEmpty()) "Validação: ok. Próximo passo: action=test id=${saved.id}."
                     else "Validação falhou:\n" + v.joinToString("\n") { "• $it" } + "\nCorrija com action=update (veja conectores com conectores_listar / conector_acoes).")
             }
             "validate" -> find()?.let { w -> validation(w).let { v -> if (v.isEmpty()) "Validação: ok." else "Validação falhou:\n" + v.joinToString("\n") { "• $it" } } } ?: notFound
