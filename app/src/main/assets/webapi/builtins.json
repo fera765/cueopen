@@ -4,7 +4,7 @@
   "name": "WhatsApp · status",
   "description": "Confere se o WhatsApp Web está conectado e logado; devolve número, nome e total de não lidas.",
   "urlTemplate": "https://web.whatsapp.com/",
-  "code": "await api.waReady();\nconst me = WPP.conn.getMyUserId ? WPP.conn.getMyUserId() : null;\nconst chats = await WPP.chat.list();\nreturn { connected: true, me: me && (me._serialized || me.user || String(me)), chats: chats.length, unread_chats: chats.filter(c => c.unreadCount > 0).length, unread_messages: chats.reduce((a, c) => a + (c.unreadCount || 0), 0), results: [{ ok: true }] };",
+  "code": "await api.waReady(40000, args);\nconst me = WPP.conn.getMyUserId ? WPP.conn.getMyUserId() : null;\nconst chats = await WPP.chat.list();\nreturn { connected: true, me: me && (me._serialized || me.user || String(me)), chats: chats.length, unread_chats: chats.filter(c => c.unreadCount > 0).length, unread_messages: chats.reduce((a, c) => a + (c.unreadCount || 0), 0), results: [{ ok: true }] };",
   "params": [],
   "waitFor": "",
   "desktop": true,
@@ -20,7 +20,7 @@
   "name": "WhatsApp · conversas",
   "description": "Lista conversas (mais recentes primeiro) com nome, id, não lidas e última mensagem; filtros e paginação.",
   "urlTemplate": "https://web.whatsapp.com/",
-  "code": "await api.waReady();\nlet chats = await WPP.chat.list();\nconst f = String(args.filter || 'all');\nif (f === 'unread') chats = chats.filter(c => c.unreadCount > 0);\nif (f === 'groups') chats = chats.filter(c => c.isGroup);\nif (f === 'users') chats = chats.filter(c => !c.isGroup);\nlet all = chats.map(api.waChat);\nif (args.query) { const q = String(args.query).toLowerCase(); all = all.filter(c => c.name.toLowerCase().includes(q)); }\nall.sort((a, b) => (b.last_time || '').localeCompare(a.last_time || ''));\nconst page = Number(args.page || 1), per = 20;\nconst results = all.slice((page - 1) * per, page * per);\nreturn { page, count: results.length, total: all.length, has_more: all.length > page * per, next_page: page + 1, results };",
+  "code": "await api.waReady(40000, args);\nlet chats = await WPP.chat.list();\nconst f = String(args.filter || 'all');\nif (f === 'unread') chats = chats.filter(c => c.unreadCount > 0);\nif (f === 'groups') chats = chats.filter(c => c.isGroup);\nif (f === 'users') chats = chats.filter(c => !c.isGroup);\nlet all = chats.map(api.waChat);\nif (args.query) { const q = String(args.query).toLowerCase(); all = all.filter(c => c.name.toLowerCase().includes(q)); }\nall.sort((a, b) => (b.last_time || '').localeCompare(a.last_time || ''));\nconst page = Number(args.page || 1), per = 20;\nconst results = all.slice((page - 1) * per, page * per);\nreturn { page, count: results.length, total: all.length, has_more: all.length > page * per, next_page: page + 1, results };",
   "params": [
    {
     "name": "page",
@@ -58,7 +58,7 @@
   "name": "WhatsApp · mensagens",
   "description": "Lê as últimas mensagens de uma conversa (por número, id ou nome do contato).",
   "urlTemplate": "https://web.whatsapp.com/",
-  "code": "await api.waReady();\nconst chatId = await api.waChatId(args.to);\nconst n = Math.min(Number(args.count || 30), 100);\nconst msgs = await WPP.chat.getMessages(chatId, { count: n });\nconst results = (msgs || []).map(api.waMsg);\nreturn { chat: chatId, count: results.length, results };",
+  "code": "await api.waReady(40000, args);\nconst chatId = await api.waChatId(args.to);\nconst n = Math.min(Number(args.count || 30), 100);\nconst msgs = await WPP.chat.getMessages(chatId, { count: n });\nconst results = (msgs || []).map(api.waMsg);\nreturn { chat: chatId, count: results.length, results };",
   "params": [
    {
     "name": "to",
@@ -89,7 +89,7 @@
   "name": "WhatsApp · não lidas",
   "description": "Mensagens não lidas de todas as conversas (sem marcar como lidas).",
   "urlTemplate": "https://web.whatsapp.com/",
-  "code": "await api.waReady();\nconst chats = (await WPP.chat.list()).filter(c => c.unreadCount > 0).slice(0, Number(args.max_chats || 15));\nconst results = [];\nfor (const c of chats) {\n  const msgs = await WPP.chat.getMessages(c.id._serialized, { count: Math.min(c.unreadCount, 20) });\n  results.push(Object.assign(api.waChat(c), { messages: (msgs || []).map(api.waMsg) }));\n}\nreturn { count: results.length, results };",
+  "code": "await api.waReady(40000, args);\nconst chats = (await WPP.chat.list()).filter(c => c.unreadCount > 0).slice(0, Number(args.max_chats || 15));\nconst results = [];\nfor (const c of chats) {\n  const msgs = await WPP.chat.getMessages(c.id._serialized, { count: Math.min(c.unreadCount, 20) });\n  results.push(Object.assign(api.waChat(c), { messages: (msgs || []).map(api.waMsg) }));\n}\nreturn { count: results.length, results };",
   "params": [
    {
     "name": "max_chats",
@@ -113,7 +113,7 @@
   "name": "WhatsApp · buscar contato",
   "description": "Procura contatos e conversas pelo nome ou número.",
   "urlTemplate": "https://web.whatsapp.com/",
-  "code": "await api.waReady();\nconst q = String(args.query || '').toLowerCase();\nconst chats = (await WPP.chat.list()).map(api.waChat).filter(c => c.name.toLowerCase().includes(q) || String(c.id).includes(q.replace(/\\D/g, '') || '§'));\nlet contacts = [];\ntry { contacts = (await WPP.contact.list()).filter(c => ((c.name || c.pushname || '') + ' ' + (c.id && c.id.user)).toLowerCase().includes(q)).slice(0, 30)\n  .map(c => ({ id: c.id && c.id._serialized, name: c.name || c.pushname || '', number: c.id && c.id.user, is_my_contact: !!c.isMyContact })); } catch (e) {}\nreturn { count: chats.length + contacts.length, results: chats.slice(0, 30).map(c => Object.assign({ kind: 'chat' }, c)).concat(contacts.map(c => Object.assign({ kind: 'contact' }, c))) };",
+  "code": "await api.waReady(40000, args);\nconst q = String(args.query || '').toLowerCase();\nconst chats = (await WPP.chat.list()).map(api.waChat).filter(c => c.name.toLowerCase().includes(q) || String(c.id).includes(q.replace(/\\D/g, '') || '§'));\nlet contacts = [];\ntry { contacts = (await WPP.contact.list()).filter(c => ((c.name || c.pushname || '') + ' ' + (c.id && c.id.user)).toLowerCase().includes(q)).slice(0, 30)\n  .map(c => ({ id: c.id && c.id._serialized, name: c.name || c.pushname || '', number: c.id && c.id.user, is_my_contact: !!c.isMyContact })); } catch (e) {}\nreturn { count: chats.length + contacts.length, results: chats.slice(0, 30).map(c => Object.assign({ kind: 'chat' }, c)).concat(contacts.map(c => Object.assign({ kind: 'contact' }, c))) };",
   "params": [
    {
     "name": "query",
@@ -144,7 +144,7 @@
   "slug": "whatsapp_groups",
   "name": "WhatsApp · grupos",
   "description": "Lista os grupos: nome, id, participantes e se você é admin.",
-  "code": "await api.waReady();\nconst me = (() => { try { const u = WPP.conn.getMyUserId(); return u && (u._serialized || String(u)); } catch (e) { return ''; } })();\nlet gs = [];\ntry { gs = await WPP.group.getAllGroups(); } catch (e) {}\ngs = (gs || []).filter(Boolean);\nif (!gs.length) { try { gs = (await WPP.chat.list({ onlyGroups: true })).filter(Boolean); } catch (e) {} }\nconst max = Math.min(Number(args.max || 200), 500);\nconst results = [];\nfor (const g of gs.slice(0, max)) {\n  const id = g.id && (g.id._serialized || String(g.id)); if (!id) continue;\n  const meta = g.groupMetadata || {};\n  let parts = [];\n  try { parts = meta.participants && meta.participants.getModelsArray ? meta.participants.getModelsArray() : (meta.participants || []); } catch (e) {}\n  results.push({ id, name: g.name || g.formattedTitle || meta.subject || '', participants: parts.length,\n    i_am_admin: parts.some(x => x && x.id && (x.id._serialized || String(x.id)) === me && (x.isAdmin || x.isSuperAdmin)),\n    unread: g.unreadCount || 0 });\n}\nreturn { count: results.length, results };",
+  "code": "await api.waReady(40000, args);\nconst me = (() => { try { const u = WPP.conn.getMyUserId(); return u && (u._serialized || String(u)); } catch (e) { return ''; } })();\nlet gs = [];\ntry { gs = await WPP.group.getAllGroups(); } catch (e) {}\ngs = (gs || []).filter(Boolean);\nif (!gs.length) { try { gs = (await WPP.chat.list({ onlyGroups: true })).filter(Boolean); } catch (e) {} }\nconst max = Math.min(Number(args.max || 200), 500);\nconst results = [];\nfor (const g of gs.slice(0, max)) {\n  const id = g.id && (g.id._serialized || String(g.id)); if (!id) continue;\n  const meta = g.groupMetadata || {};\n  let parts = [];\n  try { parts = meta.participants && meta.participants.getModelsArray ? meta.participants.getModelsArray() : (meta.participants || []); } catch (e) {}\n  results.push({ id, name: g.name || g.formattedTitle || meta.subject || '', participants: parts.length,\n    i_am_admin: parts.some(x => x && x.id && (x.id._serialized || String(x.id)) === me && (x.isAdmin || x.isSuperAdmin)),\n    unread: g.unreadCount || 0 });\n}\nreturn { count: results.length, results };",
   "params": [
    {
     "name": "max",
@@ -161,7 +161,7 @@
   "name": "WhatsApp · marcar como lida",
   "description": "Marca uma conversa como lida.",
   "urlTemplate": "https://web.whatsapp.com/",
-  "code": "await api.waReady();\nconst chatId = await api.waChatId(args.to);\nawait WPP.chat.markIsRead(chatId);\nreturn { chat: chatId, results: [{ ok: true, chat: chatId }] };",
+  "code": "await api.waReady(40000, args);\nconst chatId = await api.waChatId(args.to);\nawait WPP.chat.markIsRead(chatId);\nreturn { chat: chatId, results: [{ ok: true, chat: chatId }] };",
   "params": [
    {
     "name": "to",
@@ -192,7 +192,7 @@
   "slug": "whatsapp_send_text",
   "name": "WhatsApp · enviar texto",
   "description": "Envia UMA mensagem de texto para UMA conversa, com ritmo humano e limites anti-bloqueio. Só quando o usuário pedir.",
-  "code": "await api.waReady();\nconst chatId = await api.waChatId(args.to);\nconst text = String(args.text || '').trim();\nif (!text) throw new Error('texto vazio');\nif (text.length > 4000) throw new Error('texto longo demais (máx. 4000)');\nconst commit = await api.waGuard(args, chatId, text);\nawait api.waTyping(chatId, text.length);\nconst r = await WPP.chat.sendTextMessage(chatId, text, Object.assign({ createChat: String(args.allow_new) === 'true' }, api.waQuote(args)));\ncommit();\nreturn api.waSent(r, chatId);",
+  "code": "await api.waReady(40000, args);\nconst chatId = await api.waChatId(args.to);\nconst text = String(args.text || '').trim();\nif (!text) throw new Error('texto vazio');\nif (text.length > 4000) throw new Error('texto longo demais (máx. 4000)');\nconst commit = await api.waGuard(args, chatId, text);\nawait api.waTyping(chatId, text.length);\nconst r = await api.waSend(WPP.chat.sendTextMessage, chatId, text, Object.assign({ createChat: String(args.allow_new) === 'true' }, api.waQuote(args)));\ncommit();\nreturn api.waSent(r, chatId);",
   "params": [
    {
     "name": "to",
@@ -244,7 +244,7 @@
   "slug": "whatsapp_group_participants",
   "name": "WhatsApp · participantes do grupo",
   "description": "Lista participantes de um grupo (id, admin).",
-  "code": "await api.waReady();\nconst gid = await api.waChatId(args.group);\nif (!gid.endsWith('@g.us')) throw new Error('não é um grupo: ' + gid);\nconst ps = (await WPP.group.getParticipants(gid) || []).filter(Boolean);\nconst results = ps.map(x => ({ id: x.id && (x.id._serialized || String(x.id)), admin: !!(x.isAdmin || x.isSuperAdmin), super_admin: !!x.isSuperAdmin }));\nreturn { group: gid, count: results.length, results };",
+  "code": "await api.waReady(40000, args);\nconst gid = await api.waChatId(args.group);\nif (!gid.endsWith('@g.us')) throw new Error('não é um grupo: ' + gid);\nconst ps = (await WPP.group.getParticipants(gid) || []).filter(Boolean);\nconst results = ps.map(x => ({ id: x.id && (x.id._serialized || String(x.id)), admin: !!(x.isAdmin || x.isSuperAdmin), super_admin: !!x.isSuperAdmin }));\nreturn { group: gid, count: results.length, results };",
   "params": [
    {
     "name": "group",
@@ -268,7 +268,7 @@
   "slug": "whatsapp_send_file",
   "name": "WhatsApp · enviar arquivo/foto/vídeo/áudio",
   "description": "Envia UM arquivo para UMA conversa: imagem, vídeo, áudio, documento ou figurinha. Use file_path (arquivo da área de trabalho) ou file (data URL/URL).",
-  "code": "await api.waReady();\nconst chatId = await api.waChatId(args.to);\nlet file = String(args.file || '');\nif (!file) throw new Error('informe file_path (arquivo da área de trabalho) ou file (data URL ou URL https)');\nif (/^https?:/i.test(file)) { const res = await fetch(file); if (!res.ok) throw new Error('não consegui baixar o arquivo: HTTP ' + res.status); file = await api.blobToDataUrl(await res.blob()); }\nif (!/^data:/.test(file)) throw new Error('file precisa ser data URL ou URL https');\nconst mime = (file.match(/^data:([^;,]+)/) || [])[1] || 'application/octet-stream';\nlet type = String(args.type || 'auto');\nif (type === 'auto') type = mime.startsWith('image/') ? 'image' : mime.startsWith('video/') ? 'video' : mime.startsWith('audio/') ? 'audio' : 'document';\nif (!['image','video','audio','document','sticker'].includes(type)) throw new Error('type inválido');\nconst caption = String(args.caption || '').slice(0, 1024);\nconst commit = await api.waGuard(args, chatId, 'file:' + type + ':' + file.length + ':' + caption);\nawait api.waTyping(chatId, caption.length + 20, type === 'audio');\nconst opts = Object.assign({ type, createChat: String(args.allow_new) === 'true' }, api.waQuote(args));\nif (caption && type !== 'audio' && type !== 'sticker') opts.caption = caption;\nif (args.filename) opts.filename = String(args.filename);\nif (type === 'audio' && String(args.voice) === 'true') opts.isPtt = true;\nconst r = await WPP.chat.sendFileMessage(chatId, file, opts);\ncommit();\nreturn api.waSent(r, chatId, { type, mime });",
+  "code": "await api.waReady(40000, args);\nconst chatId = await api.waChatId(args.to);\nlet file = String(args.file || '');\nif (!file) throw new Error('informe file_path (arquivo da área de trabalho) ou file (data URL ou URL https)');\nif (/^https?:/i.test(file)) { const res = await fetch(file); if (!res.ok) throw new Error('não consegui baixar o arquivo: HTTP ' + res.status); file = await api.blobToDataUrl(await res.blob()); }\nif (!/^data:/.test(file)) throw new Error('file precisa ser data URL ou URL https');\nconst mime = (file.match(/^data:([^;,]+)/) || [])[1] || 'application/octet-stream';\nlet type = String(args.type || 'auto');\nif (type === 'auto') type = mime.startsWith('image/') ? 'image' : mime.startsWith('video/') ? 'video' : mime.startsWith('audio/') ? 'audio' : 'document';\nif (!['image','video','audio','document','sticker'].includes(type)) throw new Error('type inválido');\nconst caption = String(args.caption || '').slice(0, 1024);\nconst commit = await api.waGuard(args, chatId, 'file:' + type + ':' + file.length + ':' + caption);\nawait api.waTyping(chatId, caption.length + 20, type === 'audio');\nconst opts = Object.assign({ type, createChat: String(args.allow_new) === 'true' }, api.waQuote(args));\nif (caption && type !== 'audio' && type !== 'sticker') opts.caption = caption;\nif (args.filename) opts.filename = String(args.filename);\nif (type === 'audio' && String(args.voice) === 'true') opts.isPtt = true;\nconst r = await api.waSend(WPP.chat.sendFileMessage, chatId, file, opts);\ncommit();\nreturn api.waSent(r, chatId, { type, mime });",
   "params": [
    {
     "name": "to",
@@ -355,7 +355,7 @@
   "slug": "whatsapp_send_location",
   "name": "WhatsApp · enviar localização",
   "description": "Envia UMA localização (lat/lng) para UMA conversa.",
-  "code": "await api.waReady();\nconst chatId = await api.waChatId(args.to);\nconst lat = Number(args.lat), lng = Number(args.lng);\nif (!isFinite(lat) || !isFinite(lng) || Math.abs(lat) > 90 || Math.abs(lng) > 180) throw new Error('lat/lng inválidos');\nconst commit = await api.waGuard(args, chatId, 'loc:' + lat.toFixed(4) + ',' + lng.toFixed(4));\nawait api.waTyping(chatId, 10);\nconst o = Object.assign({ lat, lng, createChat: String(args.allow_new) === 'true' }, api.waQuote(args));\nif (args.name) o.name = String(args.name); if (args.address) o.address = String(args.address); if (args.url) o.url = String(args.url);\nconst r = await WPP.chat.sendLocationMessage(chatId, o);\ncommit();\nreturn api.waSent(r, chatId, { lat, lng });",
+  "code": "await api.waReady(40000, args);\nconst chatId = await api.waChatId(args.to);\nconst lat = Number(args.lat), lng = Number(args.lng);\nif (!isFinite(lat) || !isFinite(lng) || Math.abs(lat) > 90 || Math.abs(lng) > 180) throw new Error('lat/lng inválidos');\nconst commit = await api.waGuard(args, chatId, 'loc:' + lat.toFixed(4) + ',' + lng.toFixed(4));\nawait api.waTyping(chatId, 10);\nconst o = Object.assign({ lat, lng, createChat: String(args.allow_new) === 'true' }, api.waQuote(args));\nif (args.name) o.name = String(args.name); if (args.address) o.address = String(args.address); if (args.url) o.url = String(args.url);\nconst r = await api.waSend(WPP.chat.sendLocationMessage, chatId, o);\ncommit();\nreturn api.waSent(r, chatId, { lat, lng });",
   "params": [
    {
     "name": "to",
@@ -435,7 +435,7 @@
   "slug": "whatsapp_send_contact",
   "name": "WhatsApp · enviar contato",
   "description": "Envia UM cartão de contato (vCard) para UMA conversa.",
-  "code": "await api.waReady();\nconst chatId = await api.waChatId(args.to);\nconst num = String(args.contact || '').replace(/\\D/g, '');\nif (num.length < 8) throw new Error('contact precisa ser um número com DDI');\nconst commit = await api.waGuard(args, chatId, 'vcard:' + num);\nawait api.waTyping(chatId, 10);\nconst r = await WPP.chat.sendVCardContactMessage(chatId, { id: num + '@c.us', name: String(args.contact_name || num) });\ncommit();\nreturn api.waSent(r, chatId);",
+  "code": "await api.waReady(40000, args);\nconst chatId = await api.waChatId(args.to);\nconst num = String(args.contact || '').replace(/\\D/g, '');\nif (num.length < 8) throw new Error('contact precisa ser um número com DDI');\nconst commit = await api.waGuard(args, chatId, 'vcard:' + num);\nawait api.waTyping(chatId, 10);\nconst r = await api.waSend(WPP.chat.sendVCardContactMessage, chatId, { id: num + '@c.us', name: String(args.contact_name || num) });\ncommit();\nreturn api.waSent(r, chatId);",
   "params": [
    {
     "name": "to",
@@ -487,7 +487,7 @@
   "slug": "whatsapp_send_poll",
   "name": "WhatsApp · enviar enquete",
   "description": "Envia UMA enquete para UMA conversa.",
-  "code": "await api.waReady();\nconst chatId = await api.waChatId(args.to);\nconst name = String(args.question || '').trim();\nconst choices = String(args.options || '').split('|').map(s => s.trim()).filter(Boolean);\nif (!name) throw new Error('question vazia');\nif (choices.length < 2 || choices.length > 12) throw new Error('options: de 2 a 12 opções separadas por |');\nconst commit = await api.waGuard(args, chatId, 'poll:' + name);\nawait api.waTyping(chatId, name.length);\nconst r = await WPP.chat.sendCreatePollMessage(chatId, name, choices, { selectableCount: String(args.multiple) === 'true' ? 0 : 1 });\ncommit();\nreturn api.waSent(r, chatId);",
+  "code": "await api.waReady(40000, args);\nconst chatId = await api.waChatId(args.to);\nconst name = String(args.question || '').trim();\nconst choices = String(args.options || '').split('|').map(s => s.trim()).filter(Boolean);\nif (!name) throw new Error('question vazia');\nif (choices.length < 2 || choices.length > 12) throw new Error('options: de 2 a 12 opções separadas por |');\nconst commit = await api.waGuard(args, chatId, 'poll:' + name);\nawait api.waTyping(chatId, name.length);\nconst r = await api.waSend(WPP.chat.sendCreatePollMessage, chatId, name, choices, { selectableCount: String(args.multiple) === 'true' ? 0 : 1 });\ncommit();\nreturn api.waSent(r, chatId);",
   "params": [
    {
     "name": "to",
@@ -546,7 +546,7 @@
   "slug": "whatsapp_react",
   "name": "WhatsApp · reagir",
   "description": "Reage a uma mensagem com um emoji (vazio remove a reação).",
-  "code": "await api.waReady();\nif (String(args.confirmed) !== 'true') throw new Error('reação recusada: só quando o usuário pedir (confirmed=true)');\nconst id = String(args.message_id || ''); if (!id) throw new Error('message_id obrigatório');\nawait WPP.chat.sendReactionToMessage(id, String(args.emoji || '') || false);\nreturn { results: [{ ok: true, message_id: id, emoji: String(args.emoji || '') }] };",
+  "code": "await api.waReady(40000, args);\nif (String(args.confirmed) !== 'true') throw new Error('reação recusada: só quando o usuário pedir (confirmed=true)');\nconst id = String(args.message_id || ''); if (!id) throw new Error('message_id obrigatório');\nawait WPP.chat.sendReactionToMessage(id, String(args.emoji || '') || false);\nreturn { results: [{ ok: true, message_id: id, emoji: String(args.emoji || '') }] };",
   "params": [
    {
     "name": "message_id",
@@ -584,7 +584,7 @@
   "slug": "whatsapp_forward",
   "name": "WhatsApp · encaminhar",
   "description": "Encaminha UMA mensagem para UMA conversa.",
-  "code": "await api.waReady();\nconst chatId = await api.waChatId(args.to);\nconst id = String(args.message_id || ''); if (!id) throw new Error('message_id obrigatório');\nconst commit = await api.waGuard(args, chatId, 'fwd:' + id);\nawait WPP.chat.forwardMessage(chatId, id);\ncommit();\nreturn api.waSent(null, chatId, { message_id: id });",
+  "code": "await api.waReady(40000, args);\nconst chatId = await api.waChatId(args.to);\nconst id = String(args.message_id || ''); if (!id) throw new Error('message_id obrigatório');\nconst commit = await api.waGuard(args, chatId, 'fwd:' + id);\nawait WPP.chat.forwardMessage(chatId, id);\ncommit();\nreturn api.waSent(null, chatId, { message_id: id });",
   "params": [
    {
     "name": "to",
@@ -622,7 +622,7 @@
   "slug": "whatsapp_edit_message",
   "name": "WhatsApp · editar mensagem",
   "description": "Edita o texto de uma mensagem SUA (até 15 min após o envio).",
-  "code": "await api.waReady();\nif (String(args.confirmed) !== 'true') throw new Error('edição recusada: só quando o usuário pedir (confirmed=true)');\nconst id = String(args.message_id || ''), text = String(args.text || '').trim();\nif (!id || !text) throw new Error('message_id e text obrigatórios');\nawait WPP.chat.editMessage(id, text);\nreturn { results: [{ ok: true, message_id: id }] };",
+  "code": "await api.waReady(40000, args);\nif (String(args.confirmed) !== 'true') throw new Error('edição recusada: só quando o usuário pedir (confirmed=true)');\nconst id = String(args.message_id || ''), text = String(args.text || '').trim();\nif (!id || !text) throw new Error('message_id e text obrigatórios');\nawait WPP.chat.editMessage(id, text);\nreturn { results: [{ ok: true, message_id: id }] };",
   "params": [
    {
     "name": "message_id",
@@ -660,7 +660,7 @@
   "slug": "whatsapp_delete_message",
   "name": "WhatsApp · apagar mensagem",
   "description": "Apaga uma mensagem (para todos se for sua e everyone=true). Irreversível.",
-  "code": "await api.waReady();\nif (String(args.confirmed) !== 'true') throw new Error('exclusão recusada: ação irreversível, só quando o usuário pedir (confirmed=true)');\nconst chatId = await api.waChatId(args.to), id = String(args.message_id || '');\nif (!id) throw new Error('message_id obrigatório');\nawait WPP.chat.deleteMessage(chatId, id, true, String(args.everyone) === 'true');\nreturn { results: [{ ok: true, chat: chatId, message_id: id }] };",
+  "code": "await api.waReady(40000, args);\nif (String(args.confirmed) !== 'true') throw new Error('exclusão recusada: ação irreversível, só quando o usuário pedir (confirmed=true)');\nconst chatId = await api.waChatId(args.to), id = String(args.message_id || '');\nif (!id) throw new Error('message_id obrigatório');\nawait WPP.chat.deleteMessage(chatId, id, true, String(args.everyone) === 'true');\nreturn { results: [{ ok: true, chat: chatId, message_id: id }] };",
   "params": [
    {
     "name": "to",
@@ -705,7 +705,7 @@
   "slug": "whatsapp_download_media",
   "name": "WhatsApp · baixar mídia",
   "description": "Baixa a mídia de uma mensagem (foto, vídeo, áudio, documento) e salva na área de trabalho.",
-  "code": "await api.waReady();\nconst id = String(args.message_id || ''); if (!id) throw new Error('message_id obrigatório');\nconst blob = await WPP.chat.downloadMedia(id);\nif (!blob) throw new Error('mensagem sem mídia');\nif (blob.size > 16 * 1024 * 1024) throw new Error('mídia maior que 16 MB');\nconst data = await api.blobToDataUrl(blob);\nlet fn = ''; try { const m = await WPP.chat.getMessageById(id); fn = (m && (m.filename || m.mediaData && m.mediaData.filename)) || ''; } catch (e) {}\nreturn { results: [{ ok: true, message_id: id, mime: blob.type, size: blob.size, filename: fn, data_url: data }] };",
+  "code": "await api.waReady(40000, args);\nconst id = String(args.message_id || ''); if (!id) throw new Error('message_id obrigatório');\nconst blob = await WPP.chat.downloadMedia(id);\nif (!blob) throw new Error('mensagem sem mídia');\nif (blob.size > 16 * 1024 * 1024) throw new Error('mídia maior que 16 MB');\nconst data = await api.blobToDataUrl(blob);\nlet fn = ''; try { const m = await WPP.chat.getMessageById(id); fn = (m && (m.filename || m.mediaData && m.mediaData.filename)) || ''; } catch (e) {}\nreturn { results: [{ ok: true, message_id: id, mime: blob.type, size: blob.size, filename: fn, data_url: data }] };",
   "params": [
    {
     "name": "message_id",
@@ -736,7 +736,7 @@
   "slug": "whatsapp_contact_info",
   "name": "WhatsApp · info do contato",
   "description": "Nome, recado, foto de perfil e se o número tem WhatsApp.",
-  "code": "await api.waReady();\nconst id = await api.waChatId(args.to);\nlet c = null; try { c = await WPP.contact.get(id); } catch (e) {}\nlet pic = null, status = null, exists = null, blocked = null;\ntry { pic = await WPP.contact.getProfilePictureUrl(id); } catch (e) {}\ntry { const s = await WPP.contact.getStatus(id); status = s && (s.status || s); } catch (e) {}\ntry { exists = !!(await WPP.contact.queryExists(id)); } catch (e) {}\ntry { blocked = !!WPP.blocklist.isBlocked(id); } catch (e) {}\nreturn { results: [{ id, name: c && (c.name || c.pushname || c.formattedName) || '', push_name: c && c.pushname || '', is_business: !!(c && c.isBusiness), status: typeof status === 'string' ? status : null, picture_url: pic || null, has_whatsapp: exists, blocked }] };",
+  "code": "await api.waReady(40000, args);\nconst id = await api.waChatId(args.to);\nlet c = null; try { c = await WPP.contact.get(id); } catch (e) {}\nlet pic = null, status = null, exists = null, blocked = null;\ntry { pic = await WPP.contact.getProfilePictureUrl(id); } catch (e) {}\ntry { const s = await WPP.contact.getStatus(id); status = s && (s.status || s); } catch (e) {}\ntry { exists = !!(await WPP.contact.queryExists(id)); } catch (e) {}\ntry { blocked = !!WPP.blocklist.isBlocked(id); } catch (e) {}\nreturn { results: [{ id, name: c && (c.name || c.pushname || c.formattedName) || '', push_name: c && c.pushname || '', is_business: !!(c && c.isBusiness), status: typeof status === 'string' ? status : null, picture_url: pic || null, has_whatsapp: exists, blocked }] };",
   "params": [
    {
     "name": "to",
@@ -760,7 +760,7 @@
   "slug": "whatsapp_chat_action",
   "name": "WhatsApp · organizar conversa",
   "description": "Arquivar, desarquivar, fixar, desafixar, silenciar, reativar som ou marcar como não lida.",
-  "code": "await api.waReady();\nconst id = await api.waChatId(args.to), a = String(args.action || '');\nconst map = { archive: () => WPP.chat.archive(id), unarchive: () => WPP.chat.unarchive(id), pin: () => WPP.chat.pin(id), unpin: () => WPP.chat.unpin(id),\n  mute: () => WPP.chat.mute(id, { duration: Number(args.hours || 8) * 3600 }), unmute: () => WPP.chat.unmute(id), unread: () => WPP.chat.markIsUnread(id), read: () => WPP.chat.markIsRead(id) };\nif (!map[a]) throw new Error('action: ' + Object.keys(map).join('|'));\nawait map[a]();\nreturn { results: [{ ok: true, chat: id, action: a }] };",
+  "code": "await api.waReady(40000, args);\nconst id = await api.waChatId(args.to), a = String(args.action || '');\nconst map = { archive: () => WPP.chat.archive(id), unarchive: () => WPP.chat.unarchive(id), pin: () => WPP.chat.pin(id), unpin: () => WPP.chat.unpin(id),\n  mute: () => WPP.chat.mute(id, { duration: Number(args.hours || 8) * 3600 }), unmute: () => WPP.chat.unmute(id), unread: () => WPP.chat.markIsUnread(id), read: () => WPP.chat.markIsRead(id) };\nif (!map[a]) throw new Error('action: ' + Object.keys(map).join('|'));\nawait map[a]();\nreturn { results: [{ ok: true, chat: id, action: a }] };",
   "params": [
    {
     "name": "to",

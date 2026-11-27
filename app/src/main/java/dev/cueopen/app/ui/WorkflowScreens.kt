@@ -478,7 +478,7 @@ fun WorkflowEditorScreen(nav: NavController, id: String) {
                 }
             },
             actions = {
-                if (w.nodes.any { it.type == "trigger_schedule" || it.type == "trigger_webhook" }) Switch(checked = w.enabled, onCheckedChange = { on ->
+                if (w.nodes.any { it.type == "trigger_schedule" || it.type == "trigger_webhook" || it.type == "trigger_whatsapp" }) Switch(checked = w.enabled, onCheckedChange = { on ->
                     if (on && problems.any { !it.contains("não está ligado") }) { problemsOpen = true }
                     else if (on) { toast = "Testando de ponta a ponta antes de publicar…"; WorkflowEngine.publish(ctx, w.id) { _, msg -> toast = msg.take(300) } }
                     else { val v = WorkflowStore.upsert(w.copy(enabled = false)); WorkflowScheduler.sync(ctx, v); toast = "Desligado" }

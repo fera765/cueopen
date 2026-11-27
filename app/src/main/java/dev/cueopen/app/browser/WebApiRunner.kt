@@ -32,6 +32,9 @@ object WebApiRunner {
     private fun helpers(ctx: Context): String = helpersJs ?: ctx.assets.open("webapi/helpers.js").bufferedReader().readText().also { helpersJs = it }
     private fun host(): BrowserHost = CueApp.instance.browserFor(KEY)
 
+    /** Acesso exclusivo à página das APIs (ex.: webhook do WhatsApp lendo a fila de mensagens) sem disputar com uma chamada. */
+    suspend fun <T> withPage(block: suspend (BrowserHost, String) -> T): T = lock.withLock { block(host(), helpers(CueApp.instance)) }
+
     /** Executa a API. Devolve o JSON final (texto) ou {"ok":false,"error":…}. */
     suspend fun run(ctx: Context, a: WebApi, args: JsonObject, timeoutMs0: Long = 45_000): String = lock.withLock {
         // Com biblioteca injetada (WA-JS) a 1ª carga do WhatsApp Web pode levar ~30 s: mais folga.
@@ -63,12 +66,35 @@ object WebApiRunner {
                 if (nav.startsWith("ERROR")) return@withTimeoutOrNull err(a, full, nav.lineSequence().first().take(300), url)
             }
             // Bibliotecas (ex.: WA-JS): baixadas uma vez pelo app e injetadas só se ainda não estão na página.
-            for (lib in a.inject) {
-                stage = "injetar biblioteca $lib"
-                val key = "__inj_" + Integer.toHexString(lib.hashCode())
-                if (h.runJs("!!window['$key']") == "true") continue
-                val code = library(ctx, lib) ?: return@withTimeoutOrNull err(a, full, "não consegui baixar a biblioteca $lib", url)
-                h.evalRaw(code + "\n;window['$key']=true;1", 60_000)
+            suspend fun injectAll(): String? {
+                for (lib in a.inject) {
+                    stage = "injetar biblioteca $lib"
+                    val key = "__inj_" + Integer.toHexString(lib.hashCode())
+                    if (h.runJs("!!window['$key']") == "true") continue
+                    val code = library(ctx, lib) ?: return "não consegui baixar a biblioteca $lib"
+                    h.evalRaw(code + "\n;window['$key']=true;1", 60_000)
+                }
+                return null
+            }
+            injectAll()?.let { return@withTimeoutOrNull err(a, full, it, url) }
+            // WhatsApp: espera o WA-JS ficar pronto; travou (aba antiga, WhatsApp atualizado) → recarrega a página uma vez.
+            if (url.contains("web.whatsapp.com") && a.inject.isNotEmpty()) {
+                suspend fun waState(ms: Long): String {
+                    val t0 = System.currentTimeMillis()
+                    while (System.currentTimeMillis() - t0 < ms) {
+                        val st = h.runJs("(function(){if(document.querySelector('canvas[aria-label*=\"QR\"],div[data-ref] canvas,[data-testid=\"qrcode\"]'))return 'qr';return (window.WPP&&WPP.isReady)?'ready':'wait'})()")
+                        if (st == "ready" || st == "qr") return st
+                        kotlinx.coroutines.delay(400)
+                    }
+                    return "wait"
+                }
+                stage = "esperar o WhatsApp Web ficar pronto"
+                if (waState(30_000) == "wait") {
+                    stage = "recarregar o WhatsApp Web (não ficou pronto)"
+                    h.navigate(url)
+                    injectAll()?.let { return@withTimeoutOrNull err(a, full, it, url) }
+                    if (waState(40_000) == "wait") return@withTimeoutOrNull err(a, full, "WhatsApp Web não ficou pronto nem depois de recarregar (sem internet, página travada ou WA-JS incompatível). Abra o Browser em web.whatsapp.com e confira.", url)
+                }
             }
             // Bloqueio anti-robô: não tenta contornar — avisa.
             val blocked = h.runJs("(function(){$helpers;try{return api.blocked()}catch(e){return ''}})()").let { if (it.startsWith("(sem valor")) "" else it }

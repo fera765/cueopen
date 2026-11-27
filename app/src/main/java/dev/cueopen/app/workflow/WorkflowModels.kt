@@ -120,6 +120,14 @@ object WfCatalog {
                 WfField("secret", "Segredo (1ª linha do comentário)", WfField.Kind.TEXT, "Mínimo 12 caracteres; chamadas sem ele são ignoradas", required = true),
                 WfField("sample", "Exemplo de payload (usado no teste)", WfField.Kind.MULTILINE, "{\"evento\": \"teste\"}", default = "{\"evento\": \"teste\"}"),
             )),
+        WfNodeType("trigger_whatsapp", "Mensagem no WhatsApp", CAT_TRIGGER, "Roda na hora em que chega uma mensagem no seu WhatsApp (webhook do API Hub › WhatsApp). Dados: {{trigger.payload.text}}, {{trigger.payload.chat}}, {{trigger.payload.chat_name}}, {{trigger.payload.sender_name}}, {{trigger.payload.type}}, {{trigger.payload.id}}.", 0xFF25D366, "webhook", trigger = true,
+            fields = listOf(
+                WfField("chat", "Conversa ou grupo (vazio = todas)", WfField.Kind.TEXT, "Nome do grupo/contato, número ou id (ex.: Família, 5511999999999)"),
+                WfField("scope", "Tipo de conversa", WfField.Kind.SELECT, options = listOf("all" to "Todas", "private" to "Só conversas privadas", "groups" to "Só grupos"), default = "all"),
+                WfField("keyword", "Só se contiver (opcional)", WfField.Kind.TEXT, "Palavras separadas por | (ex.: pedido|orçamento)"),
+                WfField("from_me", "Incluir mensagens enviadas por mim", WfField.Kind.SELECT, options = listOf("false" to "Não", "true" to "Sim"), default = "false"),
+                WfField("sample", "Exemplo de mensagem (usado no teste)", WfField.Kind.MULTILINE, default = "{\"chat\": \"5511999999999@c.us\", \"chat_name\": \"Contato\", \"sender_name\": \"Contato\", \"type\": \"chat\", \"text\": \"Olá, quero um orçamento\", \"is_group\": false, \"from_me\": false}"),
+            )),
         WfNodeType("ai", "IA (texto)", CAT_AI, "Uma chamada rápida ao modelo, sem ferramentas: resumir, traduzir, classificar, formatar ou extrair dados do que veio antes.", 0xFF9B7BFF, "ai",
             fields = listOf(
                 WfField("prompt", "Instrução", WfField.Kind.MULTILINE, "Inclua os dados com {{prev}} ou {{id.campo}}. $TEMPLATE_HINT", required = true),
@@ -219,6 +227,8 @@ object WfCatalog {
         WfPreset("A cada 15 minutos", CAT_TRIGGER, "trigger_schedule", "Roda a cada 15 minutos.", mapOf("mode" to "interval", "minutes" to "15")),
         WfPreset("Toda segunda às 9h", CAT_TRIGGER, "trigger_schedule", "Roda toda segunda-feira às 09:00.", mapOf("mode" to "weekly", "weekday" to "1", "time" to "09:00")),
         WfPreset("Webhook (GitHub)", CAT_TRIGGER, "trigger_webhook", "Roda quando chega uma chamada na issue configurada.", mapOf("sample" to "{\"evento\": \"teste\"}")),
+        WfPreset("Mensagem no WhatsApp", CAT_TRIGGER, "trigger_whatsapp", "Roda quando chega mensagem no WhatsApp (todas as conversas).", mapOf("scope" to "all")),
+        WfPreset("Mensagem num grupo do WhatsApp", CAT_TRIGGER, "trigger_whatsapp", "Roda quando chega mensagem no grupo escolhido.", mapOf("scope" to "groups", "chat" to "")),
         WfPreset("Toda hora", CAT_TRIGGER, "trigger_schedule", "Roda a cada 60 minutos.", mapOf("mode" to "interval", "minutes" to "60")),
         // IA
         WfPreset("Resumir texto", CAT_AI, "ai", "Resume a saída anterior em tópicos curtos.", mapOf("prompt" to "Resuma em até 5 tópicos curtos, em português:\n\n{{prev}}")),

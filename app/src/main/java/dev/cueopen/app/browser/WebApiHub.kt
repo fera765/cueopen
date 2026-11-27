@@ -40,13 +40,33 @@ object WebApiHub {
 
     /** Lista curta para a LLM: slug, descrição e parâmetros. */
     fun catalog(ctx: Context): String = enabled(ctx).joinToString("\n") { a ->
-        "- ${a.slug}${if (a.sensitive) " [AÇÃO EXTERNA: só com pedido explícito do usuário, confirmed=true]" else ""}: ${a.description} · args: " + a.params.joinToString(", ") { p -> p.name + ":" + p.type + (if (p.required) "*" else "") + (if (p.default.isNotBlank()) "=" + p.default else "") }
+        doc(a)
     }.ifBlank { "(nenhuma API ativa no hub)" }
 
+    /** Documentação de uma API para o modelo: o que faz, quando é ação externa e cada argumento com tipo e descrição. */
+    fun doc(a: WebApi): String = "- ${a.slug}${if (a.sensitive) " [AÇÃO EXTERNA: só com pedido explícito do usuário, confirmed=true]" else ""}: ${a.description}\n" +
+        a.params.filter { it.name != "confirmed" }.joinToString("\n") { p -> "    · " + p.name + " (" + p.type + (if (p.required) ", obrigatório" else "") + (if (p.default.isNotBlank()) ", padrão " + p.default else "") + "): " + p.description }
+
+    private val STOP = setOf("para", "com", "uma", "que", "por", "dos", "das", "meu", "minha", "isso", "esse", "essa", "como", "mais", "the", "and")
+    /** APIs do hub relacionadas ao pedido (palavras do pedido × nome, slug e descrição; WhatsApp por sinônimos). */
+    fun relevant(ctx: Context, text: String, max: Int = 8): List<WebApi> {
+        val t = text.lowercase()
+        val wa = Regex("whats|zap\\b|zapzap|wpp|\\bwa\\b|mensage|grupo|contato|conversa").containsMatchIn(t)
+        val words = Regex("[\\p{L}\\d]{3,}").findAll(t).map { it.value }.filter { it !in STOP }.toSet()
+        return enabled(ctx).map { a ->
+            val hay = (a.slug.replace('_', ' ') + " " + a.name + " " + a.description).lowercase()
+            var score = words.count { w -> hay.contains(w.take(5)) }
+            if (wa && a.slug.startsWith("whatsapp_")) score += 3
+            a to score
+        }.filter { it.second >= 2 }.sortedByDescending { it.second }.take(max).map { it.first }
+    }
+
     /** Executa e registra estatísticas. */
-    suspend fun call(ctx: Context, a: WebApi, args: JsonObject): String {
-        val missing = a.params.filter { it.required && (args[it.name] as? JsonPrimitive)?.content.isNullOrBlank() }.map { it.name }
+    suspend fun call(ctx: Context, a: WebApi, args0: JsonObject): String {
+        val missing = a.params.filter { it.required && (args0[it.name] as? JsonPrimitive)?.content.isNullOrBlank() }.map { it.name }
         if (missing.isNotEmpty()) return """{"api":"${a.slug}","ok":false,"error":"faltam argumentos: ${missing.joinToString()}"}"""
+        // Regras do usuário para o WhatsApp (bloqueados / só permitidos / sem grupos): sempre do app, nunca do modelo.
+        val args = if (a.slug.startsWith("whatsapp_")) JsonObject(args0 - "__wa_policy" + ("__wa_policy" to WhatsAppHub.policyJson(ctx))) else args0
         val out = WebApiRunner.run(ctx, a, args)
         val ok = out.contains("\"ok\":true")
         val store = CueApp.instance.store

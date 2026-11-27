@@ -256,10 +256,10 @@ object WorkflowEngine {
     private suspend fun runNode(w: Workflow, run: WfRun, node: WfNode, prev: String, r: (String) -> String, rh: (String, Boolean) -> String, rt: (String, Int) -> String, setStatus: (String) -> Unit): NodeResult {
         val app = CueApp.instance
         return when (node.type) {
-            "trigger_manual", "trigger_schedule", "trigger_webhook" -> NodeResult(buildJsonObject {
+            "trigger_manual", "trigger_schedule", "trigger_webhook", "trigger_whatsapp" -> NodeResult(buildJsonObject {
                 put("trigger", run.trigger); put("time", java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss", java.util.Locale.US).format(java.util.Date()))
                 put("workflow", w.name)
-                if (node.type == "trigger_webhook") {
+                if (node.type == "trigger_webhook" || node.type == "trigger_whatsapp") {
                     val raw = payloads[run.id] ?: node.config["sample"].orEmpty()
                     val el = runCatching { Json.parseToJsonElement(raw) }.getOrNull()
                     if (el != null && raw.isNotBlank()) put("payload", el) else put("payload", raw)
@@ -615,6 +615,11 @@ object WorkflowScheduler {
         w.nodes.filter { it.type == "trigger_schedule" }.forEach { n -> scheduleNext(ctx, w.id, n, keepPending = true) }
         // Webhook: confere a issue a cada minuto (mesmo alarme exato + reserva do agendamento).
         w.nodes.filter { it.type == "trigger_webhook" }.forEach { n -> scheduleNext(ctx, w.id, n, keepPending = true) }
+        // Mensagem no WhatsApp: publicar o fluxo liga o webhook do WhatsApp (escuta em tempo real).
+        if (w.nodes.any { it.type == "trigger_whatsapp" }) runCatching {
+            val c = dev.cueopen.app.browser.WhatsAppHub.config(ctx)
+            if (!c.webhook) dev.cueopen.app.browser.WhatsAppHub.save(ctx, c.copy(webhook = true)) else dev.cueopen.app.browser.WhatsAppHub.start(ctx)
+        }
     }
 
     private fun cancel(ctx: Context, w: Workflow) {

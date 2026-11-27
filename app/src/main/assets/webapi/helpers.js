@@ -44,7 +44,8 @@ api.blocked = () => {
  * WhatsApp Web (WA-JS): espera a página e o WPP ficarem prontos, assume a janela se o WhatsApp estiver aberto em outra
  * ("Usar nesta janela") e confirma o login. Lança erro claro se não houver sessão (falta ler o QR no Browser).
  */
-api.waReady = async (ms = 90000) => {
+api.waReady = async (ms = 40000, args) => {
+  api.__policy = (args && args.__wa_policy) || api.__policy || null;
   const t0 = Date.now();
   while (Date.now() - t0 < ms) {
     const b = Array.from(document.querySelectorAll('button, div[role=button]')).find(x => /usar nesta janela|use here|usar aqui/i.test(x.innerText || ''));
@@ -54,23 +55,52 @@ api.waReady = async (ms = 90000) => {
       if (WPP.conn && WPP.conn.isAuthenticated && !WPP.conn.isAuthenticated()) throw new Error('WhatsApp sem login: leia o QR code em web.whatsapp.com no Browser do app.');
       return true;
     }
-    await sleep(400);
+    await sleep(300);
   }
-  throw new Error('WhatsApp Web não ficou pronto a tempo (página carregando, sem internet ou WA-JS incompatível com esta versão do WhatsApp).');
+  // O app recarrega a página e tenta de novo uma vez quando vê esta mensagem.
+  throw new Error('WA_NOT_READY: WhatsApp Web não ficou pronto a tempo (página carregando, sem internet ou WA-JS incompatível).');
 };
-/** Id de conversa a partir de número, id ou nome. */
+/** Só dígitos; número brasileiro sem DDI (10–11 dígitos) ganha 55. */
+api.waDigits = (s) => { let d = String(s || '').replace(/\D/g, ''); if ((d.length === 10 || d.length === 11) && !d.startsWith('55')) d = '55' + d; return d; };
+/** Regras do usuário (Configurações do WhatsApp no hub): contatos bloqueados / só permitidos. */
+api.waAllowed = (id) => {
+  const p = api.__policy; if (!p) return true;
+  const u = String(id || '').split('@')[0].replace(/\D/g, '') || String(id || '');
+  const m = (list) => (list || []).some(x => { const d = String(x).replace(/\D/g, ''); return d ? (u.endsWith(d) || d.endsWith(u)) : String(id).toLowerCase().includes(String(x).toLowerCase()); });
+  if (m(p.blocked)) return false;
+  if (p.allow_only && p.allow_only.length && !m(p.allow_only)) return false;
+  if (p.no_groups && String(id).endsWith('@g.us')) return false;
+  return true;
+};
+api.waCheck = (id) => { if (!api.waAllowed(id)) throw new Error('contato bloqueado nas configurações do WhatsApp do app: não posso interagir com ' + id); return id; };
+/** Acha a conversa existente de um número, também quando ela está indexada por LID. */
+api.waFindChat = async (digits) => {
+  let list = []; try { list = await WPP.chat.list(); } catch (e) {}
+  return list.find(c => c && c.id && (c.id.user === digits || (c.contact && c.contact.phoneNumber && String(c.contact.phoneNumber.user || c.contact.phoneNumber._serialized || '').startsWith(digits))
+    || (c.contact && c.contact.id && c.contact.id.user === digits))) || null;
+};
+/** Id de conversa a partir de número (com ou sem DDI), id ou nome. Prefere a conversa existente (inclusive @lid). */
 api.waChatId = async (to) => {
   const s = String(to || '').trim();
   if (!s) throw new Error('informe "to" (número com DDI, id do chat ou nome do contato)');
-  if (s.includes('@')) return s;
-  const digits = s.replace(/\D/g, '');
-  if (digits.length >= 10 && digits.length === s.replace(/[\s()+-]/g, '').length) return digits + '@c.us';
+  if (s.includes('@')) return api.waCheck(s);
+  const raw = s.replace(/[\s()+.-]/g, '');
+  if (/^\d{10,15}$/.test(raw)) {
+    const digits = api.waDigits(raw);
+    let hit = await api.waFindChat(digits);
+    // Celular BR com/sem o 9: tenta a outra forma.
+    if (!hit && digits.startsWith('55') && digits.length === 13) hit = await api.waFindChat(digits.slice(0, 4) + digits.slice(5));
+    if (!hit && digits.startsWith('55') && digits.length === 12) hit = await api.waFindChat(digits.slice(0, 4) + '9' + digits.slice(4));
+    if (hit) return api.waCheck(hit.id._serialized);
+    try { const ex = await WPP.contact.queryExists(digits + '@c.us'); if (ex && ex.wid) return api.waCheck(ex.wid._serialized || String(ex.wid)); } catch (e) {}
+    return api.waCheck(digits + '@c.us');
+  }
   const chats = await WPP.chat.list();
   const low = s.toLowerCase();
-  const hit = chats.find(c => ((c.name || c.formattedTitle || (c.contact && (c.contact.name || c.contact.pushname)) || '') + '').toLowerCase() === low)
-    || chats.find(c => ((c.name || c.formattedTitle || (c.contact && (c.contact.name || c.contact.pushname)) || '') + '').toLowerCase().includes(low));
-  if (!hit) throw new Error('nenhuma conversa com "' + s + '"');
-  return hit.id._serialized;
+  const nm = c => ((c.name || c.formattedTitle || (c.contact && (c.contact.name || c.contact.pushname)) || '') + '').toLowerCase();
+  const hit = chats.find(c => nm(c) === low) || chats.find(c => nm(c).includes(low));
+  if (!hit) throw new Error('nenhuma conversa com "' + s + '" (use o número com DDI ou o nome exato)');
+  return api.waCheck(hit.id._serialized);
 };
 api.waChat = (c) => {
   const msgs = c.msgs && c.msgs.getModelsArray ? c.msgs.getModelsArray() : [];
@@ -148,13 +178,15 @@ api.waGuard = async (args, chatId, fingerprint) => {
   const KEY = '__fluwy_wa_sends', now = Date.now();
   let log = []; try { log = JSON.parse(localStorage.getItem(KEY) || '[]').filter(x => now - x.t < 86400000); } catch (e) {}
   const last = log.length ? log[log.length - 1].t : 0;
-  if (now - last < 12000) throw new Error('aguarde ' + Math.ceil((12000 - (now - last)) / 1000) + 's entre envios (ritmo humano)');
+  // Ritmo humano: em vez de falhar, espera o intervalo que falta (máx. 12 s).
+  if (now - last < 12000) await sleep(12000 - (now - last) + Math.floor(Math.random() * 1500));
   if (log.filter(x => now - x.t < 3600000).length >= 20) throw new Error('limite de 20 envios por hora atingido');
   if (log.length >= 120) throw new Error('limite de 120 envios por dia atingido');
   const h = String(fingerprint || '').toLowerCase().replace(/\s+/g, ' ').slice(0, 200);
   if (h && new Set(log.filter(x => now - x.t < 3600000 && x.h === h && x.to !== chatId).map(x => x.to)).size >= 2)
     throw new Error('mesmo conteúdo já enviado para outras conversas na última hora: repetição para várias pessoas é o principal motivo de bloqueio');
   let chat = null; try { chat = await WPP.chat.get(chatId); } catch (e) {}
+  if (!chat) chat = await api.waFindChat(chatId.split('@')[0]);
   if (!chat && String(args.allow_new) !== 'true') throw new Error('não há conversa com este contato; para iniciar uma nova use allow_new=true (só para quem espera sua mensagem)');
   if (!chat && !chatId.endsWith('@g.us')) { const ex = await WPP.contact.queryExists(chatId); if (!ex) throw new Error('este número não tem WhatsApp'); }
   return () => { log.push({ t: Date.now(), to: chatId, h }); try { localStorage.setItem(KEY, JSON.stringify(log)); } catch (e) {} };
@@ -171,3 +203,34 @@ api.waSent = (r, chatId, extra) => ({ chat: chatId, results: [Object.assign({ ok
 api.waQuote = (args) => args.reply_to ? { quotedMsg: String(args.reply_to) } : {};
 /** Blob → data URL (para baixar mídia). */
 api.blobToDataUrl = (blob) => new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(r.result); r.onerror = rej; r.readAsDataURL(blob); });
+
+/** Envia com a função do WA-JS; se o WhatsApp exigir LID ("No LID for user"), resolve o LID e tenta de novo. */
+api.waSend = async (fn, chatId, ...rest) => {
+  try { return await fn(chatId, ...rest); }
+  catch (e) {
+    if (!/lid/i.test(String(e && e.message || e))) throw e;
+    let ex = null; try { ex = await WPP.contact.queryExists(chatId); } catch (e2) {}
+    const alt = ex && (ex.lid && (ex.lid._serialized || String(ex.lid)) || ex.wid && (ex.wid._serialized || String(ex.wid)));
+    if (!alt || alt === chatId) throw new Error('o WhatsApp não abriu conversa com este número (sem LID). Abra a conversa uma vez no WhatsApp e tente de novo.');
+    return await fn(alt, ...rest);
+  }
+};
+/* ───────────── Webhook: mensagens recebidas em tempo real ───────────── */
+api.waWatch = () => {
+  if (window.__fluwyWaWatch) return 'ok';
+  window.__fluwyInbox = window.__fluwyInbox || [];
+  WPP.on('chat.new_message', (m) => {
+    try {
+      const chat = (m.id && m.id.remote && (m.id.remote._serialized || String(m.id.remote))) || (m.from && (m.from._serialized || String(m.from))) || '';
+      const e = api.waMsg(m); e.chat = chat; e.is_group = chat.endsWith('@g.us');
+      try { const c = WPP.chat.get(chat); const cc = c && (c.then ? null : c); if (cc) e.chat_name = cc.name || cc.formattedTitle || ''; } catch (x) {}
+      e.has_media = !!(m.isMedia || m.mediaData || /image|video|audio|ptt|document|sticker/.test(m.type || ''));
+      if (m.type === 'location') { e.lat = m.lat; e.lng = m.lng; }
+      window.__fluwyInbox.push(e);
+      if (window.__fluwyInbox.length > 500) window.__fluwyInbox.splice(0, window.__fluwyInbox.length - 500);
+    } catch (x) {}
+  });
+  window.__fluwyWaWatch = true;
+  return 'ok';
+};
+api.waDrain = () => { const q = window.__fluwyInbox || []; window.__fluwyInbox = []; return JSON.stringify(q); };
