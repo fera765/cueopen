@@ -265,7 +265,7 @@ class AgentRunner(
         // Mensagem comum depois de uma entrega final: volta ao normal (a parada valeu só para aquela ordem).
         if (directiveSuffix.isBlank()) finalDelivery.remove(sessionId)
         autoResumeJobs.remove(sessionId)?.cancel()  // o usuário (ou a retomada) agiu: cancela a retomada agendada
-        if (showUserMessage && directiveSuffix.isBlank()) webApiTests.remove(sessionId)  // nova mensagem do usuário: libera os testes de Web API
+        if (showUserMessage && directiveSuffix.isBlank()) { webApiTests.remove(sessionId); truncNudges.remove(sessionId) }  // nova mensagem do usuário: libera os testes de Web API
         unknownToolWarned.removeIf { it.startsWith("$sessionId|") }
         jobs[sessionId]?.cancel()
         synchronized(childJobsByParent) { childJobsByParent.remove(sessionId)?.forEach { it.cancel() } }
@@ -1756,8 +1756,8 @@ class AgentRunner(
                     return
                 }
                 // 2048 cortava o file_write de um componente inteiro: os argumentos chegavam vazios ({}) ou sem content.
-                safeOutput.coerceAtMost(8192L).toInt()
-            } ?: 8192
+                safeOutput.coerceAtMost(16_000L).toInt()
+            } ?: 16_000  // modelos com raciocínio gastam parte disso pensando: 8192 cortava respostas com código grande
             var currentReplyTokenLimit = replyTokenLimit
             val llmT0 = System.currentTimeMillis()
             val replyRaw = run {
@@ -1821,6 +1821,14 @@ class AgentRunner(
                             attempt = 0
                             continue
                         }
+                        // Resposta cortada 2× mesmo com mais espaço: quase sempre é o modelo tentando escrever código enorme
+                        // dentro de UMA chamada (ex.: webapi_test com 8 KB de código). Em vez de suspender 20 min, orienta a
+                        // dividir o trabalho e segue na hora (até 3 vezes por tarefa).
+                        if (llmFailure?.responseTruncated == true && attempt >= 2 && (truncNudges.merge(sessionId, 1, Int::plus) ?: 1) <= 3) {
+                            setActivity(sessionId, Activity(Activity.Kind.THINKING, "Resposta longa demais — dividindo em partes menores"))
+                            scope.launch { send(sessionId, TRUNCATION_NUDGE, showUserMessage = false, directiveSuffix = " ") }
+                            return
+                        }
                         // Erro do provedor/modelo que não passou em até 3 tentativas: vai para o próximo provedor da cadeia.
                         // (Sem internet e contexto estourado não se resolvem trocando de provedor.)
                         if (llmFailure != null && category != dev.cueopen.app.llm.LlmRecovery.Category.NETWORK &&
@@ -1848,7 +1856,7 @@ class AgentRunner(
                             return
                         }
                         if (llmFailure.responseTruncated) {
-                            currentReplyTokenLimit = (currentReplyTokenLimit.toLong() * 2L).coerceAtMost(16_000L).toInt()
+                            currentReplyTokenLimit = (currentReplyTokenLimit.toLong() * 2L).coerceAtMost(32_000L).toInt()
                         }
                         val delayMs = dev.cueopen.app.llm.LlmRecovery.withJitter(
                             dev.cueopen.app.llm.LlmRetryPolicy.delayMillis(attempt, llmFailure.retryAfterMillis), Math.random())
@@ -3260,6 +3268,11 @@ class AgentRunner(
         }
     }.getOrDefault("")
 
+    private val truncNudges = java.util.concurrent.ConcurrentHashMap<String, Int>()
+    private val TRUNCATION_NUDGE = "[Aviso do app] Sua última resposta foi cortada no limite de saída do modelo (nenhuma ferramenta rodou). " +
+        "Não repita a mesma chamada gigante. Divida: escreva códigos/arquivos grandes em partes com file_write (append) de até ~150 linhas cada; " +
+        "para Web APIs, salve o código num arquivo e chame webapi_test/webapi_save com code_file=<caminho> em vez de colar o código inteiro; " +
+        "pense menos e aja em passos curtos. Continue a tarefa de onde parou."
     private val repeatCounts = java.util.concurrent.ConcurrentHashMap<String, Int>()
     /**
      * Mesma leitura com os MESMOS argumentos repetida (o export mostrou 30× o mesmo gmail_search_email e o mesmo
@@ -3364,7 +3377,14 @@ class AgentRunner(
     }
 
 
-    private suspend fun webApiTool(sessionId: String, name: String, a: JsonObject): ToolResult {
+    private suspend fun webApiTool(sessionId: String, name: String, a0: JsonObject): ToolResult {
+        // code_file: o código vem de um arquivo da área de trabalho (código grande inline cortava a resposta do modelo).
+        val a = a0["code_file"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() && a0["code"]?.jsonPrimitive?.contentOrNull.isNullOrBlank() }?.let { cf ->
+            val ws = workspace(sessionId).canonicalFile
+            val f = File(ws, cf.removePrefix("/root/workspace/").trimStart('/')).canonicalFile
+            if (!f.path.startsWith(ws.path) || !f.isFile) return ToolResult("ERRO: code_file não encontrado na área de trabalho: $cf")
+            JsonObject(a0 + ("code" to JsonPrimitive(f.readText())))
+        } ?: a0
         fun s(k: String) = a[k]?.jsonPrimitive?.contentOrNull.orEmpty()
         when (name) {
             "webapi_list" -> return ToolResult("Web APIs do hub (chame com webapi_call(api, args); * = obrigatório):\n" + dev.cueopen.app.browser.WebApiHub.catalog(ctx))
@@ -3394,6 +3414,7 @@ class AgentRunner(
                 if (nTests > 12) return ToolResult("PAUSADO: 12 testes seguidos sem passar. Pare aqui e explique ao usuário, em poucas linhas, o que está bloqueando (seletor, bloqueio do site, dado que não existe) e o que você tentaria a seguir. " +
                     "NÃO contorne este limite (tarefa agendada, outra conversa, outro agente): quando o usuário responder (ex.: \"continuar\"), os testes voltam a ser liberados nesta mesma conversa.", SessionStatus.WAITING_USER)
                 if (Regex("^https?://(www\\.)?example\\.(com|org)").containsMatchIn(s("url_template"))) return ToolResult("RECUSADO: teste na página real do site-alvo, não em example.com. Para chamar uma API JSON do site, use o template da página do próprio site e api.fetchJson no código.")
+                if (s("code").isBlank()) return ToolResult("ERRO: informe code (curto) ou code_file (arquivo .js na área de trabalho, para código grande).")
                 val draft = dev.cueopen.app.data.WebApi(slug = "teste", name = "teste", urlTemplate = s("url_template"), code = s("code"), waitFor = s("wait_for"),
                     desktop = a["desktop"]?.jsonPrimitive?.booleanOrNull ?: false, inject = s("inject").split(',').map { it.trim() }.filter { it.startsWith("https://") })
                 // Funções que agem fora do app (envio, edição, exclusão) testam em modo seguro: validam tudo e não executam.
@@ -3714,6 +3735,7 @@ class AgentRunner(
                 appendLine("Ferramentas: browser_js espera Promise (pode usar async/await e fetch) e devolve o erro lançado; se vier '(sem valor…)', termine o código com uma expressão. Se o mesmo script falhar 2 vezes, mude a abordagem (outro seletor, ler outerHTML de um item, browser_network) em vez de repetir variações.")
                 appendLine("Links opacos (ex.: google.com/goto?url=…, rastreadores) não se decodificam: use o href final de um elemento, data-* com a URL, ou devolva o link como está com display_url.")
                 appendLine("4. Entregar: webapi_save com o mesmo código/template, params descritos e finish com 1–2 frases.")
+                appendLine("Código com mais de ~80 linhas: grave em um arquivo .js (file_write, em partes com append) e passe code_file=<caminho> no webapi_test e no webapi_save — colar código enorme na chamada estoura o limite de saída do modelo e a resposta chega cortada.")
                 appendLine("Limites do app (testes seguidos, confirmação de envio, pausas) protegem o usuário: NUNCA os contorne com tarefa agendada, outra conversa, outro agente ou servidor improvisado. Ao bater num limite, pare, explique e espere a resposta — ela libera tudo nesta mesma conversa.")
                 appendLine("WhatsApp (web.whatsapp.com): use desktop=true e inject=https://cdn.jsdelivr.net/npm/@wppconnect/wa-js/dist/wppconnect-wa.js; comece com await api.waReady(40000, args); resolva o destino com await api.waChatId(args.to); " +
                     "envios SEMPRE passam por const commit = await api.waGuard(args, chatId, conteúdo) → api.waTyping → await api.waSend(WPP.chat.<função>, chatId, …) → commit() → return api.waSent(r, chatId). " +
@@ -4006,20 +4028,21 @@ class AgentRunner(
                 buildJsonObject {
                     put("url_template", str("Template literal JS com args, ex.: https://site.com/busca?q=\${enc(args.query)}&p=\${Number(args.page||1)}"))
                     put("code", str("Corpo de uma função async (args, api) que lê a página e faz return { results: [...], count, has_more, next_page }"))
+                    put("code_file", str("Alternativa a code para código grande: caminho de um arquivo .js na área de trabalho com o corpo da função (escreva com file_write em partes)"))
                     put("args", str("Argumentos de teste em JSON, ex.: {\"query\":\"tênis\",\"page\":2}"))
                     put("wait_for", str("Seletor CSS que indica página pronta (opcional)"))
                     put("desktop", bool("true = abre o site como computador (WhatsApp Web e outros que redirecionam no celular)"))
                     put("inject", str("URLs https de bibliotecas JS a injetar antes do código, separadas por vírgula (ex.: WA-JS no WhatsApp Web)"))
-                }, listOf("url_template", "code", "args")))
+                }, listOf("url_template", "args")))
             add(tool("webapi_save",
                 "Salva a Web API no hub (só depois de um webapi_test que PASSOU com o mesmo código e template). Vira uma ferramenta que qualquer agente chama com webapi_call.",
                 buildJsonObject {
                     put("slug", str("Identificador: minúsculas, números e _ (ex.: mercadolivre_ofertas)"))
                     put("name", str("Nome curto para o usuário"))
                     put("description", str("O que devolve, em 1 frase (a LLM decide por ela quando usar)"))
-                    put("url_template", str("O mesmo do teste")); put("code", str("O mesmo do teste")); put("wait_for", str("O mesmo do teste (opcional)")); put("desktop", bool("O mesmo do teste")); put("inject", str("O mesmo do teste"))
+                    put("url_template", str("O mesmo do teste")); put("code", str("O mesmo do teste")); put("code_file", str("Ou o mesmo arquivo usado no teste")); put("wait_for", str("O mesmo do teste (opcional)")); put("desktop", bool("O mesmo do teste")); put("inject", str("O mesmo do teste"))
                     put("params", str("JSON: [{\"name\":\"query\",\"type\":\"string\",\"description\":\"…\",\"required\":true,\"default\":\"\"}]"))
-                }, listOf("slug", "name", "description", "url_template", "code", "params")))
+                }, listOf("slug", "name", "description", "url_template", "params")))
         }
         if (scriptBuilder) {
             add(tool("userscript_inspect",
