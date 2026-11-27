@@ -3349,7 +3349,7 @@ class AgentRunner(
                         val saved = if (sv != null && sv.length >= 2000) save(k, sv, m2, fname) else null
                         if (saved != null) {
                             val nk = if (k == "data_url" || k.endsWith("_b64") || k.endsWith("_base64") || k == "base64" || k == "data") k.removeSuffix("_b64").removeSuffix("_base64").let { if (it == "data_url" || it == "base64" || it == "data") "saved_to" else it + "_file" } else k + "_file"
-                            out[nk] = saved; out[k + "_bytes"] = JsonPrimitive(File(workspace(sessionId), saved.content).length())
+                            out[nk] = saved; out[k + "_bytes"] = JsonPrimitive(File(workspace(sessionId), (saved as JsonPrimitive).content).length())
                         } else out[k] = fix(v)
                     }
                     JsonObject(out)
