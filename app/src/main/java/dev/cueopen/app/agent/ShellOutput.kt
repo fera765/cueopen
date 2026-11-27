@@ -50,7 +50,7 @@ object ShellOutput {
             if (body.isBlank()) {
                 append(when {
                     timedOut -> "(stdout/stderr vazios antes do timeout)"
-                    exitCode == 1 -> "(sem saída, exit 1 — em grep/find/test isso significa \"nada encontrado\", não erro)"
+                    exitCode == 1 -> "(stdout/stderr capturados vazios; exit 1 — em grep/find/test isso significa \"nada encontrado\", não erro)"
                     exitCode != 0 -> "(falha sem mensagem: stdout/stderr capturados vazios)"
                     else -> "(comando concluído sem saída stdout/stderr)"
                 })
