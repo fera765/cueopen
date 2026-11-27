@@ -1675,7 +1675,7 @@ class AgentRunner(
         }
     }
 
-    @Volatile private var lastRuleEvalAt = 0L
+    @Volatile internal var lastRuleEvalAt = 0L
 
     /**
      * Chamado pelo alarme (AlarmManager) do agendamento. NÃO bloqueia o receiver: dispara o ciclo e a
@@ -1896,7 +1896,7 @@ class AgentRunner(
     /** Linhas já lidas por sessão+arquivo (válidas enquanto o arquivo, compactações e limpezas não mudam). */
     internal val readCoverage = java.util.concurrent.ConcurrentHashMap<String, Pair<String, MutableList<IntRange>>>()
     internal val redundantReads = java.util.concurrent.ConcurrentHashMap<String, Int>()
-    @Volatile private var pendingCoverage: Pair<String, String>? = null
+    @Volatile internal var pendingCoverage: Pair<String, String>? = null
 
     internal val truncNudges = java.util.concurrent.ConcurrentHashMap<String, Int>()
     internal val TRUNCATION_NUDGE = "[Aviso do app] Sua última resposta foi cortada no limite de saída do modelo (nenhuma ferramenta rodou). " +
