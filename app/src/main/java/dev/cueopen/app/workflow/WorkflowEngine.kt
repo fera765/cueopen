@@ -341,6 +341,26 @@ object WorkflowEngine {
         return NodeResult(buildJsonObject { put("reply", reply); put("sent", sent); put("chat", chat); put("handoff", handoff); put("to_name", who) }.toString())
     }
 
+    private fun sampleFor(node: WfNode): String {
+        val base = node.config["sample"]?.takeIf { it.isNotBlank() } ?: WfCatalog.of(node.type).fields.firstOrNull { it.key == "sample" }?.default.orEmpty()
+        if (node.type != "trigger_whatsapp") return base
+        val o = runCatching { Json.parseToJsonElement(base.ifBlank { "{}" }) as JsonObject }.getOrDefault(JsonObject(emptyMap()))
+        val chat = node.config["chat"].orEmpty().trim()
+        val m = o.toMutableMap()
+        if (chat.isNotEmpty()) {
+            val d = chat.filter { it.isDigit() }
+            m["chat"] = kotlinx.serialization.json.JsonPrimitive(if (chat.contains('@')) chat else if (d.length >= 10) d + "@c.us" else chat)
+            m["chat_name"] = kotlinx.serialization.json.JsonPrimitive(if (chat.contains('@') || d.length >= 10) (m["chat_name"]?.toString()?.trim('"') ?: "Contato") else chat)
+        }
+        if (node.config["scope"] == "groups" && m["chat"]?.toString()?.contains("@g.us") != true) { m["chat"] = kotlinx.serialization.json.JsonPrimitive("120363000000000000@g.us"); m["is_group"] = kotlinx.serialization.json.JsonPrimitive(true) }
+        val kw = node.config["keyword"].orEmpty().split('|').map { it.trim() }.firstOrNull { it.isNotEmpty() }
+        if (kw != null && m["text"]?.toString()?.contains(kw, true) != true) m["text"] = kotlinx.serialization.json.JsonPrimitive("$kw ${m["text"]?.toString()?.trim('"').orEmpty()}".trim())
+        if (node.config["from_me"] == "true") m["from_me"] = kotlinx.serialization.json.JsonPrimitive(true)
+        if (m["id"] == null) m["id"] = kotlinx.serialization.json.JsonPrimitive("teste_" + System.currentTimeMillis())
+        if (m["type"] == null) m["type"] = kotlinx.serialization.json.JsonPrimitive("chat")
+        return JsonObject(m).toString()
+    }
+
     data class NodeResult(val output: String = "", val port: String? = null, val error: String? = null, val sessionId: String? = null)
 
     private suspend fun runNode(w: Workflow, run: WfRun, node: WfNode, prev: String, r: (String) -> String, rh: (String, Boolean) -> String, rt: (String, Int) -> String, setStatus: (String) -> Unit): NodeResult {
@@ -350,7 +370,9 @@ object WorkflowEngine {
                 put("trigger", run.trigger); put("time", java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss", java.util.Locale.US).format(java.util.Date()))
                 put("workflow", w.name)
                 if (node.type == "trigger_webhook" || node.type == "trigger_whatsapp") {
-                    val raw = payloads[run.id] ?: node.config["sample"].orEmpty()
+                    // Teste/execução manual: usa o exemplo do nó (ou o padrão do tipo); no WhatsApp, com a conversa configurada no gatilho.
+                    // Antes vinha "" e o nó seguinte falhava com "não achei {{trigger.payload.chat}}".
+                    val raw = payloads[run.id] ?: sampleFor(node)
                     val el = runCatching { Json.parseToJsonElement(raw) }.getOrNull()
                     if (el != null && raw.isNotBlank()) put("payload", el) else put("payload", raw)
                 }

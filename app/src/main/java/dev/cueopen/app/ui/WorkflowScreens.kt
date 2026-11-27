@@ -190,6 +190,84 @@ private fun templates(): List<WfTemplate> = listOf(
         val n = WfNode(id = "n$id", type = "notify", label = "Enviado", config = mapOf("title" to "✉ E-mail enviado", "text" to "O follow-up foi enviado.", "open" to "flow"))
         flow("E-mail com aprovação", listOf(t, a, ap, g, n), WfEdge(from = t.id, to = a.id), WfEdge(from = a.id, to = ap.id), WfEdge(from = ap.id, to = g.id, port = "true"), WfEdge(from = g.id, to = n.id))
     },
+    // ─── WhatsApp (API Hub + webhook em tempo real) — inspirados nos modelos mais usados do n8n, com o poder do app ───
+    WfTemplate("WhatsApp · Atendente de vendas com IA", "Cada mensagem privada recebida é respondida na hora por uma IA com a SUA base de conhecimento (produtos, preços, regras), focada em converter. Pede humano quando o cliente quiser.", "agent") {
+        val id = WfIds.new().take(4)
+        val t = WfNode(id = "t$id", type = "trigger_whatsapp", label = "Mensagem recebida", config = mapOf("scope" to "private", "from_me" to "false"))
+        val a = WfNode(id = "a$id", type = "atendente", label = "Atendente de vendas", config = mapOf(
+            "persona" to "Você é a Ana, consultora da empresa. Tom cordial, direto e humano; chama o cliente pelo nome quando souber.",
+            "knowledge" to "PRODUTOS E PREÇOS:\n- (descreva aqui seus produtos/planos, preços e condições)\n\nREGRAS:\n- Horário de atendimento: seg a sex, 9h às 18h\n- Formas de pagamento: Pix, cartão em até 12x\n\nPERGUNTAS FREQUENTES:\n- (pergunta) → (resposta)",
+            "objective" to "vendas", "history" to "10", "reply" to "auto", "handoff" to "falar com humano|atendente humano|reclamação"))
+        flow("WhatsApp · Atendente de vendas", listOf(t, a), WfEdge(from = t.id, to = a.id))
+    },
+    WfTemplate("WhatsApp · Suporte com base de conhecimento", "Responde dúvidas de clientes (privado) usando só o seu manual/FAQ; o que não estiver na base ele diz que vai confirmar e te avisa.", "agent") {
+        val id = WfIds.new().take(4)
+        val t = WfNode(id = "t$id", type = "trigger_whatsapp", label = "Mensagem recebida", config = mapOf("scope" to "private"))
+        val a = WfNode(id = "a$id", type = "atendente", label = "Suporte", config = mapOf("persona" to "Você é o suporte da empresa: paciente, claro, passo a passo.",
+            "knowledge" to "(cole aqui o manual, FAQ, políticas de troca, prazos e contatos)", "objective" to "suporte", "history" to "12", "reply" to "auto", "handoff" to "falar com humano|atendente|reclamação|cancelar"))
+        flow("WhatsApp · Suporte", listOf(t, a), WfEdge(from = t.id, to = a.id))
+    },
+    WfTemplate("WhatsApp · Recuperar pagamento", "Clientes que respondem sobre cobrança/boleto/Pix recebem atendimento empático com as condições de negociação que você definir.", "agent") {
+        val id = WfIds.new().take(4)
+        val t = WfNode(id = "t$id", type = "trigger_whatsapp", label = "Mensagem sobre pagamento", config = mapOf("scope" to "private", "keyword" to "boleto|pix|pagamento|pagar|fatura|parcela|atraso"))
+        val a = WfNode(id = "a$id", type = "atendente", label = "Negociação", config = mapOf("persona" to "Você é do financeiro: empático, sem julgamento, objetivo.",
+            "knowledge" to "CONDIÇÕES:\n- Pix com 5% de desconto à vista\n- Parcelamento em até 3x sem juros para atrasos até 30 dias\n- Chave Pix: (sua chave)\n- 2ª via: (link)",
+            "objective" to "recuperar_pagamento", "history" to "10", "reply" to "auto", "handoff" to "falar com humano|contestar|não reconheço"))
+        flow("WhatsApp · Recuperar pagamento", listOf(t, a), WfEdge(from = t.id, to = a.id))
+    },
+    WfTemplate("WhatsApp · Conversar com uma sessão do app", "Mande mensagem para você mesmo no WhatsApp: ela acorda uma conversa do app (com agentes, arquivos e ferramentas) e a resposta volta no próprio WhatsApp.", "agent") {
+        val id = WfIds.new().take(4)
+        val t = WfNode(id = "t$id", type = "trigger_whatsapp", label = "Mensagem para mim mesmo", config = mapOf("chat" to "", "from_me" to "true", "scope" to "private"))
+        val a = WfNode(id = "a$id", type = "atendente", label = "Repassar à sessão", config = mapOf("session" to "", "reply" to "auto", "history" to "0", "handoff" to ""))
+        flow("WhatsApp · Minha sessão no WhatsApp", listOf(t, a), WfEdge(from = t.id, to = a.id))
+    },
+    WfTemplate("WhatsApp · /imagem gera e envia a imagem", "Escreva \"/imagem um gato astronauta\" em uma conversa: um agente gera a imagem (API Hub) e envia a foto de volta no mesmo chat.", "agent") {
+        val id = WfIds.new().take(4)
+        val t = WfNode(id = "t$id", type = "trigger_whatsapp", label = "Comando /imagem", config = mapOf("keyword" to "/imagem", "from_me" to "true"))
+        val a = WfNode(id = "a$id", type = "agent", label = "Gerar e enviar imagem", config = mapOf("maxSteps" to "12", "prompt" to
+            "Pedido recebido no WhatsApp: {{${t.id}.payload.text}}\n1) Tire o comando /imagem e use o resto como descrição da imagem.\n2) Gere a imagem com uma Web API do hub (webapi_list; ex.: geração de imagem). O arquivo volta em webapi_files/.\n" +
+                "3) Envie a imagem com webapi_call api=whatsapp_send_file args={\"to\":\"{{${t.id}.payload.chat}}\",\"file_path\":\"<caminho do arquivo>\",\"caption\":\"<título curto>\",\"confirmed\":true} — o usuário autorizou este envio ao criar o fluxo.\n4) Termine com 1 frase dizendo o que enviou."))
+        flow("WhatsApp · /imagem", listOf(t, a), WfEdge(from = t.id, to = a.id))
+    },
+    WfTemplate("WhatsApp · /pesquisa responde com a internet", "Escreva \"/pesquisa preço do dólar hoje\": um agente pesquisa na web e a resposta (com fontes) volta no mesmo chat.", "agent") {
+        val id = WfIds.new().take(4)
+        val t = WfNode(id = "t$id", type = "trigger_whatsapp", label = "Comando /pesquisa", config = mapOf("keyword" to "/pesquisa", "from_me" to "true"))
+        val a = WfNode(id = "a$id", type = "agent", label = "Pesquisar", config = mapOf("maxSteps" to "10", "prompt" to
+            "Pergunta recebida no WhatsApp: {{${t.id}.payload.text}} (ignore o comando /pesquisa). Pesquise com web_search/web_fetch e responda em texto de WhatsApp: no máximo 6 linhas, sem markdown, com 1–2 links das fontes no fim."))
+        val s = WfNode(id = "s$id", type = "webapi", label = "Responder no WhatsApp", config = mapOf("api" to "whatsapp_send_text",
+            "args" to "{\"to\": \"{{${t.id}.payload.chat}}\", \"text\": \"{{${a.id}}}\", \"reply_to\": \"{{${t.id}.payload.id}}\"}"))
+        flow("WhatsApp · /pesquisa", listOf(t, a, s), WfEdge(from = t.id, to = a.id), WfEdge(from = a.id, to = s.id))
+    },
+    WfTemplate("WhatsApp · /arquivo envia um arquivo do app", "Escreva \"/arquivo relatório de vendas\": um agente acha (ou cria) o arquivo na área de trabalho e envia como documento no chat.", "agent") {
+        val id = WfIds.new().take(4)
+        val t = WfNode(id = "t$id", type = "trigger_whatsapp", label = "Comando /arquivo", config = mapOf("keyword" to "/arquivo", "from_me" to "true"))
+        val a = WfNode(id = "a$id", type = "agent", label = "Achar e enviar arquivo", config = mapOf("maxSteps" to "12", "prompt" to
+            "Pedido no WhatsApp: {{${t.id}.payload.text}} (ignore /arquivo). Ache o arquivo pedido na área de trabalho (file_list/file_search); se não existir e for possível, crie-o (ex.: um .md ou .csv com o conteúdo pedido). " +
+                "Envie com webapi_call api=whatsapp_send_file args={\"to\":\"{{${t.id}.payload.chat}}\",\"file_path\":\"<caminho>\",\"type\":\"document\",\"confirmed\":true} (o usuário autorizou ao criar o fluxo). Termine com 1 frase."))
+        flow("WhatsApp · /arquivo", listOf(t, a), WfEdge(from = t.id, to = a.id))
+    },
+    WfTemplate("WhatsApp · Alerta de palavra-chave em grupos", "Quando alguém num grupo escrever uma palavra importante (ex.: urgente, pagamento, seu nome), você recebe um aviso na hora com a mensagem.", "notify") {
+        val id = WfIds.new().take(4)
+        val t = WfNode(id = "t$id", type = "trigger_whatsapp", label = "Palavra-chave em grupo", config = mapOf("scope" to "groups", "keyword" to "urgente|pagamento|reunião"))
+        val n = WfNode(id = "n$id", type = "notify", label = "Avisar", config = mapOf("title" to "💬 {{${t.id}.payload.chat_name}}", "text" to "{{${t.id}.payload.sender_name}}: {{${t.id}.payload.text}}", "open" to "modal"))
+        flow("WhatsApp · Alerta em grupos", listOf(t, n), WfEdge(from = t.id, to = n.id))
+    },
+    WfTemplate("WhatsApp · Salvar mídias recebidas", "Fotos, áudios, vídeos e documentos que chegarem (privado) são baixados para a área de trabalho do Hub (webapi_files/).", "http") {
+        val id = WfIds.new().take(4)
+        val t = WfNode(id = "t$id", type = "trigger_whatsapp", label = "Mensagem recebida", config = mapOf("scope" to "private"))
+        val c = WfNode(id = "c$id", type = "if", label = "Tem mídia?", config = mapOf("left" to "{{${t.id}.payload.has_media}}", "op" to "equals", "right" to "true"))
+        val d = WfNode(id = "d$id", type = "webapi", label = "Baixar mídia", config = mapOf("api" to "whatsapp_download_media", "args" to "{\"message_id\": \"{{${t.id}.payload.id}}\"}"))
+        flow("WhatsApp · Salvar mídias", listOf(t, c, d), WfEdge(from = t.id, to = c.id), WfEdge(from = c.id, to = d.id, port = "true"))
+    },
+    WfTemplate("WhatsApp · Resumo diário de um grupo", "Todo dia às 18h lê as últimas mensagens de um grupo, a IA resume decisões, pendências e quem pediu o quê, e manda num quadro para você.", "notify") {
+        val id = WfIds.new().take(4)
+        val t = WfNode(id = "t$id", type = "trigger_schedule", label = "Todo dia às 18h", config = mapOf("mode" to "daily", "time" to "18:00"))
+        val m = WfNode(id = "m$id", type = "webapi", label = "Ler o grupo", config = mapOf("api" to "whatsapp_messages", "args" to "{\"to\": \"Nome do grupo\", \"count\": 80}"))
+        val a = WfNode(id = "a$id", type = "ai", label = "Resumir", config = mapOf("maxTokens" to "900", "prompt" to
+            "Resuma estas mensagens de um grupo de WhatsApp em português, para ler no celular: 1) decisões, 2) pendências (quem / o quê / prazo), 3) assuntos principais. Seja curto.\n\n{{${m.id}.results}}"))
+        val n = WfNode(id = "n$id", type = "notify", label = "Avisar", config = mapOf("title" to "🗂 Resumo do grupo", "text" to "O que rolou hoje no grupo", "detail" to "{{${a.id}}}", "open" to "page", "layout" to "markdown"))
+        flow("WhatsApp · Resumo diário do grupo", listOf(t, m, a, n), WfEdge(from = t.id, to = m.id), WfEdge(from = m.id, to = a.id), WfEdge(from = a.id, to = n.id))
+    },
     WfTemplate("Webhook → aviso com os dados", "Um sistema externo chama o webhook (comentário numa issue do GitHub com o segredo); a IA resume o payload e o toque abre uma página formatada.", "notify") {
         val id = WfIds.new().take(4)
         val t = WfNode(id = "t$id", type = "trigger_webhook", label = "Webhook", config = mapOf("repo" to "", "issue" to "", "secret" to "", "sample" to "{\"pedido\": 1042, \"cliente\": \"Ana\", \"total\": 189.9, \"status\": \"pago\"}"))
