@@ -36,7 +36,13 @@ object WebApiRunner {
     suspend fun <T> withPage(block: suspend (BrowserHost, String) -> T): T = lock.withLock { block(host(), helpers(CueApp.instance)) }
 
     /** Executa a API. Devolve o JSON final (texto) ou {"ok":false,"error":…}. */
-    suspend fun run(ctx: Context, a: WebApi, args: JsonObject, timeoutMs0: Long = 45_000): String = lock.withLock {
+    suspend fun run(ctx: Context, a: WebApi, args: JsonObject, timeoutMs0: Long = 45_000, workspace: java.io.File? = null, onChunk: ((String) -> Unit)? = null): String = lock.withLock {
+        // Arquivos (api.saveFile…) e stream (api.emit) valem só durante esta chamada, com token de uso único.
+        val fsTok = WebApiFs.begin(workspace ?: java.io.File(ctx.filesDir, "webapi-files"), onChunk)
+        try { runLocked(ctx, a, args, timeoutMs0, fsTok) } finally { WebApiFs.end() }
+    }
+
+    private suspend fun runLocked(ctx: Context, a: WebApi, args: JsonObject, timeoutMs0: Long, fsTok: String): String {
         // Com biblioteca injetada (WA-JS) a 1ª carga do WhatsApp Web pode levar ~30 s: mais folga.
         val timeoutMs = if (a.inject.isNotEmpty()) maxOf(timeoutMs0, 120_000) else timeoutMs0
         val started = System.currentTimeMillis()
@@ -114,7 +120,7 @@ object WebApiRunner {
             }
             // 4) Código da API — runJs aguarda a Promise e devolve o erro real.
             stage = "rodar o código (algum await não terminou: confira api.wait/fetch/seletores)"
-            val r = h.runJs("(async()=>{$helpers;const args=$argsJs;try{const r=await (async function(args,api){\n${a.code}\n})(args,api);" +
+            val r = h.runJs("(async()=>{$helpers;const args=$argsJs;api.__tok='$fsTok';try{const r=await (async function(args,api){\n${a.code}\n})(args,api);" +
                 "return JSON.stringify({ok:true,url:location.href,data:r===undefined?null:r})}catch(e){return JSON.stringify({ok:false,url:location.href,error:String(e&&e.message||e)})}})()", promiseTimeoutMs = if (a.inject.isNotEmpty()) 100_000 else 35_000)
             val o = runCatching { json.parseToJsonElement(r).jsonObject }.getOrNull()
                 ?: return@withTimeoutOrNull err(a, full, "o código não devolveu JSON: ${r.take(300)}", url)
@@ -129,7 +135,7 @@ object WebApiRunner {
             Regex("\"url\":\"([^\"]*)").find(res)?.groupValues?.get(1) ?: "-",
             if (ok) "args=$argsJs resultados=${count ?: "?"}" else "args=$argsJs etapa=$stage erro=" + (Regex("\"error\":\"([^\"]*)").find(res)?.groupValues?.get(1) ?: ""))
         if (!ok) runCatching { dev.cueopen.app.diag.ErrorLog.log("webapi", "${a.slug} falhou na etapa \"$stage\": " + res.take(600), null, a.slug) }
-        res
+        return res
     }
 
     /** Descoberta de API para o criador: carrega a página, rola e devolve requisições de dados + estados JSON embutidos. */

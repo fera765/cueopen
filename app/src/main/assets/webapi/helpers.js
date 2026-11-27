@@ -288,3 +288,62 @@ api.probe = async (pattern, max = 8) => {
   const ld = Array.from(document.querySelectorAll('script[type="application/ld+json"]')).map(s => s.textContent.replace(/\s+/g, ' ').slice(0, 300)).slice(0, 3);
   return { page: location.href, title: document.title, total_requests: all.length, requests, embedded, ld_json: ld };
 };
+
+/* ───────────── Área de trabalho (arquivos) e stream — ponte segura do app (__fluwyFs) ─────────────
+ * Só funciona durante a execução de uma Web API (token de uso único por chamada). Caminhos são relativos à
+ * área de trabalho de quem chamou (agente) — nada fora dela.
+ *   await api.saveFile('pasta/arq.txt', textoOuBlobOuArrayBufferOuDataURL, {append:false}) → {ok,path,size}
+ *   await api.readFile('arq.txt', {as:'text'|'base64'|'dataurl'})                         → string
+ *   await api.listFiles('pasta')  → [{name,path,dir,size,modified}]
+ *   await api.exists('arq.txt')   → true/false
+ *   await api.mkdir('pasta')      → {ok,path}
+ *   await api.download(url, 'pasta/arq.ext') → baixa de dentro da página (cookies do site) e salva
+ *   api.emit(parte)               → envia um pedaço em tempo real (stream) para quem chamou
+ *   await api.stream(url, init, onChunk) / await api.sse(url, init, onEvent) → lê respostas em stream do site
+ */
+api.__fs = () => { if (!window.__fluwyFs || !api.__tok) throw new Error('acesso a arquivos indisponível fora de uma chamada de Web API'); return window.__fluwyFs; };
+api.__res = (s) => { const r = JSON.parse(s); if (!r.ok) throw new Error(r.error || 'erro de arquivo'); return r; };
+api.saveFile = async (path, data, opts = {}) => {
+  let payload, b64 = false;
+  if (data instanceof Blob) { payload = (await api.blobToDataUrl(data)).split(',')[1]; b64 = true; }
+  else if (data instanceof ArrayBuffer || ArrayBuffer.isView(data)) { const u8 = data instanceof ArrayBuffer ? new Uint8Array(data) : new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+    let s = ''; for (let i = 0; i < u8.length; i += 32768) s += String.fromCharCode.apply(null, u8.subarray(i, i + 32768)); payload = btoa(s); b64 = true; }
+  else if (typeof data === 'string' && /^data:[^,]*;base64,/.test(data)) { payload = data.split(',')[1]; b64 = true; }
+  else if (typeof data === 'string') payload = data;
+  else payload = JSON.stringify(data, null, 2);
+  return api.__res(api.__fs().write(api.__tok, String(path), payload, b64 || !!opts.base64, !!opts.append));
+};
+api.readFile = async (path, opts = {}) => api.__res(api.__fs().read(api.__tok, String(path), String(opts.as || 'text'))).data;
+api.listFiles = async (path = '') => api.__res(api.__fs().list(api.__tok, String(path))).files;
+api.exists = async (path) => api.__res(api.__fs().exists(api.__tok, String(path))).exists;
+api.mkdir = async (path) => api.__res(api.__fs().mkdir(api.__tok, String(path)));
+api.download = async (url, path, init) => {
+  const r = await fetch(url, Object.assign({ credentials: 'include' }, init || {}));
+  if (!r.ok) throw new Error('download HTTP ' + r.status);
+  const blob = await r.blob();
+  const name = path || ('downloads/' + ((new URL(url, location.href).pathname.split('/').pop()) || ('arquivo_' + Date.now())));
+  return Object.assign(await api.saveFile(name, blob), { mime: blob.type });
+};
+api.emit = (part) => { try { if (window.__fluwyFs && api.__tok) window.__fluwyFs.emit(api.__tok, typeof part === 'string' ? part : JSON.stringify(part)); } catch (e) {} };
+api.stream = async (url, init, onChunk) => {
+  const r = await fetch(url, Object.assign({ credentials: 'include' }, init || {}));
+  if (!r.body) { const t = await r.text(); if (onChunk) await onChunk(t); return { status: r.status, text: t }; }
+  const rd = r.body.getReader(), dec = new TextDecoder(); let all = '';
+  for (;;) { const { done, value } = await rd.read(); if (done) break; const t = dec.decode(value, { stream: true }); all += t; if (onChunk) { try { await onChunk(t); } catch (e) {} } }
+  return { status: r.status, text: all };
+};
+/** Server-Sent Events (text/event-stream): chama onEvent(dado) a cada "data:" (JSON quando der). */
+api.sse = async (url, init, onEvent) => {
+  let buf = ''; const events = [];
+  const res = await api.stream(url, init, async (t) => {
+    buf += t; let i;
+    while ((i = buf.indexOf('\n\n')) >= 0) {
+      const block = buf.slice(0, i); buf = buf.slice(i + 2);
+      const data = block.split('\n').filter(l => l.startsWith('data:')).map(l => l.slice(5).trimStart()).join('\n');
+      if (!data || data === '[DONE]') continue;
+      let v = data; try { v = JSON.parse(data); } catch (e) {}
+      events.push(v); if (onEvent) await onEvent(v);
+    }
+  });
+  return { status: res.status, events };
+};

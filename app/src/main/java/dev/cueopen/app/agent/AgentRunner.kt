@@ -3293,7 +3293,12 @@ class AgentRunner(
             val data = "data:$mime;base64," + android.util.Base64.encodeToString(f.readBytes(), android.util.Base64.NO_WRAP)
             args = JsonObject(args - "file_path" + ("file" to JsonPrimitive(data)) + (if ("filename" in args) emptyMap() else mapOf("filename" to JsonPrimitive(f.name))))
         }
-        val r = dev.cueopen.app.browser.WebApiHub.call(ctx, api, args)
+        // Stream (api.emit): os pedaços chegam enquanto a API roda; vão junto no resultado.
+        val chunks = java.util.Collections.synchronizedList(mutableListOf<String>())
+        val r0 = dev.cueopen.app.browser.WebApiHub.call(ctx, api, args, workspace = workspace(sessionId)) { if (chunks.size < 400) chunks += it }
+        val r = if (chunks.isEmpty()) r0 else runCatching {
+            JsonObject(Json.parseToJsonElement(r0).jsonObject + ("stream" to kotlinx.serialization.json.JsonArray(chunks.map { c -> runCatching { Json.parseToJsonElement(c) }.getOrElse { JsonPrimitive(c) } }))).toString()
+        }.getOrDefault(r0)
         if (!r.contains("\"data_url\"")) return r
         // Mídia baixada: grava na área de trabalho e devolve só o caminho (base64 nunca vai para o modelo).
         return runCatching {
@@ -3668,6 +3673,8 @@ class AgentRunner(
                 appendLine("4. Entregar: webapi_save com o mesmo código/template, params descritos e finish com 1–2 frases.")
                 appendLine("WhatsApp (web.whatsapp.com): use desktop=true e inject=https://cdn.jsdelivr.net/npm/@wppconnect/wa-js/dist/wppconnect-wa.js; comece com await api.waReady(40000, args); resolva o destino com await api.waChatId(args.to); " +
                     "envios SEMPRE passam por const commit = await api.waGuard(args, chatId, conteúdo) → api.waTyping → await api.waSend(WPP.chat.<função>, chatId, …) → commit() → return api.waSent(r, chatId). " +
+                    "Arquivos (área de trabalho de quem chama): await api.saveFile(caminho, texto|Blob|ArrayBuffer|dataURL, {append}), api.readFile(caminho,{as:'text'|'base64'|'dataurl'}), api.listFiles(pasta), api.exists, api.mkdir, api.download(url, caminho) (baixa com os cookies do site). " +
+                    "Stream: await api.stream(url, init, onChunk) ou api.sse(url, init, onEvent) para respostas em stream do site; api.emit(parte) entrega cada pedaço em tempo real a quem chamou (e o JSON final continua no return). " +
                     "No webapi_test essas funções rodam em MODO SEGURO (__dry_run): validam tudo e não enviam; PASSOU com dry_run=true é o esperado. Nunca remova waGuard nem confirmed.")
                 appendLine("APIs já no hub:\n" + dev.cueopen.app.browser.WebApiHub.catalog(ctx))
             }

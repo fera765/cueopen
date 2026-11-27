@@ -295,6 +295,7 @@ class CueApp : Application() {
         dev.cueopen.app.scheduler.Heartbeat.rescheduleAll(this)
         // terminal já ativo em segundo plano assim que o app abre (se o sandbox estiver instalado)
         if (sandbox.isInstalled()) dev.cueopen.app.sandbox.SandboxService.start(this, "Terminal ativo")
+        runCatching { dev.cueopen.app.browser.WaLocalServer.start(this) }  // endereço local: webhook do WhatsApp + Web APIs em stream
         runCatching { dev.cueopen.app.browser.WhatsAppHub.start(this) }
     }
 

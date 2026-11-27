@@ -64,7 +64,7 @@ object WhatsAppHub {
             .putBoolean("webhook", c.webhook).putString("token", c.token.ifBlank { newToken() })
             .putString("blocked", c.blocked.joinToString("\n")).putString("allow", c.allowOnly.joinToString("\n"))
             .putBoolean("no_groups", c.noGroups).putBoolean("from_me", c.includeFromMe).apply()
-        if (c.webhook) start(ctx) else { _status.value = "desligado"; WaLocalServer.stop() }
+        if (c.webhook) start(ctx) else _status.value = "desligado"
     }
 
     private fun newToken() = "wa_" + java.util.UUID.randomUUID().toString().replace("-", "").take(20)

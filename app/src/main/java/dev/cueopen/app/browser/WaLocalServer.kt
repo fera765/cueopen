@@ -65,7 +65,8 @@ object WaLocalServer {
         val cfg = WhatsAppHub.config(ctx)
         val parts = path.trim('/').split('/')
         if (method == "OPTIONS") return send(c, 204, "")
-        if (parts.size < 2 || parts[0] != "whatsapp") return send(c, 404, """{"ok":false,"error":"use /whatsapp/<token>"}""")
+        if (parts.size >= 2 && parts[0] == "webapi") return webApi(ctx, c, method, parts, body, cfg)
+        if (parts.size < 2 || parts[0] != "whatsapp") return send(c, 404, """{"ok":false,"error":"use /whatsapp/<token> ou /webapi/<token>"}""")
         if (parts[1] != cfg.token) return send(c, 403, """{"ok":false,"error":"token inválido"}""")
         if (!cfg.webhook) return send(c, 503, """{"ok":false,"error":"webhook desligado no app (API Hub › WhatsApp)"}""")
         when {
@@ -98,6 +99,34 @@ object WaLocalServer {
             }
             else -> send(c, 405, """{"ok":false,"error":"método não suportado"}""")
         }
+    }
+
+    /**
+     * Web APIs do hub pelo endereço local (mesmo token):
+     *   GET  /webapi/<token>         → catálogo com o esquema de cada API
+     *   POST /webapi/<token>/<slug>  → corpo = args JSON; resposta em stream (text/event-stream):
+     *        "event: chunk" a cada api.emit(...) e "event: result" com o JSON final.
+     */
+    private fun webApi(ctx: Context, c: Socket, method: String, parts: List<String>, body: String, cfg: WhatsAppHub.Config) {
+        if (parts[1] != cfg.token) return send(c, 403, """{"ok":false,"error":"token inválido"}""")
+        if (parts.size == 2 && method == "GET") return send(c, 200, buildJsonObject {
+            put("ok", true)
+            put("apis", JsonArray(WebApiHub.enabled(ctx).map { a -> buildJsonObject {
+                put("slug", a.slug); put("name", a.name); put("description", a.description); put("sensitive", a.sensitive)
+                put("params", JsonArray(a.params.map { p -> buildJsonObject { put("name", p.name); put("type", p.type); put("required", p.required); put("default", p.default); put("description", p.description) } }))
+            } }))
+        }.toString())
+        if (parts.size != 3 || method != "POST") return send(c, 405, """{"ok":false,"error":"use POST /webapi/<token>/<slug>"}""")
+        val api = WebApiHub.find(ctx, parts[2])?.takeIf { it.enabled } ?: return send(c, 404, """{"ok":false,"error":"API não existe ou está desligada"}""")
+        val args = runCatching { kotlinx.serialization.json.Json.parseToJsonElement(body.ifBlank { "{}" }) as JsonObject }.getOrNull()
+            ?: return send(c, 400, """{"ok":false,"error":"corpo precisa ser um objeto JSON com os args"}""")
+        if (api.sensitive && (args["confirmed"] as? JsonPrimitive)?.content != "true") return send(c, 403, """{"ok":false,"error":"ação externa: envie confirmed=true só quando o usuário pediu"}""")
+        val out = c.getOutputStream()
+        val w = Object()
+        fun ev(name: String, data: String) = synchronized(w) { runCatching { out.write(("event: $name\ndata: " + data.replace("\n", "\ndata: ") + "\n\n").toByteArray()); out.flush() } }
+        out.write("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream; charset=utf-8\r\nCache-Control: no-cache\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n".toByteArray()); out.flush()
+        val result = kotlinx.coroutines.runBlocking { WebApiHub.call(ctx, api, JsonObject(args - "__wa_policy" - "__dry_run")) { ev("chunk", it) } }
+        ev("result", result)
     }
 
     fun schemaJson() = buildJsonObject {

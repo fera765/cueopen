@@ -75,12 +75,12 @@ object WebApiHub {
     }.toString()
 
     /** Executa e registra estatísticas. */
-    suspend fun call(ctx: Context, a: WebApi, args0: JsonObject): String {
+    suspend fun call(ctx: Context, a: WebApi, args0: JsonObject, workspace: java.io.File? = null, onChunk: ((String) -> Unit)? = null): String {
         val missing = a.params.filter { it.required && (args0[it.name] as? JsonPrimitive)?.content.isNullOrBlank() }.map { it.name }
         if (missing.isNotEmpty()) return """{"api":"${a.slug}","ok":false,"error":"faltam argumentos: ${missing.joinToString()}"}"""
         // Regras do usuário para o WhatsApp (bloqueados / só permitidos / sem grupos): sempre do app, nunca do modelo.
         val args = if (a.slug.startsWith("whatsapp_")) JsonObject(args0 - "__wa_policy" + ("__wa_policy" to WhatsAppHub.policyJson(ctx))) else args0
-        val out = dryOk(a.slug, WebApiRunner.run(ctx, a, args))
+        val out = dryOk(a.slug, WebApiRunner.run(ctx, a, args, workspace = workspace, onChunk = onChunk))
         val ok = out.contains("\"ok\":true")
         val store = CueApp.instance.store
         val err = if (ok) "" else Regex("\"error\":\"([^\"]*)").find(out)?.groupValues?.get(1).orEmpty()
