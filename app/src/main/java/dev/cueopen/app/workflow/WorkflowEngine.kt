@@ -251,6 +251,96 @@ object WorkflowEngine {
         }.toString())
     }
 
+    /**
+     * Atendente de WhatsApp: mensagem do gatilho + histórico da conversa + base de conhecimento → resposta da IA
+     * (ou de uma conversa do app acordada pelo fluxo) → envio no próprio chat. No teste, tudo é validado sem enviar.
+     */
+    private suspend fun atendente(w: Workflow, run: WfRun, node: WfNode, r: (String) -> String, rt: (String, Int) -> String): NodeResult {
+        val app = CueApp.instance
+        val chat = rt("{{trigger.payload.chat}}", 0).trim()
+        val text = rt("{{trigger.payload.text}}", 0).trim()
+        val who = rt("{{trigger.payload.sender_name}}", 0).ifBlank { rt("{{trigger.payload.chat_name}}", 0) }.trim()
+        val msgId = rt("{{trigger.payload.id}}", 0).trim()
+        if (chat.isBlank()) return NodeResult(error = "O atendente precisa do gatilho \"Mensagem no WhatsApp\" antes dele (não achei {{trigger.payload.chat}}).")
+        if (text.isBlank()) return NodeResult(buildJsonObject { put("skipped", "mensagem sem texto"); put("chat", chat) }.toString())
+        val hub = dev.cueopen.app.browser.WebApiHub
+        // Histórico da conversa (o que já foi dito) para responder com contexto.
+        val n = (r("history").toIntOrNull() ?: 10).coerceIn(0, 30)
+        val history = if (n == 0) "" else runCatching {
+            val api = hub.find(app, "whatsapp_messages") ?: return@runCatching ""
+            val out = hub.call(app, api, buildJsonObject { put("to", chat); put("count", n + 1) })
+            val arr = (Json.parseToJsonElement(out) as? JsonObject)?.get("results") as? kotlinx.serialization.json.JsonArray ?: return@runCatching ""
+            arr.mapNotNull { it as? JsonObject }.joinToString("\n") { m ->
+                val me = m["from_me"]?.toString() == "true"
+                (if (me) "Atendente: " else "Cliente: ") + (m["text"]?.let { (it as? kotlinx.serialization.json.JsonPrimitive)?.content }.orEmpty()).take(500)
+            }
+        }.getOrDefault("")
+        val handoffWords = r("handoff").split('|').map { it.trim() }.filter { it.isNotEmpty() }
+        val handoff = handoffWords.any { text.contains(it, ignoreCase = true) }
+        val sessionTitle = r("session").trim()
+        var reply: String
+        if (handoff) {
+            reply = "Certo! Vou chamar uma pessoa da equipe para continuar com você. Só um instante."
+            runCatching { dev.cueopen.app.notify.NotificationCenter.post("Atendimento: pedido de humano", "${who.ifBlank { chat }}: ${text.take(160)}",
+                dev.cueopen.app.notify.NotificationCenter.Priority.HIGH, dev.cueopen.app.notify.NotificationCenter.Category.TRIGGER, detail = "Conversa $chat no WhatsApp pediu uma pessoa.") }
+        } else if (sessionTitle.isNotBlank()) {
+            // Acorda a conversa do app, repassa a mensagem e espera a resposta dela (até 5 min).
+            val st = app.store.state.value
+            val sess = st.sessions.firstOrNull { it.title.equals(sessionTitle, true) } ?: st.sessions.firstOrNull { it.title.contains(sessionTitle, true) }
+                ?: return NodeResult(error = "Conversa \"$sessionTitle\" não encontrada no app.")
+            if (run.trigger == "test") reply = "(teste) a mensagem iria para a conversa \"${sess.title}\" e a resposta dela voltaria aqui."
+            else {
+                val before = app.store.session(sess.id)?.items?.size ?: 0
+                app.agent.sendOrQueue(sess.id, "[WhatsApp · ${who.ifBlank { chat }}] $text\n(Responda de forma curta: sua resposta será enviada de volta no WhatsApp.)")
+                val deadline = System.currentTimeMillis() + 5 * 60_000L
+                kotlinx.coroutines.delay(1500)
+                while (System.currentTimeMillis() < deadline && app.store.session(sess.id)?.status == dev.cueopen.app.data.SessionStatus.RUNNING) kotlinx.coroutines.delay(2000)
+                reply = app.store.session(sess.id)?.items?.drop(before)?.filterIsInstance<dev.cueopen.app.data.ChatItem.Assistant>()?.lastOrNull()?.text?.trim().orEmpty()
+                if (reply.isBlank()) return NodeResult(error = "A conversa \"${sess.title}\" não respondeu em 5 minutos.")
+            }
+        } else {
+            val goal = when (r("objective")) {
+                "vendas" -> "Objetivo: converter em venda. Entenda a necessidade, apresente a opção mais adequada da base, trate objeções com fatos da base e conduza ao próximo passo (proposta, link, contratação). Sem pressão agressiva."
+                "recuperar_pagamento" -> "Objetivo: recuperar pagamento pendente com empatia. Lembre o valor/vencimento se estiver na base, ofereça as formas de pagamento/negociação previstas e confirme o próximo passo."
+                "recuperar_cliente" -> "Objetivo: reconquistar cliente que se afastou. Pergunte o motivo, valorize o relacionamento e ofereça o que a base permitir (condição, benefício)."
+                "suporte" -> "Objetivo: resolver o problema do cliente passo a passo com base nas instruções da base."
+                else -> "Objetivo: atender bem e responder as dúvidas."
+            }
+            val prompt = buildString {
+                appendLine(r("persona").ifBlank { "Você é um atendente cordial e objetivo." })
+                appendLine(goal)
+                appendLine("Regras: responda em português do Brasil, como mensagem de WhatsApp (curta, no máximo 3 frases, sem markdown). Use APENAS informações da base de conhecimento abaixo; se não souber, diga que vai confirmar e não invente preços, prazos ou coberturas. Nunca peça senha nem dados de cartão.")
+                val kb = r("knowledge").trim()
+                if (kb.isNotBlank()) { appendLine("\n### Base de conhecimento\n" + kb.take(30_000)) }
+                if (history.isNotBlank()) appendLine("\n### Conversa até agora\n$history")
+                appendLine("\n### Nova mensagem de ${who.ifBlank { "cliente" }}\n$text")
+                appendLine("\nResponda só com o texto da mensagem a enviar.")
+            }
+            reply = ""
+            for (attempt in 0..1) {
+                reply = runCatching { app.llm.quick(prompt, maxTokens = 600, conversationId = "atendente-${w.id}-${chat.hashCode()}") }.getOrDefault("").trim()
+                if (reply.isNotBlank()) break
+                kotlinx.coroutines.delay(1500)
+            }
+            if (reply.isBlank()) return NodeResult(error = "A IA não gerou resposta.")
+        }
+        reply = reply.removePrefix("Atendente:").trim().take(3500)
+        var sent = false
+        if (r("reply") != "draft") {
+            val api = hub.find(app, "whatsapp_send_text") ?: return NodeResult(error = "API whatsapp_send_text não está no hub.")
+            // Marca invisível no fim: o webhook ignora as próprias respostas (evita o bot responder a si mesmo).
+            val args = buildJsonObject {
+                put("to", chat); put("text", reply + dev.cueopen.app.browser.WhatsAppHub.BOT_MARK); put("confirmed", "true")
+                if (msgId.isNotBlank() && !msgId.startsWith("teste_")) put("reply_to", msgId)
+                if (run.trigger == "test") put("__dry_run", "true")
+            }
+            val out = hub.call(app, api, args)
+            if (!out.contains("\"ok\":true")) return NodeResult(error = "Falha ao enviar no WhatsApp: " + (Regex("\"error\":\"([^\"]*)").find(out)?.groupValues?.get(1) ?: out.take(200)))
+            sent = run.trigger != "test"
+        }
+        return NodeResult(buildJsonObject { put("reply", reply); put("sent", sent); put("chat", chat); put("handoff", handoff); put("to_name", who) }.toString())
+    }
+
     data class NodeResult(val output: String = "", val port: String? = null, val error: String? = null, val sessionId: String? = null)
 
     private suspend fun runNode(w: Workflow, run: WfRun, node: WfNode, prev: String, r: (String) -> String, rh: (String, Boolean) -> String, rt: (String, Int) -> String, setStatus: (String) -> Unit): NodeResult {
@@ -343,6 +433,7 @@ object WorkflowEngine {
                 if (Regex("^\\s*(ERRO|ERROR|RECUSADO|Falha)", RegexOption.IGNORE_CASE).containsMatchIn(out)) NodeResult(error = out.take(1_500)) else NodeResult(out)
             }
 
+            "atendente" -> atendente(w, run, node, r = r, rt = rt)
             "webapi" -> {
                 val slug = r("api").trim()
                 val api = dev.cueopen.app.browser.WebApiHub.find(app, slug)?.takeIf { it.enabled }

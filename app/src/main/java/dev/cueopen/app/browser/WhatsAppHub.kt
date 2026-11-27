@@ -39,6 +39,8 @@ object WhatsAppHub {
     )
 
     private const val PREF = "wa_hub"
+    /** Marca invisível que o atendente põe no fim das respostas: o webhook ignora essas mensagens (sem eco/loop). */
+    const val BOT_MARK = "\u2063"
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val json = Json { ignoreUnknownKeys = true }
     private val _recent = MutableStateFlow<List<JsonObject>>(emptyList())
@@ -165,6 +167,7 @@ object WhatsAppHub {
         val chat = s(m0, "chat"); val name = s(m0, "chat_name").ifBlank { s(m0, "sender_name") }
         // Ruído do protocolo: status (stories), avisos de criptografia/grupo e mensagens ainda não decifradas.
         if (chat == "status@broadcast" || chat.isBlank() || s(m0, "type") in NOISE) return
+        if (s(m0, "text").endsWith(BOT_MARK)) return  // resposta do próprio atendente
         if (!allowed(c, chat, name)) return
         val m = JsonObject(m0 + mapOf("event" to JsonPrimitive("whatsapp.message"), "webhook" to JsonPrimitive("http://127.0.0.1:${WaLocalServer.port}/whatsapp/" + c.token),
             "received_at" to JsonPrimitive(java.time.Instant.now().toString())))

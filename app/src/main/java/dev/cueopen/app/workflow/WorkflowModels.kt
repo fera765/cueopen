@@ -165,6 +165,16 @@ object WfCatalog {
                 WfField("api", "API (slug)", WfField.Kind.TEXT, "Ex.: whatsapp_send_text", required = true),
                 WfField("args", "Argumentos (JSON)", WfField.Kind.MULTILINE, "Ex.: {\"to\": \"{{trigger.payload.chat}}\", \"text\": \"Recebido!\"} — $TEMPLATE_HINT", default = "{}"),
             )),
+        WfNodeType("atendente", "Atendente de WhatsApp (IA)", CAT_AI, "Responde quem manda mensagem: lê a mensagem do gatilho \"Mensagem no WhatsApp\", o histórico da conversa e a sua base de conhecimento, responde com IA e envia no próprio chat. Pode também acordar uma conversa do app e devolver a resposta dela.", 0xFF25D366, "ai",
+            fields = listOf(
+                WfField("persona", "Quem é o atendente", WfField.Kind.MULTILINE, "Ex.: Você é a Ana, consultora da Saúde+; tom cordial e direto.", default = "Você é um atendente cordial e objetivo."),
+                WfField("knowledge", "Base de conhecimento / treinamento", WfField.Kind.MULTILINE, "Planos, preços, regras, perguntas frequentes, políticas. O atendente só afirma o que estiver aqui."),
+                WfField("objective", "Objetivo", WfField.Kind.SELECT, options = listOf("atendimento" to "Atendimento geral", "vendas" to "Vendas (converter)", "recuperar_pagamento" to "Recuperar pagamento", "recuperar_cliente" to "Recuperar cliente", "suporte" to "Suporte"), default = "atendimento"),
+                WfField("history", "Mensagens anteriores lidas", WfField.Kind.NUMBER, default = "10"),
+                WfField("reply", "Envio", WfField.Kind.SELECT, options = listOf("auto" to "Responder sozinho", "draft" to "Só gerar a resposta (não enviar)"), default = "auto"),
+                WfField("session", "Conversa do app para acordar (opcional)", WfField.Kind.TEXT, "Título da conversa: a mensagem vai para ela e a resposta dela volta para o WhatsApp"),
+                WfField("handoff", "Passar para humano quando contiver", WfField.Kind.TEXT, "Ex.: atendente|humano|reclamação", default = "falar com humano|atendente humano"),
+            )),
         WfNodeType("http", "Requisição HTTP", CAT_APPS, "Chama qualquer API (GET, POST, PUT, PATCH, DELETE).", 0xFF4D8DFF, "http",
             fields = listOf(
                 WfField("method", "Método", WfField.Kind.SELECT, options = listOf("GET" to "GET", "POST" to "POST", "PUT" to "PUT", "PATCH" to "PATCH", "DELETE" to "DELETE"), default = "GET"),
@@ -235,6 +245,7 @@ object WfCatalog {
         WfPreset("Mensagem no WhatsApp", CAT_TRIGGER, "trigger_whatsapp", "Roda quando chega mensagem no WhatsApp (todas as conversas).", mapOf("scope" to "all")),
         WfPreset("Mensagem num grupo do WhatsApp", CAT_TRIGGER, "trigger_whatsapp", "Roda quando chega mensagem no grupo escolhido.", mapOf("scope" to "groups", "chat" to "")),
         WfPreset("Responder no WhatsApp", CAT_APPS, "webapi", "Envia uma resposta para a conversa que disparou o fluxo.", mapOf("api" to "whatsapp_send_text", "args" to "{\"to\": \"{{trigger.payload.chat}}\", \"text\": \"{{prev}}\", \"reply_to\": \"{{trigger.payload.id}}\"}")),
+        WfPreset("Atendente de vendas no WhatsApp", CAT_AI, "atendente", "Responde clientes com base no seu conhecimento, focado em converter.", mapOf("objective" to "vendas", "reply" to "auto")),
         WfPreset("Toda hora", CAT_TRIGGER, "trigger_schedule", "Roda a cada 60 minutos.", mapOf("mode" to "interval", "minutes" to "60")),
         // IA
         WfPreset("Resumir texto", CAT_AI, "ai", "Resume a saída anterior em tópicos curtos.", mapOf("prompt" to "Resuma em até 5 tópicos curtos, em português:\n\n{{prev}}")),

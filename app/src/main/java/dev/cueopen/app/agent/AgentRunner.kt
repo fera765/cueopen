@@ -3358,6 +3358,7 @@ class AgentRunner(
             val root = Json.parseToJsonElement(r)
             val dir = File(workspace(sessionId), "webapi_files").apply { mkdirs() }
             var n = 0
+            val savedByHash = HashMap<String, String>()
             val b64re = Regex("^[A-Za-z0-9+/=\\r\\n_-]{2000,}$")
             fun ext(mime: String, bytes: ByteArray): String = android.webkit.MimeTypeMap.getSingleton().getExtensionFromMimeType(mime)?.takeIf { mime.isNotBlank() } ?: when {
                 bytes.size > 3 && bytes[0] == 0xFF.toByte() && bytes[1] == 0xD8.toByte() -> "jpg"
@@ -3376,11 +3377,15 @@ class AgentRunner(
                 val mime = if (isData) value.substringAfter("data:").substringBefore(";") else mimeHint
                 val bytes = runCatching { android.util.Base64.decode(if (isData) value.substringAfter(",") else value, android.util.Base64.DEFAULT) }.getOrNull() ?: return null
                 if (bytes.size < 512) return null
+                // Mesmo binário em dois campos (ex.: image_b64 e data_url): um arquivo só.
+                val digest = java.security.MessageDigest.getInstance("MD5").digest(bytes).joinToString("") { "%02x".format(it) }
+                savedByHash[digest]?.let { return JsonPrimitive(it) }
                 n++
                 val base = (if (n == 1) saveAs else null)?.takeIf { it.isNotBlank() } ?: nameHint.takeIf { it.isNotBlank() && it.contains('.') }
                     ?: (slug + "_" + java.text.SimpleDateFormat("yyyyMMdd_HHmmss", java.util.Locale.US).format(java.util.Date()) + (if (n > 1) "_$n" else "") + "." + ext(mime, bytes))
                 val name = base.substringAfterLast('/').replace(Regex("[\\\\:*?\"<>|]"), "_")
                 val out = File(dir, name); out.writeBytes(bytes)
+                savedByHash[digest] = "webapi_files/$name"
                 return JsonPrimitive("webapi_files/$name")
             }
             fun fix(e: JsonElement): JsonElement = when (e) {
@@ -4224,6 +4229,12 @@ class AgentRunner(
             "Actions: list | get | create | update | validate | test | status | publish | run | disable | delete. " +
             "workflow_json = {name, nodes:[{id, type, label, config}], edges:[{from, to, port}]} (ids curtos como t1, h1, a1; layout é automático). Tipos e config (valores em texto): " +
             "trigger_manual; trigger_schedule (mode=interval|daily|weekly, minutes, time HH:mm, weekday 1-7 — ou when=\"frase do usuário\", ex. \"a cada 2 minutos\", \"todo dia às 8h\", \"toda segunda 18:30\"; roda com o app aberto, em segundo plano ou fechado). " +
+            "WHATSAPP (sem conector: é o API Hub): gatilho trigger_whatsapp (chat=nome/número/id da conversa ou grupo, scope=all|private|groups, keyword=palavras|separadas, from_me=true só se o usuário conversa consigo mesmo/no próprio número) — dispara NA HORA a cada mensagem, dados em {{t1.payload.text}}, .chat, .chat_name, .sender_name, .id; " +
+            "NUNCA use trigger_schedule + agent lendo whatsapp_messages a cada minuto para \"monitorar\" WhatsApp (gasta IA a cada minuto e perde mensagens). " +
+            "webapi (api=slug do hub ex. whatsapp_send_text, args=JSON com {{…}}) — chama qualquer Web API do hub; ações externas rodam de verdade só publicado (no teste são validadas sem enviar). " +
+            "atendente (persona, knowledge=dados de treinamento/base de conhecimento, objective=atendimento|vendas|recuperar_pagamento|recuperar_cliente|suporte, history=nº de mensagens anteriores, reply=auto|draft, session=título de uma conversa do app para acordar e repassar, handoff=palavras que pedem humano) — " +
+            "ATENDENTE DE WHATSAPP pronto: lê a mensagem do gatilho, o histórico da conversa e a base de conhecimento, responde com IA (ou repassa à sessão e devolve a resposta dela) e envia no próprio chat; saída {reply, sent, chat, handoff}. " +
+            "Ex. atendimento de plano de saúde: trigger_whatsapp(chat=Cliente X ou vazio p/ todos) → atendente(objective=vendas, knowledge=tabela de planos/regras). Ex. conversar com uma sessão pelo WhatsApp: trigger_whatsapp(chat=meu número, from_me=true) → atendente(session=Nome da conversa). " +
             "E-MAIL DE DESTINO: nunca invente nem use exemplo (x@y.com, email@exemplo.com). Se o fluxo envia e-mail e o usuário não disse o destino, pergunte com ask_question (opções: o e-mail da conta conectada, se souber, + allow_other) ou ask_secure se ele preferir não expor; coloque em campos.receiver e envie pelo conector de e-mail dele (gmail send_email). O fluxo só é aceito/publicado com destinatário real, assunto e corpo. FORMATO: corpo de e-mail em Markdown limpo (títulos, listas, tabelas, links) — o app converte para HTML de e-mail com estilos inline; notificação/página/chat usam Markdown estilo GitHub. TESTE e PUBLICAÇÃO: action=test lê de verdade (sites, buscas, e-mails, APIs GET) mas simula todo envio externo (e-mail, POST, webhook, ações de escrita) e valida o conteúdo; action=publish roda esse teste ponta a ponta e só ativa se passar. NOTÍCIAS/FEEDS: http GET num RSS/Atom já devolve {{id.items}} (title, link, date, source, image) e {{id.text}} (lista compacta, 1 por linha) — use {{id.text}} no nó de IA; nunca passe {{id.body}} (XML cru) nem baixe feed por shell. Um {{…}} que chega vazio faz o teste falhar com o nome do caminho; IA/agente que respondem \"não recebi os dados\" também falham. Nó agent: a última mensagem dele é a saída do nó; peça o resultado pronto, sem relato do processo. Ao errar o id de um fluxo, o erro lista os ids existentes. WEBHOOK: trigger_webhook {repo dono/repo, issue N, secret ≥12 caracteres} — quem chama posta um comentário na issue (1ª linha = segredo, resto = payload JSON), use {{trigger.payload.campo}}. NOTIFY open=chat abre uma conversa do fluxo com o conteúdo (Markdown GitHub: tabelas, links, listas). Portão: título/texto/corpo vazios, {{…}} sem valor ou JSON cru fazem o teste falhar e bloqueiam a publicação — corrija e teste de novo. QUANDO EXECUTAR: se o pedido é recorrente e o usuário NÃO disse quando, ANTES do create chame ask_question UMA vez com no máximo 2 perguntas diretas, opções de rádio e allow_other=true " +
             "(ex.: header \"Frequência\": \"1x por dia\", \"A cada hora\", \"Dia e horário fixos\", \"Só quando eu mandar\"; e, se fizer sentido, header \"Horário\": \"08:00\", \"12:00\", \"18:00\"). " +
             "A resposta (inclusive o texto livre de \"Outra resposta\", ex. \"a cada 2 minutos\") vai em when=. Se o usuário já disse a frequência, não pergunte. \"Só quando eu mandar\" = trigger_manual. " +
