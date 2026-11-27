@@ -7,14 +7,14 @@ import dev.fluwy.app.data.ChatItem
  * (nenhum some porque chegou outro) e confira todos antes de encerrar.
  */
 object MultiRequest {
-    const val PROMPT_LINE = "Várias mensagens seguidas do usuário são pedidos separados: atenda TODAS, uma a uma, sem abandonar as anteriores " +
+    val PROMPT_LINE = dev.fluwy.app.prompts.Prompts.render("multi_request.5", mapOf<String, Any?>("lb" to "{{")) +
         "(só deixe de fazer uma se outra mensagem cancelar ou corrigir aquela). Se forem independentes, faça uma de cada vez e, na resposta final, " +
         "confirme cada pedido em um item numerado (feito / não deu e por quê)."
 
     /** Junta mensagens que estavam na fila num único envio, numeradas para não se misturarem. */
     fun combine(texts: List<String>): String =
         if (texts.size <= 1) texts.firstOrNull().orEmpty()
-        else "[O usuário enviou ${texts.size} mensagens seguidas. Trate cada uma como um pedido separado e atenda todas]\n\n" +
+        else dev.fluwy.app.prompts.Prompts.render("multi_request.1", mapOf<String, Any?>("texts" to (texts.size), "lb" to "{{")) +
             texts.mapIndexed { i, t -> "Mensagem ${i + 1}:\n${t.trim()}" }.joinToString("\n\n")
 
     /**
@@ -29,8 +29,8 @@ object MultiRequest {
     }
 
     fun checkPrompt(reqs: List<String>): String =
-        "[Sistema] Antes de encerrar, confira: o usuário fez ${reqs.size} pedidos nesta conversa desde a sua última entrega:\n" +
+        dev.fluwy.app.prompts.Prompts.render("multi_request.2", mapOf<String, Any?>("reqs" to (reqs.size), "lb" to "{{")) +
             reqs.mapIndexed { i, r -> "${i + 1}. ${r.replace('\n', ' ').take(180)}" }.joinToString("\n") +
-            "\nSe algum ainda não foi feito, faça agora (chame as ferramentas). Se todos já foram, responda com o resultado final confirmando cada pedido pelo número. " +
-            "Pedidos que uma mensagem posterior cancelou ou substituiu não precisam ser feitos — só diga isso."
+            dev.fluwy.app.prompts.Prompts.render("multi_request.3", mapOf<String, Any?>("lb" to "{{")) +
+            dev.fluwy.app.prompts.Prompts.render("multi_request.4", mapOf<String, Any?>("lb" to "{{"))
 }

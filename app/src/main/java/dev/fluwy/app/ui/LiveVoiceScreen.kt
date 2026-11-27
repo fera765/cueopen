@@ -109,9 +109,9 @@ fun LiveVoiceScreen(nav: NavController) {
             }
             // Modo rápido em STREAMING: a IA manda o texto aos poucos e cada trecho já vai sendo falado.
             val history = turns.takeLast(10).joinToString("\n") { (if (it.me) "Usuário: " else "Assistente: ") + it.text + (if (it.cut) " [interrompida pelo usuário aqui]" else "") }
-            val prompt = "Você é a assistente de voz do app, numa ligação em tempo real em português do Brasil (responda em inglês só se o usuário falar em inglês). " +
-                "Responda como fala natural de telefone: curto (1 a 3 frases), direto, sem markdown, listas, emojis ou links. Comece pela resposta, sem rodeios. " +
-                "Se o usuário te interrompeu, aceite a correção dele na hora, sem repetir o que já disse. Se precisar de uma ação no celular ou na internet, diga em uma frase que pode fazer no modo Agente.\n\nConversa até agora:\n$history\n\nAssistente:"
+            val prompt = dev.fluwy.app.prompts.Prompts.render("live_voice.3", mapOf<String, Any?>("lb" to "{{")) +
+                dev.fluwy.app.prompts.Prompts.render("live_voice.2", mapOf<String, Any?>("lb" to "{{")) +
+                dev.fluwy.app.prompts.Prompts.render("live_voice.1", mapOf<String, Any?>("history" to (history), "lb" to "{{"))
             val voice = if (active) AppVoice.startStream(ctx, AppVoice.detectLang(text)) { scope.launch { if (active && phase == "falando") { phase = "ouvindo"; if (!listening) listen() } } } else null
             val idx = turns.size; turns += Turn(false, "…")
             val buf = StringBuilder(); val shown = StringBuilder(); var pieces = 0

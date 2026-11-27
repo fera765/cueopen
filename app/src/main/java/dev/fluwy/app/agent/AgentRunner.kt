@@ -209,7 +209,7 @@ class AgentRunner(
         list
     }
 
-    internal fun queuedAsPrompt(q: QueuedMessage) = "[Nova mensagem do usuário recebida enquanto você trabalhava. É um pedido A MAIS: não descarta o que ele pediu antes, " +
+    internal fun queuedAsPrompt(q: QueuedMessage) = dev.fluwy.app.prompts.Prompts.render("runner.34", mapOf<String, Any?>("lb" to "{{")) +
         "a menos que diga para cancelar, trocar ou corrigir. Se for uma correção/complemento do pedido atual, ajuste o rumo; se for outro pedido, faça também, depois ou em paralelo.]\n${q.text}" +
         (if (q.attachments.isNotEmpty()) "\n\n[Arquivos anexados no workspace: ${q.attachments.joinToString()}]" else "") +
         (if (q.quote != null) "\n[O usuário respondia a esta mensagem sua: ${q.quote}]" else "")
@@ -457,7 +457,7 @@ class AgentRunner(
         val lastError = (s?.items?.lastOrNull { it is ChatItem.Error } as? ChatItem.Error)?.text?.take(200)
         val sec = store.section(s?.sectionId)?.takeIf { it.sessionId == sessionId }
         return buildString {
-            append(if (automatic) "[Sistema] Retomada automática depois de uma falha temporária." else "[Sistema] O usuário pediu para continuar de onde você parou.")
+            append(if (automatic) dev.fluwy.app.prompts.Prompts.render("runner.32", mapOf<String, Any?>("lb" to "{{")) else dev.fluwy.app.prompts.Prompts.render("runner.33", mapOf<String, Any?>("lb" to "{{")))
             append(" Não recomece do zero nem repita o pedido original: revise o que já foi feito, identifique a última etapa concluída e execute a próxima.")
             if (plan != null) append("\nPlano: " + plan.phases.joinToString(" · ") { (if (it.done) "[x] " else "[ ] ") + it.title })
             if (lastError != null) append("\nO que interrompeu o trabalho: $lastError")
@@ -571,7 +571,7 @@ class AgentRunner(
         }
         store.session(sec.sessionId)?.let { chat ->
             store.editSession(chat.id) { it.copy(llm = it.llm + LlmMessage("user", "[Sistema] ${ag.name} entrou no time desta seção" +
-                (if (ag.mission.isNotBlank()) " (função: ${ag.mission})" else "") + ". Você já pode delegar tarefas para ele com team_delegate.")) }
+                (if (ag.mission.isNotBlank()) " (função: ${ag.mission})" else "") + dev.fluwy.app.prompts.Prompts.render("runner.31", mapOf<String, Any?>("lb" to "{{")))) }
         }
         return "${ag.name} adicionado à seção ${sec.name}."
     }
@@ -590,7 +590,7 @@ class AgentRunner(
             }
         }
         store.session(sec.sessionId)?.let { chat -> store.editSession(chat.id) { it.copy(llm = it.llm + LlmMessage("user",
-            "[Sistema] ${ag?.name ?: "Um agente"} saiu do time desta seção. Não delegue mais para ele; redistribua o que estava com ele.")) } }
+            dev.fluwy.app.prompts.Prompts.render("runner.30", mapOf<String, Any?>("agente" to (ag?.name ?: "Um agente"), "lb" to "{{")))) } }
         store.state.value.sessions.filter { it.sectionId == sectionId && it.agentId == agentId }.forEach { stop(it.id, pauseAutonomy = true) }
         if (delete) { dev.fluwy.app.scheduler.Heartbeat.cancel(ctx, agentId); store.deleteAgent(agentId) }
     }
@@ -630,12 +630,12 @@ class AgentRunner(
                     appendLine("Você é $n" + (if (role.isNotBlank()) " ($role)" else "") + ", membro da seção \"$title\".")
                     if (f("description").isNotBlank()) appendLine("Função: " + f("description"))
                     if (f("rules").isNotBlank()) appendLine("Regras fixas (valem em toda tarefa): " + f("rules"))
-                    appendLine("Você recebe tarefas do coordenador da seção. Entregue resultados concretos e verificáveis (links, números, arquivos). Trabalhe apenas com dados reais; se faltar algo, diga exatamente o que falta.")
+                    appendLine(dev.fluwy.app.prompts.Prompts.render("runner.29", mapOf<String, Any?>("lb" to "{{")))
                 }.trim(),
                 useBrowser = bo("needs_browser", true), useTerminal = bo("needs_terminal", true),
             )
         }
-        if (members.isEmpty()) return ToolResult("ERRO: nenhum agente válido em agents_json.")
+        if (members.isEmpty()) return ToolResult(dev.fluwy.app.prompts.Prompts.render("runner.28", mapOf<String, Any?>("lb" to "{{")))
         val roster = members.joinToString("\n") { "- ${it.name}: ${it.mission.ifBlank { it.instructions.lineSequence().drop(1).firstOrNull().orEmpty() }}" }
         val coordinator = AgentProfile(
             name = "Coordenador · $title".take(40), face = "bot", color = sectionColors[members.size % sectionColors.size],
@@ -643,8 +643,8 @@ class AgentRunner(
             instructions = buildString {
                 appendLine("Você é o coordenador da seção \"$title\"." + (if (description.isNotBlank()) " Objetivo: $description" else ""))
                 appendLine("Seu time:\n$roster")
-                appendLine("Use team_plan para organizar o trabalho em etapas, team_delegate para tarefas avulsas (vários agentes podem trabalhar em paralelo) e team_status para acompanhar. Divida o trabalho, cobre prazos, confira cada entrega e consolide os resultados.")
-                appendLine("Comunicação no chat: entre uma ação e outra, mande ao usuário feedbacks curtos (5 a 30 palavras, ex.: \"Radar está minerando ofertas na Biblioteca do Meta.\") e continue trabalhando. Terminal e browser ficam com os agentes; o seu papel é coordenar. Quando chegar um [Relatório automático], avalie a entrega e então aprove, peça ajustes ou passe a próxima etapa.")
+                appendLine(dev.fluwy.app.prompts.Prompts.render("runner.27", mapOf<String, Any?>("lb" to "{{")))
+                appendLine(dev.fluwy.app.prompts.Prompts.render("runner.26", mapOf<String, Any?>("lb" to "{{")))
                 if (coordinatorInstructions.isNotBlank()) appendLine("Regras definidas pelo usuário: $coordinatorInstructions")
             }.trim(),
         )
@@ -665,8 +665,8 @@ class AgentRunner(
         val caps = (capsCsv.split(',').map { it.trim() } + (if (scheduleMinutes > 0) listOf(dev.fluwy.app.device.DeviceCapPolicy.BACKGROUND) else emptyList())).filter { it in allowedCaps }.distinct()
         store.addItem(sessionId, ChatItem.SectionSetup(sectionId = sectionId, sectionName = title,
             agentNames = listOf(coordinator.name) + members.map { it.name }, suggestedCaps = caps, suggestWallet = suggestWallet, suggestAuto = autonomous || scheduleMinutes > 0))
-        return ToolResult("Seção \"$title\" criada com ${members.size} agentes + coordenador. O card de autorização está na tela: o usuário escolhe as permissões e toca em Ativar. " +
-            "Ao ativar, o primeiro agente começa a trabalhar na hora. Responda em 1-2 frases o que foi criado e aguarde; não delegue nada daqui.", SessionStatus.WAITING_USER)
+        return ToolResult(dev.fluwy.app.prompts.Prompts.render("runner.25", mapOf<String, Any?>("title" to (title), "members" to (members.size), "lb" to "{{")) +
+            dev.fluwy.app.prompts.Prompts.render("runner.24", mapOf<String, Any?>("lb" to "{{")), SessionStatus.WAITING_USER)
     }
 
     /** Aplica as permissões do card a todos os Agents da seção e dá a largada no coordenador. Retorna o chat da seção. */
@@ -945,7 +945,7 @@ class AgentRunner(
         if (!ok) return "Não consegui desfazer a alteração em ${change.shown}."
         val what = if (change.previous == null) "arquivo removido (ele tinha sido criado pelo agente)" else "conteúdo anterior restaurado"
         store.addItem(sessionId, ChatItem.Step(tool = "undo", title = "Desfeito: ${change.shown}", args = what, result = "", status = StepStatus.OK))
-        store.editSession(sessionId) { it.copy(llm = it.llm + LlmMessage("user", "[Sistema] O usuário desfez a sua última alteração em ${change.shown} ($what). O arquivo voltou ao estado anterior: releia-o antes de editar de novo e não refaça a mesma alteração sem ele pedir.")) }
+        store.editSession(sessionId) { it.copy(llm = it.llm + LlmMessage("user", dev.fluwy.app.prompts.Prompts.render("runner.23", mapOf<String, Any?>("shown" to (change.shown), "what" to (what), "lb" to "{{")))) }
         val left = q?.size ?: 0
         return "Desfeito: ${change.shown} — $what." + (if (left > 0) " Ainda há $left alteração(ões) que podem ser desfeitas." else "")
     }
@@ -1078,7 +1078,7 @@ class AgentRunner(
 
     internal fun noteEarlyWake(sessionId: String) {
         store.editSession(sessionId) { it.copy(wakeAt = null, llm = it.llm + LlmMessage("user",
-            "[App] Todos os agentes do time terminaram, então a espera foi encerrada antes do prazo. Continue agora: valide as entregas recebidas (team_review) ou passe a próxima etapa.")) }
+            dev.fluwy.app.prompts.Prompts.render("runner.22", mapOf<String, Any?>("lb" to "{{")))) }
     }
 
     internal fun sectionAuto(sec: Section): Boolean = store.agent(sec.coordinatorAgentId)?.confirmMode == "auto"
@@ -1102,13 +1102,13 @@ class AgentRunner(
         autoNudges[sec.id] = sig to count
         if (count > MAX_AUTO_NUDGES) {
             if (count == MAX_AUTO_NUDGES + 1) store.addItem(sec.sessionId, ChatItem.Error(text =
-                "Seção autônoma parada: o coordenador não avançou depois de $MAX_AUTO_NUDGES tentativas. Envie uma mensagem para orientar."))
+                dev.fluwy.app.prompts.Prompts.render("runner.20", mapOf<String, Any?>("max_auto_nudges" to (MAX_AUTO_NUDGES), "lb" to "{{"))))
             return null
         }
-        return "[Sistema] Modo autônomo: você parou, mas esta seção é 100% autônoma — o usuário não vai responder nem mandar \"continue\". " +
+        return dev.fluwy.app.prompts.Prompts.render("runner.19", mapOf<String, Any?>("lb" to "{{")) +
             "Objetivo completo da seção: " + sec.description.ifBlank { sec.firstTask }.take(500) + "\n" +
-            "Se ainda falta alguma fase desse objetivo, continue agora: tome você mesmo a decisão pendente (adote a sua própria sugestão ou a melhor opção segundo os dados e registre a escolha em uma frase) e chame team_plan com as próximas etapas. " +
-            "Quando o objetivo inteiro estiver entregue, e só então, chame section_done(summary) com o relatório final — se você já enviou o relatório no chat, não o repita: passe em summary apenas uma linha de encerramento. Não faça perguntas: ninguém vai respondê-las."
+            dev.fluwy.app.prompts.Prompts.render("runner.18", mapOf<String, Any?>("lb" to "{{")) +
+            dev.fluwy.app.prompts.Prompts.render("runner.21", mapOf<String, Any?>("lb" to "{{"))
     }
 
 
@@ -1201,18 +1201,18 @@ class AgentRunner(
                 val plan = store.section(sectionId)?.plan ?: return@withLock
                 val state = SectionPlanEngine.state(plan)
                 val msg = when (state) {
-                    SectionPlanEngine.State.VALIDATING -> "[Sistema] Há entregas aguardando a sua validação:\n" +
+                    SectionPlanEngine.State.VALIDATING -> dev.fluwy.app.prompts.Prompts.render("runner.17", mapOf<String, Any?>("lb" to "{{")) +
                         plan.filter { it.status == TaskStatus.REVIEW }.joinToString("\n") { "- ${it.id} (${it.agentName}): ${it.result.replace(Regex("\\s+"), " ").take(400)}" } +
-                        "\nO agente já terminou e está parado: não há nada a aguardar. Chame team_review agora para cada entrega — approve se serve; redo dizendo exatamente o que falta (ex.: salvar o arquivo X); block se depende do usuário. O plano só avança depois da sua revisão."
+                        dev.fluwy.app.prompts.Prompts.render("runner.16", mapOf<String, Any?>("lb" to "{{"))
                     SectionPlanEngine.State.COMPLETED -> if (finalReportAsked.add(sectionId))
-                        (if (sectionAuto(sec)) "[Sistema] Modo autônomo: todas as etapas deste plano foram aprovadas. Se o objetivo completo da seção ainda tem fases além deste plano, siga direto para a próxima com um novo team_plan, decidindo sozinho e sem perguntar. Se o objetivo inteiro já foi entregue, chame section_done(summary) com o relatório final consolidado (entregáveis, arquivos, números). O relatório vai dentro de summary; não o escreva antes como mensagem no chat, para não aparecer duas vezes."
-                        else "[Sistema] Todas as etapas do plano foram aprovadas. Envie agora ao usuário o relatório final consolidado (entregáveis, arquivos, números) e pare.") else null
+                        (if (sectionAuto(sec)) dev.fluwy.app.prompts.Prompts.render("runner.15", mapOf<String, Any?>("lb" to "{{"))
+                        else dev.fluwy.app.prompts.Prompts.render("runner.14", mapOf<String, Any?>("lb" to "{{"))) else null
                     SectionPlanEngine.State.FAILED, SectionPlanEngine.State.BLOCKED ->
                         "[Sistema] O plano está ${SectionPlanEngine.label(state)}:\n${SectionPlanEngine.describe(plan)}\n" +
-                            "Decida o próximo passo: reorganize com team_plan (outra estratégia ou outro agente) ou explique ao usuário exatamente o que falta e pare."
+                            dev.fluwy.app.prompts.Prompts.render("runner.13", mapOf<String, Any?>("lb" to "{{"))
                     else -> null  // agentes trabalhando: o próximo evento é o relatório deles
                 }
-                if (started.isNotEmpty()) store.addItem(sec.sessionId, ChatItem.Assistant(text = "▶ Próximas etapas iniciadas automaticamente: " + started.joinToString()))
+                if (started.isNotEmpty()) store.addItem(sec.sessionId, ChatItem.Assistant(text = dev.fluwy.app.prompts.Prompts.render("runner.12", mapOf<String, Any?>("lb" to "{{")) + started.joinToString()))
                 if (msg == null) {
                     if (started.isEmpty()) autoContinue(sec)?.let { send(sec.sessionId, it, showUserMessage = false).join() }
                     return@withLock
@@ -1225,16 +1225,16 @@ class AgentRunner(
                     // Seção autônoma não pode parar esperando revisão: o app decide (refaz entrega vazia, aprova o resto).
                     plan.filter { it.status == TaskStatus.REVIEW }.forEach { t ->
                         val verdict = if (t.result.trim().length < 80 && t.attempts < 2) "redo" else "approve"
-                        runCatching { teamReview(sec.sessionId, t.id, verdict, "Validação automática do app: o coordenador não revisou a entrega." + (if (verdict == "redo") " Entregue o resultado completo e salve os arquivos pedidos em /root/workspace." else "")) }
+                        runCatching { teamReview(sec.sessionId, t.id, verdict, dev.fluwy.app.prompts.Prompts.render("runner.10", mapOf<String, Any?>("lb" to "{{")) + (if (verdict == "redo") dev.fluwy.app.prompts.Prompts.render("runner.11", mapOf<String, Any?>("lb" to "{{")) else "")) }
                     }
-                    store.addItem(sec.sessionId, ChatItem.Assistant(text = "⚙ Entregas pendentes validadas automaticamente para o plano seguir."))
+                    store.addItem(sec.sessionId, ChatItem.Assistant(text = dev.fluwy.app.prompts.Prompts.render("runner.9", mapOf<String, Any?>("lb" to "{{"))))
                     planNudges.remove(sectionId)
                     planWatchdog(sectionId)
                     return@withLock
                 }
                 if (count > MAX_PLAN_NUDGES) {
                     if (count == MAX_PLAN_NUDGES + 1) store.addItem(sec.sessionId, ChatItem.Error(text =
-                        "O plano não avançou depois de $MAX_PLAN_NUDGES lembretes ao coordenador (${SectionPlanEngine.label(state)}). Parei para não gastar tokens. Envie uma mensagem para orientar."))
+                        dev.fluwy.app.prompts.Prompts.render("runner.8", mapOf<String, Any?>("max_plan_nudges" to (MAX_PLAN_NUDGES), "section_plan_engine_label" to (SectionPlanEngine.label(state)), "lb" to "{{"))))
                     return@withLock
                 }
                 send(sec.sessionId, msg, showUserMessage = false).join()
@@ -1249,8 +1249,8 @@ class AgentRunner(
             args = "$childId|${member.id}", result = "", status = StepStatus.RUNNING)
         store.addItem(sec.sessionId, pill)
         delegations[childId] = Delegation(sec.id, member.id, pill.id, before, t.task, taskId = t.id)
-        send(childId, "[Sistema] A execução da etapa ${t.id} foi interrompida porque o app fechou ou reiniciou. Continue de onde parou: " +
-            "confira primeiro o que já está feito (arquivos, notas, histórico) e não repita ações externas que já foram concluídas.", showUserMessage = false)
+        send(childId, dev.fluwy.app.prompts.Prompts.render("runner.6", mapOf<String, Any?>("valor" to (t.id), "lb" to "{{")) +
+            dev.fluwy.app.prompts.Prompts.render("runner.7", mapOf<String, Any?>("lb" to "{{")), showUserMessage = false)
     }
 
     /** Na abertura do app: retoma planos que estavam em andamento. */
@@ -1571,8 +1571,8 @@ class AgentRunner(
         val cur = store.session(sessionId)?.items?.firstOrNull { it.id == item.id } as? ChatItem.Approval ?: return
         if (cur.state != "pending") return
         store.replaceItem(sessionId, cur.copy(state = if (approve) "approved" else "denied"))
-        val msg = if (approve) "[Sistema] O usuário aprovou: ${cur.summary}. Execute agora exatamente essa ação (releia a tela antes, se precisar) e continue a tarefa."
-            else "[Sistema] O usuário negou: ${cur.summary}. Não execute essa ação nem busque outro caminho para o mesmo efeito; siga a tarefa sem ela ou finalize explicando."
+        val msg = if (approve) dev.fluwy.app.prompts.Prompts.render("runner.5", mapOf<String, Any?>("summary" to (cur.summary), "lb" to "{{"))
+            else dev.fluwy.app.prompts.Prompts.render("runner.4", mapOf<String, Any?>("summary" to (cur.summary), "lb" to "{{"))
         send(sessionId, msg, showUserMessage = false)
     }
 
@@ -1824,17 +1824,7 @@ class AgentRunner(
     suspend fun createAgentFromPrompt(desc: String, conversationId: String? = null): AgentProfile {
         val skillNames = store.state.value.skills.filter { it.enabled }.joinToString(", ") { it.name }
         val raw = runCatching {
-            llm.quick("""
-                Monte a configuração de um agente de IA a partir do pedido do usuário abaixo. Responda apenas com um objeto JSON válido, sem texto antes ou depois, neste formato:
-                {"name":"curto, 2-3 palavras","face":"jelly|bot|ghost|cat|owl|octo|sprout|cloud|star|bee|flame|orbit","color":0-7,
-                 "instructions":"como o agente age, em 2 a 5 frases: objetivo, tom e o que priorizar",
-                 "mission":"missão permanente, se o agente for rodar continuamente; caso contrário, vazio",
-                 "autonomous":true|false, "heartbeatMinutes":0,
-                 "useTerminal":true|false, "useBrowser":true|false,
-                 "skills":["nomes exatos entre: $skillNames"]}
-                Se o usuário pedir monitoramento ou execução recorrente, defina autonomous=true e heartbeatMinutes com o intervalo pedido, em minutos (1440 = uma vez por dia). Ligue useTerminal e useBrowser apenas se a função do agente precisar deles.
-                Pedido: $desc
-            """.trimIndent(), maxTokens = 600, conversationId = conversationId)
+            llm.quick(dev.fluwy.app.prompts.Prompts.render("runner.3", mapOf<String, Any?>("skill_names" to (skillNames), "desc" to (desc), "lb" to "{{")), maxTokens = 600, conversationId = conversationId)
         }.getOrDefault("")
         val js = raw.substringAfter('{', "").let { if (it.isNotEmpty()) "{$it".substringBeforeLast('}') + "}" else "" }
         val o = runCatching { json.parseToJsonElement(js).jsonObject }.getOrNull()
@@ -1886,7 +1876,7 @@ class AgentRunner(
     /** O usuário entrou e salvou a sessão: libera o site e retoma a tarefa. */
     fun onUserLoggedIn(sessionId: String, domain: String) {
         store.addItem(sessionId, ChatItem.Step(tool = "login_done", title = "Sessão de $domain salva", args = domain, result = "o agente continua", status = StepStatus.OK))
-        sendOrQueue(sessionId, "[Sistema] O usuário entrou em $domain e salvou a sessão. Recarregue a página (browser_navigate) e continue a tarefa de onde parou.")
+        sendOrQueue(sessionId, dev.fluwy.app.prompts.Prompts.render("runner.2", mapOf<String, Any?>("domain" to (domain), "lb" to "{{")))
     }
 
     internal val archiveReads = ArchiveReadGuard()
@@ -1899,7 +1889,7 @@ class AgentRunner(
     @Volatile internal var pendingCoverage: Pair<String, String>? = null
 
     internal val truncNudges = java.util.concurrent.ConcurrentHashMap<String, Int>()
-    internal val TRUNCATION_NUDGE = "[Aviso do app] Sua última resposta foi cortada no limite de saída do modelo (nenhuma ferramenta rodou). " +
+    internal val TRUNCATION_NUDGE = dev.fluwy.app.prompts.Prompts.render("runner.1", mapOf<String, Any?>("lb" to "{{")) +
         "Não repita a mesma chamada gigante. Divida: escreva códigos/arquivos grandes em partes com file_write (append) de até ~150 linhas cada; " +
         "para Web APIs, salve o código num arquivo e chame webapi_test/webapi_save com code_file=<caminho> em vez de colar o código inteiro; " +
         "pense menos e aja em passos curtos. Continue a tarefa de onde parou."

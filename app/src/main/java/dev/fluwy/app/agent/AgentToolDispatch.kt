@@ -1219,13 +1219,13 @@ internal suspend fun AgentRunner.executeTool(
                             sessionId, s("snapshot_id"), i("element_id") ?: -1,
                         )
                     } catch (t: Throwable) {
-                        if (isStaleAccessibilitySnapshotFailure("device_accessibility_inspect_image", t.message.orEmpty()))
+                        if (isStaleAccessibilitySnapshotFailure(dev.fluwy.app.prompts.Prompts.render("vision.4", mapOf<String, Any?>("lb" to "{{")), t.message.orEmpty()))
                             visualInspectionUsed.remove(sessionId)
                         throw t
                     }
-                    val prompt = "Analise apenas o recorte do elemento do post já solicitado pelo usuário. " +
-                        "Descreva o conteúdo visual relevante e qualquer texto legível; diferencie o que é visível do que não dá para afirmar. " +
-                        "Responda em português e não faça inferências sobre pessoas, identidade ou contexto além do recorte. " +
+                    val prompt = dev.fluwy.app.prompts.Prompts.render("vision.3", mapOf<String, Any?>("lb" to "{{")) +
+                        dev.fluwy.app.prompts.Prompts.render("vision.2", mapOf<String, Any?>("lb" to "{{")) +
+                        dev.fluwy.app.prompts.Prompts.render("vision.1", mapOf<String, Any?>("lb" to "{{")) +
                         "Pedido do usuário: ${request.text.take(1200)}"
                     val visual = try {
                         llm.inspectImage(prompt, jpeg, model = model, conversationId = sessionId)

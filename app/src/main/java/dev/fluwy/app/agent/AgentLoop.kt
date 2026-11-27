@@ -202,7 +202,7 @@ internal suspend fun AgentRunner.loop(sessionId: String, maxStepsOverride: Int? 
         val sys = LlmMessage("system", systemPrompt(sessionId, agent, s, contextPlan, allowDeviceTools = tokenBudgetOverride == null))
         val activeHistory = s.llm.map { AccessibilityToolHistory.forActiveModel(it, transientAccessibilityOutputs) }
         var history = ctxMgr.microCompact(activeHistory, sessionId)
-        if (history.firstOrNull()?.role != "user") history = listOf(LlmMessage("user", "[O contexto anterior foi compactado no resumo da sessão. Continue de onde parou.]")) + history
+        if (history.firstOrNull()?.role != "user") history = listOf(LlmMessage("user", dev.fluwy.app.prompts.Prompts.render("loop.18", mapOf<String, Any?>("lb" to "{{")))) + history
         // Resiliência: tenta a chamada; em erro, reenvia (backoff) e só desiste após 3 falhas.
         val replyTokenLimit = tokenBudgetOverride?.let { budget ->
             val used = ((store.session(sessionId)?.let { it.tokensIn + it.tokensOut } ?: startingTokens) - startingTokens).coerceAtLeast(0)
@@ -353,7 +353,7 @@ internal suspend fun AgentRunner.loop(sessionId: String, maxStepsOverride: Int? 
             val decision = truncatedOutput.accept(reply.content)
             if (decision == LlmTruncationPolicy.Decision.CONTINUE) {
                 store.editSession(sessionId) { it.copy(llm = it.llm + LlmMessage("user",
-                    "[Sistema] A sua resposta anterior foi cortada pelo limite de saída. Continue exatamente do ponto em que parou, sem repetir o texto já escrito, e finalize a tarefa se ela estiver pronta.")) }
+                    dev.fluwy.app.prompts.Prompts.render("loop.17", mapOf<String, Any?>("lb" to "{{")))) }
                 setActivity(sessionId, Activity(Activity.Kind.THINKING, "Continuando resposta cortada"))
                 if (++steps >= maxSteps) {
                     val partial = truncatedOutput.partialText().trim()
@@ -420,7 +420,7 @@ internal suspend fun AgentRunner.loop(sessionId: String, maxStepsOverride: Int? 
                     return
                 }
                 store.editSession(sessionId) { it.copy(llm = it.llm + LlmMessage("user",
-                    "[Sistema] Você anunciou uma ação, mas não chamou nenhuma ferramenta. Uma intenção de agir (\"vou pesquisar/verificar/testar/abrir/rodar…\") só vale junto com a chamada de ferramenta correspondente, na mesma resposta. Chame a ferramenta agora (ex.: browser_navigate, shell, file_write, uic_*). Se a tarefa já terminou, entregue o resultado final sem anunciar passos; se está bloqueado, chame finish explicando o motivo.")) }
+                    dev.fluwy.app.prompts.Prompts.render("loop.16", mapOf<String, Any?>("lb" to "{{")))) }
                 if (++steps >= maxSteps) {
                     if (store.session(sessionId)?.continuous == true) { sleepAndWake(sessionId, 60, "pausa após $maxSteps passos"); steps = 0 }
                     else { store.addItemUnique(sessionId, ChatItem.Error(text = "Limite de $maxSteps passos atingido. Envie \"continue\" para seguir.")); store.editSession(sessionId) { it.copy(status = SessionStatus.WAITING_USER) }; return }
@@ -438,12 +438,12 @@ internal suspend fun AgentRunner.loop(sessionId: String, maxStepsOverride: Int? 
                     return
                 }
                 store.editSession(sessionId) { it.copy(llm = it.llm + LlmMessage("user",
-                    "[Sistema] Sua última resposta veio vazia. Entregue agora o resultado ao usuário (ou chame a ferramenta necessária).")) }
+                    dev.fluwy.app.prompts.Prompts.render("loop.15", mapOf<String, Any?>("lb" to "{{")))) }
                 continue
             }
             if (store.session(sessionId)?.continuous == true) {
                 // modo contínuo: sem ferramenta = lembra de dormir até a próxima verificação
-                store.editSession(sessionId) { it.copy(llm = it.llm + LlmMessage("user", "[Sistema] Você está em modo contínuo. Use `sleep` para aguardar a próxima verificação, ou `finish` se o usuário pediu para encerrar.")) }
+                store.editSession(sessionId) { it.copy(llm = it.llm + LlmMessage("user", dev.fluwy.app.prompts.Prompts.render("loop.14", mapOf<String, Any?>("lb" to "{{")))) }
                 if (++steps >= maxSteps) { sleepAndWake(sessionId, 5 * 60, "verificação periódica"); steps = 0 }
                 continue
             }
@@ -660,9 +660,9 @@ internal suspend fun AgentRunner.loop(sessionId: String, maxStepsOverride: Int? 
                     if (unknownToolWarned.add(sessionId + "|" + t.tool)) {
                         toolLoops.clearUnknown(t.tool)
                         val coord = coordinatedSection(sessionId) != null
-                        store.editSession(sessionId) { it.copy(llm = it.llm + LlmMessage("user", "[Sistema] A ferramenta \"${t.tool}\" não existe para você nesta conversa, então chamá-la de novo vai falhar do mesmo jeito. " +
-                            (if (coord) "Você é o coordenador: terminal, browser e edição de arquivos ficam com os agentes. Para isso, use team_delegate(agent, task) dizendo exatamente o que executar; para ler arquivos do time, use file_read/file_list."
-                             else "Use somente as ferramentas da lista que você recebeu; se precisar de uma capacidade que não está lá, carregue-a com tools_load ou explique ao usuário o que falta."))) }
+                        store.editSession(sessionId) { it.copy(llm = it.llm + LlmMessage("user", dev.fluwy.app.prompts.Prompts.render("loop.13", mapOf<String, Any?>("tool" to (t.tool), "lb" to "{{")) +
+                            (if (coord) dev.fluwy.app.prompts.Prompts.render("loop.11", mapOf<String, Any?>("lb" to "{{"))
+                             else dev.fluwy.app.prompts.Prompts.render("loop.12", mapOf<String, Any?>("lb" to "{{"))))) }
                         return@let
                     }
                     runCatching { dev.fluwy.app.diag.ErrorLog.log("agent", "Ferramenta indisponível repetida: ${t.tool} (interrompido).", sessionId, t.tool) }
@@ -721,13 +721,13 @@ internal suspend fun AgentRunner.loop(sessionId: String, maxStepsOverride: Int? 
                 }
                 store.editSession(sessionId) {
                     val head = when (trippedKind) {
-                        ToolLoopDetector.Kind.PING_PONG -> "[Sistema] Você está alternando entre as mesmas duas ações (\"$tripped\" e outra) e nada muda. "
-                        ToolLoopDetector.Kind.NO_PROGRESS -> "[Sistema] As suas últimas ${ToolLoopDetector.NO_PROGRESS_CALLS} chamadas não trouxeram nada de novo. Tentar outras variações da mesma ideia não vai mudar isso; "
-                        else -> "[Sistema] Você chamou \"$tripped\" várias vezes com os mesmos argumentos e recebeu o mesmo resultado: nada mudou. "
+                        ToolLoopDetector.Kind.PING_PONG -> dev.fluwy.app.prompts.Prompts.render("loop.10", mapOf<String, Any?>("tripped" to (tripped), "lb" to "{{"))
+                        ToolLoopDetector.Kind.NO_PROGRESS -> dev.fluwy.app.prompts.Prompts.render("loop.9", mapOf<String, Any?>("no_progress_calls" to (ToolLoopDetector.NO_PROGRESS_CALLS), "lb" to "{{"))
+                        else -> dev.fluwy.app.prompts.Prompts.render("loop.8", mapOf<String, Any?>("tripped" to (tripped), "lb" to "{{"))
                     }
                     it.copy(llm = it.llm + LlmMessage("user", head +
-                        "Se você está esperando algo acontecer (a página carregar, uma requisição chegar), espere de outro jeito (um passo diferente, outro seletor ou script, browser_read) ou mude a abordagem; " +
-                        "se a tarefa já estiver concluída ou bloqueada, chame finish explicando a situação."))
+                        dev.fluwy.app.prompts.Prompts.render("loop.6", mapOf<String, Any?>("lb" to "{{")) +
+                        dev.fluwy.app.prompts.Prompts.render("loop.7", mapOf<String, Any?>("lb" to "{{"))))
                 }
             }
         }
@@ -755,11 +755,11 @@ internal suspend fun AgentRunner.loop(sessionId: String, maxStepsOverride: Int? 
             if (silentRounds >= MemberSupervision.SILENT_ROUNDS_BEFORE_NUDGE) {
                 silentRounds = 0
                 store.editSession(sessionId) { it.copy(llm = it.llm + LlmMessage("user",
-                    "[Sistema] Você está há várias ações sem dar feedback. Antes da próxima ferramenta, escreva 1–2 frases ao coordenador: o que já fez, o que vai fazer agora e se algo está faltando ou travado.")) }
+                    dev.fluwy.app.prompts.Prompts.render("loop.5", mapOf<String, Any?>("lb" to "{{")))) }
             }
             memberCheckpoint(sessionId, steps)
             if (steps == MEMBER_SOFT_STEPS) store.editSession(sessionId) { it.copy(llm = it.llm + LlmMessage("user",
-                "[Sistema] Você já usou $MEMBER_SOFT_STEPS passos nesta tarefa delegada. Finalize agora: entregue numa resposta final o que já tem (dados reais, links e o que ficou faltando), sem começar pesquisas novas.")) }
+                dev.fluwy.app.prompts.Prompts.render("loop.4", mapOf<String, Any?>("member_soft_steps" to (MEMBER_SOFT_STEPS), "lb" to "{{")))) }
             if (steps >= MEMBER_HARD_STEPS) {
                 store.addItemUnique(sessionId, ChatItem.Error(text = "Limite da tarefa delegada ($MEMBER_HARD_STEPS passos) atingido: entreguei ao coordenador o que foi feito até aqui."))
                 store.editSession(sessionId) { it.copy(status = SessionStatus.IDLE) }
@@ -768,7 +768,7 @@ internal suspend fun AgentRunner.loop(sessionId: String, maxStepsOverride: Int? 
         }
         // Aviso de proximidade do limite: pede para priorizar a entrega antes do corte abrupto.
         if (steps == (maxSteps - 2).coerceAtLeast(1) && store.session(sessionId)?.continuous != true) {
-            store.editSession(sessionId) { it.copy(llm = it.llm + LlmMessage("user", "[Sistema] Você está perto do limite de passos. Conclua o essencial e entregue agora com finish (resumo curto + arquivos); o que não for essencial fica registrado como próximo passo.")) }
+            store.editSession(sessionId) { it.copy(llm = it.llm + LlmMessage("user", dev.fluwy.app.prompts.Prompts.render("loop.3", mapOf<String, Any?>("lb" to "{{")))) }
         }
         if (steps >= maxSteps) {
             if (store.session(sessionId)?.continuous == true) { sleepAndWake(sessionId, 60, "pausa automática após $maxSteps passos"); steps = 0; continue }
@@ -820,7 +820,7 @@ internal suspend fun AgentRunner.checkExpiredTradesOnce(sessionId: String, trade
         ))
         store.editSession(sessionId) {
             it.copy(llm = it.llm + LlmMessage("user",
-                "[Sistema] Depois de aguardar o vencimento da opção $id, fiz uma única verificação do evento de resultado: $safe. Não repita a consulta. Se o evento ainda não chegou, explique que o protocolo desta sessão não confirma consultas históricas e aguarde uma atualização posterior."))
+                dev.fluwy.app.prompts.Prompts.render("loop.2", mapOf<String, Any?>("valor" to (id), "safe" to (safe), "lb" to "{{"))))
         }
     }
 }
@@ -834,7 +834,7 @@ internal fun AgentRunner.wakeUp(sessionId: String) {
     val now = SimpleDateFormat("dd/MM HH:mm:ss", Locale.getDefault()).format(Date())
     store.editSession(sessionId) {
         it.copy(status = SessionStatus.RUNNING, wakeAt = null,
-            llm = it.llm + LlmMessage("user", "[Sistema] $now — hora de continuar (motivo do sleep: $r). Faça a próxima verificação ou etapa."))
+            llm = it.llm + LlmMessage("user", dev.fluwy.app.prompts.Prompts.render("loop.1", mapOf<String, Any?>("now" to (now), "valor" to (r), "lb" to "{{"))))
     }
 }
 

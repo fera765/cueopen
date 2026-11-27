@@ -250,7 +250,7 @@ internal suspend fun AgentRunner.runBuildTeam(sessionId: String, argsJson: Strin
                         myBudget += budget / 2
                         BuildSquad.editWorker(squadId, n) { it.copy(doing = "continuando (orquestrador, rodada ${rounds + 1})") }
                         store.editSession(w.sessionId) { it.copy(status = SessionStatus.RUNNING, llm = it.llm + LlmMessage("user",
-                            "[Orquestrador] Você chegou ao teto desta rodada; o teto foi ampliado. Continue de onde parou (não refaça o que já está nos arquivos) e FINALIZE: termine o que falta da SUA tarefa e responda com o resumo (o que fez e quais arquivos).")) }
+                            dev.fluwy.app.prompts.Prompts.render("build_team.1", mapOf<String, Any?>("lb" to "{{")))) }
                         loop(w.sessionId, maxStepsOverride = 60, tokenBudgetOverride = myBudget)
                     }
                     val fin = store.session(w.sessionId)

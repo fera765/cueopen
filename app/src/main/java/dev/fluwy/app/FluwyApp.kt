@@ -101,6 +101,7 @@ class FluwyApp : Application() {
         if (dev.fluwy.app.backup.RestartActivity.isRestartProcess(this)) return
         instance = this
         LegacyMigration.run(this)
+        dev.fluwy.app.prompts.Prompts.init(filesDir)
         // Backup importado: troca o perfil do browser antes de qualquer WebView existir.
         dev.fluwy.app.backup.DataTransfer.applyStagedBrowserData(this)
         dev.fluwy.app.diag.ErrorLog.init(this)

@@ -73,6 +73,6 @@ object BrowserRedirect {
     )
 
     const val PROMPT_LINE =
-        "Navegador: o navegador do app (browser_*) é a única fonte de verdade. Nunca instale nem rode Chrome, Chromium, Firefox, " +
-            "puppeteer, playwright ou selenium no Linux do app; para navegar, testar uma página local (http://127.0.0.1:PORTA) ou tirar print, use browser_*."
+        dev.fluwy.app.prompts.Prompts.render("browser_redirect.1", mapOf<String, Any?>("lb" to "{{")) +
+            dev.fluwy.app.prompts.Prompts.render("browser_redirect.2", mapOf<String, Any?>("lb" to "{{"))
 }

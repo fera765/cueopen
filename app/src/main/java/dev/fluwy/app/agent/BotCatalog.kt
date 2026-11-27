@@ -62,27 +62,27 @@ object BotCatalog {
     fun avatarAt(i: Int): Pair<String, Long> = FACES[i % FACES.size] to COLORS[(i / FACES.size + i % FACES.size) % COLORS.size]
 
     private fun categoryRules(category: String): List<String> = when (category) {
-        "coding-shipping" -> listOf("Para código, use o terminal (shell) e o browser para reproduzir e testar; registre os passos exatos e o que viu.")
-        "content-publishing" -> listOf("Escreva no tom do usuário (peça um exemplo se não tiver) e entregue o texto pronto para revisar; nunca publique sozinho.")
-        "customer-sales" -> listOf("Use o CRM, e-mail e agenda conectados quando existirem; rascunhe mensagens para revisão e nunca envie em massa.")
-        "finance-ops" -> listOf("Nunca faça pagamento, compra ou alteração de orçamento sem a aprovação explícita do usuário; mostre valores e fontes.")
-        "personal-admin" -> listOf("Confirme com o usuário antes de reservar, comprar, se candidatar ou cancelar qualquer coisa.")
-        "research-briefings" -> listOf("Cruze pelo menos duas fontes, cite os links e destaque o que mudou desde a última vez.")
-        "teams-handoffs", "inbox-calendar" -> listOf("Use e-mail, agenda e mensagens conectados; organize por prioridade e deixe todo envio para o usuário aprovar.")
+        "coding-shipping" -> listOf(dev.fluwy.app.prompts.Prompts.render("bots.1", mapOf<String, Any?>("lb" to "{{")))
+        "content-publishing" -> listOf(dev.fluwy.app.prompts.Prompts.render("bots.2", mapOf<String, Any?>("lb" to "{{")))
+        "customer-sales" -> listOf(dev.fluwy.app.prompts.Prompts.render("bots.3", mapOf<String, Any?>("lb" to "{{")))
+        "finance-ops" -> listOf(dev.fluwy.app.prompts.Prompts.render("bots.4", mapOf<String, Any?>("lb" to "{{")))
+        "personal-admin" -> listOf(dev.fluwy.app.prompts.Prompts.render("bots.5", mapOf<String, Any?>("lb" to "{{")))
+        "research-briefings" -> listOf(dev.fluwy.app.prompts.Prompts.render("bots.6", mapOf<String, Any?>("lb" to "{{")))
+        "teams-handoffs", "inbox-calendar" -> listOf(dev.fluwy.app.prompts.Prompts.render("bots.7", mapOf<String, Any?>("lb" to "{{")))
         else -> emptyList()
     }
 
     fun instructions(b: Bot): String = buildString {
-        appendLine("Você é o agente \"${b.name}\" (${b.categoryLabel}), um agente pronto do catálogo de agentes bots.")
+        appendLine(dev.fluwy.app.prompts.Prompts.render("bots.8", mapOf<String, Any?>("name" to (b.name), "category_label" to (b.categoryLabel), "lb" to "{{")))
         appendLine()
         appendLine("Missão: ${b.summary}")
         appendLine()
         appendLine("Como trabalhar:")
-        appendLine("- Quando a tarefa envolver um app (e-mail, agenda, CRM, planilhas, Drive, Slack…), use os conectores: conectores_listar, conector_acoes e conector_executar. Se o app não estiver conectado, use o browser ou peça ao usuário para conectá-lo em Apps › Conectores.")
+        appendLine(dev.fluwy.app.prompts.Prompts.render("bots.9", mapOf<String, Any?>("lb" to "{{")))
         categoryRules(b.category).forEach { appendLine("- $it") }
-        appendLine("- Antes de enviar, publicar, comprar, agendar ou apagar algo, mostre o rascunho e espere a confirmação do usuário.")
-        appendLine("- Nunca invente dados, métricas, nomes ou fontes; diga claramente o que não encontrou.")
-        append("- Entregue o resultado curto e organizado, com o mais importante primeiro.")
+        appendLine(dev.fluwy.app.prompts.Prompts.render("bots.10", mapOf<String, Any?>("lb" to "{{")))
+        appendLine(dev.fluwy.app.prompts.Prompts.render("bots.11", mapOf<String, Any?>("lb" to "{{")))
+        append(dev.fluwy.app.prompts.Prompts.render("bots.12", mapOf<String, Any?>("lb" to "{{")))
     }
 
     /** Rascunho do agente (ainda não salvo): a tela de edição só grava ao tocar em Salvar. */

@@ -288,33 +288,33 @@ object WorkflowEngine {
             val st = app.store.state.value
             val sess = st.sessions.firstOrNull { it.title.equals(sessionTitle, true) } ?: st.sessions.firstOrNull { it.title.contains(sessionTitle, true) }
                 ?: return NodeResult(error = "Conversa \"$sessionTitle\" não encontrada no app.")
-            if (run.trigger == "test") reply = "(teste) a mensagem iria para a conversa \"${sess.title}\" e a resposta dela voltaria aqui."
+            if (run.trigger == "test") reply = dev.fluwy.app.prompts.Prompts.render("workflow.16", mapOf<String, Any?>("sess_title" to (sess.title), "lb" to "{{"))
             else {
                 val before = app.store.session(sess.id)?.items?.size ?: 0
-                app.agent.sendOrQueue(sess.id, "[WhatsApp · ${who.ifBlank { chat }}] $text\n(Responda de forma curta: sua resposta será enviada de volta no WhatsApp.)")
+                app.agent.sendOrQueue(sess.id, dev.fluwy.app.prompts.Prompts.render("workflow.15", mapOf<String, Any?>("chat" to (who.ifBlank { chat }), "text" to (text), "lb" to "{{")))
                 val deadline = System.currentTimeMillis() + 5 * 60_000L
                 kotlinx.coroutines.delay(1500)
                 while (System.currentTimeMillis() < deadline && app.store.session(sess.id)?.status == dev.fluwy.app.data.SessionStatus.RUNNING) kotlinx.coroutines.delay(2000)
                 reply = app.store.session(sess.id)?.items?.drop(before)?.filterIsInstance<dev.fluwy.app.data.ChatItem.Assistant>()?.lastOrNull()?.text?.trim().orEmpty()
-                if (reply.isBlank()) return NodeResult(error = "A conversa \"${sess.title}\" não respondeu em 5 minutos.")
+                if (reply.isBlank()) return NodeResult(error = dev.fluwy.app.prompts.Prompts.render("workflow.14", mapOf<String, Any?>("sess_title" to (sess.title), "lb" to "{{")))
             }
         } else {
             val goal = when (r("objective")) {
-                "vendas" -> "Objetivo: converter em venda. Entenda a necessidade, apresente a opção mais adequada da base, trate objeções com fatos da base e conduza ao próximo passo (proposta, link, contratação). Sem pressão agressiva."
-                "recuperar_pagamento" -> "Objetivo: recuperar pagamento pendente com empatia. Lembre o valor/vencimento se estiver na base, ofereça as formas de pagamento/negociação previstas e confirme o próximo passo."
-                "recuperar_cliente" -> "Objetivo: reconquistar cliente que se afastou. Pergunte o motivo, valorize o relacionamento e ofereça o que a base permitir (condição, benefício)."
-                "suporte" -> "Objetivo: resolver o problema do cliente passo a passo com base nas instruções da base."
-                else -> "Objetivo: atender bem e responder as dúvidas."
+                "vendas" -> dev.fluwy.app.prompts.Prompts.render("workflow.13", mapOf<String, Any?>("lb" to "{{"))
+                "recuperar_pagamento" -> dev.fluwy.app.prompts.Prompts.render("workflow.12", mapOf<String, Any?>("lb" to "{{"))
+                "recuperar_cliente" -> dev.fluwy.app.prompts.Prompts.render("workflow.11", mapOf<String, Any?>("lb" to "{{"))
+                "suporte" -> dev.fluwy.app.prompts.Prompts.render("workflow.10", mapOf<String, Any?>("lb" to "{{"))
+                else -> dev.fluwy.app.prompts.Prompts.render("workflow.9", mapOf<String, Any?>("lb" to "{{"))
             }
             val prompt = buildString {
-                appendLine(r("persona").ifBlank { "Você é um atendente cordial e objetivo." })
+                appendLine(r("persona").ifBlank { dev.fluwy.app.prompts.Prompts.render("workflow.8", mapOf<String, Any?>("lb" to "{{")) })
                 appendLine(goal)
-                appendLine("Regras: responda em português do Brasil, como mensagem de WhatsApp (curta, no máximo 3 frases, sem markdown). Use APENAS informações da base de conhecimento abaixo; se não souber, diga que vai confirmar e não invente preços, prazos ou coberturas. Nunca peça senha nem dados de cartão.")
+                appendLine(dev.fluwy.app.prompts.Prompts.render("workflow.7", mapOf<String, Any?>("lb" to "{{")))
                 val kb = r("knowledge").trim()
                 if (kb.isNotBlank()) { appendLine("\n### Base de conhecimento\n" + kb.take(30_000)) }
                 if (history.isNotBlank()) appendLine("\n### Conversa até agora\n$history")
                 appendLine("\n### Nova mensagem de ${who.ifBlank { "cliente" }}\n$text")
-                appendLine("\nResponda só com o texto da mensagem a enviar.")
+                appendLine(dev.fluwy.app.prompts.Prompts.render("workflow.6", mapOf<String, Any?>("lb" to "{{")))
             }
             reply = ""
             for (attempt in 0..1) {
@@ -327,7 +327,7 @@ object WorkflowEngine {
         reply = reply.removePrefix("Atendente:").trim().take(3500)
         var sent = false
         if (r("reply") != "draft") {
-            val api = hub.find(app, "whatsapp_send_text") ?: return NodeResult(error = "API whatsapp_send_text não está no hub.")
+            val api = hub.find(app, "whatsapp_send_text") ?: return NodeResult(error = dev.fluwy.app.prompts.Prompts.render("workflow.5", mapOf<String, Any?>("lb" to "{{")))
             // Marca invisível no fim: o webhook ignora as próprias respostas (evita o bot responder a si mesmo).
             val args = buildJsonObject {
                 put("to", chat); put("text", reply + dev.fluwy.app.browser.WhatsAppHub.BOT_MARK); put("confirmed", "true")
@@ -543,12 +543,12 @@ object WorkflowEngine {
                 val criteria = r("criteria").trim()
                 if (criteria.isBlank()) return NodeResult(error = "Defina o critério da decisão.")
                 val item = rh("input", false).ifBlank { prev }.take(14_000)
-                if (item.isBlank()) return NodeResult(error = "Nada para julgar: o item chegou vazio (confira o campo \"Item a julgar\").")
-                val ask = "Você é um classificador rigoroso. Decida se o ITEM atende ao CRITÉRIO.\n\nCRITÉRIO:\n$criteria\n\nITEM:\n$item\n\n" +
-                    "Responda SOMENTE com JSON, sem texto fora dele: {\"decisao\": true ou false, \"motivo\": \"frase curta em português\", \"categoria\": \"uma palavra\", \"confianca\": 0 a 1}"
+                if (item.isBlank()) return NodeResult(error = dev.fluwy.app.prompts.Prompts.render("workflow.3", mapOf<String, Any?>("lb" to "{{")))
+                val ask = dev.fluwy.app.prompts.Prompts.render("workflow.2", mapOf<String, Any?>("criteria" to (criteria), "item" to (item), "lb" to "{{")) +
+                    dev.fluwy.app.prompts.Prompts.render("workflow.1", mapOf<String, Any?>("lb" to "{{"))
                 val raw = app.llm.quick(ask, maxTokens = 300, conversationId = "workflow-${w.id}-${node.id}").trim()
                 val obj = Regex("\\{[\\s\\S]*\\}").find(raw)?.value?.let { runCatching { Json.parseToJsonElement(it) as JsonObject }.getOrNull() }
-                    ?: return NodeResult(error = "A IA não devolveu uma decisão válida: ${raw.take(200)}")
+                    ?: return NodeResult(error = dev.fluwy.app.prompts.Prompts.render("workflow.4", mapOf<String, Any?>("raw" to (raw.take(200)), "lb" to "{{")))
                 val d = obj["decisao"] ?: obj["decision"]
                 val yes = (d as? kotlinx.serialization.json.JsonPrimitive)?.content?.trim()?.lowercase() in setOf("true", "sim", "yes", "1")
                 NodeResult(buildJsonObject {

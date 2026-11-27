@@ -394,8 +394,8 @@ internal fun AgentRunner.flagRedundantReads(sessionId: String, file: String, n: 
     if (sec.sessionId == sessionId || n % 3 != 0) return
     val who = store.agent(s.agentId)?.name ?: "Um agente"
     store.editSession(sec.sessionId) { it.copy(llm = it.llm + LlmMessage("user",
-        "[Sistema · orquestração] $who está relendo $file pela ${n}ª vez sem informação nova. Intervenha: diga a ele o que entregar com o que já tem (team_message) ou encerre a tarefa (team_stop).")) }
-    runCatching { dev.fluwy.app.diag.ActivityLog.write("orq", "$who relendo $file ($n vezes) — coordenador avisado", sessionId) }
+        dev.fluwy.app.prompts.Prompts.render("aux.2", mapOf<String, Any?>("who" to (who), "file" to (file), "valor" to (n), "lb" to "{{")))) }
+    runCatching { dev.fluwy.app.diag.ActivityLog.write("orq", dev.fluwy.app.prompts.Prompts.render("aux.1", mapOf<String, Any?>("who" to (who), "file" to (file), "valor" to (n), "lb" to "{{")), sessionId) }
 }
 
 /** Ferramentas do criador de user scripts (fora do runTool: o método está no limite de tamanho da JVM). */

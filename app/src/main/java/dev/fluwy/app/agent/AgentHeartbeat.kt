@@ -124,8 +124,8 @@ internal fun AgentRunner.startHeartbeatCycle(agent: AgentProfile): Job {
     store.editSession(sid) {
         it.copy(status = SessionStatus.RUNNING, continuous = false,
             llm = it.llm + LlmMessage("user", if (cycleSection != null)
-                "[Heartbeat $stamp] Novo ciclo agendado desta seção. Execute o objetivo de novo agora, desde o início: monte um novo team_plan para este ciclo e ponha o time para trabalhar, aproveitando o que já existe no workspace e trazendo apenas o que é novo. Não espere o usuário. Ao terminar o ciclo inteiro, chame section_done com o relatório do ciclo."
-                else "[Heartbeat $stamp] Confira a sua missão e faça agora o que for necessário. Se não houver nada a fazer, responda apenas NO_REPLY."))
+                dev.fluwy.app.prompts.Prompts.render("heartbeat.6", mapOf<String, Any?>("stamp" to (stamp), "lb" to "{{"))
+                else dev.fluwy.app.prompts.Prompts.render("heartbeat.5", mapOf<String, Any?>("stamp" to (stamp), "lb" to "{{"))))
     }
     dev.fluwy.app.sandbox.SandboxService.start(ctx, "${a.name}: heartbeat")
     val job = scope.launch {
@@ -144,9 +144,9 @@ internal fun AgentRunner.startHeartbeatCycle(agent: AgentProfile): Job {
                 } catch (cancel: kotlinx.coroutines.CancellationException) {
                     throw cancel
                 } catch (_: Throwable) { }
-                finalizeRunningSteps(sid, "Ferramenta interrompida pelo watchdog do heartbeat.")
-                runCatching { dev.fluwy.app.diag.ErrorLog.log("heartbeat", "Ciclo excedeu 10 min e foi encerrado (watchdog).", sid, "heartbeat") }
-                store.addItem(sid, ChatItem.Error(text = "Ciclo excedeu o tempo máximo (10 min) e foi encerrado para liberar o próximo agendamento."))
+                finalizeRunningSteps(sid, dev.fluwy.app.prompts.Prompts.render("heartbeat.1", mapOf<String, Any?>("lb" to "{{")))
+                runCatching { dev.fluwy.app.diag.ErrorLog.log("heartbeat", dev.fluwy.app.prompts.Prompts.render("heartbeat.2", mapOf<String, Any?>("lb" to "{{")), sid, "heartbeat") }
+                store.addItem(sid, ChatItem.Error(text = dev.fluwy.app.prompts.Prompts.render("heartbeat.3", mapOf<String, Any?>("lb" to "{{"))))
             }
         } catch (c: kotlinx.coroutines.CancellationException) {
             cancelledByCaller = true
@@ -195,7 +195,7 @@ internal fun AgentRunner.startHeartbeatCycle(agent: AgentProfile): Job {
                     store.upsertAgent(updated)
                     if (fatigued) {
                         dev.fluwy.app.scheduler.Heartbeat.cancel(ctx, cur.id)
-                        val msg = "Autonomia desligada: ${dev.fluwy.app.device.AgentAutonomyPolicy.MAX_CONSECUTIVE_FAILURES} ciclos seguidos falharam. Veja os erros acima, corrija e religue a autonomia no Agent."
+                        val msg = dev.fluwy.app.prompts.Prompts.render("heartbeat.4", mapOf<String, Any?>("max_consecutive_failures" to (dev.fluwy.app.device.AgentAutonomyPolicy.MAX_CONSECUTIVE_FAILURES), "lb" to "{{"))
                         runCatching { dev.fluwy.app.diag.ErrorLog.log("heartbeat", msg, sid, "heartbeat") }
                         store.addItem(sid, ChatItem.Error(text = msg))
                         notifyAgent(updated, msg)

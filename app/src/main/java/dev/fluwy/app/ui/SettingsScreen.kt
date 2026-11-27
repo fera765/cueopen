@@ -77,6 +77,7 @@ fun SettingsScreen(nav: NavController) {
             Slider(s.contextBudget.toFloat(), { v -> app.store.updateSettings { it.copy(contextBudget = (v / 1000).toInt() * 1000) } }, valueRange = 8000f..120000f,
                 colors = SliderDefaults.colors(thumbColor = c.ink, activeTrackColor = c.ink))
             SettingsLink(Icons.Rounded.Psychology, "Memória de longo prazo", "${settingsSnapshot.second} itens") { nav.navigate("memory") }
+            SettingsLink(Icons.Rounded.EditNote, "Prompts", "Ver e editar os textos enviados aos modelos") { nav.navigate("prompts") }
             SectionLabel("Carteira")
             SettingsLink(Icons.Rounded.AccountBalanceWallet, "Carteira Solana", "Criar ou restaurar carteira local e consultar saldo") { nav.navigate("wallet") }
             // Chave Demo gratuita e opcional da CoinGecko para o mercado (evita rate limit). Vazio = keyless.
