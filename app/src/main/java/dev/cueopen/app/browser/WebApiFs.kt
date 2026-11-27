@@ -14,28 +14,25 @@ import java.io.File
  */
 object WebApiFs {
     private const val MAX_BYTES = 30L * 1024 * 1024
-    @Volatile private var token: String? = null
-    @Volatile private var root: File? = null
-    @Volatile private var onEmit: ((String) -> Unit)? = null
+    private class Call(val root: File, val emit: ((String) -> Unit)?)
+    private val calls = java.util.concurrent.ConcurrentHashMap<String, Call>()
 
     fun begin(dir: File, emit: ((String) -> Unit)?): String {
         dir.mkdirs()
-        root = dir.canonicalFile; onEmit = emit
-        return java.util.UUID.randomUUID().toString().also { token = it }
+        return java.util.UUID.randomUUID().toString().also { calls[it] = Call(dir.canonicalFile, emit) }
     }
-    fun end() { token = null; root = null; onEmit = null }
+    fun end(tok: String) { calls.remove(tok) }
 
     private fun err(m: String) = buildJsonObject { put("ok", false); put("error", m) }.toString()
     private fun resolve(tok: String?, path: String): File {
-        val r = root
-        if (tok == null || tok != token || r == null) throw SecurityException("token inválido (só durante a chamada da Web API)")
+        val r = tok?.let { calls[it]?.root } ?: throw SecurityException("token inválido (só durante a chamada da Web API)")
         val rel = path.trim().removePrefix("/root/workspace").trimStart('/').replace('\\', '/')
         val f = File(r, rel).canonicalFile
         if (f.path != r.path && !f.path.startsWith(r.path + File.separator)) throw SecurityException("caminho fora da área de trabalho: $path")
         if (f.relativeTo(r).path.split(File.separatorChar).any { it == ".cue" }) throw SecurityException("pasta interna protegida")
         return f
     }
-    private fun rel(f: File) = f.relativeTo(root!!).path
+    private fun rel(tok: String?, f: File) = f.relativeTo(calls[tok]!!.root).path
 
     private inline fun guard(block: () -> String): String = try { block() } catch (e: Throwable) { err(e.message ?: e.toString()) }
 
@@ -46,7 +43,7 @@ object WebApiFs {
         if (bytes.size + (if (append && f.exists()) f.length() else 0) > MAX_BYTES) return@guard err("arquivo maior que 30 MB")
         f.parentFile?.mkdirs()
         if (append) f.appendBytes(bytes) else f.writeBytes(bytes)
-        buildJsonObject { put("ok", true); put("path", rel(f)); put("size", f.length()) }.toString()
+        buildJsonObject { put("ok", true); put("path", rel(tok, f)); put("size", f.length()) }.toString()
     }
 
     @JavascriptInterface fun read(tok: String?, path: String, mode: String): String = guard {
@@ -67,7 +64,7 @@ object WebApiFs {
         val d = resolve(tok, path)
         if (!d.isDirectory) return@guard err("pasta não encontrada: ${path.ifBlank { "." }}")
         val files = d.listFiles().orEmpty().filter { it.name != ".cue" }.sortedBy { it.name }.take(500).map { f ->
-            buildJsonObject { put("name", f.name); put("path", rel(f)); put("dir", f.isDirectory); put("size", if (f.isFile) f.length() else 0); put("modified", f.lastModified()) }
+            buildJsonObject { put("name", f.name); put("path", rel(tok, f)); put("dir", f.isDirectory); put("size", if (f.isFile) f.length() else 0); put("modified", f.lastModified()) }
         }
         buildJsonObject { put("ok", true); put("files", JsonArray(files)) }.toString()
     }
@@ -78,12 +75,12 @@ object WebApiFs {
 
     @JavascriptInterface fun mkdir(tok: String?, path: String): String = guard {
         val d = resolve(tok, path); d.mkdirs()
-        buildJsonObject { put("ok", d.isDirectory); put("path", rel(d)) }.toString()
+        buildJsonObject { put("ok", d.isDirectory); put("path", rel(tok, d)) }.toString()
     }
 
     @JavascriptInterface fun emit(tok: String?, part: String): String = guard {
-        if (tok == null || tok != token) return@guard err("token inválido")
-        onEmit?.invoke(part)
+        val c = tok?.let { calls[it] } ?: return@guard err("token inválido")
+        c.emit?.invoke(part)
         buildJsonObject { put("ok", true) }.toString()
     }
 

@@ -7,7 +7,7 @@ const apis = JSON.parse(fs.readFileSync(`${root}/builtins.json`, 'utf8'));
 const helpers = fs.readFileSync(`${root}/helpers.js`, 'utf8');
 const only = process.argv.slice(2);
 const Q = { wikipedia_search: 'inteligência artificial', github_search: 'kotlin android', google_search: 'notebook gamer', bing_news: 'tecnologia', google_news: 'tecnologia' };
-const ARGS = { youtube_transcript: { url: 'https://www.youtube.com/watch?v=arj7oStGLkU', query: '' }, g1_noticias: { query: '' } };
+const ARGS = { youtube_transcript: { url: 'https://www.youtube.com/watch?v=arj7oStGLkU', query: '' } };
 const browser = await chromium.launch();
 const mobile = await browser.newContext({ ...devices['Pixel 7'], locale: 'pt-BR', userAgent: 'Mozilla/5.0 (Linux; Android 12; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36' });
 const desktop = await browser.newContext({ locale: 'pt-BR', viewport: { width: 1366, height: 900 }, userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36' });

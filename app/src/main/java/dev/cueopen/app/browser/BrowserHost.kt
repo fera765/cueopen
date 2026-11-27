@@ -443,7 +443,7 @@ class BrowserHost(private val appCtx: Context, private val sessionId: String = "
         // Nunca "escondido" para o Chromium: a página continua viva com o app em segundo plano.
         val v = AgentWebView(ctx)
         // WebView das Web APIs: ponte de arquivos/stream (só responde com o token da chamada em andamento).
-        if (sessionId == "__webapi__") runCatching { v.addJavascriptInterface(WebApiFs, "__fluwyFs") }
+        if (sessionId.startsWith("__webapi")) runCatching { v.addJavascriptInterface(WebApiFs, "__fluwyFs") }
         runCatching { v.resumeTimers() }
         // Perfil persistente de contas. Sem suporte a perfis, o perfil padrão do WebView já é único e
         // persistente — serve igual, então a rede nunca é bloqueada por isso.
@@ -494,7 +494,7 @@ class BrowserHost(private val appCtx: Context, private val sessionId: String = "
                 .replace(" Version/4.0", "")
                 .replace(Regex("; Android [^;]+; [^;]+ Build/[^;)]+"), "; Android 12")
             cacheMode = WebSettings.LOAD_DEFAULT
-            mediaPlaybackRequiresUserGesture = sessionId != "__webapi__" // páginas das Web APIs (ex.: WhatsApp) nunca tocam som
+            mediaPlaybackRequiresUserGesture = !sessionId.startsWith("__webapi") // páginas das Web APIs (ex.: WhatsApp) nunca tocam som
             setGeolocationEnabled(true)  // o site só recebe a localização se o usuário permitir (BrowserPermissions)
             setSupportMultipleWindows(true)
             if (android.os.Build.VERSION.SDK_INT >= 26) safeBrowsingEnabled = false

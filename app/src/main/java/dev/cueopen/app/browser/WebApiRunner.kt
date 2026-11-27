@@ -26,27 +26,37 @@ import kotlinx.serialization.json.put
  */
 object WebApiRunner {
     const val KEY = "__webapi__"
+    /** WhatsApp Web tem um WebView só dele: outras APIs (duck.ai, YouTube…) não o tiram da página (antes recarregava 20–50 s a cada minuto). */
+    const val WA_KEY = "__webapi_wa__"
     private val lock = Mutex()
+    private val waLock = Mutex()
+    private fun keyFor(url: String) = if (url.contains("web.whatsapp.com")) WA_KEY else KEY
+    private fun lockFor(key: String) = if (key == WA_KEY) waLock else lock
     private val json = Json { ignoreUnknownKeys = true }
     @Volatile private var helpersJs: String? = null
     private fun helpers(ctx: Context): String = helpersJs ?: ctx.assets.open("webapi/helpers.js").bufferedReader().readText().also { helpersJs = it }
-    private fun host(): BrowserHost = CueApp.instance.browserFor(KEY)
+    private fun host(key: String = KEY): BrowserHost = CueApp.instance.browserFor(key)
 
     /** Acesso exclusivo à página das APIs (ex.: webhook do WhatsApp lendo a fila de mensagens) sem disputar com uma chamada. */
-    suspend fun <T> withPage(block: suspend (BrowserHost, String) -> T): T = lock.withLock { block(host(), helpers(CueApp.instance)) }
+    suspend fun <T> withPage(block: suspend (BrowserHost, String) -> T): T = waLock.withLock { block(host(WA_KEY), helpers(CueApp.instance)) }
 
     /** Executa a API. Devolve o JSON final (texto) ou {"ok":false,"error":…}. */
-    suspend fun run(ctx: Context, a: WebApi, args: JsonObject, timeoutMs0: Long = 45_000, workspace: java.io.File? = null, onChunk: ((String) -> Unit)? = null): String = lock.withLock {
-        // Arquivos (api.saveFile…) e stream (api.emit) valem só durante esta chamada, com token de uso único.
-        val fsTok = WebApiFs.begin(workspace ?: java.io.File(ctx.filesDir, "webapi-files"), onChunk)
-        try { runLocked(ctx, a, args, timeoutMs0, fsTok) } finally { WebApiFs.end() }
+    suspend fun run(ctx: Context, a: WebApi, args: JsonObject, timeoutMs0: Long = 45_000, workspace: java.io.File? = null, onChunk: ((String) -> Unit)? = null): String {
+        val key = keyFor(a.urlTemplate)
+        return lockFor(key).withLock {
+            // Arquivos (api.saveFile…) e stream (api.emit): na área de trabalho do chat que chamou, com token de uso único.
+            val fsTok = WebApiFs.begin(workspace ?: defaultWorkspace(), onChunk)
+            try { runLocked(ctx, a, args, timeoutMs0, fsTok, host(key)) } finally { WebApiFs.end(fsTok) }
+        }
     }
 
-    private suspend fun runLocked(ctx: Context, a: WebApi, args: JsonObject, timeoutMs0: Long, fsTok: String): String {
+    /** Sem chat (fluxo/endereço local): área de trabalho fixa do Hub, que também tem terminal e arquivos no app. */
+    fun defaultWorkspace(): java.io.File = CueApp.instance.sandbox.workspaceFor("api-hub")
+
+    private suspend fun runLocked(ctx: Context, a: WebApi, args: JsonObject, timeoutMs0: Long, fsTok: String, h: BrowserHost): String {
         // Com biblioteca injetada (WA-JS) a 1ª carga do WhatsApp Web pode levar ~30 s: mais folga.
         val timeoutMs = if (a.inject.isNotEmpty()) maxOf(timeoutMs0, 120_000) else timeoutMs0
         val started = System.currentTimeMillis()
-        val h = host()
         val helpers = helpers(ctx)
         val full = JsonObject(a.params.filter { it.default.isNotBlank() && it.name !in args }.associate { p ->
             p.name to (p.default.toLongOrNull()?.let { JsonPrimitive(it) } ?: JsonPrimitive(p.default))

@@ -155,6 +155,7 @@ object WhatsAppHub {
         for (el in arr) dispatch(ctx, c, el as? JsonObject ?: continue)
     }
 
+    private val NOISE = setOf("e2e_notification", "gp2", "notification_template", "notification", "ciphertext", "protocol", "revoked", "call_log", "broadcast_notification", "pinned_message", "debug")
     private fun s(o: JsonObject, k: String) = o[k]?.jsonPrimitive?.contentOrNull.orEmpty()
 
     /** Processa uma mensagem recebida (também usado pelo teste do webhook na tela). */
@@ -162,11 +163,12 @@ object WhatsAppHub {
         val fromMe = s(m0, "from_me") == "true"
         if (fromMe && !c.includeFromMe) return
         val chat = s(m0, "chat"); val name = s(m0, "chat_name").ifBlank { s(m0, "sender_name") }
+        // Ruído do protocolo: status (stories), avisos de criptografia/grupo e mensagens ainda não decifradas.
+        if (chat == "status@broadcast" || chat.isBlank() || s(m0, "type") in NOISE) return
         if (!allowed(c, chat, name)) return
         val m = JsonObject(m0 + mapOf("event" to JsonPrimitive("whatsapp.message"), "webhook" to JsonPrimitive("http://127.0.0.1:${WaLocalServer.port}/whatsapp/" + c.token),
             "received_at" to JsonPrimitive(java.time.Instant.now().toString())))
         _recent.value = (listOf(m) + _recent.value).take(30)
-        dev.cueopen.app.diag.ActivityLog.webApi("whatsapp_webhook", true, 0, chat, "mensagem ${s(m, "type")} de ${name.ifBlank { chat }}")
         WaLocalServer.publish(m)
         fireFlows(m)
     }

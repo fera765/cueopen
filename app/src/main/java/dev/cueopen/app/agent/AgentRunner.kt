@@ -3254,7 +3254,7 @@ class AgentRunner(
             if (rel.any { it.slug.startsWith("whatsapp_") }) {
                 appendLine("WhatsApp: 'to' aceita número (com ou sem DDI 55), id (…@c.us/@g.us/@lid) ou nome da conversa. Para arquivos use file_path (arquivo da área de trabalho) ou file (data URL/https).")
                 appendLine("Envios/alterações só quando o usuário pediu explicitamente (destinatário e conteúdo) → confirmed=true. Se faltar a conversa, allow_new=true apenas se o usuário confirmou que é um contato novo. Nunca envie para vários contatos em sequência.")
-                appendLine("Contatos bloqueados nas configurações do app recusam a ação: não tente contornar. Mídia recebida: whatsapp_download_media salva em downloads/.")
+                appendLine("Contatos bloqueados nas configurações do app recusam a ação: não tente contornar. Mídia recebida: whatsapp_download_media salva o arquivo em webapi_files/ (área de trabalho do chat). Qualquer binário que uma API devolver (imagem, áudio, PDF em base64) é salvo em webapi_files/ e o JSON traz só o caminho.")
             }
         }
     }.getOrDefault("")
@@ -3299,32 +3299,69 @@ class AgentRunner(
         val r = if (chunks.isEmpty()) r0 else runCatching {
             JsonObject(Json.parseToJsonElement(r0).jsonObject + ("stream" to kotlinx.serialization.json.JsonArray(chunks.map { c -> runCatching { Json.parseToJsonElement(c) }.getOrElse { JsonPrimitive(c) } }))).toString()
         }.getOrDefault(r0)
-        if (!r.contains("\"data_url\"")) return r
-        // Mídia baixada: grava na área de trabalho e devolve só o caminho (base64 nunca vai para o modelo).
+        return materializeBinary(sessionId, api.slug, r, args["save_as"]?.jsonPrimitive?.contentOrNull)
+    }
+
+    /**
+     * Binário no JSON de uma Web API (data URL ou base64 longo — ex.: image_b64 do duck_ai_image) vira ARQUIVO na área
+     * de trabalho do chat (terminal e gerenciador de arquivos enxergam) e no JSON fica só o caminho. Antes o base64
+     * passava de 40 KB, era cortado e o agente gastava passos tentando remontar uma imagem corrompida.
+     */
+    private fun materializeBinary(sessionId: String, slug: String, r: String, saveAs: String? = null): String {
+        if (r.length < 3000) return r
         return runCatching {
-            val root = Json.parseToJsonElement(r).jsonObject
+            val root = Json.parseToJsonElement(r)
+            val dir = File(workspace(sessionId), "webapi_files").apply { mkdirs() }
+            var n = 0
+            val b64re = Regex("^[A-Za-z0-9+/=\\r\\n_-]{2000,}$")
+            fun ext(mime: String, bytes: ByteArray): String = android.webkit.MimeTypeMap.getSingleton().getExtensionFromMimeType(mime)?.takeIf { mime.isNotBlank() } ?: when {
+                bytes.size > 3 && bytes[0] == 0xFF.toByte() && bytes[1] == 0xD8.toByte() -> "jpg"
+                bytes.size > 4 && bytes[0] == 0x89.toByte() && bytes[1] == 'P'.code.toByte() -> "png"
+                bytes.size > 12 && String(bytes, 8, 4, Charsets.ISO_8859_1) == "WEBP" -> "webp"
+                bytes.size > 4 && String(bytes, 0, 4, Charsets.ISO_8859_1) == "%PDF" -> "pdf"
+                bytes.size > 3 && String(bytes, 0, 3, Charsets.ISO_8859_1) == "GIF" -> "gif"
+                bytes.size > 8 && String(bytes, 4, 4, Charsets.ISO_8859_1) == "ftyp" -> "mp4"
+                bytes.size > 3 && String(bytes, 0, 3, Charsets.ISO_8859_1) == "ID3" -> "mp3"
+                bytes.size > 4 && String(bytes, 0, 4, Charsets.ISO_8859_1) == "OggS" -> "ogg"
+                else -> "bin"
+            }
+            fun save(key: String, value: String, mimeHint: String, nameHint: String): JsonElement? {
+                val isData = value.startsWith("data:") && value.contains(";base64,")
+                if (!isData && !b64re.matches(value)) return null
+                val mime = if (isData) value.substringAfter("data:").substringBefore(";") else mimeHint
+                val bytes = runCatching { android.util.Base64.decode(if (isData) value.substringAfter(",") else value, android.util.Base64.DEFAULT) }.getOrNull() ?: return null
+                if (bytes.size < 512) return null
+                n++
+                val base = (if (n == 1) saveAs else null)?.takeIf { it.isNotBlank() } ?: nameHint.takeIf { it.isNotBlank() && it.contains('.') }
+                    ?: (slug + "_" + java.text.SimpleDateFormat("yyyyMMdd_HHmmss", java.util.Locale.US).format(java.util.Date()) + (if (n > 1) "_$n" else "") + "." + ext(mime, bytes))
+                val name = base.substringAfterLast('/').replace(Regex("[\\\\:*?\"<>|]"), "_")
+                val out = File(dir, name); out.writeBytes(bytes)
+                return JsonPrimitive("webapi_files/$name")
+            }
             fun fix(e: JsonElement): JsonElement = when (e) {
                 is JsonObject -> {
-                    val du = e["data_url"]?.jsonPrimitive?.contentOrNull
-                    if (du == null) JsonObject(e.mapValues { fix(it.value) }) else {
-                        val mime = du.substringAfter("data:").substringBefore(";")
-                        val ext = android.webkit.MimeTypeMap.getSingleton().getExtensionFromMimeType(mime) ?: "bin"
-                        val want = args["save_as"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
-                            ?: e["filename"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
-                            ?: ("whatsapp_" + System.currentTimeMillis() + "." + ext)
-                        val name = want.replace(Regex("[\\\\/:*?\"<>|]"), "_")
-                        val dir = File(workspace(sessionId), "downloads").apply { mkdirs() }
-                        val out = File(dir, name)
-                        out.writeBytes(android.util.Base64.decode(du.substringAfter(","), android.util.Base64.DEFAULT))
-                        JsonObject(e - "data_url" + ("saved_to" to JsonPrimitive("downloads/" + name)))
+                    val mime = listOf("mime", "mime_type", "mimetype", "content_type").firstNotNullOfOrNull { e[it]?.jsonPrimitive?.contentOrNull }.orEmpty()
+                    val fname = listOf("filename", "file_name", "name").firstNotNullOfOrNull { e[it]?.jsonPrimitive?.contentOrNull }.orEmpty()
+                    val out = LinkedHashMap<String, JsonElement>()
+                    for ((k, v) in e) {
+                        val sv = (v as? JsonPrimitive)?.takeIf { it.isString }?.content
+                        val m2 = e[k.removeSuffix("_b64").removeSuffix("_base64") + "_mime"]?.jsonPrimitive?.contentOrNull ?: mime
+                        val saved = if (sv != null && sv.length >= 2000) save(k, sv, m2, fname) else null
+                        if (saved != null) {
+                            val nk = if (k == "data_url" || k.endsWith("_b64") || k.endsWith("_base64") || k == "base64" || k == "data") k.removeSuffix("_b64").removeSuffix("_base64").let { if (it == "data_url" || it == "base64" || it == "data") "saved_to" else it + "_file" } else k + "_file"
+                            out[nk] = saved; out[k + "_bytes"] = JsonPrimitive(File(workspace(sessionId), saved.content).length())
+                        } else out[k] = fix(v)
                     }
+                    JsonObject(out)
                 }
                 is kotlinx.serialization.json.JsonArray -> kotlinx.serialization.json.JsonArray(e.map { fix(it) })
                 else -> e
             }
-            fix(root).toString()
-        }.getOrDefault(r.replace(Regex("data:[^\"]{200,}"), "[mídia omitida]"))
+            val fixed = fix(root).toString()
+            if (n > 0) fixed.removeSuffix("}") + ",\"files_note\":\"$n arquivo(s) salvo(s) na área de trabalho do chat (webapi_files/). Use o caminho: file_read/show_file/shell; o base64 não vem no JSON.\"}" else fixed
+        }.getOrElse { r.replace(Regex("data:[^\"]{200,}"), "[mídia omitida]") }
     }
+
 
     private suspend fun webApiTool(sessionId: String, name: String, a: JsonObject): ToolResult {
         fun s(k: String) = a[k]?.jsonPrimitive?.contentOrNull.orEmpty()
@@ -3357,7 +3394,8 @@ class AgentRunner(
                 // Funções que agem fora do app (envio, edição, exclusão) testam em modo seguro: validam tudo e não executam.
                 val acts = Regex("waGuard|sendTextMessage|sendFileMessage|sendLocationMessage|deleteMessage|editMessage|sendReaction|forwardMessage|sendCreatePoll|sendVCard").containsMatchIn(s("code"))
                 val targs = if (acts) JsonObject(args + mapOf("__dry_run" to JsonPrimitive("true"), "confirmed" to JsonPrimitive("true"))) else args
-                val out = dev.cueopen.app.browser.WebApiHub.dryOk("teste", dev.cueopen.app.browser.WebApiRunner.run(ctx, draft, targs))
+                val out = dev.cueopen.app.browser.WebApiHub.dryOk("teste", dev.cueopen.app.browser.WebApiRunner.run(ctx, draft, targs, workspace = workspace(sessionId)))
+                    .let { materializeBinary(sessionId, s("slug").ifBlank { "teste" }, it) }
                 val passed = out.contains("\"ok\":true") && Regex("\"results\":\\[\\s*\\{").containsMatchIn(out)
                 if (passed) webApiPassed[sessionId] = (s("url_template") + "\u0000" + s("code")).hashCode()
                 val net = runCatching { dev.cueopen.app.browser.WebApiRunner.network() }.getOrDefault("").takeIf { it.isNotBlank() && !it.startsWith("(sem valor") }

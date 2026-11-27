@@ -821,41 +821,5 @@
   "desktop": true,
   "inject": [],
   "sensitive": false
- },
- {
-  "waitFor": "",
-  "builtin": true,
-  "source": "nativa",
-  "slug": "g1_noticias",
-  "name": "g1 · notícias",
-  "description": "Últimas notícias do g1 (Globo), geral ou por editoria, com título, link, resumo e data; filtro opcional por palavra.",
-  "urlTemplate": "https://g1.globo.com/",
-  "code": "const ed = String(args.editoria || '').trim().toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/\\s+/g, '-');\nconst feed = 'https://g1.globo.com/rss/g1/' + (ed ? ed + '/' : '');\nlet items = [];\ntry { items = await api.rss(feed); } catch (e) {}\nif (!items.length && ed) throw new Error('editoria não encontrada: use economia, politica, mundo, tecnologia, ciencia-e-saude, educacao, pop-arte, turismo-e-viagem, sp/sao-paulo, rj/rio-de-janeiro…');\nif (!items.length) {\n  // Plano B: as matérias da própria página (lista do feed renderizada).\n  items = Array.from(document.querySelectorAll('.feed-post, .bastian-feed-item')).map(el => { const a = el.querySelector('a.feed-post-link, a[href*=\"/noticia/\"]');\n    return a ? { title: (a.innerText || '').trim(), url: a.href, snippet: ((el.querySelector('.feed-post-body-resumo') || {}).innerText || '').trim(), date: ((el.querySelector('.feed-post-datetime') || {}).innerText || '').trim() } : null; }).filter(Boolean);\n}\nconst q = String(args.query || '').toLowerCase();\nif (q) items = items.filter(i => (i.title + ' ' + i.snippet).toLowerCase().includes(q));\nconst max = Math.min(Number(args.max || 20), 50);\nconst res = items.slice(0, max).map(i => ({ title: i.title, url: i.url, summary: (i.snippet || '').slice(0, 400), date: i.date ? (isNaN(Date.parse(i.date)) ? i.date : new Date(i.date).toISOString()) : null }));\nreturn { source: feed, count: res.length, results: res };",
-  "params": [
-   {
-    "name": "editoria",
-    "type": "string",
-    "description": "Opcional: economia, politica, mundo, tecnologia, ciencia-e-saude, sp/sao-paulo…",
-    "required": false,
-    "default": ""
-   },
-   {
-    "name": "query",
-    "type": "string",
-    "description": "Filtrar por palavra",
-    "required": false,
-    "default": ""
-   },
-   {
-    "name": "max",
-    "type": "number",
-    "description": "Máximo (até 50)",
-    "required": false,
-    "default": "20"
-   }
-  ],
-  "desktop": false,
-  "inject": [],
-  "sensitive": false
  }
 ]
