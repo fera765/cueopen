@@ -485,7 +485,12 @@ fun Composer(
     val suggestions: List<Triple<String, String, String>> = remember(token, catalog.first, catalog.second, mentionTargets) {
         when {
             value.startsWith("/") && !value.contains(' ') -> slashCommands.filter { it.first.startsWith(value, true) }.map { Triple(it.first, it.second, it.first + " ") }
-            token.startsWith("@") -> (listOf(Triple("@create-agent", "Criar um novo agente a partir de uma descrição", "@create-agent ")) +
+            // @APIHUB: → lista as Web APIs do hub (o texto depois dos dois-pontos filtra).
+            token.startsWith("@APIHUB:", true) -> mentionTargets.filter { it.kind == dev.cueopen.app.agent.Mentions.Kind.WEBAPI && it.id.isNotBlank() }
+                .filter { it.id.contains(token.substringAfter(':'), true) }
+                .map { t -> Triple("@APIHUB:" + t.id, "API Hub · " + (runCatching { dev.cueopen.app.browser.WebApiHub.find(CueApp.instance, t.id)?.name }.getOrNull() ?: ""), "@APIHUB:" + t.id + " ") }.take(30)
+            token.startsWith("@") -> (listOf(Triple("@APIHUB", "API Hub · escolher uma Web API", "@APIHUB:")).filter { "APIHUB".contains(token.drop(1), true) } +
+                listOf(Triple("@create-agent", "Criar um novo agente a partir de uma descrição", "@create-agent ")) +
                 mentionTargets.filter { it.kind == dev.cueopen.app.agent.Mentions.Kind.CONNECTOR }.map { Triple("@" + it.label, "Conector", "@" + it.label + " ") } +
                 catalog.second.map { Triple("@" + it.name, "Agent", "@" + it.name + " ") } +
                 catalog.first.filter { it.enabled }.map { Triple("@" + it.name, "Skill · " + it.description.take(60), "@" + it.name + " ") })
@@ -512,7 +517,7 @@ fun Composer(
                         onChange(updated)
                     }
                 }.padding(horizontal = 14.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Icon(when { label.startsWith("/") -> Icons.Rounded.Terminal; desc == "Agent" -> Icons.Rounded.SmartToy; desc == "Conector" -> Icons.Rounded.Cable; else -> Icons.Rounded.AutoAwesome },
+                    Icon(when { label.startsWith("/") -> Icons.Rounded.Terminal; desc.startsWith("API Hub") -> Icons.Rounded.Api; desc == "Agent" -> Icons.Rounded.SmartToy; desc == "Conector" -> Icons.Rounded.Cable; else -> Icons.Rounded.AutoAwesome },
                         null, Modifier.size(18.dp), tint = c.accent)
                     Spacer(Modifier.width(10.dp))
                     Text(label, fontWeight = FontWeight.SemiBold, fontSize = 14.sp)

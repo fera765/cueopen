@@ -5,7 +5,7 @@ package dev.cueopen.app.agent
  * ("@Activepieces Hub" antes de "@Activepieces"). A menção termina no fim do texto ou num separador.
  */
 object Mentions {
-    enum class Kind { SKILL, CONNECTOR, AGENT, COMMAND }
+    enum class Kind { SKILL, CONNECTOR, AGENT, COMMAND, WEBAPI }
     data class Target(val label: String, val kind: Kind, val id: String)
     data class Hit(val start: Int, val end: Int, val target: Target)
 

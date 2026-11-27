@@ -3268,6 +3268,37 @@ class AgentRunner(
         }
     }.getOrDefault("")
 
+    /**
+     * Pílula no chat para as ferramentas do API Hub ("API Hub: duck_ai_image"): antes elas retornavam antes do passo
+     * genérico e rodavam invisíveis. Tocar na pílula mostra os argumentos enviados e o resultado.
+     */
+    private suspend fun webApiToolWithPill(sessionId: String, name: String, a: JsonObject): ToolResult {
+        val slug = a["api"]?.jsonPrimitive?.contentOrNull ?: a["slug"]?.jsonPrimitive?.contentOrNull
+        val title = when (name) {
+            "webapi_call" -> "API Hub: ${slug ?: "?"}"
+            "webapi_test" -> "API Hub · testando" + (slug?.let { ": $it" } ?: "")
+            "webapi_save" -> "API Hub · salvando: ${slug ?: "?"}"
+            "webapi_probe" -> "API Hub · analisando a rede do site"
+            else -> "API Hub · listando APIs"
+        }
+        val args = when (name) {
+            "webapi_call" -> (a["args"]?.let { if (it is JsonPrimitive) it.content else it.toString() } ?: "{}")
+            "webapi_probe" -> a["url"]?.jsonPrimitive?.contentOrNull.orEmpty()
+            "webapi_test" -> (a["url_template"]?.jsonPrimitive?.contentOrNull.orEmpty() + " · args " + (a["args"]?.toString() ?: "{}"))
+            else -> slug.orEmpty()
+        }.let { SecretVault.redact(sessionId, it) }.take(2000)
+        val step = ChatItem.Step(tool = name, title = title, args = args)
+        store.addItem(sessionId, step)
+        setActivity(sessionId, Activity(Activity.Kind.THINKING, title))
+        val r = try { webApiTool(sessionId, name, a) } catch (c: kotlinx.coroutines.CancellationException) {
+            store.replaceItem(sessionId, step.copy(status = StepStatus.ERROR, result = "interrompido")); throw c
+        }
+        val out = r.output
+        val failed = out.startsWith("ERRO") || out.startsWith("RECUSADO") || out.startsWith("PAUSADO") || out.startsWith("FALHOU") || out.contains("\"ok\":false")
+        store.replaceItem(sessionId, step.copy(status = if (failed) StepStatus.ERROR else StepStatus.OK, result = SecretVault.redact(sessionId, out).take(4000)))
+        return r
+    }
+
     private val truncNudges = java.util.concurrent.ConcurrentHashMap<String, Int>()
     private val TRUNCATION_NUDGE = "[Aviso do app] Sua última resposta foi cortada no limite de saída do modelo (nenhuma ferramenta rodou). " +
         "Não repita a mesma chamada gigante. Divida: escreva códigos/arquivos grandes em partes com file_write (append) de até ~150 linhas cada; " +
@@ -3555,6 +3586,9 @@ class AgentRunner(
             out += Mentions.Target(it.spec.name, Mentions.Kind.CONNECTOR, "connector:" + it.spec.id)
         }
         st.agents.forEach { out += Mentions.Target(it.name, Mentions.Kind.AGENT, it.id) }
+        // @APIHUB e @APIHUB:<slug> (Web API escolhida pelo usuário).
+        out += Mentions.Target("APIHUB", Mentions.Kind.WEBAPI, "")
+        runCatching { dev.cueopen.app.browser.WebApiHub.enabled(ctx) }.getOrDefault(emptyList()).forEach { out += Mentions.Target("APIHUB:" + it.slug, Mentions.Kind.WEBAPI, it.slug) }
         return out
     }
 
@@ -3598,6 +3632,8 @@ class AgentRunner(
             appendLine(PromptContextPolicy.instructionHierarchy)
             appendLine("1. Planeje: em tarefas com várias etapas, chame `update_plan` no início e atualize o plano conforme as fases terminam.")
             appendLine("2. Aja em vez de descrever: use as ferramentas e confira o resultado de cada ação.")
+            appendLine("   Antes de improvisar (curl em sites, scripts, serviços externos) ou dizer que não consegue — ex.: gerar imagem, transcrever, buscar dados de um site —, confira o que o app já tem: 1º conectores (conectores_listar), 2º API Hub (webapi_list). Se existir algo que sirva, use (webapi_call/conector) e não reinvente. Se nada servir, siga com as outras ferramentas.")
+            appendLine("   Mensagem com @APIHUB:<slug> = o usuário escolheu essa Web API: chame webapi_call(api=\"<slug>\") direto, montando os args a partir do texto que vem depois.")
             appendLine("2g. Login em sites: nunca digite senha, código 2FA ou dados de cartão. Se a página pedir login, o app mostra ao usuário o pedido \"Entrar e salvar\" e a tarefa continua sozinha depois; enquanto isso, avance no que não depende do login ou encerre dizendo que aguarda o login.")
             appendLine("2f. Contexto é limitado e resultados antigos de ferramentas podem ser removidos: guarde caminhos, URLs e IDs (não cópias de conteúdo grande) e recarregue sob demanda. Em trabalho longo, mantenha no NOTES.md o progresso e o que falta, assumindo que a conversa pode ser compactada a qualquer momento.")
             appendLine("2e. Eficiência: faça o trabalho com o menor número de passos. Para pesquisar, `web_search` e depois `web_fetch` nas melhores fontes (o browser só para login, JavaScript ou interação). Em arquivos grandes, `file_search` acha a linha e `file_read` com offset lê só o trecho. Chame várias ferramentas independentes na mesma resposta. Não releia o que já está no contexto.")
@@ -3638,6 +3674,7 @@ class AgentRunner(
                         Mentions.Kind.CONNECTOR -> "conector ${h.target.label}"
                         Mentions.Kind.AGENT -> "agent ${h.target.label}"
                         Mentions.Kind.COMMAND -> h.target.label
+                        Mentions.Kind.WEBAPI -> if (h.target.id.isBlank()) "API Hub (webapi_list para escolher)" else "Web API ${h.target.id} — chame webapi_call(api=\"${h.target.id}\") direto"
                     }
                 }.distinct()
                 ConnectorRouting.promptLines(
@@ -3724,7 +3761,9 @@ class AgentRunner(
             if (session.webApiBuilder) {
                 appendLine(); appendLine("## Criar Web APIs do hub (esta conversa é o criador do Web API Scraper)")
                 appendLine("Você transforma um site numa API que devolve JSON para LLMs. Roda num WebView separado com a sessão (cookies/logins) e o proxy do browser do app.")
-                appendLine("1. Descobrir: abra o site com browser_navigate e use browser_js/browser_snapshot/browser_network para achar a URL de busca/listagem (com paginação) e seletores estáveis (data-*, aria-*, ids; evite classes com hash). Se o site tiver um JSON público, use-o com api.fetchJson.")
+                appendLine("1. Descobrir — REDE PRIMEIRO (obrigatório): comece SEMPRE com webapi_probe na página do site (e browser_network depois de usar a função no site) para achar a API interna que entrega os dados (JSON, GraphQL, stream/SSE). " +
+                    "Se achar, a Web API funciona como PROXY dessa API a partir da própria página (api.replay/api.fetchJson/api.stream/api.sse, com os cookies do site; em stream, repasse cada pedaço com api.emit). " +
+                    "Só se a rede não trouxer os dados (ou exigir algo que a página não consegue gerar), extraia do DOM com seletores estáveis (data-*, aria-*, ids; evite classes com hash). Diga no description qual caminho usou (rede ou DOM).")
                 appendLine("2. Escrever: url_template é um template literal JS com args e enc() (= encodeURIComponent), ex.: https://site/busca?q=\${enc(args.query)}&page=\${Number(args.page||1)}. code é o corpo de async function(args, api); devolva { query, page, count, has_more, next_page, results: [{position, title, url, …}] }.")
                 appendLine("   api: wait(sel,ms), all(sel,root), one(sel,root), text(el,sel), attr(el,sel,nome), abs(url), num(texto→número), fetchText/fetchJson(url), scroll(vezes), sleep(ms), requests(padrão), watch(padrão), waitResponse(padrão,ms), replay(urlOuPadrão,{params}); WhatsApp: waReady(), waChatId(to), waChat(c), waMsg(m).")
                 appendLine("3. Provar: webapi_test com args reais (teste também page 2 se houver paginação). Só passa com ok:true e results não vazio.")
@@ -4974,7 +5013,7 @@ class AgentRunner(
                 if (!out.startsWith("ERROR")) scriptPolicy(sessionId).onInspect()
                 return ToolResult(out + if (selectors.isEmpty() && s("text").isBlank()) "\n(Dica: passe selectors e/ou text para localizar o alvo.)" else "")
             }
-            "webapi_list", "webapi_call", "webapi_test", "webapi_save", "webapi_probe" -> return webApiTool(sessionId, call.name, a)
+            "webapi_list", "webapi_call", "webapi_test", "webapi_save", "webapi_probe" -> return webApiToolWithPill(sessionId, call.name, a)
             "userscript_test", "userscript_propose" -> return userscriptTool(sessionId, call.name, a)
             "team_review" -> return ToolResult(teamReview(sessionId, s("task_id"), s("verdict"), s("note")))
             "team_message" -> return ToolResult(teamMessage(sessionId, s("agent"), s("message")))
