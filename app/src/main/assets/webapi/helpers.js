@@ -173,13 +173,14 @@ api.replay = async (urlOrPattern, opt = {}) => {
  * para várias conversas e só conversas existentes (salvo allow_new). Registra o envio só depois de confirmado.
  */
 api.waGuard = async (args, chatId, fingerprint) => {
-  if (String(args.confirmed) !== 'true') throw new Error('envio recusado: só envie quando o usuário pedir explicitamente esta ação para este contato (confirmed=true).');
+  if (String(args.confirmed) !== 'true' && String(args.__dry_run) !== 'true') throw new Error('envio recusado: só envie quando o usuário pedir explicitamente esta ação para este contato (confirmed=true).');
   if (chatId.endsWith('@broadcast') || /[,;]/.test(String(args.to || ''))) throw new Error('um destinatário por vez: envio em massa não é permitido');
   const KEY = '__fluwy_wa_sends', now = Date.now();
   let log = []; try { log = JSON.parse(localStorage.getItem(KEY) || '[]').filter(x => now - x.t < 86400000); } catch (e) {}
   const last = log.length ? log[log.length - 1].t : 0;
   // Ritmo humano: em vez de falhar, espera o intervalo que falta (máx. 12 s).
-  if (now - last < 12000) await sleep(12000 - (now - last) + Math.floor(Math.random() * 1500));
+  const dry = String(args.__dry_run) === 'true';
+  if (!dry && now - last < 12000) await sleep(12000 - (now - last) + Math.floor(Math.random() * 1500));
   if (log.filter(x => now - x.t < 3600000).length >= 20) throw new Error('limite de 20 envios por hora atingido');
   if (log.length >= 120) throw new Error('limite de 120 envios por dia atingido');
   const h = String(fingerprint || '').toLowerCase().replace(/\s+/g, ' ').slice(0, 200);
@@ -189,12 +190,14 @@ api.waGuard = async (args, chatId, fingerprint) => {
   if (!chat) chat = await api.waFindChat(chatId.split('@')[0]);
   if (!chat && String(args.allow_new) !== 'true') throw new Error('não há conversa com este contato; para iniciar uma nova use allow_new=true (só para quem espera sua mensagem)');
   if (!chat && !chatId.endsWith('@g.us')) { const ex = await WPP.contact.queryExists(chatId); if (!ex) throw new Error('este número não tem WhatsApp'); }
+  // Teste seguro (criador de APIs / teste de fluxo): tudo validado, nada enviado.
+  if (dry) throw new Error('__DRYRUN_OK__ validado sem enviar: ' + chatId);
   return () => { log.push({ t: Date.now(), to: chatId, h }); try { localStorage.setItem(KEY, JSON.stringify(log)); } catch (e) {} };
 };
 /** "digitando…"/"gravando…" proporcional ao conteúdo, com variação. */
 api.waTyping = async (chatId, size, recording) => {
   try { recording ? await WPP.chat.markIsRecording(chatId) : await WPP.chat.markIsComposing(chatId); } catch (e) {}
-  await sleep(Math.min(1200 + size * 35, 6000) + Math.floor(Math.random() * 900));
+  await sleep(Math.min(500 + size * 15, 2500) + Math.floor(Math.random() * 400));
   try { await WPP.chat.markIsPaused(chatId); } catch (e) {}
 };
 /** Resultado do envio no formato do hub. */

@@ -160,6 +160,11 @@ object WfCatalog {
                 WfField("tool", "Ferramenta", WfField.Kind.TEXT, "mcp_<conector>__<ferramenta>", required = true),
                 WfField("args", "Argumentos (JSON)", WfField.Kind.JSON, TEMPLATE_HINT, default = "{}"),
             )),
+        WfNodeType("webapi", "Web API do hub", CAT_APPS, "Chama uma Web API do API Hub (ex.: whatsapp_send_text, whatsapp_messages) e devolve o JSON. Ações externas (enviar, apagar) rodam de verdade só no fluxo publicado; no teste são validadas sem enviar.", 0xFF25D366, "http",
+            fields = listOf(
+                WfField("api", "API (slug)", WfField.Kind.TEXT, "Ex.: whatsapp_send_text", required = true),
+                WfField("args", "Argumentos (JSON)", WfField.Kind.MULTILINE, "Ex.: {\"to\": \"{{trigger.payload.chat}}\", \"text\": \"Recebido!\"} — $TEMPLATE_HINT", default = "{}"),
+            )),
         WfNodeType("http", "Requisição HTTP", CAT_APPS, "Chama qualquer API (GET, POST, PUT, PATCH, DELETE).", 0xFF4D8DFF, "http",
             fields = listOf(
                 WfField("method", "Método", WfField.Kind.SELECT, options = listOf("GET" to "GET", "POST" to "POST", "PUT" to "PUT", "PATCH" to "PATCH", "DELETE" to "DELETE"), default = "GET"),
@@ -229,6 +234,7 @@ object WfCatalog {
         WfPreset("Webhook (GitHub)", CAT_TRIGGER, "trigger_webhook", "Roda quando chega uma chamada na issue configurada.", mapOf("sample" to "{\"evento\": \"teste\"}")),
         WfPreset("Mensagem no WhatsApp", CAT_TRIGGER, "trigger_whatsapp", "Roda quando chega mensagem no WhatsApp (todas as conversas).", mapOf("scope" to "all")),
         WfPreset("Mensagem num grupo do WhatsApp", CAT_TRIGGER, "trigger_whatsapp", "Roda quando chega mensagem no grupo escolhido.", mapOf("scope" to "groups", "chat" to "")),
+        WfPreset("Responder no WhatsApp", CAT_APPS, "webapi", "Envia uma resposta para a conversa que disparou o fluxo.", mapOf("api" to "whatsapp_send_text", "args" to "{\"to\": \"{{trigger.payload.chat}}\", \"text\": \"{{prev}}\", \"reply_to\": \"{{trigger.payload.id}}\"}")),
         WfPreset("Toda hora", CAT_TRIGGER, "trigger_schedule", "Roda a cada 60 minutos.", mapOf("mode" to "interval", "minutes" to "60")),
         // IA
         WfPreset("Resumir texto", CAT_AI, "ai", "Resume a saída anterior em tópicos curtos.", mapOf("prompt" to "Resuma em até 5 tópicos curtos, em português:\n\n{{prev}}")),

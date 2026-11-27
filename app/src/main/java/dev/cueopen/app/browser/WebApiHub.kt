@@ -61,13 +61,26 @@ object WebApiHub {
         }.filter { it.second >= 2 }.sortedByDescending { it.second }.take(max).map { it.first }
     }
 
+    /** Teste seguro (__dry_run): a API validou tudo e parou antes de agir — vira sucesso simulado. */
+    fun dryOk(slug: String, out: String): String {
+        if (!out.contains("__DRYRUN_OK__")) return out
+        val note = Regex("__DRYRUN_OK__([^\"]*)").find(out)?.groupValues?.get(1)?.trim().orEmpty()
+        return buildJsonObjectString(slug, note)
+    }
+    private fun buildJsonObjectString(slug: String, note: String) = kotlinx.serialization.json.buildJsonObject {
+        put("api", JsonPrimitive(slug)); put("ok", JsonPrimitive(true)); put("dry_run", JsonPrimitive(true))
+        put("results", kotlinx.serialization.json.JsonArray(listOf(kotlinx.serialization.json.buildJsonObject {
+            put("ok", JsonPrimitive(true)); put("simulated", JsonPrimitive(true)); put("note", JsonPrimitive("teste seguro: " + note + " — nada foi enviado"))
+        })))
+    }.toString()
+
     /** Executa e registra estatísticas. */
     suspend fun call(ctx: Context, a: WebApi, args0: JsonObject): String {
         val missing = a.params.filter { it.required && (args0[it.name] as? JsonPrimitive)?.content.isNullOrBlank() }.map { it.name }
         if (missing.isNotEmpty()) return """{"api":"${a.slug}","ok":false,"error":"faltam argumentos: ${missing.joinToString()}"}"""
         // Regras do usuário para o WhatsApp (bloqueados / só permitidos / sem grupos): sempre do app, nunca do modelo.
         val args = if (a.slug.startsWith("whatsapp_")) JsonObject(args0 - "__wa_policy" + ("__wa_policy" to WhatsAppHub.policyJson(ctx))) else args0
-        val out = WebApiRunner.run(ctx, a, args)
+        val out = dryOk(a.slug, WebApiRunner.run(ctx, a, args))
         val ok = out.contains("\"ok\":true")
         val store = CueApp.instance.store
         val err = if (ok) "" else Regex("\"error\":\"([^\"]*)").find(out)?.groupValues?.get(1).orEmpty()

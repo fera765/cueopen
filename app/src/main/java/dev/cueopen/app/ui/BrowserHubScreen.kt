@@ -435,6 +435,7 @@ private fun WebApiHubTab(nav: NavController) {
     val scope = rememberCoroutineScope()
     var aiDialog by remember { mutableStateOf(false) }
     var trying by remember { mutableStateOf<dev.cueopen.app.data.WebApi?>(null) }
+    var waOpen by androidx.compose.runtime.saveable.rememberSaveable { mutableStateOf(false) }
     LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
         item {
             Text("APIs prontas sobre sites: os agentes chamam com webapi_call e recebem JSON (com paginação). Rodam num navegador separado, com os mesmos logins e o mesmo proxy do Browser.",
@@ -443,7 +444,9 @@ private fun WebApiHubTab(nav: NavController) {
             Button({ aiDialog = true }) { Icon(Icons.Rounded.AutoAwesome, null); Spacer(Modifier.width(6.dp)); Text("Criar API com IA") }
         }
         val wa = apis.filter { it.slug.startsWith("whatsapp_") }
-        if (wa.isNotEmpty()) item(key = "__wa__") { WhatsAppSection(wa, nav) { trying = it } }
+        if (wa.isNotEmpty()) item(key = "__wa__") { WhatsAppSection(wa.size, waOpen) { waOpen = !waOpen } }
+        // APIs do WhatsApp como itens da lista (abrir/fechar é instantâneo: nada pesado dentro do cabeçalho).
+        if (waOpen) items(wa, key = { it.slug }) { a -> ApiRow(a, nav) { trying = it } }
         items(apis.filterNot { it.slug.startsWith("whatsapp_") }, key = { it.slug }) { a -> ApiRow(a, nav) { trying = it } }
     }
     if (aiDialog) {
@@ -539,7 +542,11 @@ private fun ApiRow(a: dev.cueopen.app.data.WebApi, nav: NavController, onTry: (d
                 TextButton({
                     val sess = dev.cueopen.app.data.Session(title = "API: " + a.slug, webApiBuilder = true)
                     app.store.upsertSession(sess)
-                    app.agent.send(sess.id, "Melhore/corrija a Web API \"${a.slug}\" do hub (salve com o mesmo slug). Template atual: ${a.urlTemplate}\nCódigo atual:\n${a.code}")
+                    app.agent.send(sess.id, "Corrija/melhore a Web API \"${a.slug}\" do hub e salve com o MESMO slug, mantendo nome, descrição, params, desktop e inject (a menos que o problema esteja neles). " +
+                    "Fluxo seguro: 1) reproduza o problema com webapi_test usando o código atual; 2) ajuste; 3) webapi_test até PASSAR (funções que enviam/alteram testam em modo seguro, sem executar); 4) webapi_save.\n" +
+                    "nome: ${a.name}\ndescrição: ${a.description}\nurl_template: ${a.urlTemplate}\nwait_for: ${a.waitFor}\ndesktop: ${a.desktop}\ninject: ${a.inject.joinToString(",")}\n" +
+                    "params: " + kotlinx.serialization.json.Json.encodeToString(kotlinx.serialization.builtins.ListSerializer(dev.cueopen.app.data.WebApiParam.serializer()), a.params) +
+                    (if (a.lastError.isNotBlank()) "\núltimo erro: ${a.lastError}" else "") + "\ncódigo atual:\n${a.code}")
                     nav.navigate("chat/${sess.id}")
                 }) { Text("Ajustar com IA") }
                 if (!a.builtin || app.store.state.value.webApis.any { it.slug == a.slug && !it.builtin })
@@ -550,66 +557,66 @@ private fun ApiRow(a: dev.cueopen.app.data.WebApi, nav: NavController, onTry: (d
 }
 
 /**
- * WhatsApp no API Hub: uma seção colapsável com o webhook (mensagens recebidas em tempo real, para fluxos e
- * automações), as configurações avançadas (contatos bloqueados / só permitidos / sem grupos) e todas as APIs.
+ * WhatsApp no API Hub: cabeçalho colapsável com o webhook LOCAL (127.0.0.1), o esquema do evento e as
+ * configurações avançadas. As APIs em si são itens da lista logo abaixo (abrir/fechar é instantâneo).
  */
 @Composable
-private fun WhatsAppSection(apis: List<dev.cueopen.app.data.WebApi>, nav: NavController, onTry: (dev.cueopen.app.data.WebApi) -> Unit) {
+private fun WhatsAppSection(count: Int, open: Boolean, onToggle: () -> Unit) {
     val c = Cue.c
     val ctx = androidx.compose.ui.platform.LocalContext.current
     val hub = dev.cueopen.app.browser.WhatsAppHub
-    var open by remember { mutableStateOf(false) }
     var cfg by remember { mutableStateOf(hub.config(ctx)) }
     val status by hub.status.collectAsStateWithLifecycle()
     val recent by hub.recent.collectAsStateWithLifecycle()
     val clip = androidx.compose.ui.platform.LocalClipboardManager.current
     var advanced by remember { mutableStateOf(false) }
+    var schema by remember { mutableStateOf(false) }
     var blocked by remember { mutableStateOf(cfg.blocked.joinToString("\n")) }
     var allow by remember { mutableStateOf(cfg.allowOnly.joinToString("\n")) }
-    var forward by remember { mutableStateOf(cfg.forwardUrl) }
     var note by remember { mutableStateOf("") }
-    fun persist(n: dev.cueopen.app.browser.WhatsAppHub.Config) { cfg = n; hub.save(ctx, n) }
+    fun persist(n: dev.cueopen.app.browser.WhatsAppHub.Config) { hub.save(ctx, n); cfg = hub.config(ctx) }
+    LaunchedEffect(open) { if (open) hub.prewarm(ctx) }
 
     Surface(shape = RoundedCornerShape(16.dp), color = c.surface2, modifier = Modifier.fillMaxWidth()) {
         Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp))
-                .then(Modifier.padding(2.dp))) {
-                Icon(Icons.Rounded.Chat, null, tint = androidx.compose.ui.graphics.Color(0xFF25D366))
-                Spacer(Modifier.width(8.dp))
-                Column(Modifier.weight(1f)) {
-                    Text("WhatsApp", fontWeight = FontWeight.SemiBold)
-                    Text("${apis.size} APIs · webhook " + (if (cfg.webhook) "ligado" else "desligado"), fontSize = 11.sp, color = c.ink3)
+            Surface(onClick = onToggle, color = androidx.compose.ui.graphics.Color.Transparent, shape = RoundedCornerShape(12.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth().padding(4.dp)) {
+                    Icon(Icons.Rounded.Chat, null, tint = androidx.compose.ui.graphics.Color(0xFF25D366))
+                    Spacer(Modifier.width(8.dp))
+                    Column(Modifier.weight(1f)) {
+                        Text("WhatsApp", fontWeight = FontWeight.SemiBold)
+                        Text("$count APIs · webhook " + (if (cfg.webhook) "ligado" else "desligado"), fontSize = 11.sp, color = c.ink3)
+                    }
+                    Icon(if (open) Icons.Rounded.ExpandLess else Icons.Rounded.ExpandMore, if (open) "Recolher" else "Expandir")
                 }
-                IconButton({ open = !open }) { Icon(if (open) Icons.Rounded.ExpandLess else Icons.Rounded.ExpandMore, if (open) "Recolher" else "Expandir") }
             }
             if (open) {
-                // ── Webhook ──
                 Surface(shape = RoundedCornerShape(12.dp), color = c.surface) {
                     Column(Modifier.padding(10.dp).fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Column(Modifier.weight(1f)) {
-                                Text("Webhook de mensagens recebidas", fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
-                                Text(if (cfg.webhook) status else "Ligue para receber cada mensagem em tempo real e disparar fluxos.", fontSize = 11.sp, color = c.ink3)
+                                Text("Webhook local de mensagens recebidas", fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
+                                Text(if (cfg.webhook) status else "Ligue para receber cada mensagem em tempo real (fluxos e apps deste aparelho).", fontSize = 11.sp, color = c.ink3)
                             }
                             Switch(cfg.webhook, { persist(cfg.copy(webhook = it)) })
                         }
-                        val id = "fluwy://whatsapp/" + cfg.token
+                        val url = hub.webhookUrl(ctx)
                         Row(verticalAlignment = Alignment.CenterVertically) {
-                            Text(id, fontSize = 11.sp, fontFamily = FontFamily.Monospace, modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis)
-                            IconButton({ clip.setText(androidx.compose.ui.text.AnnotatedString(id)); note = "Webhook copiado" }) { Icon(Icons.Rounded.ContentCopy, "Copiar webhook") }
+                            Text(url, fontSize = 11.sp, fontFamily = FontFamily.Monospace, modifier = Modifier.weight(1f), maxLines = 2, overflow = TextOverflow.Ellipsis)
+                            IconButton({ clip.setText(androidx.compose.ui.text.AnnotatedString(url)); note = "Endereço copiado" }) { Icon(Icons.Rounded.ContentCopy, "Copiar webhook") }
                         }
-                        Text("Nos fluxos, use o gatilho \"Mensagem no WhatsApp\" (filtre por grupo, contato ou palavra). Os dados chegam em {{trigger.payload.text}}, .chat, .chat_name, .sender_name, .type e .id.",
-                            fontSize = 11.sp, color = c.ink2)
-                        OutlinedTextField(forward, { forward = it }, singleLine = true, modifier = Modifier.fillMaxWidth(),
-                            label = { Text("Encaminhar também para (https, opcional)") }, textStyle = MaterialTheme.typography.bodySmall)
-                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                            TextButton({
-                                val u = forward.trim()
-                                if (u.isNotEmpty() && !u.startsWith("https://")) { note = "O endereço precisa começar com https://"; return@TextButton }
-                                persist(cfg.copy(forwardUrl = u)); note = "Salvo" + if (u.isNotEmpty()) " · POST JSON com o cabeçalho X-Fluwy-Token" else ""
-                            }) { Text("Salvar") }
-                            TextButton({ hub.dispatch(ctx, cfg, hub.sample(cfg)); note = "Mensagem de teste enviada ao webhook (fluxos e encaminhamento)" }) { Text("Testar webhook") }
-                            TextButton({ persist(cfg.copy(token = "")); cfg = hub.config(ctx); note = "Novo endereço gerado: atualize quem usa o antigo" }) { Text("Novo endereço") }
+                        Text("Só neste aparelho (127.0.0.1). GET lista as mensagens (?since=<ms>&wait=25 espera chegar), GET …/schema mostra o esquema, POST injeta um evento de teste. " +
+                            "Nos fluxos use o gatilho \"Mensagem no WhatsApp\".", fontSize = 11.sp, color = c.ink2)
+                        Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                            TextButton({ hub.dispatch(ctx, cfg, hub.sample(cfg)); note = if (cfg.webhook) "Mensagem de teste entregue (fluxos + endereço local)" else "Ligue o webhook para testar" }) { Text("Testar") }
+                            TextButton({ schema = !schema }) { Text(if (schema) "Ocultar esquema" else "Esquema") }
+                            TextButton({ persist(cfg.copy(token = "")); note = "Novo endereço gerado" }) { Text("Novo endereço") }
+                        }
+                        if (schema) Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                            hub.SCHEMA.forEach { (k, t, d) ->
+                                Text(buildString { append(k); append(" · "); append(t) }, fontSize = 11.sp, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.SemiBold)
+                                Text(d, fontSize = 11.sp, color = c.ink3)
+                            }
                         }
                         if (recent.isNotEmpty()) {
                             Text("Últimas mensagens recebidas", fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
@@ -620,12 +627,13 @@ private fun WhatsAppSection(apis: List<dev.cueopen.app.data.WebApi>, nav: NavCon
                         }
                     }
                 }
-                // ── Configurações avançadas ──
                 Surface(shape = RoundedCornerShape(12.dp), color = c.surface) {
                     Column(Modifier.padding(10.dp).fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Text("Configurações avançadas", fontWeight = FontWeight.SemiBold, fontSize = 13.sp, modifier = Modifier.weight(1f))
-                            IconButton({ advanced = !advanced }) { Icon(if (advanced) Icons.Rounded.ExpandLess else Icons.Rounded.ExpandMore, null) }
+                        Surface(onClick = { advanced = !advanced }, color = androidx.compose.ui.graphics.Color.Transparent) {
+                            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+                                Text("Configurações avançadas", fontWeight = FontWeight.SemiBold, fontSize = 13.sp, modifier = Modifier.weight(1f))
+                                Icon(if (advanced) Icons.Rounded.ExpandLess else Icons.Rounded.ExpandMore, null)
+                            }
                         }
                         if (advanced) {
                             Text("Valem para todas as APIs e para o webhook. Números (com ou sem DDI) ou nomes, um por linha.", fontSize = 11.sp, color = c.ink3)
@@ -649,7 +657,6 @@ private fun WhatsAppSection(apis: List<dev.cueopen.app.data.WebApi>, nav: NavCon
                     }
                 }
                 if (note.isNotBlank()) Text(note, fontSize = 11.sp, color = c.accent)
-                apis.forEach { a -> ApiRow(a, nav, onTry) }
             }
         }
     }

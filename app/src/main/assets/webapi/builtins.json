@@ -546,7 +546,7 @@
   "slug": "whatsapp_react",
   "name": "WhatsApp · reagir",
   "description": "Reage a uma mensagem com um emoji (vazio remove a reação).",
-  "code": "await api.waReady(40000, args);\nif (String(args.confirmed) !== 'true') throw new Error('reação recusada: só quando o usuário pedir (confirmed=true)');\nconst id = String(args.message_id || ''); if (!id) throw new Error('message_id obrigatório');\nawait WPP.chat.sendReactionToMessage(id, String(args.emoji || '') || false);\nreturn { results: [{ ok: true, message_id: id, emoji: String(args.emoji || '') }] };",
+  "code": "await api.waReady(40000, args);\nif (String(args.confirmed) !== 'true' && String(args.__dry_run) !== 'true') throw new Error('reação recusada: só quando o usuário pedir (confirmed=true)');\nif (String(args.__dry_run) === 'true') { if (args.to) await api.waChatId(args.to); throw new Error('__DRYRUN_OK__ validado sem executar'); }\nconst id = String(args.message_id || ''); if (!id) throw new Error('message_id obrigatório');\nawait WPP.chat.sendReactionToMessage(id, String(args.emoji || '') || false);\nreturn { results: [{ ok: true, message_id: id, emoji: String(args.emoji || '') }] };",
   "params": [
    {
     "name": "message_id",
@@ -622,7 +622,7 @@
   "slug": "whatsapp_edit_message",
   "name": "WhatsApp · editar mensagem",
   "description": "Edita o texto de uma mensagem SUA (até 15 min após o envio).",
-  "code": "await api.waReady(40000, args);\nif (String(args.confirmed) !== 'true') throw new Error('edição recusada: só quando o usuário pedir (confirmed=true)');\nconst id = String(args.message_id || ''), text = String(args.text || '').trim();\nif (!id || !text) throw new Error('message_id e text obrigatórios');\nawait WPP.chat.editMessage(id, text);\nreturn { results: [{ ok: true, message_id: id }] };",
+  "code": "await api.waReady(40000, args);\nif (String(args.confirmed) !== 'true' && String(args.__dry_run) !== 'true') throw new Error('edição recusada: só quando o usuário pedir (confirmed=true)');\nif (String(args.__dry_run) === 'true') { if (args.to) await api.waChatId(args.to); throw new Error('__DRYRUN_OK__ validado sem executar'); }\nconst id = String(args.message_id || ''), text = String(args.text || '').trim();\nif (!id || !text) throw new Error('message_id e text obrigatórios');\nawait WPP.chat.editMessage(id, text);\nreturn { results: [{ ok: true, message_id: id }] };",
   "params": [
    {
     "name": "message_id",
@@ -660,7 +660,7 @@
   "slug": "whatsapp_delete_message",
   "name": "WhatsApp · apagar mensagem",
   "description": "Apaga uma mensagem (para todos se for sua e everyone=true). Irreversível.",
-  "code": "await api.waReady(40000, args);\nif (String(args.confirmed) !== 'true') throw new Error('exclusão recusada: ação irreversível, só quando o usuário pedir (confirmed=true)');\nconst chatId = await api.waChatId(args.to), id = String(args.message_id || '');\nif (!id) throw new Error('message_id obrigatório');\nawait WPP.chat.deleteMessage(chatId, id, true, String(args.everyone) === 'true');\nreturn { results: [{ ok: true, chat: chatId, message_id: id }] };",
+  "code": "await api.waReady(40000, args);\nif (String(args.confirmed) !== 'true' && String(args.__dry_run) !== 'true') throw new Error('exclusão recusada: ação irreversível, só quando o usuário pedir (confirmed=true)');\nif (String(args.__dry_run) === 'true') { if (args.to) await api.waChatId(args.to); throw new Error('__DRYRUN_OK__ validado sem executar'); }\nconst chatId = await api.waChatId(args.to), id = String(args.message_id || '');\nif (!id) throw new Error('message_id obrigatório');\nawait WPP.chat.deleteMessage(chatId, id, true, String(args.everyone) === 'true');\nreturn { results: [{ ok: true, chat: chatId, message_id: id }] };",
   "params": [
    {
     "name": "to",

@@ -343,6 +343,27 @@ object WorkflowEngine {
                 if (Regex("^\\s*(ERRO|ERROR|RECUSADO|Falha)", RegexOption.IGNORE_CASE).containsMatchIn(out)) NodeResult(error = out.take(1_500)) else NodeResult(out)
             }
 
+            "webapi" -> {
+                val slug = r("api").trim()
+                val api = dev.cueopen.app.browser.WebApiHub.find(app, slug)?.takeIf { it.enabled }
+                    ?: return NodeResult(error = "Web API \"$slug\" não existe ou está desligada no API Hub.")
+                val tpl = runCatching { Json.parseToJsonElement(node.config["args"].orEmpty().ifBlank { "{}" }) as kotlinx.serialization.json.JsonObject }
+                    .getOrElse { return NodeResult(error = "Argumentos não são um JSON válido: ${it.message?.take(120)}") }
+                // Templates resolvidos valor a valor (texto com aspas não quebra o JSON).
+                fun res(e: kotlinx.serialization.json.JsonElement): kotlinx.serialization.json.JsonElement = when (e) {
+                    is kotlinx.serialization.json.JsonPrimitive -> if (e.isString) kotlinx.serialization.json.JsonPrimitive(rt(e.content, 0)) else e
+                    is kotlinx.serialization.json.JsonObject -> kotlinx.serialization.json.JsonObject(e.mapValues { res(it.value) })
+                    is kotlinx.serialization.json.JsonArray -> kotlinx.serialization.json.JsonArray(e.map { res(it) })
+                    else -> e
+                }
+                var args = res(tpl) as kotlinx.serialization.json.JsonObject
+                // Fluxo publicado = autorização do usuário para a ação configurada; no teste, só valida.
+                if (api.sensitive) args = kotlinx.serialization.json.JsonObject(args + ("confirmed" to kotlinx.serialization.json.JsonPrimitive("true")) +
+                    (if (run.trigger == "test") mapOf("__dry_run" to kotlinx.serialization.json.JsonPrimitive("true")) else emptyMap()))
+                val out = dev.cueopen.app.browser.WebApiHub.call(app, api, args)
+                if (out.contains("\"ok\":true")) NodeResult(out)
+                else NodeResult(error = "${api.slug}: " + (Regex("\"error\":\"([^\"]*)").find(out)?.groupValues?.get(1) ?: out.take(300)))
+            }
             "http" -> withContext(Dispatchers.IO) {
                 val method = r("method").ifBlank { "GET" }
                 if (run.trigger == "test" && WfQuality.isExternalSend("http", node.config, method)) {

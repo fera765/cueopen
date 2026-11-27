@@ -52,8 +52,11 @@ object WebApiRunner {
             val wantDesktop = a.desktop || a.urlTemplate.contains("web.whatsapp.com")
             if (h.ui.value.desktop != wantDesktop) kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) { runCatching { h.setDesktop(wantDesktop) } }
             // 1) URL pelo template (precisa de uma página qualquer para rodar JS).
-            if (h.runJs("1").startsWith("ERROR")) h.navigate("about:blank")
-            val url = h.runJs("(function(){$helpers;const args=$argsJs;return `${a.urlTemplate}`})()").trim()
+            // Template fixo (ex.: WhatsApp): sem ida e volta ao WebView.
+            val url = if (!a.urlTemplate.contains("\${")) a.urlTemplate.trim() else {
+                if (h.runJs("1").startsWith("ERROR")) h.navigate("about:blank")
+                h.runJs("(function(){$helpers;const args=$argsJs;return `${a.urlTemplate}`})()").trim()
+            }
             if (!Regex("^https?://", RegexOption.IGNORE_CASE).containsMatchIn(url))
                 return@withTimeoutOrNull err(a, full, "URL inválida a partir do template: ${url.take(200)}")
             // 2) Carrega com a espera completa do browser do app (redirecionamentos, SPA, conteúdo estável).
@@ -97,7 +100,7 @@ object WebApiRunner {
                 }
             }
             // Bloqueio anti-robô: não tenta contornar — avisa.
-            val blocked = h.runJs("(function(){$helpers;try{return api.blocked()}catch(e){return ''}})()").let { if (it.startsWith("(sem valor")) "" else it }
+            val blocked = if (url.contains("web.whatsapp.com")) "" else h.runJs("(function(){$helpers;try{return api.blocked()}catch(e){return ''}})()").let { if (it.startsWith("(sem valor")) "" else it }
             if (blocked.isNotBlank() && !blocked.startsWith("ERROR")) return@withTimeoutOrNull buildJsonObject {
                 put("api", a.slug); put("ok", false); put("blocked", true); put("args", full); put("url", url); put("error", blocked)
                 put("hint", "O site pediu verificação humana. O usuário pode resolvê-la uma vez no Browser (mesma sessão); depois a API volta a funcionar.")

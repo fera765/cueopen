@@ -3328,7 +3328,10 @@ class AgentRunner(
                 if (Regex("^https?://(www\\.)?example\\.(com|org)").containsMatchIn(s("url_template"))) return ToolResult("RECUSADO: teste na página real do site-alvo, não em example.com. Para chamar uma API JSON do site, use o template da página do próprio site e api.fetchJson no código.")
                 val draft = dev.cueopen.app.data.WebApi(slug = "teste", name = "teste", urlTemplate = s("url_template"), code = s("code"), waitFor = s("wait_for"),
                     desktop = a["desktop"]?.jsonPrimitive?.booleanOrNull ?: false, inject = s("inject").split(',').map { it.trim() }.filter { it.startsWith("https://") })
-                val out = dev.cueopen.app.browser.WebApiRunner.run(ctx, draft, args)
+                // Funções que agem fora do app (envio, edição, exclusão) testam em modo seguro: validam tudo e não executam.
+                val acts = Regex("waGuard|sendTextMessage|sendFileMessage|sendLocationMessage|deleteMessage|editMessage|sendReaction|forwardMessage|sendCreatePoll|sendVCard").containsMatchIn(s("code"))
+                val targs = if (acts) JsonObject(args + mapOf("__dry_run" to JsonPrimitive("true"), "confirmed" to JsonPrimitive("true"))) else args
+                val out = dev.cueopen.app.browser.WebApiHub.dryOk("teste", dev.cueopen.app.browser.WebApiRunner.run(ctx, draft, targs))
                 val passed = out.contains("\"ok\":true") && Regex("\"results\":\\[\\s*\\{").containsMatchIn(out)
                 if (passed) webApiPassed[sessionId] = (s("url_template") + "\u0000" + s("code")).hashCode()
                 val net = runCatching { dev.cueopen.app.browser.WebApiRunner.network() }.getOrDefault("").takeIf { it.isNotBlank() && !it.startsWith("(sem valor") }
@@ -3344,7 +3347,10 @@ class AgentRunner(
                     .getOrElse { return ToolResult("ERRO: params não é uma lista JSON válida: ${it.message?.take(160)}") }
                 store.upsertWebApi(dev.cueopen.app.data.WebApi(slug = slug, name = s("name").ifBlank { slug }, description = s("description"), urlTemplate = s("url_template"),
                     code = s("code"), waitFor = s("wait_for"), params = params, source = "ia", desktop = a["desktop"]?.jsonPrimitive?.booleanOrNull ?: false,
-                    inject = s("inject").split(',').map { it.trim() }.filter { it.startsWith("https://") }))
+                    inject = s("inject").split(',').map { it.trim() }.filter { it.startsWith("https://") },
+                    // Ação externa continua exigindo confirmação mesmo depois de ajustada pela IA.
+                    sensitive = (dev.cueopen.app.browser.WebApiHub.find(ctx, slug)?.sensitive == true) ||
+                        Regex("waGuard|sendTextMessage|sendFileMessage|sendLocationMessage|deleteMessage|editMessage|sendReaction|forwardMessage|sendCreatePoll|sendVCard").containsMatchIn(s("code"))))
                 webApiTests.remove(sessionId)
                 return ToolResult("OK: Web API \"$slug\" salva no hub e ativa. Qualquer agente chama com webapi_call(api=\"$slug\", args={…}).")
             }
@@ -3639,6 +3645,9 @@ class AgentRunner(
                 appendLine("Ferramentas: browser_js espera Promise (pode usar async/await e fetch) e devolve o erro lançado; se vier '(sem valor…)', termine o código com uma expressão. Se o mesmo script falhar 2 vezes, mude a abordagem (outro seletor, ler outerHTML de um item, browser_network) em vez de repetir variações.")
                 appendLine("Links opacos (ex.: google.com/goto?url=…, rastreadores) não se decodificam: use o href final de um elemento, data-* com a URL, ou devolva o link como está com display_url.")
                 appendLine("4. Entregar: webapi_save com o mesmo código/template, params descritos e finish com 1–2 frases.")
+                appendLine("WhatsApp (web.whatsapp.com): use desktop=true e inject=https://cdn.jsdelivr.net/npm/@wppconnect/wa-js/dist/wppconnect-wa.js; comece com await api.waReady(40000, args); resolva o destino com await api.waChatId(args.to); " +
+                    "envios SEMPRE passam por const commit = await api.waGuard(args, chatId, conteúdo) → api.waTyping → await api.waSend(WPP.chat.<função>, chatId, …) → commit() → return api.waSent(r, chatId). " +
+                    "No webapi_test essas funções rodam em MODO SEGURO (__dry_run): validam tudo e não enviam; PASSOU com dry_run=true é o esperado. Nunca remova waGuard nem confirmed.")
                 appendLine("APIs já no hub:\n" + dev.cueopen.app.browser.WebApiHub.catalog(ctx))
             }
             if (session.scriptBuilder) {

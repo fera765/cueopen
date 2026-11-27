@@ -32,7 +32,6 @@ object WhatsAppHub {
     data class Config(
         val webhook: Boolean = false,
         val token: String = "",
-        val forwardUrl: String = "",
         val blocked: List<String> = emptyList(),
         val allowOnly: List<String> = emptyList(),
         val noGroups: Boolean = false,
@@ -56,22 +55,42 @@ object WhatsAppHub {
         val p = ctx.getSharedPreferences(PREF, Context.MODE_PRIVATE)
         var token = p.getString("token", "").orEmpty()
         if (token.isBlank()) { token = newToken(); p.edit().putString("token", token).apply() }
-        return Config(p.getBoolean("webhook", false), token, p.getString("forward", "").orEmpty(),
+        return Config(p.getBoolean("webhook", false), token,
             list(p.getString("blocked", "")), list(p.getString("allow", "")), p.getBoolean("no_groups", false), p.getBoolean("from_me", false))
     }
 
     fun save(ctx: Context, c: Config) {
         ctx.getSharedPreferences(PREF, Context.MODE_PRIVATE).edit()
-            .putBoolean("webhook", c.webhook).putString("token", c.token.ifBlank { newToken() }).putString("forward", c.forwardUrl.trim())
+            .putBoolean("webhook", c.webhook).putString("token", c.token.ifBlank { newToken() })
             .putString("blocked", c.blocked.joinToString("\n")).putString("allow", c.allowOnly.joinToString("\n"))
             .putBoolean("no_groups", c.noGroups).putBoolean("from_me", c.includeFromMe).apply()
-        if (c.webhook) start(ctx) else _status.value = "desligado"
+        if (c.webhook) start(ctx) else { _status.value = "desligado"; WaLocalServer.stop() }
     }
 
     private fun newToken() = "wa_" + java.util.UUID.randomUUID().toString().replace("-", "").take(20)
 
-    /** Endereço do webhook (identificador copiável) usado no gatilho dos fluxos. */
-    fun webhookId(ctx: Context) = "fluwy://whatsapp/" + config(ctx).token
+    /** Endereço local do webhook (só neste aparelho: 127.0.0.1). */
+    fun webhookUrl(ctx: Context) = "http://127.0.0.1:${WaLocalServer.port}/whatsapp/" + config(ctx).token
+
+    /** Esquema do evento que o webhook entrega (fluxos: {{trigger.payload.<campo>}}; servidor local: JSON). */
+    val SCHEMA: List<Triple<String, String, String>> = listOf(
+        Triple("event", "string", "sempre \"whatsapp.message\""),
+        Triple("id", "string", "id da mensagem (use em reply_to, whatsapp_react, whatsapp_download_media)"),
+        Triple("chat", "string", "id da conversa: …@c.us (pessoa), …@g.us (grupo) ou …@lid"),
+        Triple("chat_name", "string", "nome da conversa ou do grupo"),
+        Triple("is_group", "boolean", "true se veio de um grupo"),
+        Triple("author", "string", "quem enviou (em grupos, o participante)"),
+        Triple("sender_name", "string", "nome de quem enviou"),
+        Triple("from_me", "boolean", "true se foi você que enviou"),
+        Triple("type", "string", "chat, image, video, audio, ptt, document, sticker, location, vcard, poll_creation…"),
+        Triple("text", "string", "texto (ou legenda; [tipo] para mídia sem legenda)"),
+        Triple("has_media", "boolean", "true se tem mídia (baixe com whatsapp_download_media)"),
+        Triple("lat", "number", "latitude (só type=location)"),
+        Triple("lng", "number", "longitude (só type=location)"),
+        Triple("time", "string", "data/hora da mensagem (ISO 8601)"),
+        Triple("received_at", "string", "quando o app recebeu (ISO 8601)"),
+        Triple("ack", "number", "status de entrega (−1 erro, 0 pendente, 1 enviado, 2 entregue, 3 lido)"),
+    )
 
     /** Regras que vão para o código das APIs (o modelo nunca as define). */
     fun policyJson(ctx: Context): JsonObject {
@@ -98,6 +117,7 @@ object WhatsAppHub {
     fun start(ctx: Context) {
         if (!config(ctx).webhook) return
         runCatching { dev.cueopen.app.sandbox.SandboxService.start(ctx, "Webhook do WhatsApp ativo") }
+        WaLocalServer.start(ctx)
         if (started) return
         started = true
         scope.launch {
@@ -114,7 +134,11 @@ object WhatsAppHub {
         retryPending()
         val raw = WebApiRunner.withPage { h, helpers ->
             if (!h.currentUrl().contains("web.whatsapp.com")) "__NOPAGE__"
-            else h.runJs("(function(){$helpers;if(!(window.WPP&&WPP.isReady))return '__NOTREADY__';api.waWatch();return api.waDrain()})()")
+            else {
+                // Leitura leve a cada 3 s (sem reenviar os helpers); instala o escutador só quando falta.
+                val r = h.runJs("(function(){if(!(window.WPP&&WPP.isReady))return '__NOTREADY__';if(!window.__fluwyWaWatch)return '__INSTALL__';var q=window.__fluwyInbox||[];window.__fluwyInbox=[];return JSON.stringify(q)})()")
+                if (r == "__INSTALL__") h.runJs("(function(){$helpers;api.waWatch();return '[]'})()") else r
+            }
         }
         if (raw == "__NOPAGE__" || raw == "__NOTREADY__" || raw.startsWith("ERROR")) {
             _status.value = if (raw == "__NOTREADY__") "aguardando o WhatsApp Web ficar pronto" else "abrindo o WhatsApp Web…"
@@ -139,11 +163,11 @@ object WhatsAppHub {
         if (fromMe && !c.includeFromMe) return
         val chat = s(m0, "chat"); val name = s(m0, "chat_name").ifBlank { s(m0, "sender_name") }
         if (!allowed(c, chat, name)) return
-        val m = JsonObject(m0 + mapOf("event" to JsonPrimitive("whatsapp.message"), "webhook" to JsonPrimitive("fluwy://whatsapp/" + c.token),
+        val m = JsonObject(m0 + mapOf("event" to JsonPrimitive("whatsapp.message"), "webhook" to JsonPrimitive("http://127.0.0.1:${WaLocalServer.port}/whatsapp/" + c.token),
             "received_at" to JsonPrimitive(java.time.Instant.now().toString())))
         _recent.value = (listOf(m) + _recent.value).take(30)
         dev.cueopen.app.diag.ActivityLog.webApi("whatsapp_webhook", true, 0, chat, "mensagem ${s(m, "type")} de ${name.ifBlank { chat }}")
-        if (c.forwardUrl.startsWith("https://")) scope.launch { forward(c, m) }
+        WaLocalServer.publish(m)
         fireFlows(m)
     }
 
@@ -188,15 +212,11 @@ object WhatsAppHub {
         }
     }
 
-    private fun forward(c: Config, m: JsonObject) = runCatching {
-        val con = java.net.URL(c.forwardUrl).openConnection() as java.net.HttpURLConnection
-        con.requestMethod = "POST"; con.doOutput = true; con.connectTimeout = 10_000; con.readTimeout = 15_000
-        con.setRequestProperty("Content-Type", "application/json; charset=utf-8")
-        con.setRequestProperty("X-Fluwy-Token", c.token)
-        con.outputStream.use { it.write(m.toString().toByteArray()) }
-        val code = con.responseCode; con.disconnect()
-        if (code !in 200..299) dev.cueopen.app.diag.ErrorLog.log("webapi", "webhook WhatsApp: encaminhamento HTTP $code", null, "whatsapp_webhook")
-    }.onFailure { runCatching { dev.cueopen.app.diag.ErrorLog.log("webapi", "webhook WhatsApp: encaminhamento falhou: ${it.message}", null, "whatsapp_webhook") } }
+    /** Deixa o WhatsApp Web carregado em segundo plano (as chamadas seguintes ficam quase instantâneas). */
+    fun prewarm(ctx: Context) = scope.launch {
+        val loaded = runCatching { WebApiRunner.withPage { h, _ -> h.currentUrl().contains("web.whatsapp.com") } }.getOrDefault(false)
+        if (!loaded) WebApiHub.find(ctx, "whatsapp_status")?.let { WebApiHub.call(ctx, it, JsonObject(emptyMap())) }
+    }
 
     /** Mensagem de exemplo para testar o webhook e os fluxos sem depender de alguém mandar mensagem. */
     fun sample(c: Config): JsonObject = buildJsonObject {
