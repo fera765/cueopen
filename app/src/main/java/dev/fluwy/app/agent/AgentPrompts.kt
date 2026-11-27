@@ -179,7 +179,6 @@ internal fun AgentRunner.systemPrompt(
                 "append_line_2" to (buildString {
     dev.fluwy.app.device.DeviceCapPolicy.agentGuidance(promptDeviceTools).forEach { appendLine("6c. $it") }
     }.removeSuffix("\n")),
-                "cap" to (if ((deviceGroupInContext) && (missingGrants.isNotEmpty())) ((missingGrants.joinToString(", ") { cap -> dev.fluwy.app.device.DeviceCaps.all.firstOrNull { it.id == cap }?.title ?: cap }).toString()) else ""),
                 "caminho" to (buildString {
     if (deviceGroupInContext) {
                 val missingGrants = requestedCaps.filter { !dev.fluwy.app.device.DeviceCaps.granted(ctx, it) }
@@ -313,7 +312,6 @@ internal fun AgentRunner.systemPrompt(
                 appendLine(dev.fluwy.app.prompts.Prompts.render("agent_system.66", mapOf<String, Any?>("lb" to "{{")))
             }
     }.removeSuffix("\n")),
-                "past_chats" to (if ((session.summary.isBlank() && session.llm.count { it.role == "user" } <= 1 && session.sectionId == null) && (past.isNotEmpty())) ((PromptContextPolicy.untrustedBlock("past_chats", past.joinToString("\n- "), 1_400)).toString()) else ""),
                 "past_chats_2" to (buildString {
     if (session.summary.isBlank() && session.llm.count { it.role == "user" } <= 1 && session.sectionId == null) {
                 val past = MemoryHygiene.pastChats(store.state.value.sessions, session.id, query)
@@ -323,7 +321,6 @@ internal fun AgentRunner.systemPrompt(
                 }
             }
     }.removeSuffix("\n")),
-                "knowledge" to (if ((knowledge.isNotEmpty())) ((PromptContextPolicy.untrustedBlock("knowledge", knowledgeText, contextPlan?.knowledgeChars ?: 4_500)).toString()) else ""),
                 "knowledge_2" to (buildString {
     if (knowledge.isNotEmpty()) {
                 val knowledgeText = knowledge.joinToString("\n\n") { "Documento: ${it.title}\n${it.content.take(1500)}" }
@@ -360,8 +357,6 @@ internal fun AgentRunner.systemPrompt(
             ),
             mapOf(
                 "se_worker" to (session.squadParentId == null && !session.title.startsWith("[Worker ")),
-                "se_device_group_in_context" to (deviceGroupInContext),
-                "se_missing_grants" to (if ((deviceGroupInContext)) (missingGrants.isNotEmpty()) else false),
                 "se_wallet_has_grants" to (walletHasGrants),
                 "se_can_agent_autonomous_transfer" to (if ((walletHasGrants)) (agent != null && walletPolicyForPrompt.canAgentAutonomousTransfer(agent.id)) else false),
                 "se_can_agent_day_trade" to (if ((walletHasGrants)) (agent != null && walletPolicyForPrompt.canAgentDayTrade(agent.id)) else false),
@@ -380,9 +375,6 @@ internal fun AgentRunner.systemPrompt(
                 "se_skills" to (skills.isNotEmpty()),
                 "se_voice_replies" to (session.voiceReplies),
                 "se_memory_facts" to (memoryFacts.isNotEmpty()),
-                "se_section_id" to (session.summary.isBlank() && session.llm.count { it.role == "user" } <= 1 && session.sectionId == null),
-                "se_past" to (if ((session.summary.isBlank() && session.llm.count { it.role == "user" } <= 1 && session.sectionId == null)) (past.isNotEmpty()) else false),
-                "se_knowledge" to (knowledge.isNotEmpty()),
                 "se_summary" to (session.summary.isNotBlank()),
                 "se_notes" to (notes.isNotBlank()),
                 "se_home_session_id" to (agent != null && agent.autonomous && session.id == agent.homeSessionId),

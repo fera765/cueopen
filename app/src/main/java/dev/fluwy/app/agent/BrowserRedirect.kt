@@ -72,7 +72,7 @@ object BrowserRedirect {
             "|webdriver_manager|chromium revision is not downloaded|you need to install a browser",
     )
 
-    const val PROMPT_LINE =
+    val PROMPT_LINE =
         dev.fluwy.app.prompts.Prompts.render("browser_redirect.1", mapOf<String, Any?>("lb" to "{{")) +
             dev.fluwy.app.prompts.Prompts.render("browser_redirect.2", mapOf<String, Any?>("lb" to "{{"))
 }
