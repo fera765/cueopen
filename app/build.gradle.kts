@@ -124,7 +124,7 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.3")
     implementation("org.yaml:snakeyaml:2.2")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
-    // Voz Dii no aparelho (Piper/VITS via sherpa-onnx 1.10.46, a mesma versão validada em tools/voice_lab).
+    // Voz Dii no aparelho (Piper/VITS via sherpa-onnx 1.10.46).
     // O AAR é baixado pelo CI (debug-apk.yml) da release oficial do k2-fsa/sherpa-onnx.
     implementation(files("libs/sherpa-onnx-1.10.46.aar"))
     // Voz Phonon (Gradium): libptts_ffi.so compilada pelo CI a partir de gradium-ai/xn-ptts, chamada via JNA.
