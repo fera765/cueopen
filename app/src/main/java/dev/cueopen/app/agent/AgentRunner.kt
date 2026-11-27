@@ -1642,7 +1642,8 @@ class AgentRunner(
             if (AccessibilityToolHistory.sanitizePersistedSession(existing) != existing)
                 store.editSession(sessionId) { AccessibilityToolHistory.sanitizePersistedSession(it) }
         }
-        val maxSteps0 = (maxStepsOverride ?: store.settings.maxSteps).coerceIn(1, store.settings.maxSteps.coerceAtLeast(1))
+        // Teto explícito (fluxos, workers) vale mesmo acima do limite do chat; antes era cortado para o padrão (14) e os fluxos paravam sem entregar.
+        val maxSteps0 = (maxStepsOverride ?: store.settings.maxSteps).coerceIn(1, maxOf(store.settings.maxSteps, maxStepsOverride ?: 0, 1))
         val maxSteps = if (sessionId in finalDelivery) maxSteps0.coerceAtMost(15) else maxSteps0
         val sectionMember = store.session(sessionId)?.let { s -> s.sectionId != null && store.section(s.sectionId)?.sessionId != sessionId } == true
         val startingTokens = store.session(sessionId)?.let { it.tokensIn + it.tokensOut } ?: 0L
@@ -2032,7 +2033,7 @@ class AgentRunner(
                 val cachedConnectorResult = if (cacheConnectorResult) connectorBuilderResults[cacheKey] else null
                 val gate = if (!callWasExposed || blockedSnapshotReuse || cachedTradeResult != null || cachedConnectorResult != null) null
                     else if (awaitingApproval) ToolResult("NÃO EXECUTADO: uma ação anterior desta resposta aguarda a confirmação do usuário. Espere a resposta antes de continuar.")
-                    else runCatching { actionGate(sessionId, call) }.getOrNull()
+                    else repeatGuard(sessionId, call) ?: runCatching { actionGate(sessionId, call) }.getOrNull()
                 if (gate?.stop == SessionStatus.WAITING_USER) awaitingApproval = true
                 val rawResult = if (!callWasExposed) {
                     ToolResult("RECUSADO: a ferramenta '${call.name}' não foi disponibilizada neste passo. Nenhuma ação foi executada; continue somente com ferramentas expostas ou carregue a capacidade autorizada.")
@@ -3258,6 +3259,20 @@ class AgentRunner(
         }
     }.getOrDefault("")
 
+    private val repeatCounts = java.util.concurrent.ConcurrentHashMap<String, Int>()
+    /**
+     * Mesma leitura com os MESMOS argumentos repetida (o export mostrou 30× o mesmo gmail_search_email e o mesmo
+     * web_fetch 3×): a partir da 3ª, não executa e manda usar o resultado que já tem.
+     */
+    private fun repeatGuard(sessionId: String, call: dev.cueopen.app.llm.ToolCall): ToolResult? {
+        if (call.name !in setOf("conector_executar", "web_fetch", "web_search", "browser_navigate", "file_list", "webapi_call", "browser_read")) return null
+        if (call.name == "webapi_call" && call.argsJson.contains("\"confirmed\"")) return null
+        val key = sessionId + "\u0000" + call.name + "\u0000" + normArgs(call.argsJson)
+        val n = repeatCounts.merge(key, 1, Int::plus) ?: 1
+        if (repeatCounts.size > 5000) repeatCounts.clear()
+        return if (n >= 3) ToolResult("REPETIDO (não executado): ${call.name} já rodou ${n - 1}× nesta tarefa com exatamente estes argumentos. Use o resultado que você já recebeu, mude os argumentos (ex.: outra página, max_results maior) ou avance para a entrega.") else null
+    }
+
     /** Ferramentas do Web API Hub (fora do runTool: o método já está no limite de tamanho da JVM). */
 
     /** webapi_call com arquivos: file_path (área de trabalho) vira data URL em args.file; data_url de retorno é salvo em arquivo. */
@@ -3319,6 +3334,12 @@ class AgentRunner(
                 if (api.sensitive && args["confirmed"]?.jsonPrimitive?.contentOrNull != "true")
                     return ToolResult("RECUSADO: ${api.slug} age em seu nome fora do app. Só chame com confirmed=true quando o usuário pediu explicitamente esta ação (destinatário e conteúdo). Se não pediu, pergunte antes.")
                 return ToolResult(webApiCallWithFiles(sessionId, api, args).take(40_000))
+            }
+            "webapi_probe" -> {
+                val url = s("url").trim()
+                if (!Regex("^https?://", RegexOption.IGNORE_CASE).containsMatchIn(url)) return ToolResult("ERRO: url precisa começar com https://")
+                val r = dev.cueopen.app.browser.WebApiRunner.probe(url, s("pattern"), a["desktop"]?.jsonPrimitive?.booleanOrNull ?: false)
+                return ToolResult("Descoberta em $url (use as URLs de dados com api.replay a partir da própria página; estados embutidos se leem direto no código):\n" + r.take(14_000))
             }
             "webapi_test" -> {
                 val args = webApiArgs(a["args"]) ?: return ToolResult("ERRO: args precisa ser um objeto JSON.")
@@ -3921,6 +3942,14 @@ class AgentRunner(
     private fun tools(agentIn: AgentProfile?, allowMultiAgent: Boolean = true, builder: Boolean = false, connectorEditId: String? = null, sectionId: String? = null,
                       scriptBuilder: Boolean = false, webApiBuilder: Boolean = false) = buildJsonArray {
         if (webApiBuilder) {
+            add(tool("webapi_probe",
+                "DESCOBERTA DE API: abre a página do site no WebView das APIs, espera carregar, rola e devolve as requisições fetch/XHR que o site fez (refeitas de dentro da página, com status, tipo e trecho da resposta) " +
+                    "e os estados JSON embutidos (ytInitialPlayerResponse, __NEXT_DATA__, __NUXT__…). Use ANTES de escrever o código para achar a API interna do site.",
+                buildJsonObject {
+                    put("url", str("Página do site (ex.: https://www.youtube.com/watch?v=…, https://g1.globo.com/)"))
+                    put("pattern", str("Regex opcional para filtrar as URLs das requisições (ex.: api|graphql|json|timedtext)"))
+                    put("desktop", bool("true = abre como computador"))
+                }, listOf("url")))
             add(tool("webapi_test",
                 "Testa uma Web API do hub num WebView separado (mesma sessão/cookies e proxy do browser): monta a URL pelo template, carrega, espera wait_for e roda o código. Devolve o JSON exato que a LLM vai receber.",
                 buildJsonObject {
@@ -4871,7 +4900,7 @@ class AgentRunner(
                 if (!out.startsWith("ERROR")) scriptPolicy(sessionId).onInspect()
                 return ToolResult(out + if (selectors.isEmpty() && s("text").isBlank()) "\n(Dica: passe selectors e/ou text para localizar o alvo.)" else "")
             }
-            "webapi_list", "webapi_call", "webapi_test", "webapi_save" -> return webApiTool(sessionId, call.name, a)
+            "webapi_list", "webapi_call", "webapi_test", "webapi_save", "webapi_probe" -> return webApiTool(sessionId, call.name, a)
             "userscript_test", "userscript_propose" -> return userscriptTool(sessionId, call.name, a)
             "team_review" -> return ToolResult(teamReview(sessionId, s("task_id"), s("verdict"), s("note")))
             "team_message" -> return ToolResult(teamMessage(sessionId, s("agent"), s("message")))
@@ -6345,7 +6374,7 @@ class AgentRunner(
                 val runId = engine.start(w.id, trigger = "test").getOrElse { return@runCatching "ERRO: ${it.message}" }
                 val r = engine.awaitRun(runId, 5 * 60_000L) ?: return@runCatching "O teste ainda está rodando (id $runId). Consulte com action=status id=${w.id}."
                 if (r.status == "waiting") "O teste está aguardando a aprovação do usuário (nó Aprovação). Peça para ele aprovar em Fluxos › ${w.name} › Execuções; depois consulte action=status."
-                else "Teste concluído.\n" + report(r) + if (r.status == "ok") "\nTudo certo: publique com action=publish id=${w.id}." else "\nCorrija com action=update e teste de novo."
+                else (if (r.status == "ok") "Teste concluído.\n" else "ERRO: o teste do fluxo falhou.\n") + report(r) + if (r.status == "ok") "\nTudo certo: publique com action=publish id=${w.id}." else "\nCorrija com action=update e teste de novo."
             }
             "status" -> {
                 val w = find() ?: return@runCatching notFound

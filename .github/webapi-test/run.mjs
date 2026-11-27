@@ -7,6 +7,7 @@ const apis = JSON.parse(fs.readFileSync(`${root}/builtins.json`, 'utf8'));
 const helpers = fs.readFileSync(`${root}/helpers.js`, 'utf8');
 const only = process.argv.slice(2);
 const Q = { wikipedia_search: 'inteligência artificial', github_search: 'kotlin android', google_search: 'notebook gamer', bing_news: 'tecnologia', google_news: 'tecnologia' };
+const ARGS = { youtube_transcript: { url: 'https://www.youtube.com/watch?v=arj7oStGLkU', query: '' }, g1_noticias: { query: '' } };
 const browser = await chromium.launch();
 const mobile = await browser.newContext({ ...devices['Pixel 7'], locale: 'pt-BR', userAgent: 'Mozilla/5.0 (Linux; Android 12; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36' });
 const desktop = await browser.newContext({ locale: 'pt-BR', viewport: { width: 1366, height: 900 }, userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36' });
@@ -26,7 +27,7 @@ async function call(a, args) {
 const summary = [];
 for (const a of apis) {
   if (only.length && !only.includes(a.slug)) continue;
-  const base = { ...Object.fromEntries(a.params.filter(p => p.default).map(p => [p.name, p.default])), query: Q[a.slug] || 'notebook' };
+  const base = { ...Object.fromEntries(a.params.filter(p => p.default).map(p => [p.name, p.default])), query: Q[a.slug] || 'notebook', ...(ARGS[a.slug] || {}) };
   const r1 = await call(a, { ...base, page: 1 }); const n1 = ((r1.data || {}).results || []);
   let verdict = n1.length ? 'OK' : 'FAIL', note = r1.blocked ? 'BLOCKED:' + r1.blocked : (r1.error || '');
   if (n1.length && a.params.some(p => p.name === 'page')) {

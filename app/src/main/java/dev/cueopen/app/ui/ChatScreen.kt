@@ -202,11 +202,21 @@ fun ChatScreen(nav: NavController, sessionId: String, onMenu: () -> Unit = {}) {
             val onOpenMedia: (String) -> Unit = remember { { mediaOpen = it } }
             val onSendMsg: (String) -> Unit = remember(sessionId) { { msg -> app.agent.sendOrQueue(sessionId, msg) } }
             val onReplyItem: (ChatItem.Assistant) -> Unit = remember { { replyingTo = it } }
+            // "Nova mensagem": marca a última ordem do coordenador ainda não vista; some na próxima visita.
+            val lastCoord = remember(visibleItems) { visibleItems.lastOrNull { it is ChatItem.User && it.text.startsWith("[Coordenador]") }?.id }
+            var newCoordId by remember(sessionId) { mutableStateOf<String?>(null) }
+            LaunchedEffect(sessionId, lastCoord) {
+                if (lastCoord == null) return@LaunchedEffect
+                val p = ctx.getSharedPreferences("coord_seen", android.content.Context.MODE_PRIVATE)
+                if (p.getString(sessionId, null) != lastCoord) { newCoordId = lastCoord; p.edit().putString(sessionId, lastCoord).apply() }
+            }
             LazyColumn(Modifier.fillMaxSize(), state = list, contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 // Rolagem leve em chats longos: callbacks estáveis (não recompõem todos os itens a cada token do stream)
                 // e contentType por tipo (o LazyColumn reaproveita a composição de itens do mesmo tipo).
                 items(visibleItems, key = { it.id }, contentType = { it::class }) { item ->
-                    TimelineItem(item, onOpenComputer = onOpenComputer, onOpenMedia = onOpenMedia, sessionId = sessionId, nav = nav,
+                    if (item.id == newCoordId) Column { NewMessageDivider()
+                        TimelineItem(item, onOpenComputer = onOpenComputer, onOpenMedia = onOpenMedia, sessionId = sessionId, nav = nav, onSend = onSendMsg, onReply = onReplyItem) }
+                    else TimelineItem(item, onOpenComputer = onOpenComputer, onOpenMedia = onOpenMedia, sessionId = sessionId, nav = nav,
                         onSend = onSendMsg, onReply = onReplyItem)
                 }
                 if (running) item { ThinkingRow(act) }
@@ -1504,5 +1514,16 @@ private fun GeneratingAudioRow() {
         CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp, color = c.accent)
         Spacer(Modifier.width(8.dp))
         Text("Gerando áudio…", fontSize = 13.sp, color = c.ink2)
+    }
+}
+
+/** Linha "Nova mensagem" antes da ordem do coordenador que o usuário ainda não tinha visto. */
+@Composable
+private fun NewMessageDivider() {
+    val c = dev.cueopen.app.ui.theme.Cue.c
+    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth().padding(bottom = 10.dp)) {
+        HorizontalDivider(Modifier.weight(1f), color = c.err, thickness = 1.5.dp)
+        Text("Nova mensagem", color = c.err, fontSize = 12.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold, modifier = Modifier.padding(horizontal = 10.dp))
+        HorizontalDivider(Modifier.weight(1f), color = c.err, thickness = 1.5.dp)
     }
 }

@@ -53,6 +53,7 @@ api.waReady = async (ms = 40000, args) => {
     if (document.querySelector('canvas[aria-label*="QR"], div[data-ref] canvas, [data-testid="qrcode"]')) throw new Error('WhatsApp sem login: abra o Browser, vá em web.whatsapp.com (modo desktop) e leia o QR code com o celular.');
     if (window.WPP && WPP.isReady) {
       if (WPP.conn && WPP.conn.isAuthenticated && !WPP.conn.isAuthenticated()) throw new Error('WhatsApp sem login: leia o QR code em web.whatsapp.com no Browser do app.');
+      api.waQuiet();
       return true;
     }
     await sleep(300);
@@ -199,6 +200,7 @@ api.waTyping = async (chatId, size, recording) => {
   try { recording ? await WPP.chat.markIsRecording(chatId) : await WPP.chat.markIsComposing(chatId); } catch (e) {}
   await sleep(Math.min(500 + size * 15, 2500) + Math.floor(Math.random() * 400));
   try { await WPP.chat.markIsPaused(chatId); } catch (e) {}
+  setTimeout(() => { try { WPP.conn.markAvailable(false); } catch (e) {} }, 1500);
 };
 /** Resultado do envio no formato do hub. */
 api.waSent = (r, chatId, extra) => ({ chat: chatId, results: [Object.assign({ ok: true, id: r && (r.id && (r.id._serialized || r.id)) || null, chat: chatId, sent_at: new Date().toISOString() }, extra || {})] });
@@ -221,6 +223,7 @@ api.waSend = async (fn, chatId, ...rest) => {
 /* ───────────── Webhook: mensagens recebidas em tempo real ───────────── */
 api.waWatch = () => {
   if (window.__fluwyWaWatch) return 'ok';
+  api.waQuiet();
   window.__fluwyInbox = window.__fluwyInbox || [];
   WPP.on('chat.new_message', (m) => {
     try {
@@ -237,3 +240,51 @@ api.waWatch = () => {
   return 'ok';
 };
 api.waDrain = () => { const q = window.__fluwyInbox || []; window.__fluwyInbox = []; return JSON.stringify(q); };
+
+/**
+ * Modo silencioso do WhatsApp Web (aparelho conectado "invisível"): sem som, sem notificação do navegador,
+ * aba sempre "em segundo plano" e presença indisponível — assim o WhatsApp do celular continua recebendo
+ * as notificações na hora (com o Web "online", o servidor segura o push do celular).
+ */
+api.waQuiet = () => {
+  try { WPP.conn.markAvailable(false); } catch (e) {}
+  if (window.__fluwyQuiet) return;
+  window.__fluwyQuiet = true;
+  try { const N = function () { return { close() {}, addEventListener() {} }; }; N.permission = 'denied'; N.requestPermission = () => Promise.resolve('denied');
+    Object.defineProperty(window, 'Notification', { value: N, configurable: true, writable: true }); } catch (e) {}
+  try { HTMLMediaElement.prototype.play = function () { try { this.muted = true; this.pause(); } catch (e) {} return Promise.resolve(); }; } catch (e) {}
+  try { if (window.AudioContext) window.AudioContext.prototype.resume = function () { return Promise.resolve(); }; } catch (e) {}
+  try { Object.defineProperty(document, 'hidden', { get: () => true, configurable: true });
+    Object.defineProperty(document, 'visibilityState', { get: () => 'hidden', configurable: true });
+    document.hasFocus = () => false; window.dispatchEvent(new Event('blur')); document.dispatchEvent(new Event('visibilitychange')); } catch (e) {}
+  // Reafirma "indisponível" (o WhatsApp volta a online ao digitar/enviar).
+  setInterval(() => { try { WPP.conn.markAvailable(false); } catch (e) {} }, 45000);
+};
+/**
+ * Descoberta de API (criador de Web APIs): lista as requisições fetch/XHR que a página fez, refaz de DENTRO da
+ * página as que parecem dados (JSON) e mostra um trecho de cada resposta; também expõe estados JSON embutidos
+ * (ytInitialPlayerResponse, __NEXT_DATA__, __NUXT__, __INITIAL_STATE__, application/ld+json…).
+ */
+api.probe = async (pattern, max = 8) => {
+  const re = pattern ? new RegExp(pattern, 'i') : null;
+  const skip = /\.(png|jpe?g|gif|webp|svg|woff2?|ttf|css|mp4|m4s|ts|webm|ico)(\?|$)|google-analytics|googletagmanager|doubleclick|facebook\.net\/tr|hotjar|sentry|beacon|\/log(ging)?\b|\/collect\b|\/ping\b|stats\?/i;
+  const seen = new Set();
+  const all = performance.getEntriesByType('resource').filter(e => /fetch|xmlhttprequest/.test(e.initiatorType)).map(e => e.name)
+    .filter(u => !skip.test(u) && (!re || re.test(u))).filter(u => { const k = u.split('?')[0]; if (seen.has(k)) return false; seen.add(k); return true; });
+  const requests = [];
+  for (const u of all.slice(-max)) {
+    try {
+      const r = await fetch(u, { credentials: 'include' });
+      const ct = r.headers.get('content-type') || '';
+      const t = await r.text();
+      requests.push({ url: u.slice(0, 400), status: r.status, type: ct.split(';')[0], size: t.length, sample: t.replace(/\s+/g, ' ').slice(0, 500) });
+    } catch (e) { requests.push({ url: u.slice(0, 400), error: String(e.message || e).slice(0, 120) }); }
+  }
+  const embedded = {};
+  for (const k of ['ytInitialPlayerResponse', 'ytInitialData', '__NEXT_DATA__', '__NUXT__', '__INITIAL_STATE__', '__APOLLO_STATE__', '__PRELOADED_STATE__', 'initialState']) {
+    try { const v = window[k]; if (v && typeof v === 'object') embedded[k] = Object.keys(v).slice(0, 25); } catch (e) {}
+  }
+  const nd = document.getElementById('__NEXT_DATA__'); if (nd && !embedded.__NEXT_DATA__) { try { embedded.__NEXT_DATA__ = Object.keys(JSON.parse(nd.textContent).props || {}); } catch (e) {} }
+  const ld = Array.from(document.querySelectorAll('script[type="application/ld+json"]')).map(s => s.textContent.replace(/\s+/g, ' ').slice(0, 300)).slice(0, 3);
+  return { page: location.href, title: document.title, total_requests: all.length, requests, embedded, ld_json: ld };
+};

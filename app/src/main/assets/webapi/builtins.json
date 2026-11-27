@@ -785,5 +785,77 @@
    }
   ],
   "sensitive": false
+ },
+ {
+  "waitFor": "",
+  "builtin": true,
+  "source": "nativa",
+  "slug": "youtube_transcript",
+  "name": "YouTube · transcrição",
+  "description": "Transcrição completa de um vídeo do YouTube a partir do link (legenda manual ou automática; traduz para o idioma pedido quando possível). Devolve o texto inteiro e os trechos com tempo.",
+  "urlTemplate": "https://www.youtube.com/watch?v=${(String(args.url||'').match(/(?:v=|youtu\\.be\\/|shorts\\/|embed\\/|live\\/)([\\w-]{11})/)||[])[1]||String(args.url||'').trim()}&hl=pt",
+  "code": "const want = String(args.lang || 'pt').toLowerCase();\nconst vid = (String(args.url || '').match(/(?:v=|youtu\\.be\\/|shorts\\/|embed\\/|live\\/)([\\w-]{11})/) || [])[1] || (/^[\\w-]{11}$/.test(String(args.url || '').trim()) ? String(args.url).trim() : '');\nif (!vid) throw new Error('url do vídeo inválida');\nlet pr = null;\nfor (let i = 0; i < 40; i++) { pr = window.ytInitialPlayerResponse; if (pr && pr.videoDetails && pr.videoDetails.videoId === vid) break; await sleep(250); }\nif (!pr || !pr.videoDetails || pr.videoDetails.videoId !== vid) {\n  // Página em SPA com outro vídeo: lê o player do HTML da página do vídeo.\n  const html = await api.fetchText('https://www.youtube.com/watch?v=' + vid + '&hl=pt');\n  const m = html.match(/ytInitialPlayerResponse\\s*=\\s*(\\{.+?\\});(?:var|<\\/script)/s); pr = m ? JSON.parse(m[1]) : null;\n}\nif (!pr) throw new Error('não consegui ler o player do YouTube');\nif (pr.playabilityStatus && pr.playabilityStatus.status && pr.playabilityStatus.status !== 'OK' && !pr.captions) throw new Error('vídeo indisponível: ' + (pr.playabilityStatus.reason || pr.playabilityStatus.status));\nconst vd = pr.videoDetails || {};\nconst tracks = (((pr.captions || {}).playerCaptionsTracklistRenderer || {}).captionTracks || []);\nconst pick = (list) => list.find(t => t.languageCode.toLowerCase().startsWith(want) && t.kind !== 'asr') || list.find(t => t.languageCode.toLowerCase().startsWith(want))\n  || list.find(t => t.kind !== 'asr') || list[0];\nlet segs = [], lang = '', source = '';\nconst tr = tracks.length ? pick(tracks) : null;\nif (tr) {\n  try {\n    const url = tr.baseUrl + '&fmt=json3' + (tr.languageCode.toLowerCase().startsWith(want) ? '' : '&tlang=' + want);\n    const r = await fetch(url, { credentials: 'include' }); const t = await r.text();\n    if (t && t.trim().startsWith('{')) {\n      const j = JSON.parse(t);\n      segs = (j.events || []).filter(e => e.segs).map(e => ({ start: (e.tStartMs || 0) / 1000, end: ((e.tStartMs || 0) + (e.dDurationMs || 0)) / 1000, text: e.segs.map(s => s.utf8).join('').replace(/\\s+/g, ' ').trim() })).filter(s => s.text);\n      lang = tr.languageCode + (tr.kind === 'asr' ? ' (automática)' : ''); source = 'timedtext';\n    }\n  } catch (e) {}\n}\nif (!segs.length) {\n  // Plano B: o painel \"Mostrar transcrição\" do próprio site (youtubei/get_transcript), de dentro da página.\n  let html = ''; try { html = document.documentElement.innerHTML; } catch (e) {}\n  let pm = html.match(/\"getTranscriptEndpoint\":\\{\"params\":\"([^\"]+)\"/);\n  if (!pm || !location.href.includes(vid)) { const h2 = await api.fetchText('https://www.youtube.com/watch?v=' + vid); pm = h2.match(/\"getTranscriptEndpoint\":\\{\"params\":\"([^\"]+)\"/); }\n  if (pm && window.ytcfg) {\n    const key = ytcfg.get('INNERTUBE_API_KEY'), ctx = ytcfg.get('INNERTUBE_CONTEXT');\n    const r = await fetch('/youtubei/v1/get_transcript?prettyPrint=false' + (key ? '&key=' + key : ''), { method: 'POST', credentials: 'include', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ context: ctx, params: pm[1] }) });\n    const j = await r.json();\n    const find = (o) => { if (!o || typeof o !== 'object') return null; if (o.initialSegments) return o.initialSegments; for (const k in o) { const x = find(o[k]); if (x) return x; } return null; };\n    const list = find(j) || [];\n    segs = list.map(x => x.transcriptSegmentRenderer).filter(Boolean).map(s => ({ start: Number(s.startMs || 0) / 1000, end: Number(s.endMs || 0) / 1000, text: ((s.snippet || {}).runs || []).map(r => r.text).join('').replace(/\\s+/g, ' ').trim() })).filter(s => s.text);\n    source = 'get_transcript'; lang = lang || 'padrão do vídeo';\n  }\n}\nif (!segs.length) throw new Error(tracks.length ? 'o YouTube não liberou a transcrição deste vídeo agora (tente de novo)' : 'este vídeo não tem legendas/transcrição');\nconst text = segs.map(s => s.text).join(' ');\nconst fmt = (x) => { const m = Math.floor(x / 60), s = Math.floor(x % 60); return m + ':' + String(s).padStart(2, '0'); };\nreturn { video_id: vid, title: vd.title || document.title, channel: vd.author || '', duration_s: Number(vd.lengthSeconds || 0), language: lang, source,\n  languages: tracks.map(t => t.languageCode + (t.kind === 'asr' ? '(auto)' : '')), count: segs.length, text,\n  results: String(args.timestamps) === 'false' ? [{ text }] : segs.map(s => ({ t: fmt(s.start), start: s.start, text: s.text })) };",
+  "params": [
+   {
+    "name": "url",
+    "type": "string",
+    "description": "Link do vídeo (watch, youtu.be, shorts) ou o id",
+    "required": true,
+    "default": ""
+   },
+   {
+    "name": "lang",
+    "type": "string",
+    "description": "Idioma desejado (pt, en, es…)",
+    "required": false,
+    "default": "pt"
+   },
+   {
+    "name": "timestamps",
+    "type": "boolean",
+    "description": "false = só o texto corrido",
+    "required": false,
+    "default": "true"
+   }
+  ],
+  "desktop": true,
+  "inject": [],
+  "sensitive": false
+ },
+ {
+  "waitFor": "",
+  "builtin": true,
+  "source": "nativa",
+  "slug": "g1_noticias",
+  "name": "g1 · notícias",
+  "description": "Últimas notícias do g1 (Globo), geral ou por editoria, com título, link, resumo e data; filtro opcional por palavra.",
+  "urlTemplate": "https://g1.globo.com/",
+  "code": "const ed = String(args.editoria || '').trim().toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/\\s+/g, '-');\nconst feed = 'https://g1.globo.com/rss/g1/' + (ed ? ed + '/' : '');\nlet items = [];\ntry { items = await api.rss(feed); } catch (e) {}\nif (!items.length && ed) throw new Error('editoria não encontrada: use economia, politica, mundo, tecnologia, ciencia-e-saude, educacao, pop-arte, turismo-e-viagem, sp/sao-paulo, rj/rio-de-janeiro…');\nif (!items.length) {\n  // Plano B: as matérias da própria página (lista do feed renderizada).\n  items = Array.from(document.querySelectorAll('.feed-post, .bastian-feed-item')).map(el => { const a = el.querySelector('a.feed-post-link, a[href*=\"/noticia/\"]');\n    return a ? { title: (a.innerText || '').trim(), url: a.href, snippet: ((el.querySelector('.feed-post-body-resumo') || {}).innerText || '').trim(), date: ((el.querySelector('.feed-post-datetime') || {}).innerText || '').trim() } : null; }).filter(Boolean);\n}\nconst q = String(args.query || '').toLowerCase();\nif (q) items = items.filter(i => (i.title + ' ' + i.snippet).toLowerCase().includes(q));\nconst max = Math.min(Number(args.max || 20), 50);\nconst res = items.slice(0, max).map(i => ({ title: i.title, url: i.url, summary: (i.snippet || '').slice(0, 400), date: i.date ? (isNaN(Date.parse(i.date)) ? i.date : new Date(i.date).toISOString()) : null }));\nreturn { source: feed, count: res.length, results: res };",
+  "params": [
+   {
+    "name": "editoria",
+    "type": "string",
+    "description": "Opcional: economia, politica, mundo, tecnologia, ciencia-e-saude, sp/sao-paulo…",
+    "required": false,
+    "default": ""
+   },
+   {
+    "name": "query",
+    "type": "string",
+    "description": "Filtrar por palavra",
+    "required": false,
+    "default": ""
+   },
+   {
+    "name": "max",
+    "type": "number",
+    "description": "Máximo (até 50)",
+    "required": false,
+    "default": "20"
+   }
+  ],
+  "desktop": false,
+  "inject": [],
+  "sensitive": false
  }
 ]

@@ -132,6 +132,21 @@ object WebApiRunner {
         res
     }
 
+    /** Descoberta de API para o criador: carrega a página, rola e devolve requisições de dados + estados JSON embutidos. */
+    suspend fun probe(url: String, pattern: String, desktop: Boolean): String = lock.withLock {
+        val h = host()
+        kotlinx.coroutines.withTimeoutOrNull(70_000) {
+            if (h.ui.value.desktop != desktop) kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) { runCatching { h.setDesktop(desktop) } }
+            val nav = h.navigate(url)
+            if (nav.startsWith("ERROR")) return@withTimeoutOrNull "ERRO ao abrir: " + nav.take(300)
+            kotlinx.coroutines.delay(2500)
+            h.runJs("(function(){window.scrollTo(0,document.body.scrollHeight/2);return 1})()")
+            kotlinx.coroutines.delay(1500)
+            val pat = JsonPrimitive(pattern).toString()
+            h.runJs("(async()=>{${helpers(CueApp.instance)};return JSON.stringify(await api.probe($pat||'',8),null,1)})()", promiseTimeoutMs = 45_000)
+        } ?: "ERRO: a descoberta passou de 70 s"
+    }
+
     /** Requisições fetch/XHR que a página da API fez (para o criador enxergar de onde vêm os dados). */
     suspend fun network(): String = lock.withLock {
         host().runJs("(function(){var seen={};return performance.getEntriesByType('resource').filter(function(e){return /fetch|xmlhttprequest/.test(e.initiatorType)})" +

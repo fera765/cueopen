@@ -492,7 +492,7 @@ class BrowserHost(private val appCtx: Context, private val sessionId: String = "
                 .replace(" Version/4.0", "")
                 .replace(Regex("; Android [^;]+; [^;]+ Build/[^;)]+"), "; Android 12")
             cacheMode = WebSettings.LOAD_DEFAULT
-            mediaPlaybackRequiresUserGesture = false
+            mediaPlaybackRequiresUserGesture = sessionId != "__webapi__" // páginas das Web APIs (ex.: WhatsApp) nunca tocam som
             setGeolocationEnabled(true)  // o site só recebe a localização se o usuário permitir (BrowserPermissions)
             setSupportMultipleWindows(true)
             if (android.os.Build.VERSION.SDK_INT >= 26) safeBrowsingEnabled = false
