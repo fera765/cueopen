@@ -265,6 +265,7 @@ class AgentRunner(
         // Mensagem comum depois de uma entrega final: volta ao normal (a parada valeu só para aquela ordem).
         if (directiveSuffix.isBlank()) finalDelivery.remove(sessionId)
         autoResumeJobs.remove(sessionId)?.cancel()  // o usuário (ou a retomada) agiu: cancela a retomada agendada
+        if (showUserMessage && directiveSuffix.isBlank()) webApiTests.remove(sessionId)  // nova mensagem do usuário: libera os testes de Web API
         unknownToolWarned.removeIf { it.startsWith("$sessionId|") }
         jobs[sessionId]?.cancel()
         synchronized(childJobsByParent) { childJobsByParent.remove(sessionId)?.forEach { it.cancel() } }
@@ -3386,8 +3387,12 @@ class AgentRunner(
             "webapi_test" -> {
                 val args = webApiArgs(a["args"]) ?: return ToolResult("ERRO: args precisa ser um objeto JSON.")
                 // Teste às cegas em série (o log mostrou 15 seguidos, até em example.com): limite e orientação.
+                // Limite contra teste às cegas: 12 testes SEGUIDOS sem passar. Zera quando um teste passa, ao salvar e a cada
+                // nova mensagem do usuário (antes era um total por conversa: conversas longas que criam várias APIs ficavam
+                // travadas para sempre e o agente tentava contornar com tarefa agendada).
                 val nTests = webApiTests.merge(sessionId, 1, Int::plus) ?: 1
-                if (nTests > 12) return ToolResult("RECUSADO: 12 testes nesta conversa sem salvar. Pare e explique ao usuário o que está bloqueando (seletor, bloqueio do site, dado que não existe) em vez de testar mais variações.", SessionStatus.WAITING_USER)
+                if (nTests > 12) return ToolResult("PAUSADO: 12 testes seguidos sem passar. Pare aqui e explique ao usuário, em poucas linhas, o que está bloqueando (seletor, bloqueio do site, dado que não existe) e o que você tentaria a seguir. " +
+                    "NÃO contorne este limite (tarefa agendada, outra conversa, outro agente): quando o usuário responder (ex.: \"continuar\"), os testes voltam a ser liberados nesta mesma conversa.", SessionStatus.WAITING_USER)
                 if (Regex("^https?://(www\\.)?example\\.(com|org)").containsMatchIn(s("url_template"))) return ToolResult("RECUSADO: teste na página real do site-alvo, não em example.com. Para chamar uma API JSON do site, use o template da página do próprio site e api.fetchJson no código.")
                 val draft = dev.cueopen.app.data.WebApi(slug = "teste", name = "teste", urlTemplate = s("url_template"), code = s("code"), waitFor = s("wait_for"),
                     desktop = a["desktop"]?.jsonPrimitive?.booleanOrNull ?: false, inject = s("inject").split(',').map { it.trim() }.filter { it.startsWith("https://") })
@@ -3397,9 +3402,9 @@ class AgentRunner(
                 val out = dev.cueopen.app.browser.WebApiHub.dryOk("teste", dev.cueopen.app.browser.WebApiRunner.run(ctx, draft, targs, workspace = workspace(sessionId)))
                     .let { materializeBinary(sessionId, s("slug").ifBlank { "teste" }, it) }
                 val passed = out.contains("\"ok\":true") && Regex("\"results\":\\[\\s*\\{").containsMatchIn(out)
-                if (passed) webApiPassed[sessionId] = (s("url_template") + "\u0000" + s("code")).hashCode()
+                if (passed) { webApiPassed[sessionId] = (s("url_template") + "\u0000" + s("code")).hashCode(); webApiTests.remove(sessionId) }
                 val net = runCatching { dev.cueopen.app.browser.WebApiRunner.network() }.getOrDefault("").takeIf { it.isNotBlank() && !it.startsWith("(sem valor") }
-                return ToolResult((if (passed) "PASSOU" else "FALHOU (precisa ok:true e results com itens)") + " (teste $nTests/12)" +
+                return ToolResult((if (passed) "PASSOU" else "FALHOU (precisa ok:true e results com itens)") + (if (passed) "" else " (falha seguida $nTests/12)") +
                     (if (net != null) "\nRequisições fetch/XHR que a página fez (dados podem vir prontos daqui — use api.replay/api.waitResponse):\n${net.take(3000)}" else "") +
                     (if (!passed && nTests % 3 == 0) ". Três falhas seguidas: inspecione a página com browser_navigate + browser_js no ponto exato antes de testar de novo." else "") + ":\n" + out.take(12_000))
             }
@@ -3709,6 +3714,7 @@ class AgentRunner(
                 appendLine("Ferramentas: browser_js espera Promise (pode usar async/await e fetch) e devolve o erro lançado; se vier '(sem valor…)', termine o código com uma expressão. Se o mesmo script falhar 2 vezes, mude a abordagem (outro seletor, ler outerHTML de um item, browser_network) em vez de repetir variações.")
                 appendLine("Links opacos (ex.: google.com/goto?url=…, rastreadores) não se decodificam: use o href final de um elemento, data-* com a URL, ou devolva o link como está com display_url.")
                 appendLine("4. Entregar: webapi_save com o mesmo código/template, params descritos e finish com 1–2 frases.")
+                appendLine("Limites do app (testes seguidos, confirmação de envio, pausas) protegem o usuário: NUNCA os contorne com tarefa agendada, outra conversa, outro agente ou servidor improvisado. Ao bater num limite, pare, explique e espere a resposta — ela libera tudo nesta mesma conversa.")
                 appendLine("WhatsApp (web.whatsapp.com): use desktop=true e inject=https://cdn.jsdelivr.net/npm/@wppconnect/wa-js/dist/wppconnect-wa.js; comece com await api.waReady(40000, args); resolva o destino com await api.waChatId(args.to); " +
                     "envios SEMPRE passam por const commit = await api.waGuard(args, chatId, conteúdo) → api.waTyping → await api.waSend(WPP.chat.<função>, chatId, …) → commit() → return api.waSent(r, chatId). " +
                     "Arquivos (área de trabalho de quem chama): await api.saveFile(caminho, texto|Blob|ArrayBuffer|dataURL, {append}), api.readFile(caminho,{as:'text'|'base64'|'dataurl'}), api.listFiles(pasta), api.exists, api.mkdir, api.download(url, caminho) (baixa com os cookies do site). " +

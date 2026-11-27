@@ -41,7 +41,7 @@ object WebApiRunner {
     suspend fun <T> withPage(block: suspend (BrowserHost, String) -> T): T = waLock.withLock { block(host(WA_KEY), helpers(CueApp.instance)) }
 
     /** Executa a API. Devolve o JSON final (texto) ou {"ok":false,"error":…}. */
-    suspend fun run(ctx: Context, a: WebApi, args: JsonObject, timeoutMs0: Long = 45_000, workspace: java.io.File? = null, onChunk: ((String) -> Unit)? = null): String {
+    suspend fun run(ctx: Context, a: WebApi, args: JsonObject, timeoutMs0: Long = 100_000, workspace: java.io.File? = null, onChunk: ((String) -> Unit)? = null): String {
         val key = keyFor(a.urlTemplate)
         return lockFor(key).withLock {
             // Arquivos (api.saveFile…) e stream (api.emit): na área de trabalho do chat que chamou, com token de uso único.
@@ -55,7 +55,9 @@ object WebApiRunner {
 
     private suspend fun runLocked(ctx: Context, a: WebApi, args: JsonObject, timeoutMs0: Long, fsTok: String, h: BrowserHost): String {
         // Com biblioteca injetada (WA-JS) a 1ª carga do WhatsApp Web pode levar ~30 s: mais folga.
-        val timeoutMs = if (a.inject.isNotEmpty()) maxOf(timeoutMs0, 120_000) else timeoutMs0
+        // args.timeout (s) da própria API (ex.: imagem/IA levam 60–120 s) amplia o teto, até 3 min.
+        val asked = ((args["timeout"] as? kotlinx.serialization.json.JsonPrimitive)?.content?.toDoubleOrNull() ?: 0.0).times(1000).toLong()
+        val timeoutMs = maxOf(if (a.inject.isNotEmpty()) maxOf(timeoutMs0, 120_000) else timeoutMs0, minOf(asked + 20_000, 180_000))
         val started = System.currentTimeMillis()
         val helpers = helpers(ctx)
         val full = JsonObject(a.params.filter { it.default.isNotBlank() && it.name !in args }.associate { p ->
@@ -131,7 +133,7 @@ object WebApiRunner {
             // 4) Código da API — runJs aguarda a Promise e devolve o erro real.
             stage = "rodar o código (algum await não terminou: confira api.wait/fetch/seletores)"
             val r = h.runJs("(async()=>{$helpers;const args=$argsJs;api.__tok='$fsTok';try{const r=await (async function(args,api){\n${a.code}\n})(args,api);" +
-                "return JSON.stringify({ok:true,url:location.href,data:r===undefined?null:r})}catch(e){return JSON.stringify({ok:false,url:location.href,error:String(e&&e.message||e)})}})()", promiseTimeoutMs = if (a.inject.isNotEmpty()) 100_000 else 35_000)
+                "return JSON.stringify({ok:true,url:location.href,data:r===undefined?null:r})}catch(e){return JSON.stringify({ok:false,url:location.href,error:String(e&&e.message||e)})}})()", promiseTimeoutMs = (timeoutMs - 10_000).coerceAtLeast(30_000))
             val o = runCatching { json.parseToJsonElement(r).jsonObject }.getOrNull()
                 ?: return@withTimeoutOrNull err(a, full, "o código não devolveu JSON: ${r.take(300)}", url)
             if (o["ok"]?.jsonPrimitive?.contentOrNull != "true") return@withTimeoutOrNull err(a, full, o["error"]?.jsonPrimitive?.contentOrNull ?: "erro no código", o["url"]?.jsonPrimitive?.contentOrNull)
