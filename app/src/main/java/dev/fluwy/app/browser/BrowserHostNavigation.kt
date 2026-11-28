@@ -33,7 +33,6 @@ import dev.fluwy.app.browser.BrowserHost.NavDiag
 import dev.fluwy.app.browser.BrowserHost.NetEntry
 import dev.fluwy.app.browser.BrowserHost.PageReadiness
 import dev.fluwy.app.browser.BrowserHost.ScriptTestResult
-import dev.fluwy.app.browser.BrowserHost.State
 import dev.fluwy.app.browser.BrowserHost.TabInfo
 import dev.fluwy.app.browser.BrowserHost.Ui
 import dev.fluwy.app.browser.BrowserHost.Companion.DESKTOP_UA
