@@ -50,7 +50,15 @@ fun MemoryScreen(nav: NavController) {
     val c = Fluwy.c
     var q by remember { mutableStateOf("") }
     var new by remember { mutableStateOf("") }
-    val list = st.memories.filter { q.isBlank() || it.text.contains(q, true) || it.tags.any { t -> t.contains(q, true) } }.sortedByDescending { it.lastUsedAt }
+    // Busca: mesmo ranking do agente (sem acento, título/tags pesam mais) + correspondência literal.
+    val list = if (q.isBlank()) st.memories.sortedByDescending { it.lastUsedAt } else {
+        val terms = dev.fluwy.app.agent.MemoryCurator.terms(q)
+        st.memories.map { it to dev.fluwy.app.agent.MemoryCurator.memoryScore(terms, it) + (if (it.text.contains(q, true) || it.title.contains(q, true)) 0.5 else 0.0) }
+            .filter { it.second > 0 }.sortedByDescending { it.second }.map { it.first }
+    }
+    var editing by remember { mutableStateOf<MemoryItem?>(null) }
+    editing?.let { m -> MemoryEditDialog(m, onDismiss = { editing = null }, onSave = { app.store.upsertMemory(it); editing = null },
+        onDelete = { app.store.deleteMemory(m.id); editing = null }) }
     // Modo seleção ("Excluir…"): checkbox em cada memória + "Selecionar tudo"; nada é apagado até confirmar no rodapé.
     var selecting by remember { mutableStateOf(false) }
     var selected by remember { mutableStateOf(setOf<String>()) }
@@ -103,7 +111,7 @@ fun MemoryScreen(nav: NavController) {
                     BasicTextField(new, { new = it }, Modifier.weight(1f).padding(14.dp), singleLine = true,
                         textStyle = MaterialTheme.typography.bodyLarge.copy(color = c.ink), cursorBrush = androidx.compose.ui.graphics.SolidColor(c.accent),
                         decorationBox = { inner -> if (new.isEmpty()) Text("Adicionar uma memória…", color = c.ink3); inner() })
-                    if (new.isNotBlank()) TextButton({ app.store.upsertMemory(MemoryItem(text = new.trim())); new = "" }) { Text("Salvar", color = c.accent) }
+                    if (new.isNotBlank()) TextButton({ app.store.upsertMemory(MemoryItem(text = new.trim().take(dev.fluwy.app.agent.MemoryCurator.MAX_CHARS), source = dev.fluwy.app.agent.MemoryCurator.SOURCE_USER)); new = "" }) { Text("Salvar", color = c.accent) }
                 }
             }
             item {
@@ -125,7 +133,7 @@ fun MemoryScreen(nav: NavController) {
             items(list, key = { it.id }) { m ->
                 val agentName = m.agentId?.let { id -> st.agents.firstOrNull { it.id == id }?.name }
                 val isSel = m.id in selected
-                FluwyCard(onClick = if (selecting) ({ selected = if (isSel) selected - m.id else selected + m.id }) else null) {
+                FluwyCard(onClick = if (selecting) ({ selected = if (isSel) selected - m.id else selected + m.id }) else ({ editing = m })) {
                     if (selecting) Row(verticalAlignment = Alignment.CenterVertically) {
                         Checkbox(isSel, { v -> selected = if (v) selected + m.id else selected - m.id }, colors = CheckboxDefaults.colors(checkedColor = c.err))
                         Text(if (isSel) "Selecionada" else "Toque para selecionar", fontSize = 12.sp, color = c.ink3)
@@ -138,6 +146,7 @@ fun MemoryScreen(nav: NavController) {
                     Text(dev.fluwy.app.agent.MemoryGraph.plain(m.text), fontSize = 14.sp, lineHeight = 20.sp)
                     if (m.links.isNotEmpty()) Text("→ " + m.links.mapNotNull { id -> st.memories.firstOrNull { it.id == id } }.joinToString(", ") { "[[${dev.fluwy.app.agent.MemoryGraph.titleOf(it)}]]" },
                         fontSize = 12.sp, color = c.accent, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                    Text(memoryOrigin(m), fontSize = 11.sp, color = c.ink3)
                     Spacer(Modifier.height(8.dp))
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Box(Modifier.clip(CircleShape).background(if (agentName != null) c.accentSoft else c.surface2).padding(horizontal = 10.dp, vertical = 4.dp)) {
