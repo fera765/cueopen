@@ -77,6 +77,8 @@ Pacote raiz: `app/src/main/java/dev/fluwy/app`. Cada pasta é uma feature com um
 | `backup/`, `files/`, `pages/`, `skills/` | Backup, arquivos, páginas compartilhadas e skills. |
 | `ui/` | Telas Compose, uma pasta ou arquivo por tela (`ui/settings/`, `ui/theme/`, `ui/mascot/`…). |
 
+Documentação de cada feature em [`docs/features/`](docs/features/README.md).
+
 Outros módulos: `terminal-emulator/` e `terminal-view/` (emulador de terminal). Também há `tools/` (scripts de CI: mini-hub de conectores, bots e pipeline de voz) e `docs/` (pesquisas e modelos de ameaça).
 
 ## Prompts editáveis

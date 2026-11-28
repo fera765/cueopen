@@ -51,7 +51,7 @@ fun ErrorLogsScreen(nav: NavController) {
     val shown = entries.filter { source == null || it.source == source }
     Scaffold(containerColor = c.bg, topBar = {
         FluwyTopBar("Logs de erro", { nav.popBackStack() }) {
-            TextButton({ ErrorLog.clear(ctx); reload++ }) { Text("Limpar") }
+            TextButton({ ErrorLog.clearErrors(ctx); reload++ }) { Text("Limpar") }
         }
     }) { pad ->
         LazyColumn(Modifier.padding(pad).fillMaxSize().padding(horizontal = 16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {

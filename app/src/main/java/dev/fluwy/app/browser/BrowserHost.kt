@@ -531,10 +531,10 @@ class BrowserHost(internal val appCtx: Context, internal val sessionId: String =
         return "Rede: ${_ui.value.netType} · ${l.size} requisições · $fails com erro\n" + l.joinToString("\n") { e ->
             buildString {
                 append("${e.method} ${e.status ?: e.error ?: "-"} ${e.type} ${e.durationMs?.let { "${it}ms" } ?: ""} ${e.sizeBytes?.let { "${it / 1024}KB" } ?: ""} ${e.url.take(160)}")
-                if (e.requestHeaders.isNotEmpty()) append("\n  Request headers: ").append(e.requestHeaders.entries.joinToString { "${it.key}=${it.value}" }.take(1500))
-                e.requestBody?.let { append("\n  Request payload: ").append(it.take(3000)) }
-                if (e.responseHeaders.isNotEmpty()) append("\n  Response headers: ").append(e.responseHeaders.entries.joinToString { "${it.key}=${it.value}" }.take(1500))
-                e.responseBody?.let { append("\n  Response body: ").append(it.take(3000)) }
+                if (e.requestHeaders.isNotEmpty()) append("\n  Request headers: ").append(safeHeaders(e.requestHeaders).take(1500))
+                e.requestBody?.let { append("\n  Request payload: ").append(dev.fluwy.app.diag.ErrorLog.redact(it).take(3000)) }
+                if (e.responseHeaders.isNotEmpty()) append("\n  Response headers: ").append(safeHeaders(e.responseHeaders).take(1500))
+                e.responseBody?.let { append("\n  Response body: ").append(dev.fluwy.app.diag.ErrorLog.redact(it).take(3000)) }
             }
         }
     }
@@ -965,3 +965,9 @@ internal object HostPacing {
 
     fun success(host: String) { hosts[host]?.let { it.strikes = 0; it.cooldownUntil = 0 } }
 }
+
+private val SENSITIVE_HEADERS = setOf("authorization", "proxy-authorization", "cookie", "set-cookie", "x-api-key", "x-auth-token", "x-csrf-token")
+
+/** Cabeçalhos para o modelo: credenciais e cookies viram ••• (o agente só precisa saber que existem). */
+internal fun safeHeaders(h: Map<String, String>): String =
+    h.entries.joinToString { (k, v) -> if (k.lowercase() in SENSITIVE_HEADERS) "$k=•••" else "$k=${dev.fluwy.app.diag.ErrorLog.redact(v)}" }

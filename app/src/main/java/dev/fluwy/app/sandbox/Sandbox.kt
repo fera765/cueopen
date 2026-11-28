@@ -31,7 +31,7 @@ import dev.fluwy.app.proxy.ProxyValidator
  *                                       POST /terminals {cols,rows} -> pid
  *                                       WS   /terminals/{pid}       (stdin/stdout)
  *                                       POST /terminals/{pid}/resize | /terminate
- *  Frontend do terminal: xterm.js num WebView (assets/terminal/index.html).
+ *  Frontend do terminal: TerminalView nativo (módulos terminal-emulator/terminal-view), via TerminalManager.
  */
 class Sandbox(private val ctx: Context) {
 
