@@ -73,6 +73,33 @@ Objeto global (todos os chats): intervalo mínimo de 2,5 s entre aberturas do me
 - Falhas de browser vão ao `ErrorLog` com `diagnostics()` (linha do tempo, redirecionamentos, requisições pendentes).
 - Modo leve (`liteMode`) após 2+ quedas do renderizador em 5 min.
 
+## Resiliência (páginas pesadas, crash e segundo plano)
+Arquivos: `BrowserResilience.kt` (aplicação no WebView) e `BrowserResiliencePolicy.kt` (regras puras, testadas em `BrowserResiliencePolicyTest`).
+
+```mermaid
+flowchart TD
+    RG[onRenderProcessGone] --> H[handleRendererGone: destrói a view, nunca derruba o app]
+    EV[eval timeout] --> P{ping JS em 4 s?}
+    P -- responde --> T[devolve timeout normal]
+    P -- não --> HUNG[renderer travado: recreateTabView]
+    H --> R{RendererRecoveryPolicy}
+    HUNG --> R
+    R -- 1ª falha em 5 min --> RR[recria aba + repete a navegação pendente]
+    R -- 2ª --> RO[recria aba, ERROR claro ao agente]
+    R -- loop / >6 globais --> GU[aba vazia about:blank, recuperação suspensa]
+    TM[onTrimMemory / onLowMemory no FluwyApp] --> MP{MemoryPressurePolicy}
+    MP --> PK[estaciona abas ociosas ou excedentes]
+    MP --> PA[onPause + prioridade WAIVED em abas ocultas]
+    MP --> CC[clearCache RAM nos níveis graves]
+    BG[app em background] --> OS[OffscreenStage: display virtual mantém JS/render]
+    BG --> FS[SandboxService foreground + wake lock iniciado pelo AgentRunner]
+```
+
+- **Anti-loop**: por aba, no máximo 2 recuperações em 5 min (a 1ª repete a navegação pendente uma vez); 6 no total por browser. Uma navegação nova pedida pelo agente zera o contador da aba.
+- **Nunca afetadas pela pressão de memória**: aba ativa, aba visível na tela e aba com navegação/eval pendente (agente usando). `ensureTabView` retoma (`onResume` + prioridade `IMPORTANT`) qualquer aba pausada antes do uso. `pauseTimers()` (global) não é usado, para não congelar a aba do agente.
+- **Segundo plano**: `OffscreenStage` move os WebViews para um display virtual quando a Activity pausa; o processo é mantido vivo pelo `SandboxService` (foreground, `IMPORTANCE_LOW`), iniciado pelo `AgentRunner` ao executar tarefas.
+- Mídia exige gesto do usuário (`mediaPlaybackRequiresUserGesture`), então páginas não tocam autoplay em segundo plano.
+
 ## Como estender
 
 Nova ferramenta: método `suspend` no `BrowserHost` (ou extensão em `BrowserHost*.kt`), case em `AgentBrowserTools.kt`, schema em `AgentToolSchemas.kt` e grupo em `ToolContextPlanner`.

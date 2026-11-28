@@ -254,13 +254,7 @@ internal fun BrowserHost.createView(ctx: Context, tab: BrowserTab): WebView {
         override fun onRenderProcessGone(view: WebView, detail: android.webkit.RenderProcessGoneDetail): Boolean {
             // O processo do Chromium morreu (memória/crash). Sem tratar, o Android encerra o app inteiro.
             val crashed = if (android.os.Build.VERSION.SDK_INT >= 26) detail.didCrash() else true
-            synchronized(rendererCrashes) { rendererCrashes.add(System.currentTimeMillis()); while (rendererCrashes.size > 10) rendererCrashes.removeAt(0) }
-            tab.diag.add("processo do renderer encerrado (" + (if (crashed) "crash" else "falta de memória") + ")")
-            runCatching { dev.fluwy.app.diag.ErrorLog.log("browser", "Renderer do WebView encerrado (" + (if (crashed) "crash" else "memória") + ") na aba ${tab.id}; a aba será recriada.\n" + tab.diag.lines().joinToString("\n")) }
-            tab.pageDone?.complete("ERROR: o motor do browser foi encerrado pelo Android (" + (if (crashed) "falha" else "memória") + "). A aba será recriada; abra a página de novo uma vez.")
-            runCatching { (view.parent as? android.view.ViewGroup)?.removeView(view); view.destroy() }
-            if (tab.webView === view) tab.webView = null
-            tab.reloadNote = "o Android encerrou o motor do browser (" + (if (crashed) "falha" else "memória") + ") e a aba foi recriada"
+            runCatching { handleRendererGone(tab, view, crashed) }
             return true
         }
         override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {

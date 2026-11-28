@@ -104,6 +104,7 @@ internal suspend fun BrowserHost.navigateInTab(url: String, tabId: String?): Str
             tab.pageDone = CompletableDeferred()
             tab.lastSnapshotDigest = null
             lastReadTabId = null
+            rendererRecovery.reset(tab.id)
         }
         tab
     } ?: return "ERROR: a aba do browser não existe mais."
