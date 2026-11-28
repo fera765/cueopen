@@ -71,6 +71,8 @@ class BrowserHost(internal val appCtx: Context, internal val sessionId: String =
         var lastUsed: Long = System.currentTimeMillis(),
         /** OpenBot 0.71: a aba foi recarregada sem o agente pedir (scripts/formulários perdidos) — vai na próxima leitura. */
         var reloadNote: String? = null,
+        /** Quando o WebView atual foi criado (páginas abertas há horas são recicladas pela frota). */
+        var liveSince: Long = 0,
     )
 
     /** Linha do tempo de uma navegação: eventos do WebView com o tempo desde o início. */
@@ -258,6 +260,7 @@ class BrowserHost(internal val appCtx: Context, internal val sessionId: String =
         tab.webView?.let { resumeView(it); return it }
         return createView(ctx, tab).also { view ->
             tab.webView = view
+            tab.liveSince = System.currentTimeMillis()
             ensureSized(view)
             if (_ui.value.desktop) view.settings.userAgentString = DESKTOP_UA
             if (restore) restoreViewState(tab, view)
@@ -282,19 +285,6 @@ class BrowserHost(internal val appCtx: Context, internal val sessionId: String =
     }
 
     /** Libera o WebView da aba guardando o histórico (recriado sob demanda). */
-    /**
-     * Libera os WebViews de abas paradas há mais de [idleMs] (o histórico é salvo e a aba é recriada ao voltar).
-     * Nunca mexe na aba ativa nem em aba visível na tela. Chamar na thread principal. Devolve quantas liberou.
-     */
-    internal fun releaseIdleViews(idleMs: Long, now: Long = System.currentTimeMillis()): Int {
-        val idle = tabs.values.filter { t ->
-            t.id != activeTabId && now - t.lastUsed > idleMs &&
-                t.webView?.let { v -> !v.isAttachedToWindow || OffscreenStage.isStaged(v) } == true
-        }
-        idle.forEach { parkTab(it) }
-        return idle.size
-    }
-
     internal fun parkTab(tab: BrowserTab) {
         val v = tab.webView ?: return
         runCatching { persistWebViewState(tab, v) }
@@ -913,17 +903,17 @@ class BrowserHost(internal val appCtx: Context, internal val sessionId: String =
         // não passa pela CSP. 1) código como EXPRESSÃO; 2) se não for expressão (instruções soltas), roda como está e usa
         // o valor de conclusão do próprio WebView.
         val handle = "if(r&&typeof r.then==='function'){window['$key']=null;r.then(function(v){window['$key']={v:S(v)}},function(e){window['$key']={e:String(e&&e.stack||e)}});return '__PROMISE__'}return S(r)"
-        var start = eval("(function(){var S=$ser;try{var r=(\n$code\n);$handle}catch(e){return 'ERROR (exceção no script): '+String(e&&e.message||e)}})()", tab = tab)
+        var start = eval("(function(){var S=$ser;try{var r=(\n$code\n);$handle}catch(e){return 'ERROR: exceção no script — '+String(e&&e.message||e)}})()", tab = tab)
         if (start == "null") {
             // Erro de sintaxe como expressão = são instruções: roda uma única vez, cru (valor de conclusão do WebView).
-            start = eval(code, tab = tab).let { if (it == "null") "__UNDEF__" else it }
+            start = eval(code, tab = tab).let { if (it == "null") syntaxError(code, tab) ?: "__UNDEF__" else it }
         }
         val out = if (start != "__PROMISE__") start else {
             var got: String? = null
             val deadline = System.currentTimeMillis() + promiseTimeoutMs
             while (got == null && System.currentTimeMillis() < deadline) {
                 kotlinx.coroutines.delay(120)
-                val r = eval("(function(){var x=window['$key'];if(!x)return '__WAIT__';delete window['$key'];return x.e!==undefined?'ERROR (Promise rejeitada): '+x.e:x.v})()", tab = tab)
+                val r = eval("(function(){var x=window['$key'];if(!x)return '__WAIT__';delete window['$key'];return x.e!==undefined?'ERROR: Promise rejeitada — '+x.e:x.v})()", tab = tab)
                 if (r != "__WAIT__") got = r
             }
             got ?: "timeout: a Promise não terminou em ${promiseTimeoutMs / 1000}s (algo no código ficou esperando para sempre)"
@@ -933,6 +923,16 @@ class BrowserHost(internal val appCtx: Context, internal val sessionId: String =
             "__UNDEF__", "null", "" -> "(sem valor: o código não devolveu nada. Termine com uma expressão, ex.: JSON.stringify(resultado), ou use return dentro de uma função)"
             else -> out
         }
+    }
+
+    /**
+     * O WebView devolve null tanto para "sem valor" quanto para erro de sintaxe. Confere a sintaxe com
+     * new Function (sem executar); em sites com CSP que bloqueia isso, não conclui nada.
+     */
+    private suspend fun syntaxError(code: String, tab: BrowserTab): String? {
+        val quoted = org.json.JSONObject.quote(code)
+        val r = eval("(function(){try{new Function($quoted);return ''}catch(e){return e&&e.name==='SyntaxError'?'ERROR: erro de sintaxe no script — '+e.message+'. Corrija aspas e escapes; para código grande, divida em chamadas menores.':''}})()", tab = tab)
+        return r.takeIf { it.startsWith("ERROR:") }
     }
 
     /** JS cru na aba ativa (biblioteca grande, sem embrulho). Não passa pela CSP da página. */
