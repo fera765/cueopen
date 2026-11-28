@@ -40,7 +40,7 @@ flowchart TD
 ```
 
 - Fonte `connector`: ação de leitura de um conector do hub (`piece`, `action`, `input`, `connection`); itens = maior array do resultado; chave = campo id/messageId/uid ou hash SHA-256 (16 hex).
-- Fonte `site`: a página inteira é um item; qualquer mudança de texto gera evento.
+- Fonte `site`: cada trecho de texto da página (20 a 500 caracteres) vira um item, com chave que ignora números; só trechos novos acordam a sessão. Gatilhos antigos refazem a linha de base na primeira verificação.
 - `seen` guarda os 500 ids mais recentes; `history` guarda 20 eventos.
 - 3 falhas seguidas geram notificação de falha.
 - `wake` envia à sessão existente (ou recria "⚡ nome") até 10 eventos (1500 chars cada) com a instrução e o lembrete de que ações externas exigem aprovação.

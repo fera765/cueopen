@@ -132,6 +132,22 @@ object TriggerLogic {
 
     data class Diff(val fresh: List<JsonElement>, val seen: List<String>)
 
+    const val SITE_KEY_PREFIX = "id:s:"
+    private val digits = Regex("[0-9]+")
+    private val spaces = Regex("\\s+")
+
+    /**
+     * Itens de um gatilho de site: cada trecho de texto relevante da página vira um item, com chave que
+     * ignora números (horários, contadores). Assim só acorda a sessão o conteúdo realmente novo.
+     */
+    fun siteItems(text: String): List<JsonElement> = text.lines().asSequence()
+        .map { spaces.replace(it, " ").trim() }
+        .filter { it.length in 20..500 }
+        .distinctBy { digits.replace(it.lowercase(), "#") }
+        .take(400)
+        .map { line -> JsonObject(mapOf("key" to JsonPrimitive("s:" + sha(digits.replace(line.lowercase(), "#"))), "texto" to JsonPrimitive(line))) }
+        .toList()
+
     /** Novos itens desde a última vez (mantém os 500 ids mais recentes). */
     fun diff(items: List<JsonElement>, seen: List<String>, filter: String): Diff {
         val known = seen.toHashSet()
@@ -167,7 +183,7 @@ object TriggerEngine {
                 "site" -> {
                     val text = dev.fluwy.app.web.WebTools.fetch(t.url, 20_000)
                     if (text.startsWith("ERRO")) error(text.take(200))
-                    listOf(JsonPrimitive(text.take(20_000)))
+                    TriggerLogic.siteItems(text)
                 }
                 else -> {
                     val input = runCatching { Json.parseToJsonElement(t.input) as? JsonObject }.getOrNull() ?: JsonObject(emptyMap())
@@ -187,7 +203,9 @@ object TriggerEngine {
             return "erro: ${e.message}"
         }
         val d = TriggerLogic.diff(items, t.seen, t.filter)
-        if (!t.baselineDone) {
+        // Gatilhos de site criados antes da comparação por trecho: a 1ª verificação vira a nova linha de base.
+        val siteRebase = t.source == "site" && t.seen.none { it.startsWith(TriggerLogic.SITE_KEY_PREFIX) }
+        if (!t.baselineDone || siteRebase) {
             TriggerStore.upsert(app, t.copy(seen = d.seen, baselineDone = true, lastRunAt = now, lastError = null, errorStreak = 0,
                 history = (listOf(TriggerEvent(now, 0, "linha de base: ${items.size} item(ns) já existentes")) + t.history).take(20)))
             return "linha de base registrada (${items.size} itens)"

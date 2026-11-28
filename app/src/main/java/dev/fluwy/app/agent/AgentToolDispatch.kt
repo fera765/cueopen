@@ -562,6 +562,10 @@ internal suspend fun AgentRunner.executeTool(
             ContextManager.memoryTooLong(fact) ?: ctxMgr.saveMemory(fact, if (agentScoped) sess?.agentId else null, tags,
                 s("title"), s("kind"), a["links"]?.jsonArray?.map { it.jsonPrimitive.content }.orEmpty())
         }
+        "notes_read" -> ctxMgr.readNotes(sessionId).ifBlank { "NOTES.md está vazio: nada registrado com notes_write nesta tarefa." }.takeLast(12_000)
+        "knowledge_search" -> ctxMgr.relevantKnowledge(s("query"), k = (i("limit") ?: 4).coerceIn(1, 8), maxChars = 8_000)
+            .joinToString("\n\n") { "## ${it.title}\n${it.content.take(2_000)}" }
+            .ifBlank { "Nada encontrado na base de conhecimento para \"${s("query")}\". Tente outros termos ou siga sem esse material." }
         "memory_search" -> ctxMgr.describeMemories(ctxMgr.searchMemories(s("query"), store.session(sessionId)?.agentId))
             .joinToString("\n") { "- $it" }.ifBlank { "Nada encontrado." }
         "remember_legacy" -> {

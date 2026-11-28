@@ -53,7 +53,7 @@ sequenceDiagram
 
 ## Cofre (Pix e cartões)
 
-- `CardVault` e `PixVault` usam AES-256-GCM com o alias de Keystore `fluwy_cofre_cards_v1` (compartilhado), entradas `cards` e `pix`.
+- `CardVault` usa AES-256-GCM com o alias `fluwy_cofre_cards_v1` e `PixVault` com `fluwy_cofre_pix_v1` (migração automática do alias compartilhado anterior).
 - Cartões: somente a tela do Cofre lê; exibição sempre mascarada; CVV nunca guardado.
 - `VaultTools.describe` mostra à IA apenas ids, apelidos, tipo e bandeira.
 - `pix_qr`: escolhe a chave (id, apelido ou única), valida valor (`parseCents`), monta e **confere** o BR Code (`checkedPayload`) e cria `ChatItem.PixQr`; o app desenha o QR. A IA recebe só uma frase de confirmação.
@@ -88,4 +88,3 @@ Saídas de ferramentas já chegam ao log após `SecretVault.redact`.
 
 - `redact` só conhece valores do `SecretVault`; segredos que não vieram de `ask_secure` (ex.: headers capturados por `browser_network`) só são mascarados pelos padrões genéricos do `ErrorLog`, e não na resposta ao modelo.
 - Segredos curtos (<3 chars) não são mascarados.
-- `CardVault` e `PixVault` compartilham o mesmo alias de chave; invalidar a chave afeta ambos.
