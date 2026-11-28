@@ -109,3 +109,14 @@ Nova ferramenta: método `suspend` no `BrowserHost` (ou extensão em `BrowserHos
 - `browser_network` mascara cabeçalhos de credencial (`Authorization`, `Cookie`, `Set-Cookie`, chaves de API) e tokens conhecidos nos corpos; outros dados da página continuam visíveis ao modelo.
 - Captura de rede vê apenas `fetch`/XHR instrumentados após a navegação; requisições iniciais e de outros mecanismos dependem do `shouldInterceptRequest`/Resource Timing.
 - `HostPacing` é em memória e global; reinício do app zera os recuos.
+
+## Frota global de WebViews
+
+Todos os WebViews do app (chats e API Hub) dividem um único processo de renderer. Quando o Android o mata por falta de memória, todas as abas caem juntas. Por isso a memória é controlada globalmente em `BrowserFleet` / `BrowserFleetPolicy`:
+
+- **Orçamento global:** no máximo 3 WebViews vivos no app inteiro (2 no modo de pouca memória). Passou disso, as abas menos usadas são estacionadas.
+- **Ociosas:** abas paradas há 10 min (3 min no modo de pouca memória) são estacionadas, inclusive a aba ativa de um chat parado. Ela volta, restaurada, no próximo uso.
+- **Reciclagem:** páginas abertas há mais de 2 h (45 min no modo de pouca memória) são recarregadas do zero quando ficam paradas, porque SPAs pesadas acumulam memória ao longo das horas. Isso vale também para o WhatsApp Web do API Hub.
+- **Nunca estacionadas:** a aba na tela, a aba com navegação ou script pendente e a aba ativa de um agente em execução. O WhatsApp Web só é estacionado pela reciclagem, não por estar parado.
+- **Depois de uma queda:** recria só o que está em uso, com intervalo de 1,5 s entre as abas. O resto volta quando for usado. Duas quedas em 30 min ligam o modo de pouca memória.
+- A revisão roda a cada minuto e em toda chamada a `onTrimMemory`. Os logs identificam o browser (`browser <id> · aba tab-N`).
