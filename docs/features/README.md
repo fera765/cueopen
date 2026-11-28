@@ -9,6 +9,7 @@ Documentação técnica das principais funcionalidades do app Android Fluwy (pac
 | [agent-loop.md](agent-loop.md) | `AgentRunner`, `AgentLoop`, `ToolContextPlanner`, guardas de loop, compactação, dispatch e famílias de ferramentas. |
 | [tools.md](tools.md) | Convenções de schema, famílias de ferramentas, prefixos `ERRO`/`GUARDRAIL`/`RECUSADO`, como adicionar ferramenta, `ToolSchemaQualityTest`. |
 | [memory-and-knowledge.md](memory-and-knowledge.md) | `ContextManager`, memórias, knowledge, `NOTES.md`, `MemoryHygiene`, `MemoryGraph`, compactação. |
+| [commands-and-mentions.md](commands-and-mentions.md) | Caixa de mensagem: `@` (Conectores/API Hub), comandos `/`, tela de configuração do agent. |
 | [prompts.md](prompts.md) | Catálogo de prompts, sintaxe de template, Configurações > Prompts. |
 
 ## Ambientes de execução

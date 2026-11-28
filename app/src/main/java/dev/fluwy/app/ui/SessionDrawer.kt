@@ -336,16 +336,3 @@ fun dayGroup(t: Long): String {
 }
 
 
-/** Comandos da caixa de mensagem. */
-val slashCommands = listOf(
-    "/compact" to "Compacta o contexto da conversa agora",
-    "/autocompact" to "Liga/desliga a compactação automática ao atingir o limite",
-    "/clear" to "Limpa o contexto do modelo (mantém o histórico na tela)",
-    "/stop" to "Para o agente",
-    "/undo" to "Desfaz a última alteração de arquivo feita pelo agente",
-    "/usage" to "Mostra uso de tokens e contexto",
-    "/memory" to "Abre a memória de longo prazo",
-    "/skills" to "Abre as skills",
-    "/connectors" to "Abre os conectores",
-    "/help" to "Lista os comandos",
-)

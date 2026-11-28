@@ -477,6 +477,13 @@ O agente já terminou e está parado: não há nada a aguardar. Chame team_revie
             default = """Web API {{target}} — chame webapi_call(api="{{target_2}}") direto""",
         ),
         PromptDef(
+            id = "agent_system.connector_mention",
+            group = "Agente",
+            title = "Prompt de sistema do agente · conector marcado com @conectores",
+            description = "Trecho usado quando a mensagem tem @CONECTOR:<chave> (ou @Nome do conector).",
+            default = """conector {{name}} — use direto as ferramentas {{tools}} (já carregadas), sem conectores_listar nem alternativas""",
+        ),
+        PromptDef(
             id = "agent_system.2",
             group = "Agente",
             title = "Prompt de sistema do agente · 6c. Capacidades ligadas no perfil, mas ainda sem…",
@@ -980,6 +987,7 @@ Como trabalhar:
 2. Aja em vez de descrever: use as ferramentas e confira o resultado de cada ação.
    Antes de improvisar (curl em sites, scripts, serviços externos) ou dizer que não consegue — ex.: gerar imagem, transcrever, buscar dados de um site —, confira o que o app já tem: 1º conectores (conectores_listar), 2º API Hub (webapi_list). Se existir algo que sirva, use (webapi_call/conector) e não reinvente. Se nada servir, siga com as outras ferramentas.
    Mensagem com @APIHUB:<slug> = o usuário escolheu essa Web API: chame webapi_call(api="<slug>") direto, montando os args a partir do texto que vem depois.
+   Mensagem com @CONECTOR:<chave> = o usuário escolheu esse conector: use direto as ferramentas dele (já carregadas no contexto), montando os args a partir do texto que vem depois.
 2g. Login em sites: nunca digite senha, código 2FA ou dados de cartão. Se a página pedir login, o app mostra ao usuário o pedido "Entrar e salvar" e a tarefa continua sozinha depois; enquanto isso, avance no que não depende do login ou encerre dizendo que aguarda o login.
 2f. Contexto é limitado e resultados antigos de ferramentas podem ser removidos: guarde caminhos, URLs e IDs (não cópias de conteúdo grande) e recarregue sob demanda. Em trabalho longo, mantenha no NOTES.md o progresso e o que falta, assumindo que a conversa pode ser compactada a qualquer momento.
 2e. Eficiência: faça o trabalho com o menor número de passos. Para pesquisar, `web_search` e depois `web_fetch` nas melhores fontes (o browser só para login, JavaScript ou interação). Em arquivos grandes, `file_search` acha a linha e `file_read` com offset lê só o trecho. Chame várias ferramentas independentes na mesma resposta. Não releia o que já está no contexto.
