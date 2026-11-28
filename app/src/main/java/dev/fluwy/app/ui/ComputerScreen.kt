@@ -1,5 +1,7 @@
 package dev.fluwy.app.ui
 
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.ui.input.pointer.pointerInput
 import android.annotation.SuppressLint
 import android.content.Intent
 import android.webkit.JavascriptInterface
@@ -264,17 +266,17 @@ private fun ExtraKeys(
                 keys.forEach { (label, sequence) ->
                     val modifierKey = label == "CTRL" || label == "ALT"
                     val selected = (label == "CTRL" && ctrl) || (label == "ALT" && alt)
+                    val surface = Modifier.weight(1f).padding(2.dp).clip(RoundedCornerShape(7.dp))
+                        .background(if (selected) Color(0xFFFF6B3D) else Color(0xFF23262D))
                     Box(
-                        Modifier.weight(1f).padding(2.dp).clip(RoundedCornerShape(7.dp))
-                            .background(if (selected) Color(0xFFFF6B3D) else Color(0xFF23262D))
-                            .clickable {
-                                when (label) {
-                                    "CTRL" -> onCtrl()
-                                    "ALT" -> onAlt()
-                                    else -> send(sequence)
-                                }
+                        (if (label in ARROW_KEYS) surface.repeatWhilePressed(sequence) { send(sequence) }
+                        else surface.clickable {
+                            when (label) {
+                                "CTRL" -> onCtrl()
+                                "ALT" -> onAlt()
+                                else -> send(sequence)
                             }
-                            .padding(horizontal = 2.dp, vertical = 9.dp),
+                        }).padding(horizontal = 2.dp, vertical = 9.dp),
                         contentAlignment = Alignment.Center
                     ) {
                         Text(
@@ -740,5 +742,25 @@ fun FilesScreen(nav: NavController) {
     val app = FluwyApp.instance
     Scaffold(containerColor = Fluwy.c.bg, topBar = { FluwyTopBar("Arquivos", { nav.popBackStack() }) }) { pad ->
         Box(Modifier.padding(pad)) { FilesPane(app.sandbox.publicDir, "/root") }
+    }
+}
+
+private val ARROW_KEYS = setOf("↑", "↓", "←", "→")
+
+/**
+ * Envia [action] ao tocar e repete enquanto o dedo continuar pressionado (como uma tecla física):
+ * primeira repetição após 400 ms, depois a cada 60 ms; para ao soltar.
+ */
+private fun Modifier.repeatWhilePressed(key: Any, action: () -> Unit): Modifier = pointerInput(key, action) {
+    kotlinx.coroutines.coroutineScope {
+        detectTapGestures(onPress = {
+            val job = launch {
+                action()
+                kotlinx.coroutines.delay(400)
+                while (true) { action(); kotlinx.coroutines.delay(60) }
+            }
+            tryAwaitRelease()
+            job.cancel()
+        })
     }
 }

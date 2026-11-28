@@ -26,7 +26,7 @@ import kotlinx.serialization.json.putJsonArray
  * WhatsApp do API Hub: configurações (contatos bloqueados / só permitidos / sem grupos) e o webhook de mensagens
  * recebidas em tempo real. O webhook escuta o WhatsApp Web (WA-JS, evento chat.new_message) na página das APIs,
  * lê a fila a cada ~3 s e, para cada mensagem: guarda nas recentes, dispara os fluxos com gatilho "Mensagem no
- * WhatsApp" que casam com o filtro e, se configurado, encaminha (POST JSON) para um endereço externo.
+ * WhatsApp" que casam com o filtro. O consumo externo é feito pelo servidor local (WaLocalServer), sem envio para fora do aparelho.
  */
 object WhatsAppHub {
     data class Config(

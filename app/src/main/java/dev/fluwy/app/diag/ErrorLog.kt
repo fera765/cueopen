@@ -144,6 +144,12 @@ object ErrorLog {
 
     fun clear(context: Context) = clearFiles(context.applicationContext.filesDir)
 
+    /** Apaga só os registros de erro (mantém atividade e último crash). */
+    fun clearErrors(context: Context) = synchronized(lock) {
+        runCatching { file(context).delete() }
+        recent.clear()
+    }
+
     /**
      * Diagnóstico completo num só arquivo para enviar: erros (IA/LLM, agentes, ferramentas, conectores, skills,
      * hub, Linux, browser, crashes), logs de depuração dos conectores e os registros de instalação/execução do hub
