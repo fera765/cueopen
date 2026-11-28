@@ -88,10 +88,9 @@ fun Composer(
             mentionRange = null
         }
     }
-    // Todas as menções conhecidas (@skill, @conector, @agent) ficam em azul enquanto o usuário digita.
+    // Menções conhecidas (@CONECTOR:, @APIHUB:, @skill/@agent vindos de /skill e /agent) ficam em azul.
     val mentionTargets = remember(editor.text.count { it == '@' }) {
-        runCatching { FluwyApp.instance.agent.mentionTargets() }.getOrDefault(emptyList()) +
-            dev.fluwy.app.agent.Mentions.Target("create-agent", dev.fluwy.app.agent.Mentions.Kind.COMMAND, "create-agent")
+        runCatching { FluwyApp.instance.agent.mentionTargets() }.getOrDefault(emptyList())
     }
     val mentionTransformation = remember(mentionRange, editor.text, mentionTargets) {
         VisualTransformation { source ->
@@ -243,7 +242,7 @@ fun Composer(
             beginVoiceRecording()
         }
     }
-    // Sugestões de comandos (/) e menções (@ skills e agents)
+    // Sugestões: "/" (comandos agrupados), "/skill …"/"/agent …" (escolha), "@" (Conectores ou API Hub).
     val token = editor.text.substringAfterLast(' ').substringAfterLast('\n')
     val catalogFlow = remember {
         FluwyApp.instance.store.state.map { it.skills to it.agents }.distinctUntilChanged()
@@ -252,48 +251,23 @@ fun Composer(
         FluwyApp.instance.store.state.value.let { it.skills to it.agents }
     }
     val catalog by catalogFlow.collectAsStateWithLifecycle(initialCatalog)
-    val suggestions: List<Triple<String, String, String>> = remember(token, catalog.first, catalog.second, mentionTargets) {
-        when {
-            value.startsWith("/") && !value.contains(' ') -> slashCommands.filter { it.first.startsWith(value, true) }.map { Triple(it.first, it.second, it.first + " ") }
-            // @APIHUB: → lista as Web APIs do hub (o texto depois dos dois-pontos filtra).
-            token.startsWith("@APIHUB:", true) -> mentionTargets.filter { it.kind == dev.fluwy.app.agent.Mentions.Kind.WEBAPI && it.id.isNotBlank() }
-                .filter { it.id.contains(token.substringAfter(':'), true) }
-                .map { t -> Triple("@APIHUB:" + t.id, "API Hub · " + (runCatching { dev.fluwy.app.browser.WebApiHub.find(FluwyApp.instance, t.id)?.name }.getOrNull() ?: ""), "@APIHUB:" + t.id + " ") }.take(30)
-            token.startsWith("@") -> (listOf(Triple("@APIHUB", "API Hub · escolher uma Web API", "@APIHUB:")).filter { "APIHUB".contains(token.drop(1), true) } +
-                listOf(Triple("@create-agent", "Criar um novo agente a partir de uma descrição", "@create-agent ")) +
-                mentionTargets.filter { it.kind == dev.fluwy.app.agent.Mentions.Kind.CONNECTOR }.map { Triple("@" + it.label, "Conector", "@" + it.label + " ") } +
-                catalog.second.map { Triple("@" + it.name, "Agent", "@" + it.name + " ") } +
-                catalog.first.filter { it.enabled }.map { Triple("@" + it.name, "Skill · " + it.description.take(60), "@" + it.name + " ") })
-                .filter { it.first.contains(token.drop(1), true) }.take(20)
-            else -> emptyList()
-        }
+    val suggestions: List<ComposerSuggestion> = remember(token, editor.text, catalog.first, catalog.second, mentionTargets) {
+        composerSuggestions(editor.text, token, catalog.first, catalog.second, mentionTargets)
     }
     if (suggestions.isNotEmpty()) {
-        Column(Modifier.fillMaxWidth().padding(horizontal = 12.dp).clip(RoundedCornerShape(18.dp)).background(c.surface).border(1.dp, c.line, RoundedCornerShape(18.dp))
-            .heightIn(max = 240.dp).verticalScroll(rememberScrollState())) {
-            suggestions.forEach { (label, desc, insert) ->
-                Row(Modifier.fillMaxWidth().clickable {
-                    if (label.startsWith("/")) {
-                        editor = TextFieldValue(insert, selection = TextRange(insert.length))
-                        mentionRange = null
-                        onChange(insert)
-                    } else {
-                        val prefix = editor.text.dropLast(token.length)
-                        val selected = insert.trimEnd()
-                        val updated = prefix + insert
-                        val start = prefix.length
-                        editor = TextFieldValue(updated, selection = TextRange(updated.length))
-                        mentionRange = TextRange(start, start + selected.length)
-                        onChange(updated)
-                    }
-                }.padding(horizontal = 14.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Icon(when { label.startsWith("/") -> Icons.Rounded.Terminal; desc.startsWith("API Hub") -> Icons.Rounded.Api; desc == "Agent" -> Icons.Rounded.SmartToy; desc == "Conector" -> Icons.Rounded.Cable; else -> Icons.Rounded.AutoAwesome },
-                        null, Modifier.size(18.dp), tint = c.accent)
-                    Spacer(Modifier.width(10.dp))
-                    Text(label, fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
-                    Spacer(Modifier.width(8.dp))
-                    Text(desc, fontSize = 12.sp, color = c.ink3, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                }
+        ComposerSuggestionBox(suggestions) { sg ->
+            if (sg.replaceAll) {
+                editor = TextFieldValue(sg.insert, selection = TextRange(sg.insert.length))
+                mentionRange = null
+                onChange(sg.insert)
+            } else {
+                val prefix = editor.text.dropLast(token.length)
+                val selected = sg.insert.trimEnd()
+                val updated = prefix + sg.insert
+                val start = prefix.length
+                editor = TextFieldValue(updated, selection = TextRange(updated.length))
+                mentionRange = TextRange(start, start + selected.length)
+                onChange(updated)
             }
         }
     }

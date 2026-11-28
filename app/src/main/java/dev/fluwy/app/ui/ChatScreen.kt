@@ -285,11 +285,20 @@ fun ChatScreen(nav: NavController, sessionId: String, onMenu: () -> Unit = {}) {
                 replyText = replyingTo?.text?.take(800),
                 replyAuthor = agent?.name ?: "Fluwy Bot",
                 onClearReply = { replyingTo = null },
-                onSend = { text, files ->
-                    if (text.trim().startsWith("@create-agent", true)) {
-                        val desc = text.trim().removePrefix("@create-agent").removePrefix("@Create-Agent").trim()
+                onSend = { rawText, files ->
+                    // /skill Nome … e /agent Nome … viram a menção "@Nome …" que o agente já entende.
+                    val st0 = app.store.state.value
+                    val text = dev.fluwy.app.agent.SlashCommands.resolveArgCommand(rawText, st0.skills.filter { it.enabled }.map { it.name }, st0.agents.map { it.name }) ?: rawText
+                    val tt = text.trim()
+                    if (tt.startsWith("/skill ", true) || tt.equals("/skill", true) || tt.startsWith("/agent ", true) || tt.equals("/agent", true)) {
                         draft = ""
-                        if (desc.isBlank()) app.store.addItem(sessionId, ChatItem.Assistant(text = "Descreva o agente após @create-agent. Ex.: `@create-agent um analista de ações que todo dia de manhã resume o mercado`", final = false))
+                        app.store.addItem(sessionId, ChatItem.Assistant(text = "Não encontrei esse nome. Digite `/skill ` ou `/agent ` e escolha na lista.", final = false))
+                        return@Composer
+                    }
+                    if (tt.startsWith("/create-agent", true) || tt.startsWith("@create-agent", true)) {
+                        val desc = tt.drop("/create-agent".length).trim()
+                        draft = ""
+                        if (desc.isBlank()) app.store.addItem(sessionId, ChatItem.Assistant(text = "Descreva o agente após /create-agent. Ex.: `/create-agent um analista de ações que todo dia de manhã resume o mercado`", final = false))
                         else {
                             app.store.addItem(sessionId, ChatItem.Assistant(text = "Criando agente…", final = false))
                             cmdScope.launch {
@@ -334,8 +343,10 @@ fun ChatScreen(nav: NavController, sessionId: String, onMenu: () -> Unit = {}) {
                             "/memory" -> nav.navigate("memory")
                             "/skills" -> nav.navigate("skills")
                             "/connectors" -> nav.navigate("connectors")
-                            else -> app.store.addItem(sessionId, ChatItem.Assistant(text = "**Comandos**\n" + slashCommands.joinToString("\n") { "- `${it.first}` — ${it.second}" } +
-                                "\n\nUse `@` para mencionar uma skill (carrega as instruções dela) ou um Agent (passa a tarefa para ele).", final = false))
+                            "/agents" -> nav.navigate("agents")
+                            "/new" -> nav.navigate("home") { launchSingleTop = true }
+                            else -> app.store.addItem(sessionId, ChatItem.Assistant(text =
+                                (if (cmd == "/help") "" else "Comando desconhecido: `$cmd`.\n\n") + dev.fluwy.app.agent.SlashCommands.helpMarkdown(), final = false))
                         }
                         return@Composer
                     }
