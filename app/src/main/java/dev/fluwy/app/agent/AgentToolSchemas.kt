@@ -234,7 +234,7 @@ internal fun AgentRunner.tools(agentIn: AgentProfile?, allowMultiAgent: Boolean 
             add(tool("browser_read", "Lê o texto e os elementos da página atual, sem clicar nem preencher campos.", buildJsonObject {}))
             add(tool("browser_scroll", "Rola a página atual, sem acionar controles.", buildJsonObject { put("direction", str("up ou down")) }))
             add(browserWaitForTool())
-            add(tool("browser_back", "Volta para a página anterior.", buildJsonObject {}))
+            add(tool("browser_back", "Volta para a página anterior da aba ativa (como o botão voltar). Use depois de seguir um link errado; confira o resultado com browser_read.", buildJsonObject {}))
         }
         return@buildJsonArray
     }
@@ -351,7 +351,7 @@ internal fun AgentRunner.tools(agentIn: AgentProfile?, allowMultiAgent: Boolean 
             "[{\"op\":\"replace_text\",\"find\":\"<h1>Título antigo</h1>\",\"replace\":\"<h1>Título novo</h1>\"}]. Antes de replace_text, copie o trecho do page_read.",
             buildJsonObject { put("page_id", str("ID da página (page_list)")); put("ops", buildJsonObject { put("type", "array"); put("description", "Lista de operações, cada uma um objeto com \"op\" e os campos dela"); put("items", buildJsonObject { put("type", "object") }) }) }, listOf("page_id", "ops")))
         add(tool("page_read", "Lê uma página em formato compacto (cartões com card_id, linhas numeradas).", buildJsonObject { put("page_id", str("ID da página")) }, listOf("page_id")))
-        add(tool("page_list", "Lista as páginas desta conversa/seção.", buildJsonObject {}))
+        add(tool("page_list", "Lista as páginas (Pages) desta conversa ou seção, com id e título. Use antes de page_read ou page_update para achar a página certa.", buildJsonObject {}))
     }
     add(tool("file_search", "Procura um texto (ou regex) dentro dos arquivos do workspace e devolve caminho:linha: trecho. Use ANTES de ler arquivos grandes: ache a linha e leia só o trecho com file_read(offset).",
         buildJsonObject { put("pattern", str("Texto ou regex a procurar (sem diferenciar maiúsculas)")); put("path", str("Arquivo ou pasta (padrão: todo o workspace)")); put("regex", bool("true se pattern é regex")); put("max", int("Máximo de linhas (padrão 50)")) }, listOf("pattern")))
@@ -370,7 +370,7 @@ internal fun AgentRunner.tools(agentIn: AgentProfile?, allowMultiAgent: Boolean 
         }, listOf("index", "text")))
         add(tool("browser_scroll", "Rola a página, espera novos itens carregarem e informa quantas páginas ainda faltam.", buildJsonObject { put("direction", str("up ou down")) }))
         add(browserWaitForTool())
-        add(tool("browser_back", "Volta para a página anterior.", buildJsonObject {}))
+        add(tool("browser_back", "Volta para a página anterior da aba ativa (como o botão voltar). Use depois de seguir um link errado; confira o resultado com browser_read.", buildJsonObject {}))
         add(tool("browser_js", "Executa JavaScript na página atual e devolve o resultado da expressão.", buildJsonObject { put("code", str("Código JS (uma expressão)")) }, listOf("code")))
     }
     // Busca, leitura HTTP e Web APIs não usam o browser da sessão: valem também para workers e fluxos
@@ -446,7 +446,7 @@ internal fun AgentRunner.tools(agentIn: AgentProfile?, allowMultiAgent: Boolean 
                 put("intervalo_min", int("De quanto em quanto tempo verificar (mínimo 15)"))
             }, listOf("nome", "fonte", "instrucao")))
         add(tool("trigger_list", "Lista os gatilhos desta conversa (estado, última verificação, eventos).", buildJsonObject {}))
-        add(tool("trigger_delete", "Remove um gatilho pelo id.", buildJsonObject { put("id", str("Id do gatilho")) }, listOf("id")))
+        add(tool("trigger_delete", "Remove um gatilho pelo id (veja os ids com trigger_list). A remoção é imediata e o gatilho para de disparar.", buildJsonObject { put("id", str("Id do gatilho")) }, listOf("id")))
     }
     if (allowMultiAgent) add(tool("cron_add",
         "Agenda uma tarefa para rodar sozinha num horário exato, em uma conversa nova e isolada (não mexe nesta). Use quando o usuário pedir algo com hora marcada: \"todo dia às 8h\", \"amanhã às 15:30\", \"toda segunda\". Para repetir por intervalo dentro desta mesma conversa, use set_schedule.",

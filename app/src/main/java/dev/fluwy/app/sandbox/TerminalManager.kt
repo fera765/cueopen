@@ -382,7 +382,7 @@ class TerminalManager(private val ctx: Context, private val sandbox: Sandbox) {
                         withContext(Dispatchers.Main) { kill() }
                         "Erro: a saída do comando não pôde ser capturada (terminal preso a um ambiente antigo). " +
                             "O terminal foi REINICIADO; confira com ls se o comando teve efeito e execute de novo se necessário."
-                    } else ShellOutput.readCapturedFile(outputFile)
+                    } else ShellOutput.readCapturedFile(outputFile, File(dir, "out/cmd_$id.log"), "$gfluwy/out/cmd_$id.log")
                 }
                 // Em segundo plano o nohup ainda vai ler o script: apagar aqui causava
                 // "bash: …/run_x.sh: No such file or directory" e o servidor nunca subia.

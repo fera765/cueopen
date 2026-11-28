@@ -261,6 +261,7 @@ fun FluwyNav(nav: NavHostController, startOnboarding: Boolean) {
         composable("uiconnector/{id}") { e -> UiConnectorScreen(nav, e.arguments!!.getString("id")!!) }
         composable("settings") { SettingsScreen(nav) }
         composable("proxy") { ProxyScreen(nav) }
+        composable("error_logs") { dev.fluwy.app.ui.settings.ErrorLogsScreen(nav) }
         composable("prompts") { dev.fluwy.app.ui.settings.PromptsScreen(nav) }
         composable("prompt/{id}") { e -> dev.fluwy.app.ui.settings.PromptEditorScreen(nav, e.arguments?.getString("id").orEmpty()) }
         composable("providers") { ProvidersScreen(nav) }

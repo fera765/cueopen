@@ -158,6 +158,7 @@ fun SettingsScreen(nav: NavController) {
                 Switch(bankGuard, { bankGuard = it; dev.fluwy.app.device.BankApps.setAutoOff(nav.context, it) })
             }
             SectionLabel("Logs (erros e atividade)")
+            SettingsLink(Icons.Rounded.BugReport, "Logs de erro", "Ver, filtrar e copiar as falhas registradas") { nav.navigate("error_logs") }
             Text(
                 "Registra as FALHAS e a ATIVIDADE do app: cada ferramenta executada (argumentos, status, tempo e resultado), cada chamada de Web API do API Hub (URL, etapa, tempo), cada chamada ao modelo, além de conectores, hub, Linux, browser e crashes — com um resumo de falhas por ferramenta. O texto das conversas não entra. Baixe o diagnóstico completo e envie aqui no Claude para eu corrigir.",
                 fontSize = 12.sp, color = c.ink2
