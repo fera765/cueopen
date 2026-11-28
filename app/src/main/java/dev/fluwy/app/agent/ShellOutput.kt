@@ -36,16 +36,44 @@ object ShellOutput {
         return out.joinToString("\n")
     }
 
-    /** Reads captured stdout/stderr without disguising a missing capture file as a silent command. */
-    fun readCapturedFile(file: File): String {
+    /** Limite de caracteres da saída que volta ao modelo; o excedente fica num arquivo consultável. */
+    const val INLINE_LIMIT = 12_000
+    private const val HEAD_CHARS = 2_000
+    private const val KEEP_FULL_LOGS = 20
+
+    /**
+     * Lê o stdout/stderr capturado sem disfarçar captura ausente como comando silencioso.
+     * Saída longa volta como início + fim (onde costumam estar o comando e o erro) e o arquivo
+     * completo é preservado em [keepAs], citado pelo caminho [guestPath] para o agente usar grep/file_read.
+     */
+    fun readCapturedFile(file: File, keepAs: File? = null, guestPath: String? = null): String {
         if (!file.isFile) return "Erro: o arquivo de captura de stdout/stderr não foi criado ou ficou inacessível no sandbox."
-        return runCatching { file.readText().takeLast(12_000) }
-            .getOrElse { "Erro ao ler a captura de stdout/stderr: ${it.message ?: "falha de leitura"}" }
+        return runCatching {
+            val text = file.readText()
+            if (text.length <= INLINE_LIMIT) return@runCatching text
+            val kept = keepAs?.let { dest ->
+                dest.parentFile?.mkdirs()
+                file.copyTo(dest, overwrite = true)
+                dest.parentFile?.listFiles { f -> f.name.startsWith("cmd_") }?.sortedByDescending { it.lastModified() }
+                    ?.drop(KEEP_FULL_LOGS)?.forEach { it.delete() }
+                true
+            } == true
+            headTail(text, INLINE_LIMIT, if (kept && guestPath != null) guestPath else null)
+        }.getOrElse { "Erro ao ler a captura de stdout/stderr: ${it.message ?: "falha de leitura"}" }
+    }
+
+    /** Mantém o início e o fim de [text] dentro de [limit] caracteres, com um aviso do que foi omitido. */
+    fun headTail(text: String, limit: Int, fullPath: String? = null): String {
+        if (text.length <= limit) return text
+        val tail = limit - HEAD_CHARS
+        val omitted = text.length - HEAD_CHARS - tail
+        val where = if (fullPath != null) " Saída completa em $fullPath (use grep -n ou file_read com offset para ler o trecho)." else ""
+        return text.take(HEAD_CHARS) + "\n… [$omitted caracteres omitidos.$where]\n" + text.takeLast(tail)
     }
 
     /** Formats output together with an unambiguous process result for the agent. */
     fun formatExecutionResult(raw: String, exitCode: Int, timedOut: Boolean): String {
-        val body = compact(raw).takeLast(10_000)
+        val body = compact(raw).let { if (it.contains(" caracteres omitidos.")) it else headTail(it, INLINE_LIMIT) }
         return buildString {
             if (body.isBlank()) {
                 append(when {

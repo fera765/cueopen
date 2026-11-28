@@ -45,4 +45,13 @@ class ShellOutputTest {
             directory.deleteRecursively()
         }
     }
+
+    @org.junit.Test fun longOutputKeepsHeadAndTailWithPointer() {
+        val text = "INICIO\n" + "x".repeat(50_000) + "\nERRO FINAL"
+        val out = ShellOutput.headTail(text, ShellOutput.INLINE_LIMIT, "/root/workspace/.fluwy/out/cmd_1.log")
+        org.junit.Assert.assertTrue(out.startsWith("INICIO"))
+        org.junit.Assert.assertTrue(out.endsWith("ERRO FINAL"))
+        org.junit.Assert.assertTrue(out.contains("cmd_1.log"))
+        org.junit.Assert.assertTrue(out.length < ShellOutput.INLINE_LIMIT + 300)
+    }
 }

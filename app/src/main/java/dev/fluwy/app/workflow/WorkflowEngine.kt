@@ -187,6 +187,7 @@ object WorkflowEngine {
                     res.output.take(20_000), res.error.orEmpty(), res.sessionId)
                 save(run.copy(status = "running", steps = run.steps.dropLast(1) + step))
                 if (res.error != null) {
+                    dev.fluwy.app.diag.ErrorLog.log("workflow", "${w.name} · ${labels[node.id]} (${node.type}): ${res.error}", tool = node.type)
                     save(run.copy(status = "error", finishedAt = System.currentTimeMillis(), error = "${labels[node.id]}: ${res.error}"))
                     notifyResult(w, run); return
                 }
@@ -200,6 +201,7 @@ object WorkflowEngine {
             pauses.remove(run.id)
             if (isActive(run.status)) save(run.copy(status = "cancelled", finishedAt = System.currentTimeMillis(), error = "Parada pelo usuário."))
         } catch (e: Throwable) {
+            dev.fluwy.app.diag.ErrorLog.log("workflow", e, "Fluxo ${w.name}")
             save(run.copy(status = "error", finishedAt = System.currentTimeMillis(), error = (e.message ?: e.javaClass.simpleName).take(1_000)))
             notifyResult(w, run)
         } finally {
