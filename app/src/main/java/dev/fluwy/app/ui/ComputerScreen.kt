@@ -1,5 +1,6 @@
 package dev.fluwy.app.ui
 
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.ui.input.pointer.pointerInput
 import android.annotation.SuppressLint
 import android.content.Intent
@@ -752,7 +753,7 @@ private val ARROW_KEYS = setOf("↑", "↓", "←", "→")
  */
 private fun Modifier.repeatWhilePressed(key: Any, action: () -> Unit): Modifier = pointerInput(key, action) {
     kotlinx.coroutines.coroutineScope {
-        androidx.compose.foundation.gestures.detectTapGestures(onPress = {
+        detectTapGestures(onPress = {
             val job = launch {
                 action()
                 kotlinx.coroutines.delay(400)
