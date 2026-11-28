@@ -60,6 +60,21 @@ class FluwyApp : Application() {
         else if (clearPersistentData) BrowserHost.clearSessionData(this, sessionId)
     }
 
+    /**
+     * A cada 5 min libera os WebViews de abas paradas há mais de 10 min nos browsers de chats que não estão
+     * executando. Mantém a memória estável com muitos chats abertos; as abas voltam ao serem usadas.
+     */
+    private fun startBrowserIdleReaper() = applicationScope.launch(kotlinx.coroutines.Dispatchers.Main) {
+        while (true) {
+            kotlinx.coroutines.delay(5 * 60_000L)
+            browsers.forEach { (id, host) ->
+                if (::agent.isInitialized && agent.isRunning(id)) return@forEach
+                runCatching { host.releaseIdleViews(10 * 60_000L) }
+                    .onFailure { dev.fluwy.app.diag.ErrorLog.log("browser", it, "Liberação de abas ociosas") }
+            }
+        }
+    }
+
     /** Flush best-effort de estado nativo por chat antes de a Activity entrar em background. */
     fun persistRuntimeState() {
         browsers.values.forEach { browser -> runCatching { browser.persistState() } }
@@ -126,6 +141,7 @@ class FluwyApp : Application() {
         connectorDebugLog
         applyBrowserProxy()
         restartProxyRotation()
+        startBrowserIdleReaper()
         sandbox = Sandbox(this)
         // Agentes de uma mesma Seção compartilham o workspace (arquivos entregues entre etapas).
         sandbox.environmentAlias = { sid ->

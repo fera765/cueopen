@@ -282,6 +282,19 @@ class BrowserHost(internal val appCtx: Context, internal val sessionId: String =
     }
 
     /** Libera o WebView da aba guardando o histórico (recriado sob demanda). */
+    /**
+     * Libera os WebViews de abas paradas há mais de [idleMs] (o histórico é salvo e a aba é recriada ao voltar).
+     * Nunca mexe na aba ativa nem em aba visível na tela. Chamar na thread principal. Devolve quantas liberou.
+     */
+    internal fun releaseIdleViews(idleMs: Long, now: Long = System.currentTimeMillis()): Int {
+        val idle = tabs.values.filter { t ->
+            t.id != activeTabId && now - t.lastUsed > idleMs &&
+                t.webView?.let { v -> !v.isAttachedToWindow || OffscreenStage.isStaged(v) } == true
+        }
+        idle.forEach { parkTab(it) }
+        return idle.size
+    }
+
     internal fun parkTab(tab: BrowserTab) {
         val v = tab.webView ?: return
         runCatching { persistWebViewState(tab, v) }

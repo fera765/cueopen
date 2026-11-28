@@ -250,7 +250,7 @@ internal suspend fun BrowserHost.waitForContent(tab: BrowserTab, maxMillis: Long
 internal suspend fun BrowserHost.awaitLoad(tab: BrowserTab, target: String = tab.url): String {
     val status = tab.navigationStatus
     val deferred = tab.pageDone ?: return "ERROR: não foi possível acompanhar o carregamento desta navegação."
-    val completed = withTimeoutOrNull(30_000) { deferred.await() }
+    val completed = awaitPageSignal(tab, deferred)
     val result = completed?.let(status::preserveHttpError) ?: status.httpError() ?: run {
         tab.diag.add("30s sem sinal do WebView; conferindo conteúdo")
         val st = waitForStable(tab, 6_000)
@@ -284,7 +284,8 @@ internal suspend fun BrowserHost.awaitLoad(tab: BrowserTab, target: String = tab
     }
     return when {
         st.ready == "complete" || st.chars >= 200 -> "OK: página carregada ($target)" +
-            (if (st.ready != "complete") " — conteúdo visível (${st.chars} caracteres); o site mantém conexões abertas, o que é normal." else "")
+            (if (st.ready != "complete") " — conteúdo visível (${st.chars} caracteres); o site mantém conexões abertas, o que é normal." else "") +
+            pageIdentity(tab)
         else -> {
             val url = runCatching { eval("location.href", 1_500, tab) }.getOrDefault("").trim('"').ifBlank { tab.url }
             status.incompleteMessage(target, url, st.ready, st.chars) +
@@ -292,3 +293,32 @@ internal suspend fun BrowserHost.awaitLoad(tab: BrowserTab, target: String = tab
         }
     }
 }
+
+/**
+ * Espera o fim do carregamento (onPageFinished) por até 30 s, mas sem ficar preso a sites que nunca
+ * fecham conexões: a partir de 5 s, se a página já tem conteúdo e nada pendente, segue adiante.
+ */
+internal suspend fun BrowserHost.awaitPageSignal(tab: BrowserTab, deferred: kotlinx.coroutines.CompletableDeferred<String>): String? {
+    val start = System.currentTimeMillis()
+    while (System.currentTimeMillis() - start < 30_000) {
+        withTimeoutOrNull(1_000) { deferred.await() }?.let { return it }
+        if (System.currentTimeMillis() - start >= 5_000) {
+            val st = runCatching { readiness(tab) }.getOrNull() ?: continue
+            if (st.ready != "loading" && st.chars >= 400 && st.inflight == 0) {
+                tab.diag.add("conteúdo pronto (${st.chars} caracteres) antes do sinal de fim do WebView")
+                return "OK"
+            }
+        }
+    }
+    return null
+}
+
+/** Título e endereço final da página, para o agente não precisar de uma leitura extra só para confirmar onde está. */
+internal suspend fun BrowserHost.pageIdentity(tab: BrowserTab): String = runCatching {
+    val title = eval("document.title", 1_500, tab).trim('"').take(120)
+    val url = eval("location.href", 1_500, tab).trim('"').take(200)
+    buildString {
+        if (title.isNotBlank() && title != "null") append(" · título: \"").append(title).append('"')
+        if (url.isNotBlank() && url != "null") append(" · endereço: ").append(url)
+    }
+}.getOrDefault("")

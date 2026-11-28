@@ -218,115 +218,8 @@ internal suspend fun AgentRunner.loop(sessionId: String, maxStepsOverride: Int? 
             // 2048 cortava o file_write de um componente inteiro: os argumentos chegavam vazios ({}) ou sem content.
             safeOutput.coerceAtMost(16_000L).toInt()
         } ?: 16_000  // modelos com raciocínio gastam parte disso pensando: 8192 cortava respostas com código grande
-        var currentReplyTokenLimit = replyTokenLimit
         val llmT0 = System.currentTimeMillis()
-        val replyRaw = run {
-            var attempt = 0
-            while (true) {
-                // Circuit breaker por provedor+modelo: se está aberto (ou em cooldown de rate limit), espera em vez de chamar.
-                val breaker = dev.fluwy.app.llm.LlmRecovery.breaker(store.settings.baseUrl, stepModel(agent))
-                while (true) {
-                    val wait = breaker.acquire(System.currentTimeMillis())
-                    if (wait <= 0) break
-                    setActivity(sessionId, Activity(Activity.Kind.THINKING, "Provedor instável — aguardando ${(wait / 1000).coerceAtLeast(1)}s para tentar de novo"))
-                    kotlinx.coroutines.delay(wait.coerceAtMost(15_000))
-                }
-                try {
-                    val usedModel = stepModel(agent)
-                    val response = llm.chat(listOf(sys) + history, tools = stepTools, model = usedModel, maxTokens = currentReplyTokenLimit, conversationId = sessionId)
-                    breaker.onSuccess()
-                    dev.fluwy.app.llm.KeyPool.onSuccess(dev.fluwy.app.llm.ProviderRoute.route(store.settings, usedModel).first.apiKey)
-                    if (usedModel == primaryModel(agent) && dev.fluwy.app.llm.ModelFallback.onSuccess(usedModel))
-                        store.addItem(sessionId, ChatItem.Step(tool = "model_switch", title = "Modelo principal voltou a responder", args = usedModel, result = "", status = StepStatus.OK))
-                    if (response.truncated && (response.toolCalls.isNotEmpty() || response.content.isNullOrBlank())) throw dev.fluwy.app.llm.LlmRequestFailure(
-                        "A resposta foi cortada sem texto recuperável ou com chamadas de ferramenta incompletas; nenhuma ferramenta foi executada.",
-                        retryable = true,
-                        responseTruncated = true,
-                    )
-                    return@run response
-                } catch (c: kotlinx.coroutines.CancellationException) {
-                    throw c
-                } catch (t: Throwable) {
-                    attempt++
-                    val llmFailure = t as? dev.fluwy.app.llm.LlmRequestFailure
-                    val retryable = llmFailure?.retryable == true
-                    val category = dev.fluwy.app.llm.LlmRecovery.classify(t.message, retryable, llmFailure?.responseTruncated == true)
-                    dev.fluwy.app.llm.PlanUsage.orgIdFrom(t.message)?.let { org -> if (store.settings.opencodeOrgId.isBlank()) store.updateSettings { it.copy(opencodeOrgId = org) } }
-                    if (llmFailure?.responseTruncated != true) breaker.onFailure(System.currentTimeMillis(), llmFailure?.retryAfterMillis)
-                    // Contexto estourado: compacta e continua (uma vez a cada 10 min, para nunca virar ciclo).
-                    if (category == dev.fluwy.app.llm.LlmRecovery.Category.CONTEXT && tokenBudgetOverride == null &&
-                        System.currentTimeMillis() - (contextOverflowAt[sessionId] ?: 0) > 600_000) {
-                        contextOverflowAt[sessionId] = System.currentTimeMillis()
-                        store.session(sessionId)?.let { cur -> runCatching { ctxMgr.compactIfNeeded(cur, force = true) }.getOrElse { ctxMgr.safeTrim(cur) } }
-                        scope.launch { send(sessionId, continuationDirective(sessionId, automatic = true), showUserMessage = false) }
-                        return
-                    }
-                    // Limite de requisições no modelo principal: passa na hora para o modelo alternativo (se configurado).
-                    val primaryNow = primaryModel(agent)
-                    val failingModel = stepModel(agent)
-                    val failingKeys = dev.fluwy.app.llm.ProviderRoute.route(store.settings, failingModel).first.apiKey
-                    if (category == dev.fluwy.app.llm.LlmRecovery.Category.RATE_LIMIT && dev.fluwy.app.llm.KeyPool.rotate(failingKeys)) {
-                        store.addItem(sessionId, ChatItem.Step(tool = "model_switch", title = "Limite nesta conta: usando a próxima chave do provedor",
-                            args = dev.fluwy.app.llm.ProviderRoute.label(failingModel), result = "Mesmo modelo, outra conta.", status = StepStatus.OK))
-                        attempt = 0
-                        continue
-                    }
-                    if (category == dev.fluwy.app.llm.LlmRecovery.Category.RATE_LIMIT &&
-                        dev.fluwy.app.llm.ModelFallback.onRateLimit(failingModel, fallbackChain(), primary = primaryNow)) {
-                        val next = stepModel(agent)
-                        val back = dev.fluwy.app.llm.ModelFallback.activeUntil(primaryNow)?.let { SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(it)) }.orEmpty()
-                        store.addItem(sessionId, ChatItem.Step(tool = "model_switch",
-                            title = if (failingModel == primaryNow) "Limite no modelo principal: usando o alternativo" else "Limite no alternativo: usando o próximo da cadeia",
-                            args = dev.fluwy.app.llm.ProviderRoute.label(next), result = "Testo o principal ($primaryNow) de novo às $back.", status = StepStatus.OK))
-                        attempt = 0
-                        continue
-                    }
-                    // Resposta cortada 2× mesmo com mais espaço: quase sempre é o modelo tentando escrever código enorme
-                    // dentro de UMA chamada (ex.: webapi_test com 8 KB de código). Em vez de suspender 20 min, orienta a
-                    // dividir o trabalho e segue na hora (até 3 vezes por tarefa).
-                    if (llmFailure?.responseTruncated == true && attempt >= 2 && (truncNudges.merge(sessionId, 1, Int::plus) ?: 1) <= 3) {
-                        setActivity(sessionId, Activity(Activity.Kind.THINKING, "Resposta longa demais — dividindo em partes menores"))
-                        scope.launch { send(sessionId, TRUNCATION_NUDGE, showUserMessage = false, directiveSuffix = " ") }
-                        return
-                    }
-                    // Erro do provedor/modelo que não passou em até 3 tentativas: vai para o próximo provedor da cadeia.
-                    // (Sem internet e contexto estourado não se resolvem trocando de provedor.)
-                    if (llmFailure != null && category != dev.fluwy.app.llm.LlmRecovery.Category.NETWORK &&
-                        category != dev.fluwy.app.llm.LlmRecovery.Category.CONTEXT &&
-                        (attempt >= 3 || !dev.fluwy.app.llm.LlmRecovery.shouldRetry(category, attempt, retryable)) &&
-                        dev.fluwy.app.llm.ModelFallback.onRateLimit(failingModel, fallbackChain(), primary = primaryNow)) {
-                        val next = stepModel(agent)
-                        store.addItem(sessionId, ChatItem.Step(tool = "model_switch", title = "Falha no provedor (${category.label}): usando o próximo da cadeia",
-                            args = dev.fluwy.app.llm.ProviderRoute.label(next), result = "Depois de $attempt tentativa(s) em ${dev.fluwy.app.llm.ProviderRoute.label(failingModel)}. O principal é testado de novo em alguns minutos.", status = StepStatus.OK))
-                        attempt = 0
-                        continue
-                    }
-                    if (llmFailure == null || !dev.fluwy.app.llm.LlmRecovery.shouldRetry(category, attempt, retryable)) {
-                        runCatching { dev.fluwy.app.diag.ErrorLog.log("agent", "LLM falhou após $attempt tentativa(s) [${category.name}]: ${t.javaClass.simpleName}: ${t.message.orEmpty()}", sessionId, "llm") }
-                        // Erro recuperável → suspende e retoma sozinho em 20 min; permanente → espera o usuário.
-                        val resumeAt = if (tokenBudgetOverride == null) scheduleAutoResume(sessionId, category) else null
-                        store.session(sessionId)?.items?.filterIsInstance<ChatItem.LlmRecovery>()?.filter { it.state == "waiting" }
-                            ?.forEach { store.replaceItem(sessionId, it.copy(state = "resolved")) }
-                        store.addItem(sessionId, ChatItem.LlmRecovery(
-                            provider = dev.fluwy.app.llm.LlmRecovery.providerLabel(store.settings.baseUrl), model = stepModel(agent),
-                            category = category.label, detail = SecretVault.redact(sessionId, t.message.orEmpty()).take(220), attempts = attempt,
-                            advice = category.advice, permanent = category.permanent, resumeAt = resumeAt, round = autoResumeRound[sessionId] ?: 0))
-                        pendingRecovery.add(sessionId)
-                        if (resumeAt == null) store.editSession(sessionId) { it.copy(status = SessionStatus.WAITING_USER) }
-                        return
-                    }
-                    if (llmFailure.responseTruncated) {
-                        currentReplyTokenLimit = (currentReplyTokenLimit.toLong() * 2L).coerceAtMost(32_000L).toInt()
-                    }
-                    val delayMs = dev.fluwy.app.llm.LlmRecovery.withJitter(
-                        dev.fluwy.app.llm.LlmRetryPolicy.delayMillis(attempt, llmFailure.retryAfterMillis), Math.random())
-                    val waitLabel = (delayMs / 1_000L).coerceAtLeast(1L)
-                    setActivity(sessionId, Activity(Activity.Kind.THINKING, "${category.label} — aguardando ${waitLabel}s antes de tentar de novo ($attempt/${category.maxAttempts})"))
-                    kotlinx.coroutines.delay(delayMs)
-                }
-            }
-            @Suppress("UNREACHABLE_CODE") return
-        }
+        val replyRaw = callModelWithRecovery(sessionId, agent, sys, history, stepTools, replyTokenLimit, tokenBudgetOverride) ?: return
         // Nomes de ferramenta "de hábito" (grep, read_file, fetch…) viram a ferramenta real exposta.
         val reply = replyRaw.copy(toolCalls = replyRaw.toolCalls.map { tc -> squadFixArgs(sessionId, tc.copy(name = ToolAliases.resolve(tc.name, exposedToolNames))) })
         val modelId = stepModel(agent)
@@ -375,6 +268,7 @@ internal suspend fun AgentRunner.loop(sessionId: String, maxStepsOverride: Int? 
         if (sectionMember) silentRounds = if (displayContent.isBlank() && reply.toolCalls.isNotEmpty()) silentRounds + 1 else 0
         // Anti-repetição: se o modelo repetir quase o mesmo texto várias vezes, interrompe.
         // Só é repetição real se o texto for quase igual E as ações também forem as mesmas
+        val resultLong = round.resultLong
         // (mesmas ferramentas com os mesmos argumentos). Mesma ferramenta com argumentos
         // diferentes (ex.: navegar em URLs distintas) é progresso, não loop.
         val cNow = displayContent.trim()
@@ -463,173 +357,18 @@ internal suspend fun AgentRunner.loop(sessionId: String, maxStepsOverride: Int? 
             return
         }
         intentNoActionTurns = 0
-        var stopLoop: SessionStatus? = null
-        var sleepReq: Pair<Int, String>? = null // (segundos, motivo)
-        val tradeIdsAfterSleep = linkedSetOf<Long>()
-        val tradeCallCache = HashMap<String, ToolResult>()
-        val resultHashes = HashMap<String, Int>()
-        val resultLong = HashSet<String>()
-        var repeatedFileFailure: String? = null
-        var repeatedToolFailure: String? = null
-        val staleSnapshotRecoveryCache = HashMap<String?, String>()
-        // Depois que uma ação pediu confirmação, nada mais desta resposta é executado.
-        var awaitingApproval = false
-        for (call in reply.toolCalls) {
-            val callWasExposed = ToolCallExecutionPolicy.isExposed(call.name, exposedToolNames)
-            val accessibilitySnapshotId = if (callWasExposed && call.name in accessibilitySnapshotBoundTools) runCatching {
-                json.parseToJsonElement(call.argsJson).jsonObject["snapshot_id"]?.jsonPrimitive?.contentOrNull
-            }.getOrNull() else null
-            val blockedSnapshotReuse = callWasExposed && call.name in accessibilitySnapshotBoundTools &&
-                invalidAccessibilitySnapshots.shouldBlock(accessibilitySnapshotId)
-            val blockedSnapshotRead = if (blockedSnapshotReuse) {
-                staleSnapshotRecoveryCache[accessibilitySnapshotId] ?: try {
-                    dev.fluwy.app.device.DeviceAccessibilityActions.readScreen(sessionId)
-                } catch (c: kotlinx.coroutines.CancellationException) {
-                    throw c
-                } catch (t: Throwable) {
-                    "A releitura automática falhou: ${t.message?.take(180) ?: t.javaClass.simpleName}."
-                }
-            } else null
-            if (blockedSnapshotReuse) {
-                accessibilitySnapshotId?.let { staleSnapshotRecoveryCache[it] = blockedSnapshotRead.orEmpty() }
-            }
-            // Auto-recuperação: uma exceção em qualquer ferramenta vira um erro acionável devolvido
-            // ao modelo (nunca derruba o loop do agente).
-            val tradeResultTool = call.name == "uic_iqoption_open_option" || call.name == "uic_iqoption_get_trade_result"
-            val cacheKey = call.name + "|" + normArgs(call.argsJson)
-            val cachedTradeResult = if (tradeResultTool) tradeCallCache[cacheKey] else null
-            val cacheConnectorResult = memoizeConnectorBuilderCall(call.name)
-            val cachedConnectorResult = if (cacheConnectorResult) connectorBuilderResults[cacheKey] else null
-            val gate = if (!callWasExposed || blockedSnapshotReuse || cachedTradeResult != null || cachedConnectorResult != null) null
-                else if (awaitingApproval) ToolResult("NÃO EXECUTADO: uma ação anterior desta resposta aguarda a confirmação do usuário. Espere a resposta antes de continuar.")
-                else repeatGuard(sessionId, call) ?: runCatching { actionGate(sessionId, call) }.getOrNull()
-            if (gate?.stop == SessionStatus.WAITING_USER) awaitingApproval = true
-            val rawResult = if (!callWasExposed) {
-                ToolResult("RECUSADO: a ferramenta '${call.name}' não foi disponibilizada neste passo. Nenhuma ação foi executada; continue somente com ferramentas expostas ou carregue a capacidade autorizada.")
-            } else if (gate != null) {
-                gate
-            } else if (toolArgsGuard(call) != null) {
-                ToolResult(toolArgsGuard(call)!!)
-            } else if (squadModeGuard(sessionId, call) != null) {
-                ToolResult(squadModeGuard(sessionId, call)!!)
-            } else if (blockedSnapshotReuse) {
-                ToolResult("ERRO: Snapshot ausente ou invalidado; nenhuma ação foi executada com o ID já recusado. Use somente IDs da releitura atual:\n${blockedSnapshotRead.orEmpty()}")
-            } else try {
-                cachedTradeResult ?: cachedConnectorResult ?: ledgerRun(sessionId, call) { runTool(
-                    sessionId, call, allowDeviceTools = tokenBudgetOverride == null,
-                    model = modelId, visualInspectionUsed = visualInspectionUsed,
-                    accessibilityReadScreenCompleted = accessibilityReadScreenCompleted,
-                ) }
-            } catch (c: kotlinx.coroutines.CancellationException) {
-                throw c
-            } catch (t: Throwable) {
-                val safeFailure = if (call.name.startsWith("device_accessibility_"))
-                    "Falha de ferramenta Android; conteúdo de tela omitido por privacidade."
-                else "${t.javaClass.simpleName}: ${t.message.orEmpty()}"
-                runCatching { dev.fluwy.app.diag.ErrorLog.log(errorSource(call.name), safeFailure, sessionId, call.name) }
-                val detail = t.message?.take(300) ?: t.javaClass.simpleName
-                val staleFailure = isStaleAccessibilitySnapshotFailure(call.name, detail)
-                val refreshedScreen = if (staleFailure) try {
-                    dev.fluwy.app.device.DeviceAccessibilityActions.readScreen(sessionId)
-                } catch (c: kotlinx.coroutines.CancellationException) {
-                    throw c
-                } catch (refreshError: Throwable) {
-                    "A releitura automática também falhou: ${refreshError.message?.take(180) ?: refreshError.javaClass.simpleName}."
-                } else ""
-                val output = if (staleFailure) {
-                    "ERRO: $detail. Nenhuma ação foi executada. Li a tela automaticamente; descarte todos os IDs antigos e reidentifique o alvo usando esta leitura nova:\n$refreshedScreen"
-                } else {
-                    "ERRO ao executar a ferramenta \"${call.name}\": $detail. Diagnostique a causa, ajuste os argumentos/abordagem e tente de outra forma; não repita a mesma chamada. Se estiver bloqueado, chame finish explicando."
-                }
-                ToolResult(output = output)
-            }
-            if (call.name in accessibilitySnapshotBoundTools ||
-                call.name == "device_accessibility_open_app" || call.name == "device_accessibility_back") {
-                accessibilityReadScreenCompleted.remove(sessionId)
-            }
-            if (call.name == "device_accessibility_read_screen" &&
-                rawResult.output.startsWith("Tela acessível", ignoreCase = true)) {
-                accessibilityReadScreenCompleted.add(sessionId)
-            } else if (isStaleAccessibilitySnapshotFailure(call.name, rawResult.output) &&
-                rawResult.output.contains("snapshot_id=")) {
-                accessibilityReadScreenCompleted.add(sessionId)
-            }
-            if (call.name in accessibilitySnapshotBoundTools)
-                invalidAccessibilitySnapshots.recordFailure(accessibilitySnapshotId, rawResult.output)
-            if (!blockedSnapshotReuse && accessibilitySnapshotId != null &&
-                isStaleAccessibilitySnapshotFailure(call.name, rawResult.output))
-                staleSnapshotRecoveryCache[accessibilitySnapshotId] = rawResult.output
-            if (tradeResultTool && cachedTradeResult == null) tradeCallCache[cacheKey] = rawResult
-            if (cacheConnectorResult && cachedConnectorResult == null) connectorBuilderResults[cacheKey] = rawResult
-            val consumedWait = if (tradeResultTool) IqTradeWaitDirective.consume(rawResult.output) else null
-            val outputText = consumedWait?.output ?: rawResult.output
-            val result = rawResult.copy(output = if (cachedTradeResult != null)
-                "Chamada idêntica já executada nesta resposta; resultado reutilizado para evitar uma segunda ordem/consulta.\n$outputText"
-            else outputText)
-            val tradeWaits = consumedWait?.waits.orEmpty()
-            tradeWaits.forEach { tradeIdsAfterSleep += it.tradeId }
-            val directiveSeconds = tradeWaits.maxOfOrNull { it.seconds }
-            if (directiveSeconds != null) {
-                val current = sleepReq
-                if (current == null || directiveSeconds > current.first)
-                    sleepReq = directiveSeconds to "aguardar vencimento da(s) opção(ões) ${tradeWaits.joinToString { it.tradeId.toString() }}; fazer uma única verificação ao final"
-            }
-            resultHashes[call.id] = result.output.hashCode()
-            if (result.output.length > 200) resultLong.add(call.id)
-            // a especificação do SDK (connector_spec) vai inteira: cortá-la fazia o agente ler a sobra por arquivo em loop
-            // nenhum valor do formulário seguro volta para o modelo, mesmo que uma ferramenta o ecoe
-            val accessibilityOutput = call.name.startsWith("device_accessibility_")
-            val redactedOut = SecretVault.redact(sessionId, result.output)
-            // Conectores devolvem JSON bruto (ex.: e-mails com cabeçalhos SMTP e HTML): compacta para alto sinal e
-            // arquiva o original — o agente não precisa reler pedaços truncados.
-            val shapedOut = if ((call.name.startsWith("mcp_") || call.name.startsWith("uic_")) && redactedOut.length > 1_500) {
-                val sh = ToolOutputShaper.shape(redactedOut)
-                if (!sh.changed) redactedOut else {
-                    val ptr = ctxMgr.archive(sessionId, redactedOut)
-                    sh.text + "\n[Resultado compactado: " +
-                        (if (sh.omittedKeys.isNotEmpty()) "campos omitidos " + sh.omittedKeys.take(8).joinToString() + "; " else "") +
-                        "textos longos cortados. " + (if (ptr != null) "JSON completo (${redactedOut.length} chars) em $ptr — use file_search nesse arquivo só se precisar de um campo omitido; não chame a ferramenta de novo." else "") + "]"
-                }
-            } else redactedOut
-            val ctxOut = ctxMgr.storeToolOutput(
-                sessionId, call.id, shapedOut,
-                limit = if (call.name == "connector_spec") 60_000 else 8_000,
-                persistLongOutput = !accessibilityOutput, toolName = call.name)
-            if (accessibilityOutput) {
-                transientAccessibilityOutputs.remove(call.id)
-                transientAccessibilityOutputs[call.id] = ctxOut
-                while (transientAccessibilityOutputs.size > 6) {
-                    val oldest = transientAccessibilityOutputs.keys.firstOrNull() ?: break
-                    transientAccessibilityOutputs.remove(oldest)
-                }
-            }
-            // OpenBot: conteúdo externo vai como dado não confiável + falhas ganham motivo e próximo passo.
-            val durableToolOutput = ToolOutcomeAdvisor.decorate(
-                call.name, AccessibilityToolHistory.durableResult(call.name, ctxOut), result.output)
-                .let { o -> dev.fluwy.app.browser.BrowserDownloads.drain(sessionId)?.let { "$o\n\n$it" } ?: o }
-                .let { o ->
-                    // OpenBot 0.71: a mesma chamada falhando igual várias vezes = troque de abordagem; na 5ª, para o turno.
-                    when (repeatGuard.record(call.name, normArgs(call.argsJson), rawResult.output)) {
-                        RepeatedToolFailureGuard.Verdict.WARN -> "$o\n\n${RepeatedToolFailureGuard.WARN_NOTE}"
-                        RepeatedToolFailureGuard.Verdict.STOP -> { repeatedToolFailure = call.name; o }
-                        else -> o
-                    }
-                }
-            // Como o Manus: página pede login → o app pede ao usuário (o agente nunca digita senha), e a tarefa continua depois.
-            if (call.name.startsWith("browser_") && ToolOutcomeAdvisor.classify(call.name, result.output) == ToolOutcomeAdvisor.Reason.LOGIN_WALL)
-                runCatching { requestUserLogin(sessionId) }
-            store.editSession(sessionId) {
-                it.copy(llm = it.llm + LlmMessage("tool", durableToolOutput, toolCallId = call.id, name = call.name))
-            }
-            if (call.name == "file_read" || call.name == "file_list") {
-                repeatedFileFailure = fileToolFailureGuard.record(call.name, normArgs(call.argsJson), rawResult.output)
-            }
-            if (result.stop != null) stopLoop = result.stop
-            if (result.sleepSeconds != null) {
-                val current = sleepReq
-                if (current == null || result.sleepSeconds > current.first) sleepReq = result.sleepSeconds to result.output
-            }
-        }
+        val round = RoundState()
+        runRoundTools(sessionId, reply, exposedToolNames, modelId, tokenBudgetOverride, round, LoopResources(
+            connectorBuilderResults, invalidAccessibilitySnapshots, visualInspectionUsed, accessibilityReadScreenCompleted,
+            transientAccessibilityOutputs, fileToolFailureGuard, repeatGuard,
+        ))
+        var stopLoop = round.stopLoop
+        var sleepReq = round.sleepReq
+        val tradeIdsAfterSleep = round.tradeIdsAfterSleep
+        val resultHashes = round.resultHashes
+        val repeatedFileFailure = round.repeatedFileFailure
+        val repeatedToolFailure = round.repeatedToolFailure
+        val awaitingApproval = round.awaitingApproval
         if (repeatedToolFailure != null && repeatedFileFailure == null) {
             runCatching { dev.fluwy.app.diag.ErrorLog.log("agent", "A mesma chamada de $repeatedToolFailure falhou 5 vezes igual; turno encerrado.", sessionId, repeatedToolFailure) }
             store.addItemUnique(sessionId, ChatItem.Error(text = "Parei: a ferramenta $repeatedToolFailure falhou 5 vezes do mesmo jeito. Ajuste o pedido ou troque de modelo e envie continuar."))
@@ -986,3 +725,321 @@ internal fun AgentRunner.normArgs(raw: String): String {
     }
     return runCatching { canon(kotlinx.serialization.json.Json.parseToJsonElement(raw)) }.getOrElse { raw.trim() }
 }
+
+/**
+ * Chama o modelo com recuperação de falhas: circuit breaker por provedor, rotação de chave, troca para o
+ * modelo alternativo, compactação quando o contexto estoura e espera com backoff. Devolve null quando a
+ * execução deve parar (a sessão já foi atualizada com o motivo).
+ */
+internal suspend fun AgentRunner.callModelWithRecovery(
+    sessionId: String,
+    agent: AgentProfile?,
+    sys: LlmMessage,
+    history: List<LlmMessage>,
+    stepTools: kotlinx.serialization.json.JsonArray,
+    replyTokenLimit: Int,
+    tokenBudgetOverride: Long?,
+): dev.fluwy.app.llm.LlmReply? {
+    var currentReplyTokenLimit = replyTokenLimit
+
+    var attempt = 0
+    while (true) {
+        // Circuit breaker por provedor+modelo: se está aberto (ou em cooldown de rate limit), espera em vez de chamar.
+        val breaker = dev.fluwy.app.llm.LlmRecovery.breaker(store.settings.baseUrl, stepModel(agent))
+        while (true) {
+            val wait = breaker.acquire(System.currentTimeMillis())
+            if (wait <= 0) break
+            setActivity(sessionId, Activity(Activity.Kind.THINKING, "Provedor instável — aguardando ${(wait / 1000).coerceAtLeast(1)}s para tentar de novo"))
+            kotlinx.coroutines.delay(wait.coerceAtMost(15_000))
+        }
+        try {
+            val usedModel = stepModel(agent)
+            val response = llm.chat(listOf(sys) + history, tools = stepTools, model = usedModel, maxTokens = currentReplyTokenLimit, conversationId = sessionId)
+            breaker.onSuccess()
+            dev.fluwy.app.llm.KeyPool.onSuccess(dev.fluwy.app.llm.ProviderRoute.route(store.settings, usedModel).first.apiKey)
+            if (usedModel == primaryModel(agent) && dev.fluwy.app.llm.ModelFallback.onSuccess(usedModel))
+                store.addItem(sessionId, ChatItem.Step(tool = "model_switch", title = "Modelo principal voltou a responder", args = usedModel, result = "", status = StepStatus.OK))
+            if (response.truncated && (response.toolCalls.isNotEmpty() || response.content.isNullOrBlank())) throw dev.fluwy.app.llm.LlmRequestFailure(
+                "A resposta foi cortada sem texto recuperável ou com chamadas de ferramenta incompletas; nenhuma ferramenta foi executada.",
+                retryable = true,
+                responseTruncated = true,
+            )
+            return response
+        } catch (c: kotlinx.coroutines.CancellationException) {
+            throw c
+        } catch (t: Throwable) {
+            attempt++
+            val llmFailure = t as? dev.fluwy.app.llm.LlmRequestFailure
+            val retryable = llmFailure?.retryable == true
+            val category = dev.fluwy.app.llm.LlmRecovery.classify(t.message, retryable, llmFailure?.responseTruncated == true)
+            dev.fluwy.app.llm.PlanUsage.orgIdFrom(t.message)?.let { org -> if (store.settings.opencodeOrgId.isBlank()) store.updateSettings { it.copy(opencodeOrgId = org) } }
+            if (llmFailure?.responseTruncated != true) breaker.onFailure(System.currentTimeMillis(), llmFailure?.retryAfterMillis)
+            // Contexto estourado: compacta e continua (uma vez a cada 10 min, para nunca virar ciclo).
+            if (category == dev.fluwy.app.llm.LlmRecovery.Category.CONTEXT && tokenBudgetOverride == null &&
+                System.currentTimeMillis() - (contextOverflowAt[sessionId] ?: 0) > 600_000) {
+                contextOverflowAt[sessionId] = System.currentTimeMillis()
+                store.session(sessionId)?.let { cur -> runCatching { ctxMgr.compactIfNeeded(cur, force = true) }.getOrElse { ctxMgr.safeTrim(cur) } }
+                scope.launch { send(sessionId, continuationDirective(sessionId, automatic = true), showUserMessage = false) }
+                return null
+            }
+            // Limite de requisições no modelo principal: passa na hora para o modelo alternativo (se configurado).
+            val primaryNow = primaryModel(agent)
+            val failingModel = stepModel(agent)
+            val failingKeys = dev.fluwy.app.llm.ProviderRoute.route(store.settings, failingModel).first.apiKey
+            if (category == dev.fluwy.app.llm.LlmRecovery.Category.RATE_LIMIT && dev.fluwy.app.llm.KeyPool.rotate(failingKeys)) {
+                store.addItem(sessionId, ChatItem.Step(tool = "model_switch", title = "Limite nesta conta: usando a próxima chave do provedor",
+                    args = dev.fluwy.app.llm.ProviderRoute.label(failingModel), result = "Mesmo modelo, outra conta.", status = StepStatus.OK))
+                attempt = 0
+                continue
+            }
+            if (category == dev.fluwy.app.llm.LlmRecovery.Category.RATE_LIMIT &&
+                dev.fluwy.app.llm.ModelFallback.onRateLimit(failingModel, fallbackChain(), primary = primaryNow)) {
+                val next = stepModel(agent)
+                val back = dev.fluwy.app.llm.ModelFallback.activeUntil(primaryNow)?.let { SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(it)) }.orEmpty()
+                store.addItem(sessionId, ChatItem.Step(tool = "model_switch",
+                    title = if (failingModel == primaryNow) "Limite no modelo principal: usando o alternativo" else "Limite no alternativo: usando o próximo da cadeia",
+                    args = dev.fluwy.app.llm.ProviderRoute.label(next), result = "Testo o principal ($primaryNow) de novo às $back.", status = StepStatus.OK))
+                attempt = 0
+                continue
+            }
+            // Resposta cortada 2× mesmo com mais espaço: quase sempre é o modelo tentando escrever código enorme
+            // dentro de UMA chamada (ex.: webapi_test com 8 KB de código). Em vez de suspender 20 min, orienta a
+            // dividir o trabalho e segue na hora (até 3 vezes por tarefa).
+            if (llmFailure?.responseTruncated == true && attempt >= 2 && (truncNudges.merge(sessionId, 1, Int::plus) ?: 1) <= 3) {
+                setActivity(sessionId, Activity(Activity.Kind.THINKING, "Resposta longa demais — dividindo em partes menores"))
+                scope.launch { send(sessionId, TRUNCATION_NUDGE, showUserMessage = false, directiveSuffix = " ") }
+                return null
+            }
+            // Erro do provedor/modelo que não passou em até 3 tentativas: vai para o próximo provedor da cadeia.
+            // (Sem internet e contexto estourado não se resolvem trocando de provedor.)
+            if (llmFailure != null && category != dev.fluwy.app.llm.LlmRecovery.Category.NETWORK &&
+                category != dev.fluwy.app.llm.LlmRecovery.Category.CONTEXT &&
+                (attempt >= 3 || !dev.fluwy.app.llm.LlmRecovery.shouldRetry(category, attempt, retryable)) &&
+                dev.fluwy.app.llm.ModelFallback.onRateLimit(failingModel, fallbackChain(), primary = primaryNow)) {
+                val next = stepModel(agent)
+                store.addItem(sessionId, ChatItem.Step(tool = "model_switch", title = "Falha no provedor (${category.label}): usando o próximo da cadeia",
+                    args = dev.fluwy.app.llm.ProviderRoute.label(next), result = "Depois de $attempt tentativa(s) em ${dev.fluwy.app.llm.ProviderRoute.label(failingModel)}. O principal é testado de novo em alguns minutos.", status = StepStatus.OK))
+                attempt = 0
+                continue
+            }
+            if (llmFailure == null || !dev.fluwy.app.llm.LlmRecovery.shouldRetry(category, attempt, retryable)) {
+                runCatching { dev.fluwy.app.diag.ErrorLog.log("agent", "LLM falhou após $attempt tentativa(s) [${category.name}]: ${t.javaClass.simpleName}: ${t.message.orEmpty()}", sessionId, "llm") }
+                // Erro recuperável → suspende e retoma sozinho em 20 min; permanente → espera o usuário.
+                val resumeAt = if (tokenBudgetOverride == null) scheduleAutoResume(sessionId, category) else null
+                store.session(sessionId)?.items?.filterIsInstance<ChatItem.LlmRecovery>()?.filter { it.state == "waiting" }
+                    ?.forEach { store.replaceItem(sessionId, it.copy(state = "resolved")) }
+                store.addItem(sessionId, ChatItem.LlmRecovery(
+                    provider = dev.fluwy.app.llm.LlmRecovery.providerLabel(store.settings.baseUrl), model = stepModel(agent),
+                    category = category.label, detail = SecretVault.redact(sessionId, t.message.orEmpty()).take(220), attempts = attempt,
+                    advice = category.advice, permanent = category.permanent, resumeAt = resumeAt, round = autoResumeRound[sessionId] ?: 0))
+                pendingRecovery.add(sessionId)
+                if (resumeAt == null) store.editSession(sessionId) { it.copy(status = SessionStatus.WAITING_USER) }
+                return null
+            }
+            if (llmFailure.responseTruncated) {
+                currentReplyTokenLimit = (currentReplyTokenLimit.toLong() * 2L).coerceAtMost(32_000L).toInt()
+            }
+            val delayMs = dev.fluwy.app.llm.LlmRecovery.withJitter(
+                dev.fluwy.app.llm.LlmRetryPolicy.delayMillis(attempt, llmFailure.retryAfterMillis), Math.random())
+            val waitLabel = (delayMs / 1_000L).coerceAtLeast(1L)
+            setActivity(sessionId, Activity(Activity.Kind.THINKING, "${category.label} — aguardando ${waitLabel}s antes de tentar de novo ($attempt/${category.maxAttempts})"))
+            kotlinx.coroutines.delay(delayMs)
+        }
+    }
+    @Suppress("UNREACHABLE_CODE") return null
+}
+
+/** Estado de uma rodada de ferramentas (uma resposta do modelo). */
+internal class RoundState {
+    var stopLoop: SessionStatus? = null
+    /** Pedido de pausa: (segundos, motivo). */
+    var sleepReq: Pair<Int, String>? = null
+    val tradeIdsAfterSleep = linkedSetOf<Long>()
+    val tradeCallCache = HashMap<String, ToolResult>()
+    val resultHashes = HashMap<String, Int>()
+    val resultLong = HashSet<String>()
+    var repeatedFileFailure: String? = null
+    var repeatedToolFailure: String? = null
+    val staleSnapshotRecoveryCache = HashMap<String?, String>()
+    /** Depois que uma ação pediu confirmação, nada mais desta resposta é executado. */
+    var awaitingApproval = false
+}
+
+/** Guardas e caches que vivem durante toda a execução do loop. */
+internal class LoopResources(
+    val connectorBuilderResults: ExactToolCallMemo<ToolResult>,
+    val invalidAccessibilitySnapshots: dev.fluwy.app.device.InvalidAccessibilitySnapshotGuard,
+    val visualInspectionUsed: MutableSet<String>,
+    val accessibilityReadScreenCompleted: MutableSet<String>,
+    val transientAccessibilityOutputs: LinkedHashMap<String, String>,
+    val fileToolFailureGuard: AgentFileToolFailureGuard,
+    val repeatGuard: RepeatedToolFailureGuard,
+)
+
+/** Executa as chamadas de ferramenta de uma resposta, em ordem, aplicando as guardas de segurança e repetição. */
+internal suspend fun AgentRunner.runRoundTools(
+    sessionId: String,
+    reply: dev.fluwy.app.llm.LlmReply,
+    exposedToolNames: Set<String>,
+    modelId: String,
+    tokenBudgetOverride: Long?,
+    round: RoundState,
+    res: LoopResources,
+) = with(round) { with(res) {
+    for (call in reply.toolCalls) {
+        val callWasExposed = ToolCallExecutionPolicy.isExposed(call.name, exposedToolNames)
+        val accessibilitySnapshotId = if (callWasExposed && call.name in accessibilitySnapshotBoundTools) runCatching {
+            json.parseToJsonElement(call.argsJson).jsonObject["snapshot_id"]?.jsonPrimitive?.contentOrNull
+        }.getOrNull() else null
+        val blockedSnapshotReuse = callWasExposed && call.name in accessibilitySnapshotBoundTools &&
+            invalidAccessibilitySnapshots.shouldBlock(accessibilitySnapshotId)
+        val blockedSnapshotRead = if (blockedSnapshotReuse) {
+            staleSnapshotRecoveryCache[accessibilitySnapshotId] ?: try {
+                dev.fluwy.app.device.DeviceAccessibilityActions.readScreen(sessionId)
+            } catch (c: kotlinx.coroutines.CancellationException) {
+                throw c
+            } catch (t: Throwable) {
+                "A releitura automática falhou: ${t.message?.take(180) ?: t.javaClass.simpleName}."
+            }
+        } else null
+        if (blockedSnapshotReuse) {
+            accessibilitySnapshotId?.let { staleSnapshotRecoveryCache[it] = blockedSnapshotRead.orEmpty() }
+        }
+        // Auto-recuperação: uma exceção em qualquer ferramenta vira um erro acionável devolvido
+        // ao modelo (nunca derruba o loop do agente).
+        val tradeResultTool = call.name == "uic_iqoption_open_option" || call.name == "uic_iqoption_get_trade_result"
+        val cacheKey = call.name + "|" + normArgs(call.argsJson)
+        val cachedTradeResult = if (tradeResultTool) tradeCallCache[cacheKey] else null
+        val cacheConnectorResult = memoizeConnectorBuilderCall(call.name)
+        val cachedConnectorResult = if (cacheConnectorResult) connectorBuilderResults[cacheKey] else null
+        val gate = if (!callWasExposed || blockedSnapshotReuse || cachedTradeResult != null || cachedConnectorResult != null) null
+            else if (awaitingApproval) ToolResult("NÃO EXECUTADO: uma ação anterior desta resposta aguarda a confirmação do usuário. Espere a resposta antes de continuar.")
+            else repeatGuard(sessionId, call) ?: runCatching { actionGate(sessionId, call) }.getOrNull()
+        if (gate?.stop == SessionStatus.WAITING_USER) awaitingApproval = true
+        val rawResult = if (!callWasExposed) {
+            ToolResult("RECUSADO: a ferramenta '${call.name}' não foi disponibilizada neste passo. Nenhuma ação foi executada; continue somente com ferramentas expostas ou carregue a capacidade autorizada.")
+        } else if (gate != null) {
+            gate
+        } else if (toolArgsGuard(call) != null) {
+            ToolResult(toolArgsGuard(call)!!)
+        } else if (squadModeGuard(sessionId, call) != null) {
+            ToolResult(squadModeGuard(sessionId, call)!!)
+        } else if (blockedSnapshotReuse) {
+            ToolResult("ERRO: Snapshot ausente ou invalidado; nenhuma ação foi executada com o ID já recusado. Use somente IDs da releitura atual:\n${blockedSnapshotRead.orEmpty()}")
+        } else try {
+            cachedTradeResult ?: cachedConnectorResult ?: ledgerRun(sessionId, call) { runTool(
+                sessionId, call, allowDeviceTools = tokenBudgetOverride == null,
+                model = modelId, visualInspectionUsed = visualInspectionUsed,
+                accessibilityReadScreenCompleted = accessibilityReadScreenCompleted,
+            ) }
+        } catch (c: kotlinx.coroutines.CancellationException) {
+            throw c
+        } catch (t: Throwable) {
+            val safeFailure = if (call.name.startsWith("device_accessibility_"))
+                "Falha de ferramenta Android; conteúdo de tela omitido por privacidade."
+            else "${t.javaClass.simpleName}: ${t.message.orEmpty()}"
+            runCatching { dev.fluwy.app.diag.ErrorLog.log(errorSource(call.name), safeFailure, sessionId, call.name) }
+            val detail = t.message?.take(300) ?: t.javaClass.simpleName
+            val staleFailure = isStaleAccessibilitySnapshotFailure(call.name, detail)
+            val refreshedScreen = if (staleFailure) try {
+                dev.fluwy.app.device.DeviceAccessibilityActions.readScreen(sessionId)
+            } catch (c: kotlinx.coroutines.CancellationException) {
+                throw c
+            } catch (refreshError: Throwable) {
+                "A releitura automática também falhou: ${refreshError.message?.take(180) ?: refreshError.javaClass.simpleName}."
+            } else ""
+            val output = if (staleFailure) {
+                "ERRO: $detail. Nenhuma ação foi executada. Li a tela automaticamente; descarte todos os IDs antigos e reidentifique o alvo usando esta leitura nova:\n$refreshedScreen"
+            } else {
+                "ERRO ao executar a ferramenta \"${call.name}\": $detail. Diagnostique a causa, ajuste os argumentos/abordagem e tente de outra forma; não repita a mesma chamada. Se estiver bloqueado, chame finish explicando."
+            }
+            ToolResult(output = output)
+        }
+        if (call.name in accessibilitySnapshotBoundTools ||
+            call.name == "device_accessibility_open_app" || call.name == "device_accessibility_back") {
+            accessibilityReadScreenCompleted.remove(sessionId)
+        }
+        if (call.name == "device_accessibility_read_screen" &&
+            rawResult.output.startsWith("Tela acessível", ignoreCase = true)) {
+            accessibilityReadScreenCompleted.add(sessionId)
+        } else if (isStaleAccessibilitySnapshotFailure(call.name, rawResult.output) &&
+            rawResult.output.contains("snapshot_id=")) {
+            accessibilityReadScreenCompleted.add(sessionId)
+        }
+        if (call.name in accessibilitySnapshotBoundTools)
+            invalidAccessibilitySnapshots.recordFailure(accessibilitySnapshotId, rawResult.output)
+        if (!blockedSnapshotReuse && accessibilitySnapshotId != null &&
+            isStaleAccessibilitySnapshotFailure(call.name, rawResult.output))
+            staleSnapshotRecoveryCache[accessibilitySnapshotId] = rawResult.output
+        if (tradeResultTool && cachedTradeResult == null) tradeCallCache[cacheKey] = rawResult
+        if (cacheConnectorResult && cachedConnectorResult == null) connectorBuilderResults[cacheKey] = rawResult
+        val consumedWait = if (tradeResultTool) IqTradeWaitDirective.consume(rawResult.output) else null
+        val outputText = consumedWait?.output ?: rawResult.output
+        val result = rawResult.copy(output = if (cachedTradeResult != null)
+            "Chamada idêntica já executada nesta resposta; resultado reutilizado para evitar uma segunda ordem/consulta.\n$outputText"
+        else outputText)
+        val tradeWaits = consumedWait?.waits.orEmpty()
+        tradeWaits.forEach { tradeIdsAfterSleep += it.tradeId }
+        val directiveSeconds = tradeWaits.maxOfOrNull { it.seconds }
+        if (directiveSeconds != null) {
+            val current = sleepReq
+            if (current == null || directiveSeconds > current.first)
+                sleepReq = directiveSeconds to "aguardar vencimento da(s) opção(ões) ${tradeWaits.joinToString { it.tradeId.toString() }}; fazer uma única verificação ao final"
+        }
+        resultHashes[call.id] = result.output.hashCode()
+        if (result.output.length > 200) resultLong.add(call.id)
+        // a especificação do SDK (connector_spec) vai inteira: cortá-la fazia o agente ler a sobra por arquivo em loop
+        // nenhum valor do formulário seguro volta para o modelo, mesmo que uma ferramenta o ecoe
+        val accessibilityOutput = call.name.startsWith("device_accessibility_")
+        val redactedOut = SecretVault.redact(sessionId, result.output)
+        // Conectores devolvem JSON bruto (ex.: e-mails com cabeçalhos SMTP e HTML): compacta para alto sinal e
+        // arquiva o original — o agente não precisa reler pedaços truncados.
+        val shapedOut = if ((call.name.startsWith("mcp_") || call.name.startsWith("uic_")) && redactedOut.length > 1_500) {
+            val sh = ToolOutputShaper.shape(redactedOut)
+            if (!sh.changed) redactedOut else {
+                val ptr = ctxMgr.archive(sessionId, redactedOut)
+                sh.text + "\n[Resultado compactado: " +
+                    (if (sh.omittedKeys.isNotEmpty()) "campos omitidos " + sh.omittedKeys.take(8).joinToString() + "; " else "") +
+                    "textos longos cortados. " + (if (ptr != null) "JSON completo (${redactedOut.length} chars) em $ptr — use file_search nesse arquivo só se precisar de um campo omitido; não chame a ferramenta de novo." else "") + "]"
+            }
+        } else redactedOut
+        val ctxOut = ctxMgr.storeToolOutput(
+            sessionId, call.id, shapedOut,
+            limit = if (call.name == "connector_spec") 60_000 else 8_000,
+            persistLongOutput = !accessibilityOutput, toolName = call.name)
+        if (accessibilityOutput) {
+            transientAccessibilityOutputs.remove(call.id)
+            transientAccessibilityOutputs[call.id] = ctxOut
+            while (transientAccessibilityOutputs.size > 6) {
+                val oldest = transientAccessibilityOutputs.keys.firstOrNull() ?: break
+                transientAccessibilityOutputs.remove(oldest)
+            }
+        }
+        // OpenBot: conteúdo externo vai como dado não confiável + falhas ganham motivo e próximo passo.
+        val durableToolOutput = ToolOutcomeAdvisor.decorate(
+            call.name, AccessibilityToolHistory.durableResult(call.name, ctxOut), result.output)
+            .let { o -> dev.fluwy.app.browser.BrowserDownloads.drain(sessionId)?.let { "$o\n\n$it" } ?: o }
+            .let { o ->
+                // OpenBot 0.71: a mesma chamada falhando igual várias vezes = troque de abordagem; na 5ª, para o turno.
+                when (repeatGuard.record(call.name, normArgs(call.argsJson), rawResult.output)) {
+                    RepeatedToolFailureGuard.Verdict.WARN -> "$o\n\n${RepeatedToolFailureGuard.WARN_NOTE}"
+                    RepeatedToolFailureGuard.Verdict.STOP -> { repeatedToolFailure = call.name; o }
+                    else -> o
+                }
+            }
+        // Como o Manus: página pede login → o app pede ao usuário (o agente nunca digita senha), e a tarefa continua depois.
+        if (call.name.startsWith("browser_") && ToolOutcomeAdvisor.classify(call.name, result.output) == ToolOutcomeAdvisor.Reason.LOGIN_WALL)
+            runCatching { requestUserLogin(sessionId) }
+        store.editSession(sessionId) {
+            it.copy(llm = it.llm + LlmMessage("tool", durableToolOutput, toolCallId = call.id, name = call.name))
+        }
+        if (call.name == "file_read" || call.name == "file_list") {
+            repeatedFileFailure = fileToolFailureGuard.record(call.name, normArgs(call.argsJson), rawResult.output)
+        }
+        if (result.stop != null) stopLoop = result.stop
+        if (result.sleepSeconds != null) {
+            val current = sleepReq
+            if (current == null || result.sleepSeconds > current.first) sleepReq = result.sleepSeconds to result.output
+        }
+    }
+} }
