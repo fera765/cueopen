@@ -4,7 +4,7 @@
 -keep class com.termux.terminal.** { *; }
 -keep class com.termux.view.** { *; }
 # Modelos serializados
--keep class dev.cueopen.app.data.** { *; }
+-keep class dev.fluwy.app.data.** { *; }
 -keepattributes *Annotation*, InnerClasses, Signature, EnclosingMethod
 -dontwarn org.slf4j.**
 -dontwarn org.conscrypt.**
@@ -14,3 +14,9 @@
 -dontwarn java.beans.**
 -dontobfuscate
 -keep class com.caverock.androidsvg.** { *; }
+
+# Voz Phonon (JNA)
+-keep class com.sun.jna.** { *; }
+-keep class * implements com.sun.jna.** { *; }
+-keep class dev.fluwy.app.voice.phonon.** { *; }
+-dontwarn java.awt.**

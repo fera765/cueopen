@@ -1,0 +1,52 @@
+name: Mini-hub de conectores (verificação real)
+
+on:
+  workflow_dispatch:
+    inputs:
+      limit:
+        description: 'Quantas pieces verificar (vazio = todas)'
+        required: false
+        default: ''
+  push:
+    paths:
+      - 'tools/minihub/**'
+      - 'app/src/main/assets/minihub/**'
+      - '.github/workflows/minihub.yml'
+  schedule:
+    # Toda segunda: confere se alguma atualização do Activepieces quebrou alguma piece.
+    - cron: '17 9 * * 1'
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Node 22 (mesma versão do Alpine 3.21 do app)
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Testes locais do mini-hub
+        run: node tools/minihub/test-local.js
+
+      - name: Verificar pieces reais e gerar catálogo
+        env:
+          LIMIT: ${{ github.event.inputs.limit }}
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          if [ -n "${LIMIT:-}" ]; then extra="--limit $LIMIT"; else extra=""; fi
+          node tools/minihub/build-catalog.js out/catalog.json out/report.json $extra
+
+      - name: Publicar catálogo e relatório
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: minihub-catalog-${{ github.run_number }}
+          path: out/
+          if-no-files-found: warn

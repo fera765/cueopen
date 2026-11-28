@@ -1,0 +1,37 @@
+name: voice-lab3
+on:
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  lab:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        voice: [faber, cadu, jeff, amy, lessac, ryan]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      - run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg espeak-ng >/dev/null
+      - run: |
+          pip install -q torch torchaudio --index-url https://download.pytorch.org/whl/cpu
+          pip install -q numpy scipy soundfile huggingface_hub onnxruntime onnx piper-tts faster-whisper
+      - run: cd tools/voice_lab3 && python lab3.py ${{ matrix.voice }}
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: "lab3-${{ matrix.voice }}", path: tools/voice_lab3/out/ }
+  publish:
+    needs: lab
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { path: out, pattern: "lab3-*", merge-multiple: true }
+      - env: { GH_TOKEN: "${{ github.token }}" }
+        run: |
+          ls -la out
+          gh release delete voice-lab3 -R "$GITHUB_REPOSITORY" -y --cleanup-tag || true
+          gh release create voice-lab3 -R "$GITHUB_REPOSITORY" --prerelease --title "Laboratório de voz 3" --notes "Antes e depois" --target "$GITHUB_SHA" out/*

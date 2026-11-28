@@ -1,0 +1,22 @@
+name: voice-diag
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  tune:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    strategy:
+      fail-fast: false
+      matrix:
+        voice: [cadu]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with: { ref: voices, path: tools/voice_diag/pk }
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      - run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg >/dev/null
+      - run: pip install -q numpy soundfile faster-whisper num2words "sherpa-onnx==1.10.46"
+      - run: cd tools/voice_diag && python final.py ${{ matrix.voice }}

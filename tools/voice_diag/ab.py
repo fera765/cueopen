@@ -1,0 +1,61 @@
+"""A/B de motor: mesma voz leve, mesmas frases, Whisper. Uso: ab.py <voz> <motor: sherpa|piper>"""
+import json, os, re, sys, zipfile
+import numpy as np, soundfile as sf
+sys.path.insert(0, os.path.dirname(__file__)); sys.argv_backup = list(sys.argv)
+VID, ENGINE = sys.argv[1], sys.argv[2]
+sys.argv = [sys.argv[0], VID]
+import importlib.util
+spec = importlib.util.spec_from_file_location("t", os.path.join(os.path.dirname(__file__), "tune_lib.py")); t = importlib.util.module_from_spec(spec); spec.loader.exec_module(t)
+P = {"cadu": (0.667, 0.5, 1.15), "faber": (0.5, 0.8, 1.08), "lessac": (0.5, 0.5, 1.08), "ryan": (0.5, 0.8, 1.0), "amy": (0.667, 0.5, 1.08)}[VID]
+ns, nw, ls = P
+if ENGINE == "sherpa":
+    import sherpa_onnx
+    d = f"ex/piper2-{VID}-int8"; zipfile.ZipFile(f"pk/piper2-{VID}-int8.zip").extractall("ex")
+    DATA = f"{d}/espeak-ng-data"
+    if os.environ.get("ESPEAK") == "piper":  # dados de pronúncia do Piper (espeak-ng mais novo)
+        import glob as _g, piper as _p
+        DATA = _g.glob(os.path.join(os.path.dirname(_p.__file__), "**", "espeak-ng-data"), recursive=True)[0]; print("espeak do piper:", DATA, flush=True)
+    tts = sherpa_onnx.OfflineTts(sherpa_onnx.OfflineTtsConfig(model=sherpa_onnx.OfflineTtsModelConfig(
+        vits=sherpa_onnx.OfflineTtsVitsModelConfig(model=f"{d}/model.onnx", lexicon="", tokens=f"{d}/tokens.txt", data_dir=DATA,
+                                                   noise_scale=ns, noise_scale_w=nw, length_scale=ls), num_threads=4), max_num_sentences=1))
+    def synth(text):
+        g = tts.generate(text, sid=0, speed=1.0); return np.array(g.samples, dtype=np.float32), g.sample_rate
+else:
+    from piper import PiperVoice, SynthesisConfig
+    from huggingface_hub import hf_hub_download
+    from onnxruntime.quantization import quantize_dynamic, QuantType
+    path = {"cadu": "pt/pt_BR/cadu/medium/pt_BR-cadu-medium", "faber": "pt/pt_BR/faber/medium/pt_BR-faber-medium", "lessac": "en/en_US/lessac/medium/en_US-lessac-medium",
+            "ryan": "en/en_US/ryan/medium/en_US-ryan-medium", "amy": "en/en_US/amy/medium/en_US-amy-medium"}[VID]
+    m = hf_hub_download("rhasspy/piper-voices", path + ".onnx"); c = hf_hub_download("rhasspy/piper-voices", path + ".onnx.json")
+    quantize_dynamic(m, "q.onnx", weight_type=QuantType.QUInt8); v = PiperVoice.load("q.onnx", config_path=c)
+    cfg = SynthesisConfig(noise_scale=ns, noise_w_scale=nw, length_scale=ls)
+    def synth(text):
+        return np.concatenate([ch.audio_float_array for ch in v.synthesize(text, syn_config=cfg)]), v.config.sample_rate
+errs = tot = 0; bad = []; allaudio = []
+for s in t.SENT:
+    a, sr = synth(t.normalize(s) if t.PT else s)
+    sf.write("tmp.wav", np.concatenate([np.zeros(int(sr * 0.3), dtype=np.float32), a]), sr)
+    allaudio += [a, np.zeros(int(sr * 0.4), dtype=np.float32)]
+    hyp = " ".join(x.text for x in t.asr.transcribe("tmp.wav", language="pt" if t.PT else "en", beam_size=5)[0]).strip()
+    e, n = t.wer(s, hyp); errs += e; tot += n
+    if e: bad.append({"enviado": s, "whisper": hyp})
+ver = (__import__("sherpa_onnx").__version__ + ("-espeakpiper" if os.environ.get("ESPEAK") == "piper" else "")) if ENGINE == "sherpa" else "piper"
+os.makedirs("out", exist_ok=True)
+r = {"voice": VID, "engine": ENGINE, "version": ver, "wer": round(errs / tot, 4), "errors": bad}
+json.dump(r, open(f"out/ab_{VID}_{ENGINE}_{ver}.json", "w"), indent=2, ensure_ascii=False); print(json.dumps(r, ensure_ascii=False, indent=1))
+
+import subprocess
+full = np.concatenate(allaudio); full = full / max(1e-6, float(np.abs(full).max())) * 0.95
+sf.write("full.wav", full, sr); subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", "full.wav", "-b:a", "96k", f"out/amostra-{VID}.mp3"])
+
+# Prévia curta (tela de vozes) e amostra longa: impressas no log em base64 (releases/artefatos indisponíveis daqui).
+import base64
+if ENGINE == "sherpa":
+    PREV = {True: "Oi! Eu sou a sua assistente de voz. Posso ler suas mensagens, organizar sua agenda e responder o que você precisar, a qualquer hora.",
+            False: "Hi! I'm your voice assistant. I can read your messages, organize your schedule, and answer anything you need, any time."}[t.PT]
+    a, sr = synth(t.normalize(PREV) if t.PT else PREV)
+    a = np.concatenate([np.zeros(int(sr * 0.15), dtype=np.float32), a]); a = a / max(1e-6, float(np.abs(a).max())) * 0.95
+    sf.write("prev.wav", a, sr); subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", "prev.wav", "-ac", "1", "-b:a", "48k", f"out/preview-{VID}.mp3"])
+    subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", "full.wav", "-ac", "1", "-b:a", "48k", "full48.mp3"])
+    for tag, path in (("PREVIEW", f"out/preview-{VID}.mp3"), ("AMOSTRA", "full48.mp3")):
+        print(f"=={tag}-{VID}-BEGIN=="); print(base64.b64encode(open(path, "rb").read()).decode()); print(f"=={tag}-{VID}-END==")

@@ -1,9 +1,9 @@
-# CueOpen — roda DENTRO do proot (Alpine). Baseado no init-alpine.sh do Acode (MIT).
+# Fluwy — roda DENTRO do proot (Alpine). Baseado no init-alpine.sh do Acode (MIT).
 export PATH=/bin:/sbin:/usr/bin:/usr/sbin:/usr/local/bin:/usr/local/sbin:/system/bin:/system/xbin
 export HOME=/root
 export TERM=xterm-256color
 export LANG=C.UTF-8
-export PS1="\[\e[38;5;209m\]cue\[\033[39m\]@sandbox \[\033[36m\]\w \[\033[0m\]\\$ "
+export PS1="\[\e[38;5;209m\]fluwy\[\033[39m\]@sandbox \[\033[36m\]\w \[\033[0m\]\\$ "
 
 INSTALLING=false
 while [ $# -gt 0 ]; do
@@ -23,8 +23,8 @@ mkdir -p /root/workspace
 if [ "$INSTALLING" = true ]; then
     echo "[*] Atualizando índices do apk..."
     apk update
-    echo "[*] Instalando pacotes: $CUE_PACKAGES"
-    apk add $CUE_PACKAGES
+    echo "[*] Instalando pacotes: $FLUWY_PACKAGES"
+    apk add $FLUWY_PACKAGES
     if [ -n "$ANDROID_TZ" ] && [ -f "/usr/share/zoneinfo/$ANDROID_TZ" ]; then
         ln -sf "/usr/share/zoneinfo/$ANDROID_TZ" /etc/localtime
     fi

@@ -1,4 +1,4 @@
-# CueOpen UI Connector SDK
+# Fluwy UI Connector SDK
 
 O SDK oferece conectores com interface própria: login, painéis, ações do usuário e ferramentas que o agente pode chamar. Há duas formas de implementação: conectores nativos em Kotlin e conectores personalizados declarativos em YAML.
 
@@ -47,7 +47,7 @@ O formato-fonte da definição é YAML. O parser produz o modelo tipado interno 
 
 O parser limita a definição a 64 KB e a profundidade permitida, rejeita chaves duplicadas e tags customizadas, desativa aliases de coleções e exige um mapa na raiz. Evite âncoras e aliases. Coloque entre aspas strings que começam por `{{...}}`, parecem número/booleano/data ou contêm pontuação que possa ser interpretada pelo YAML.
 
-A especificação apresentada no botão **Doc** e ao agente por `connector_spec` fica em [`SdkPrompt.kt`](../app/src/main/java/dev/cueopen/app/uiconnector/custom/SdkPrompt.kt). A implementação é a fonte final para as regras efetivamente aplicadas.
+A especificação apresentada no botão **Doc** e ao agente por `connector_spec` fica em [`SdkPrompt.kt`](../app/src/main/java/dev/fluwy/app/uiconnector/custom/SdkPrompt.kt). A implementação é a fonte final para as regras efetivamente aplicadas.
 
 ### Campos suportados
 

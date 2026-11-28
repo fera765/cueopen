@@ -1,0 +1,61 @@
+name: Phonon model (voices branch)
+
+# Copia o modelo gradium/phonon-40m-pt (CC BY-NC 4.0, acesso com termos aceitos) para a branch "voices",
+# de onde o app baixa no 1º uso. Precisa do secret HF_TOKEN (token de leitura de uma conta que aceitou os termos).
+on:
+  workflow_dispatch:
+  push:
+    paths: ['.github/phonon-model.trigger']
+
+permissions:
+  contents: write
+
+jobs:
+  copy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Baixar do Hugging Face
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          set -euo pipefail
+          [ -n "$HF_TOKEN" ] || unset HF_TOKEN
+          pip install -q "huggingface_hub>=0.25"
+          python - <<'EOF'
+          import os
+          from huggingface_hub import snapshot_download
+          tok = bool(os.environ.get("HF_TOKEN"))
+          pats = ["*.gguf", "config.json", "tokenizer.json", "default-voice.safetensors", "LICENSE*", "README.md"]
+          # Destino -> candidatos (o 1º que baixar vence). Espelhos públicos mantêm a licença original.
+          jobs = {
+            "phonon-40m-pt": (["gradium/phonon-40m-pt"] if tok else []) + ["ldenoue/phonon-40m-pt"],
+            "phonon-en": (["gradium/phonon-40m-en"] if tok else []) + ["ldenoue/phonon-40m-en", "gradium/phonon-31m-en", "ldenoue/phonon-40m-multilingual"],
+          }
+          for dst, cands in jobs.items():
+              for repo in cands:
+                  try:
+                      snapshot_download(repo, local_dir=f"out/{dst}", allow_patterns=pats)
+                      open(f"out/{dst}/SOURCE.txt", "w").write(repo + "\n"); print(dst, "<-", repo); break
+                  except Exception as e:
+                      print(dst, repo, "falhou:", type(e).__name__)
+              else:
+                  raise SystemExit(f"nenhuma fonte para {dst}")
+          EOF
+          for d in out/*; do
+            ( cd "$d"; rm -rf .cache
+              printf 'Phonon (Gradium) — fonte: %s. Licença original (CC BY-NC 4.0 nos modelos 40m; Apache 2.0 no 31m). Cópia sem modificações, usada pelo Fluwy Bot.\n' "$(cat SOURCE.txt)" > NOTICE.txt
+              find . -type f ! -name manifest.txt | sed 's|^\./||' | sort | while read -r f; do echo "$f $(stat -c%s "$f")"; done > manifest.txt
+              cat manifest.txt
+              find . -type f -size +95M -print | grep . && { echo "arquivo acima de 95 MB"; exit 1; } || true )
+          done
+
+      - name: Publicar na branch voices
+        run: |
+          set -euo pipefail
+          git clone --depth 1 --branch voices "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}" vb
+          rm -rf vb/phonon-40m-pt vb/phonon-en && cp -r out/* vb/
+          cd vb
+          git config user.name "github-actions[bot]"; git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add phonon-40m-pt phonon-en
+          git commit -m "Phonon pt + en (Gradium)" || echo "sem mudanças"
+          git push origin voices

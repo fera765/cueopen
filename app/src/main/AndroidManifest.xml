@@ -6,11 +6,31 @@
         <intent>
             <action android:name="android.speech.RecognitionService" />
         </intent>
+        <intent>
+            <action android:name="android.intent.action.SEND" />
+            <data android:mimeType="*/*" />
+        </intent>
+        <!-- device_accessibility_open_app: ver os apps do launcher (sem isto, no Android 11+ quase nenhum app aparece) -->
+        <intent>
+            <action android:name="android.intent.action.MAIN" />
+            <category android:name="android.intent.category.LAUNCHER" />
+        </intent>
+        <package android:name="com.whatsapp" />
+        <package android:name="com.whatsapp.w4b" />
+        <package android:name="org.telegram.messenger" />
+        <package android:name="org.telegram.messenger.web" />
+        <package android:name="org.thunderdog.challegram" />
+        <package android:name="com.Slack" />
+        <package android:name="com.discord" />
     </queries>
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-feature android:name="android.hardware.camera" android:required="false" />
+    <uses-feature android:name="android.hardware.location.gps" android:required="false" />
     <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30" />
     <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30" />
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
@@ -26,16 +46,19 @@
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
     <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
 
     <application
-        android:name=".CueApp"
-        android:allowBackup="false"
+        android:name=".FluwyApp"
+        android:allowBackup="true"
+        android:fullBackupContent="@xml/backup_rules"
+        android:dataExtractionRules="@xml/data_extraction_rules"
         android:extractNativeLibs="true"
         android:icon="@mipmap/ic_launcher"
         android:roundIcon="@mipmap/ic_launcher"
         android:label="@string/app_name"
         android:supportsRtl="true"
-        android:theme="@style/Theme.CueOpen"
+        android:theme="@style/Theme.Fluwy"
         android:usesCleartextTraffic="true"
         android:networkSecurityConfig="@xml/network_security"
         tools:targetApi="35">
@@ -49,7 +72,7 @@
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
-            <!-- Compartilhar texto/arquivo para o CueOpen vira uma nova tarefa -->
+            <!-- Compartilhar texto/arquivo para o Fluwy vira uma nova tarefa -->
             <intent-filter>
                 <action android:name="android.intent.action.SEND" />
                 <category android:name="android.intent.category.DEFAULT" />
@@ -115,12 +138,16 @@
         </receiver>
 
 
+        <receiver android:name=".workflow.WorkflowAlarmReceiver" android:exported="false">
+            <intent-filter><action android:name="com.fluwy.bot.WORKFLOW_FIRE" /></intent-filter>
+        </receiver>
+
         <receiver android:name=".scheduler.HeartbeatReceiver" android:exported="false">
             <intent-filter><action android:name="com.fluwy.bot.HEARTBEAT" /></intent-filter>
         </receiver>
 
         <service
-            android:name=".device.CueNotificationListener"
+            android:name=".device.FluwyNotificationListener"
             android:exported="false"
             android:label="@string/app_name"
             android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE">
@@ -139,6 +166,10 @@
                 android:name="android.accessibilityservice"
                 android:resource="@xml/fluwy_accessibility_service" />
         </service>
+
+        <activity android:name=".backup.RestartActivity" android:exported="false" android:process=":restart"
+            android:excludeFromRecents="true" android:noHistory="true"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar" />
 
         <activity android:name=".device.DeviceVoiceInputActivity" android:exported="false"
             android:theme="@android:style/Theme.Translucent.NoTitleBar" />

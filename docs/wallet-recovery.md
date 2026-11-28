@@ -2,7 +2,7 @@
 
 ## Scope
 
-CueOpen currently derives one Solana account from an English BIP-39 recovery phrase. The implementation is not yet approved for real funds; the wallet UI, encrypted-vault verification, transaction signer, and security test suite remain incomplete.
+Fluwy currently derives one Solana account from an English BIP-39 recovery phrase. The implementation is not yet approved for real funds; the wallet UI, encrypted-vault verification, transaction signer, and security test suite remain incomplete.
 
 ## Derivation path
 

@@ -8,3 +8,5 @@ app/src/main/assets/terminal/xterm.css
 app/src/main/assets/terminal/addon-*.js
 app/src/main/assets/md/*.js
 app/src/main/assets/md/*.css
+app/src/main/assets/minihub/catalog.json
+app/libs/sherpa-onnx-*.aar

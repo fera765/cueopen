@@ -1,4 +1,4 @@
-# CueOpen Solana Wallet — threat model and release gates
+# Fluwy Solana Wallet — threat model and release gates
 
 **Status: implementation in progress; not approved for real funds.**
 

@@ -8,14 +8,14 @@ plugins {
 }
 
 // Keystore de release deve ficar fora do repositório; a chave versionada antiga não é selecionada.
-val cueopenSigningPath = System.getenv("CUEOPEN_KEYSTORE_PATH")?.takeIf { it.isNotBlank() }
-val cueopenSigningStore = cueopenSigningPath?.let { rootProject.file(it) }
-if (cueopenSigningPath != null && cueopenSigningStore?.isFile != true) {
-    throw GradleException("CUEOPEN_KEYSTORE_PATH não aponta para uma keystore existente.")
+val fluwySigningPath = System.getenv("FLUWY_KEYSTORE_PATH")?.takeIf { it.isNotBlank() }
+val fluwySigningStore = fluwySigningPath?.let { rootProject.file(it) }
+if (fluwySigningPath != null && fluwySigningStore?.isFile != true) {
+    throw GradleException("FLUWY_KEYSTORE_PATH não aponta para uma keystore existente.")
 }
 
 android {
-    namespace = "dev.cueopen.app"
+    namespace = "dev.fluwy.app"
     compileSdk = 35
     defaultConfig {
         applicationId = "com.fluwy.bot"
@@ -29,20 +29,28 @@ android {
         ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64") }
     }
     signingConfigs {
+        // Chave de debug FIXA (versionada, credenciais padrão do Android): todo APK debug do CI sai com a
+        // mesma assinatura e instala por cima do anterior. Não é a chave de release.
+        create("ciDebug") {
+            storeFile = file("debug-ci.keystore")
+            storePassword = "android"
+            keyAlias = "androiddebugkey"
+            keyPassword = "android"
+        }
         // Chave estável lida de um caminho externo e credenciais locais; nunca use a chave versionada antiga.
-        create("cueopen") {
-            if (cueopenSigningStore != null) {
-                storeFile = cueopenSigningStore
-                storePassword = System.getenv("CUEOPEN_STORE_PASSWORD") ?: error("Defina CUEOPEN_STORE_PASSWORD para usar a keystore externa.")
-                keyAlias = System.getenv("CUEOPEN_KEY_ALIAS") ?: error("Defina CUEOPEN_KEY_ALIAS para usar a keystore externa.")
-                keyPassword = System.getenv("CUEOPEN_KEY_PASSWORD") ?: error("Defina CUEOPEN_KEY_PASSWORD para usar a keystore externa.")
+        create("fluwy") {
+            if (fluwySigningStore != null) {
+                storeFile = fluwySigningStore
+                storePassword = System.getenv("FLUWY_STORE_PASSWORD") ?: error("Defina FLUWY_STORE_PASSWORD para usar a keystore externa.")
+                keyAlias = System.getenv("FLUWY_KEY_ALIAS") ?: error("Defina FLUWY_KEY_ALIAS para usar a keystore externa.")
+                keyPassword = System.getenv("FLUWY_KEY_PASSWORD") ?: error("Defina FLUWY_KEY_PASSWORD para usar a keystore externa.")
             }
         }
     }
     buildTypes {
         debug {
             // Use a keystore externa aprovada em builds locais de entrega, quando configurada.
-            if (cueopenSigningStore != null) signingConfig = signingConfigs.getByName("cueopen")
+            signingConfig = signingConfigs.getByName(if (fluwySigningStore != null) "fluwy" else "ciDebug")
         }
         release {
             // build otimizado: R8 (minify + otimização) deixa o Compose bem mais fluido que o debug
@@ -50,10 +58,16 @@ android {
             isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
             // Só configura assinatura quando a chave externa aprovada está disponível.
-            if (cueopenSigningStore != null) signingConfig = signingConfigs.getByName("cueopen")
+            if (fluwySigningStore != null) signingConfig = signingConfigs.getByName("fluwy")
         }
     }
-    packaging { jniLibs { useLegacyPackaging = true } } // extrai .so para nativeLibraryDir
+    packaging {
+        jniLibs {
+            useLegacyPackaging = true  // extrai .so para nativeLibraryDir
+            // Motor de voz só nos celulares ARM (x86_64 é emulador): -26 MB no APK; lá o app usa a voz do Android.
+            excludes += listOf("lib/x86_64/libonnxruntime.so", "lib/x86_64/libsherpa-onnx-jni.so")
+        }
+    }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
@@ -63,16 +77,16 @@ android {
     lint { abortOnError = false; checkReleaseBuilds = false }
 }
 
-val requireCueOpenReleaseSigning by tasks.registering {
+val requireFluwyReleaseSigning by tasks.registering {
     doLast {
-        if (cueopenSigningStore == null) {
-            throw GradleException("Defina CUEOPEN_KEYSTORE_PATH para empacotar o release com a chave aprovada.")
+        if (fluwySigningStore == null) {
+            throw GradleException("Defina FLUWY_KEYSTORE_PATH para empacotar o release com a chave aprovada.")
         }
     }
 }
 tasks.configureEach {
     if (name == "assembleRelease" || name == "packageRelease" || name == "bundleRelease") {
-        dependsOn(requireCueOpenReleaseSigning)
+        dependsOn(requireFluwyReleaseSigning)
     }
 }
 
@@ -101,6 +115,8 @@ dependencies {
     implementation("androidx.navigation:navigation-compose:2.8.5")
     implementation("androidx.work:work-runtime-ktx:2.10.0")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
+    // Extração de texto de páginas (web_fetch/web_search) sem abrir o WebView.
+    implementation("org.jsoup:jsoup:1.18.3")
     // Solana keypair/signing primitives and BIP-39 mnemonic generation/validation.
     implementation("com.google.zxing:core:3.5.3")
     implementation("org.sol4k:sol4k:0.8.2")
@@ -108,6 +124,11 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.3")
     implementation("org.yaml:snakeyaml:2.2")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
+    // Voz Dii no aparelho (Piper/VITS via sherpa-onnx 1.10.46).
+    // O AAR é baixado pelo CI (debug-apk.yml) da release oficial do k2-fsa/sherpa-onnx.
+    implementation(files("libs/sherpa-onnx-1.10.46.aar"))
+    // Voz Phonon (Gradium): libptts_ffi.so compilada pelo CI a partir de gradium-ai/xn-ptts, chamada via JNA.
+    implementation("net.java.dev.jna:jna:5.17.0@aar")
     testImplementation("junit:junit:4.13.2")
     androidTestImplementation("androidx.test.ext:junit:1.2.1")
     androidTestImplementation("androidx.test:runner:1.6.2")

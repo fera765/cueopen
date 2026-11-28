@@ -1,0 +1,21 @@
+name: Web API hub test
+on:
+  workflow_dispatch:
+    inputs:
+      only: { description: 'slugs separados por espaço (vazio = todos)', required: false, default: '' }
+  push:
+    paths: ['app/src/main/assets/webapi/**', '.github/webapi-test/**']
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 20 }
+      - name: Playwright
+        run: cd .github/webapi-test && npm init -y >/dev/null && npm i playwright@1.49.1 >/dev/null && npx playwright install --with-deps chromium >/dev/null
+      - name: Testar APIs
+        run: cd .github/webapi-test && ASSETS=$GITHUB_WORKSPACE/app/src/main/assets/webapi node run.mjs ${{ inputs.only }} | tee out.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: webapi-pages, path: .github/webapi-test/out/, if-no-files-found: ignore }
