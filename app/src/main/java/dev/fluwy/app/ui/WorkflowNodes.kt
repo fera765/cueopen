@@ -123,7 +123,7 @@ internal fun NodeCard(n: WfNode, status: String?, selected: Boolean, targetable:
     val border = st?.let { if (status == "running" || status == "waiting") it.copy(alpha = a) else it }
         ?: if (selected || source) c.accent else if (targetable) tint.copy(alpha = a) else c.line
     val shape = RoundedCornerShape(if (t.trigger) 22.dp else 16.dp)
-    Box(Modifier.size(NODE_W.dp, NODE_H.dp)) {
+    Box(Modifier.size(NODE_W.dp, NODE_H.dp).graphicsLayer { alpha = if (n.settings.disabled) .55f else 1f }) {
         Row(Modifier.fillMaxSize().clip(shape).background(c.surface)
             .border(if (selected || st != null || source || targetable) 2.dp else 1.dp, border, shape)
             .pointerInput(n.id) { detectDragGestures(onDragEnd = { dragEnd() }, onDragCancel = { dragEnd() }) { ch, d -> ch.consume(); drag(d.x, d.y) } }
@@ -150,15 +150,22 @@ internal fun NodeCard(n: WfNode, status: String?, selected: Boolean, targetable:
         }
         // Entrada (esquerda) e saídas (direita). Toque numa saída e depois no nó de destino para ligar.
         if (!t.trigger) Box(Modifier.align(Alignment.CenterStart).offset(x = (-7).dp).size(14.dp).clip(CircleShape).background(c.surface).border(2.dp, c.ink3, CircleShape))
-        t.ports.forEachIndexed { i, port ->
-            val y = if (t.ports.size > 1) (if (i == 0) NODE_H * 0.32f else NODE_H * 0.70f) else NODE_H / 2
-            val col = when (port) { "true" -> c.ok; "false" -> c.err; else -> tint }
+        val ports = WfLogic.ports(n)
+        ports.forEach { port ->
+            val y = portY(ports, port)
+            val col = when (port) { "true" -> c.ok; "false", "error" -> c.err; else -> tint }
             Box(Modifier.offset { IntOffset((NODE_W - 15).dp.roundToPx(), (y - 15).dp.roundToPx()) }.size(30.dp).clip(CircleShape)
                 .clickable { onPort(port) }, contentAlignment = Alignment.Center) {
                 Box(Modifier.size(16.dp).clip(CircleShape).background(col).border(3.dp, c.surface, CircleShape))
             }
-            if (port != "main") Text(if (port == "true") "sim" else "não", Modifier.offset { IntOffset((NODE_W + 16).dp.roundToPx(), (y - 8).dp.roundToPx()) }
+            if (port != "main") Text(portLabel(port), Modifier.offset { IntOffset((NODE_W + 16).dp.roundToPx(), (y - 8).dp.roundToPx()) }
                 .clip(RoundedCornerShape(6.dp)).background(col.copy(alpha = .15f)).padding(horizontal = 5.dp), fontSize = 10.sp, color = col, fontWeight = FontWeight.Bold)
+        }
+        // Indicadores n8n: dados fixados (pin) e nó desativado.
+        if (n.settings.pinData.isNotBlank() || n.settings.disabled) Row(Modifier.align(Alignment.TopEnd).offset(x = (-8).dp, y = (-9).dp)
+            .clip(RoundedCornerShape(8.dp)).background(c.surface2).padding(horizontal = 5.dp, vertical = 1.dp), verticalAlignment = Alignment.CenterVertically) {
+            if (n.settings.pinData.isNotBlank()) Icon(Icons.Rounded.PushPin, "Dados fixados", Modifier.size(12.dp), tint = c.accent)
+            if (n.settings.disabled) Text("desativado", fontSize = 9.sp, color = c.ink3)
         }
     }
 }
@@ -211,8 +218,17 @@ internal fun NodeEditor(w: Workflow, node: WfNode, lastStep: WfStep?, nav: NavCo
             }
         }
         FluwyField(label, { commit(newLabel = it) }, "Nome do nó (${t.title})")
-        Text("Id para usar em outros nós: {{${node.id}}}", fontSize = 11.sp, color = c.ink3, fontFamily = FontFamily.Monospace)
-
+        Text("Em outros nós: {{ \$node[\"${WfLogic.label(node)}\"].json }} · antigo: {{${node.id}}}", fontSize = 11.sp, color = c.ink3, fontFamily = FontFamily.Monospace)
+        // Como no n8n: ENTRADA | PARÂMETROS | SAÍDA, mais as configurações do nó.
+        var tab by remember(node.id) { mutableIntStateOf(1) }
+        Row(Modifier.fillMaxWidth().horizontalScrollIfNeeded(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            listOf("Entrada", "Parâmetros", "Saída", "Configurações").forEachIndexed { i, l -> Chip(l, selected = tab == i) { tab = i } }
+        }
+        val current = node.copy(config = cfg, label = label)
+        if (tab == 0) NodeInputView(w, node, lastStep)
+        if (tab == 2) NodeOutputView(w.copy(nodes = w.nodes.map { if (it.id == node.id) current else it }), current, lastStep, onPin = { pin -> onChange(current.copy(settings = current.settings.copy(pinData = pin))) })
+        if (tab == 3) NodeSettingsView(current) { st -> onChange(current.copy(settings = st)) }
+        if (tab == 1) {
         if (node.type == "connector") ConnectorConfig(node, cfg, w.nodes.filter { it.id != node.id && w.edges.any { e -> e.to == node.id && e.from == it.id } }) { commit(it) }
         else t.fields.forEach { f ->
             val v = cfg[f.key] ?: f.default
@@ -244,8 +260,8 @@ internal fun NodeEditor(w: Workflow, node: WfNode, lastStep: WfStep?, nav: NavCo
         if (node.type != "connector" && lastKey != null && t.fields.any { it.kind != WfField.Kind.SELECT }) {
             Text("Inserir dados de outros nós", fontSize = 12.sp, color = c.ink2)
             Row(Modifier.fillMaxWidth().horizontalScrollIfNeeded(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                (listOf("{{prev}}" to "Saída anterior", "{{trigger.time}}" to "Hora do disparo") +
-                    others.map { "{{${it.id}}}" to WfLogic.label(it) }).forEach { (token, text) ->
+                (listOf("{{ \$json }}" to "Item atual", "{{ \$now.toFormat('dd/MM/yyyy HH:mm') }}" to "Agora", "{{ \$execution.id }}" to "Id da execução") +
+                    others.map { "{{ \$node[\"${WfLogic.label(it)}\"].json }}" to WfLogic.label(it) }).forEach { (token, text) ->
                     Chip(text) { lastKey?.let { k -> commit(cfg + (k to (cfg[k].orEmpty() + token))) } }
                 }
             }
@@ -284,10 +300,10 @@ internal fun NodeEditor(w: Workflow, node: WfNode, lastStep: WfStep?, nav: NavCo
 
         // Ligações.
         SectionLabel("Ligações")
-        t.ports.forEach { port ->
-            val outs = w.edges.filter { it.from == node.id && (it.port == port || (port == "main" && it.port == "main")) }
+        WfLogic.ports(node).forEach { port ->
+            val outs = w.edges.filter { it.from == node.id && it.port == port }
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(when (port) { "true" -> "Se sim →"; "false" -> "Se não →"; else -> "Depois →" }, fontSize = 13.sp, color = c.ink2, modifier = Modifier.width(78.dp))
+                Text(when (port) { "true" -> "Se sim →"; "false" -> "Se não →"; "error" -> "Se erro →"; else -> "Depois →" }, fontSize = 13.sp, color = c.ink2, modifier = Modifier.width(78.dp))
                 Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                     outs.forEach { e ->
                         val target = w.nodes.firstOrNull { it.id == e.to }
@@ -301,7 +317,7 @@ internal fun NodeEditor(w: Workflow, node: WfNode, lastStep: WfStep?, nav: NavCo
             }
         }
 
-        if (!WfCatalog.of(node.type).trigger && node.type != "approval") NodeTester(w.copy(nodes = w.nodes.map { if (it.id == node.id) node.copy(config = cfg, label = label) else it }), node, lastStep)
+        }
         lastStep?.let { s ->
             if (s.status == "error") Text("Última execução: erro — ${s.error}".take(1_500), Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(c.surface2).padding(10.dp),
                 fontSize = 11.sp, fontFamily = FontFamily.Monospace, color = c.err)

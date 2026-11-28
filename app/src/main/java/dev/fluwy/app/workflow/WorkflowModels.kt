@@ -16,6 +16,10 @@ data class Workflow(
     val testedSig: String = "",
     /** Autonomia total: nós "Revisar e aprovar" seguem sozinhos (sem esperar o usuário). */
     val autonomous: Boolean = false,
+    /** Versão do formato salvo (ver [WfMigration]). Arquivos antigos não têm o campo e chegam como 1. */
+    val version: Int = 1,
+    /** Fluxo de erro (como no n8n): roda quando uma execução real deste fluxo falha. Vazio = nenhum. */
+    val errorWorkflowId: String = "",
 )
 
 @Serializable
@@ -26,7 +30,25 @@ data class WfNode(
     val x: Float = 0f,
     val y: Float = 0f,
     val config: Map<String, String> = emptyMap(),
+    /** Configurações do nó (retentativas, continuar em erro, tempo máximo, dados fixados). */
+    val settings: WfNodeSettings = WfNodeSettings(),
 )
+
+/**
+ * Configurações por nó no estilo n8n. [pinData] = itens fixados (JSON `[{...}]`) usados no lugar da execução real
+ * em execuções manuais/teste. [continueOnFail]: o erro vira item na saída "error" (ou na principal, se ela não estiver ligada).
+ */
+@Serializable
+data class WfNodeSettings(
+    val retries: Int = 0,
+    val retryWaitMs: Long = 1_000,
+    val continueOnFail: Boolean = false,
+    val timeoutSec: Int = 0,
+    val disabled: Boolean = false,
+    val pinData: String = "",
+) {
+    val isDefault: Boolean get() = this == WfNodeSettings()
+}
 
 /** Aresta da saída [port] de [from] para a entrada de [to]. Porta "main" (padrão), "true"/"false" (Condição). */
 @Serializable
@@ -44,6 +66,8 @@ data class WfRun(
     val status: String = "running",
     val steps: List<WfStep> = emptyList(),
     val error: String = "",
+    /** Execução parcial ("executar até este nó"): id do nó-alvo. */
+    val until: String = "",
 )
 
 @Serializable
@@ -58,6 +82,12 @@ data class WfStep(
     val error: String = "",
     /** Chat criado pelo nó (Agente IA), para abrir a conversa completa. */
     val sessionId: String? = null,
+    /** Itens recebidos (texto, como [output]) e quantos itens saíram. */
+    val input: String = "",
+    val items: Int = 1,
+    val inputItems: Int = 1,
+    val attempts: Int = 1,
+    val pinned: Boolean = false,
 )
 
 object WfIds {
@@ -102,7 +132,7 @@ object WfCatalog {
     const val CAT_LOGIC = "Lógica e dados"
     const val CAT_OUT = "Saídas"
 
-    val TEMPLATE_HINT = "Use {{prev}} (saída do nó anterior), {{<id do nó>}} ou {{<id do nó>.campo}}, {{trigger.time}}."
+    val TEMPLATE_HINT = "Use {{ \$json.campo }} (item atual), {{ \$node[\"Nome\"].json.campo }}, {{ \$now }} — ou o formato antigo {{prev}}, {{<id>.campo}}, {{trigger.time}}."
 
     val TYPES: List<WfNodeType> = listOf(
         WfNodeType("trigger_manual", "Manual", CAT_TRIGGER, "Roda quando você toca em Executar.", 0xFF8A8F98, "play", trigger = true),
@@ -128,6 +158,7 @@ object WfCatalog {
                 WfField("from_me", "Incluir mensagens enviadas por mim", WfField.Kind.SELECT, options = listOf("false" to "Não", "true" to "Sim"), default = "false"),
                 WfField("sample", "Exemplo de mensagem (usado no teste)", WfField.Kind.MULTILINE, default = "{\"chat\": \"5511999999999@c.us\", \"chat_name\": \"Contato\", \"sender_name\": \"Contato\", \"type\": \"chat\", \"text\": \"Olá, quero um orçamento\", \"is_group\": false, \"from_me\": false}"),
             )),
+        WfNodeType("trigger_error", "Erro em outro fluxo", CAT_TRIGGER, "Roda quando um fluxo que escolheu este como \"fluxo de erro\" falha. Dados: {{ \$json.payload.workflow.name }}, {{ \$json.payload.execution.error }}, {{ \$json.payload.execution.lastNode }}.", 0xFFE5484D, "webhook", trigger = true),
         WfNodeType("ai", "IA (texto)", CAT_AI, "Uma chamada rápida ao modelo, sem ferramentas: resumir, traduzir, classificar, formatar ou extrair dados do que veio antes.", 0xFF9B7BFF, "ai",
             fields = listOf(
                 WfField("prompt", "Instrução", WfField.Kind.MULTILINE, "Inclua os dados com {{prev}} ou {{id.campo}}. $TEMPLATE_HINT", required = true),
@@ -182,7 +213,6 @@ object WfCatalog {
                 WfField("headers", "Cabeçalhos (um por linha: Nome: valor)", WfField.Kind.MULTILINE),
                 WfField("body", "Corpo", WfField.Kind.MULTILINE, TEMPLATE_HINT),
                 WfField("timeout", "Tempo máximo (segundos)", WfField.Kind.NUMBER, default = "30"),
-                WfField("onError", "Se der erro (4xx/5xx ou sem rede)", WfField.Kind.SELECT, options = listOf("stop" to "Parar o fluxo", "continue" to "Continuar (status 0 se sem rede)"), default = "stop"),
             )),
         WfNodeType("shell", "Terminal", CAT_APPS, "Roda um comando no Linux do app e devolve a saída.", 0xFF9C978E, "terminal",
             fields = listOf(
@@ -200,6 +230,13 @@ object WfCatalog {
                 WfField("right", "Comparar com", WfField.Kind.TEXT),
             ),
             ports = listOf("true", "false")),
+        WfNodeType("split_out", "Separar em itens", CAT_LOGIC, "Transforma uma lista (ex.: {{ \$json.data.items }}) em vários itens: os nós seguintes rodam uma vez por item.", 0xFF00B8A9, "set",
+            fields = listOf(
+                WfField("field", "Lista", WfField.Kind.TEXT, "Expressão que resulta numa lista. Ex.: {{ \$json.items }}", required = true),
+                WfField("limit", "Máximo de itens", WfField.Kind.NUMBER, default = "50"),
+            )),
+        WfNodeType("aggregate", "Juntar itens", CAT_LOGIC, "Junta todos os itens recebidos num só item ({\"items\": [...]}) para resumir ou enviar de uma vez.", 0xFF00B8A9, "set",
+            fields = listOf(WfField("field", "Nome do campo", WfField.Kind.TEXT, default = "items"))),
         WfNodeType("if_new", "Se for novo", CAT_LOGIC, "Lembra o que já viu entre execuções: segue por \"sim\" só quando a chave (ex.: id do último e-mail) ainda não apareceu.", 0xFFFFB020, "new",
             fields = listOf(
                 WfField("key", "Chave que identifica o item", WfField.Kind.TEXT, "Ex.: {{g1.data.results.messages.0.id}}", required = true),

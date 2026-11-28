@@ -24,7 +24,7 @@ object WorkflowStore {
         if (dir != null) return
         val d = File(filesDir, "workflows").apply { mkdirs() }
         dir = d
-        _flows.value = read(File(d, "workflows.json"), ListSerializer(Workflow.serializer()))
+        _flows.value = read(File(d, "workflows.json"), ListSerializer(Workflow.serializer())).map { WfMigration.migrate(it) }
         // Execução que estava rodando quando o app foi encerrado não volta sozinha: fica registrada como interrompida.
         _runs.value = read(File(d, "runs.json"), ListSerializer(WfRun.serializer())).map {
             if (it.status == "running" || it.status == "waiting" || it.status == "paused" || it.status == "queued") it.copy(status = "cancelled", finishedAt = it.finishedAt ?: System.currentTimeMillis(),
@@ -64,7 +64,7 @@ object WorkflowStore {
     fun get(id: String): Workflow? = _flows.value.firstOrNull { it.id == id }
 
     @Synchronized fun upsert(w: Workflow): Workflow {
-        val v = w.copy(updatedAt = System.currentTimeMillis())
+        val v = WfMigration.migrate(w).copy(updatedAt = System.currentTimeMillis())
         _flows.update { list -> if (list.any { it.id == v.id }) list.map { if (it.id == v.id) v else it } else list + v }
         write("workflows.json", ListSerializer(Workflow.serializer()), _flows.value)
         return v
@@ -83,7 +83,7 @@ object WorkflowStore {
 
     @Synchronized fun putRun(r0: WfRun) {
         // Saída de cada passo guardada com teto (o arquivo não cresce sem limite com fluxos que rodam o dia todo).
-        val r = r0.copy(steps = r0.steps.map { if (it.output.length > 12_000) it.copy(output = it.output.take(12_000)) else it })
+        val r = r0.copy(steps = r0.steps.map { if (it.output.length > 12_000 || it.input.length > 6_000) it.copy(output = it.output.take(12_000), input = it.input.take(6_000)) else it })
         _runs.update { list ->
             val merged = if (list.any { it.id == r.id }) list.map { if (it.id == r.id) r else it } else list + r
             val keep = merged.groupBy { it.workflowId }.flatMap { (_, rs) -> rs.sortedByDescending { it.startedAt }.take(RUNS_PER_FLOW) }.map { it.id }.toSet()

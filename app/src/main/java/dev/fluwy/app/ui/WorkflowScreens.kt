@@ -58,6 +58,14 @@ import kotlin.math.roundToInt
 
 internal const val NODE_W = 212f
 internal const val NODE_H = 84f
+
+/** Altura (dp, dentro do card) da porta de saída [port] entre [ports]. */
+internal fun portY(ports: List<String>, port: String): Float {
+    val i = ports.indexOf(port).coerceAtLeast(0)
+    return NODE_H * (i + 1) / (ports.size + 1)
+}
+
+internal fun portLabel(port: String): String = when (port) { "true" -> "sim"; "false" -> "não"; "error" -> "erro"; else -> port }
 internal const val WORLD = 4000f
 
 internal fun nodeIcon(type: String): ImageVector = when (WfCatalog.of(type).icon) {
@@ -96,4 +104,5 @@ internal val timeFmt = SimpleDateFormat("dd/MM HH:mm", Locale("pt", "BR"))
 /** Modelo pronto: título, descrição e montagem (ids curtos e legíveis; layout automático). */
 internal data class WfTemplate(val title: String, val description: String, val icon: String, val make: () -> Workflow)
 
-internal fun flow(name: String, nodes: List<WfNode>, vararg edges: WfEdge) = WfLogic.layout(Workflow(name = name, nodes = nodes, edges = edges.toList()), NODE_W, NODE_H)
+internal fun flow(name: String, nodes: List<WfNode>, vararg edges: WfEdge) =
+    WfExprConvert.workflow(WfLogic.layout(Workflow(name = name, nodes = nodes, edges = edges.toList(), version = WfMigration.CURRENT), NODE_W, NODE_H))
