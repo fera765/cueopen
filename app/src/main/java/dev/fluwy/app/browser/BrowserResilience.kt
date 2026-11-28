@@ -19,18 +19,25 @@ internal fun BrowserHost.handleRendererGone(tab: BrowserTab, view: WebView, cras
     if (tab.webView === view) tab.webView = null
     tab.lastSnapshotDigest = null
     val decision = rendererRecovery.onFailure(tab.id, System.currentTimeMillis())
-    runCatching { dev.fluwy.app.diag.ErrorLog.log("browser", "Renderer do WebView encerrado ($why) na aba ${tab.id}; decisão: $decision.\n" + tab.diag.lines().joinToString("\n")) }
+    runCatching { dev.fluwy.app.diag.ErrorLog.log("browser", "Renderer do WebView encerrado ($why) · browser $sessionId · aba ${tab.id}; decisão: $decision.\n" + tab.diag.lines().joinToString("\n")) }
     val pending = tab.pageDone?.takeIf { !it.isCompleted }
     when (decision) {
         RendererRecoveryPolicy.Decision.RECOVER_AND_RETRY -> {
             tab.reloadNote = "o Android encerrou o motor do browser ($why); a aba foi recriada e a página recarregada automaticamente"
             // A navegação pendente continua aguardando: a recarga abaixo completa o mesmo pageDone.
             val retryUrl = tab.diag.target.takeIf { pending != null && _ui.value.profileIsolated && (it.startsWith("http://") || it.startsWith("https://")) }
-            runCatching {
-                val v = ensureTabView(tab, appCtx, restore = retryUrl == null)
-                retryUrl?.let { v.loadUrl(it) }
-            }.onFailure {
-                pending?.complete("ERROR: o motor do browser foi encerrado ($why) e não foi possível recriar a aba.")
+            // O renderer é compartilhado: todas as abas de todos os chats caem juntas. Só recria agora o que está
+            // em uso (navegação pendente ou agente executando nesta aba), espaçado; o resto volta quando for usado.
+            val app = runCatching { dev.fluwy.app.FluwyApp.instance }.getOrNull()
+            val neededNow = pending != null || (app != null && BrowserFleet.isRunning(app, sessionId) && tab.id == activeTabId) || BrowserFleet.isPinned(sessionId)
+            val delayMs = app?.let { BrowserFleet.onRendererDeath(it, sessionId, neededNow) } ?: 0L
+            if (delayMs != null) BrowserFleet.post(delayMs) {
+                runCatching {
+                    val v = ensureTabView(tab, appCtx, restore = retryUrl == null)
+                    retryUrl?.let { v.loadUrl(it) }
+                }.onFailure {
+                    pending?.complete("ERROR: o motor do browser foi encerrado ($why) e não foi possível recriar a aba.")
+                }
             }
         }
         RendererRecoveryPolicy.Decision.RECOVER_ONLY -> {
@@ -57,7 +64,7 @@ internal suspend fun BrowserHost.checkRendererHung(tab: BrowserTab?): String? {
     if (!sent) return null
     if (withTimeoutOrNull(PING_TIMEOUT_MS) { ping.await() } != null) return null
     val decision = rendererRecovery.onFailure(target.id, System.currentTimeMillis())
-    runCatching { dev.fluwy.app.diag.ErrorLog.log("browser", "Renderer travado (não respondeu a ping) na aba ${target.id}; decisão: $decision") }
+    runCatching { dev.fluwy.app.diag.ErrorLog.log("browser", "Renderer travado (não respondeu a ping) · browser $sessionId · aba ${target.id}; decisão: $decision") }
     onMain {
         recreateTabView(target)
         if (decision != RendererRecoveryPolicy.Decision.GIVE_UP) runCatching { ensureTabView(target, appCtx, restore = true) }
@@ -99,3 +106,18 @@ internal fun resumeView(v: WebView) {
 }
 
 private const val PING_TIMEOUT_MS = 4_000L
+
+/** Estado das abas deste browser para a frota global. Chamar na thread principal. */
+internal fun BrowserHost.fleetStates(running: Boolean, pinned: Boolean): List<BrowserFleetPolicy.Tab> = tabs.values.map { t ->
+    val v = t.webView
+    BrowserFleetPolicy.Tab(
+        hostId = sessionId, tabId = t.id, live = v != null,
+        visible = v != null && v.isAttachedToWindow && !OffscreenStage.isStaged(v),
+        busy = t.pageDone?.isCompleted == false,
+        inUse = running && t.id == activeTabId,
+        pinned = pinned, lastUsed = t.lastUsed, liveSince = t.liveSince,
+    )
+}
+
+/** Estaciona uma aba pelo id (a aba ativa também: ela é recriada e restaurada no próximo uso). */
+internal fun BrowserHost.parkById(tabId: String) { tabs[tabId]?.takeIf { it.webView != null }?.let { parkTab(it) } }

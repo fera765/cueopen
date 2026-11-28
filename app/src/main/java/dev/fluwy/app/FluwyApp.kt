@@ -54,7 +54,7 @@ class FluwyApp : Application() {
     /** Pressão de memória: estaciona/pausa abas ociosas de todos os browsers (ver BrowserResilience.kt). */
     private fun registerBrowserMemoryCallbacks() {
         val main = android.os.Handler(android.os.Looper.getMainLooper())
-        fun dispatch(level: Int) = main.post { browsers.values.forEach { b -> runCatching { b.onMemoryPressure(level) } } }
+        fun dispatch(level: Int) = main.post { runCatching { dev.fluwy.app.browser.BrowserFleet.onMemoryPressure(this@FluwyApp, level) } }
         registerComponentCallbacks(object : android.content.ComponentCallbacks2 {
             override fun onTrimMemory(level: Int) { dispatch(level) }
             @Deprecated("Deprecated in Java") override fun onLowMemory() { dispatch(dev.fluwy.app.browser.MemoryPressurePolicy.LOW_MEMORY) }
@@ -73,17 +73,14 @@ class FluwyApp : Application() {
     }
 
     /**
-     * A cada 5 min libera os WebViews de abas paradas há mais de 10 min nos browsers de chats que não estão
-     * executando. Mantém a memória estável com muitos chats abertos; as abas voltam ao serem usadas.
+     * A cada minuto a frota global de WebViews revisa as abas de todos os chats e do API Hub: respeita o
+     * orçamento total, estaciona as ociosas e recicla páginas abertas há horas (ver BrowserFleetPolicy).
      */
     private fun startBrowserIdleReaper() = applicationScope.launch(kotlinx.coroutines.Dispatchers.Main) {
         while (true) {
-            kotlinx.coroutines.delay(5 * 60_000L)
-            browsers.forEach { (id, host) ->
-                if (::agent.isInitialized && agent.isRunning(id)) return@forEach
-                runCatching { host.releaseIdleViews(10 * 60_000L) }
-                    .onFailure { dev.fluwy.app.diag.ErrorLog.log("browser", it, "Liberação de abas ociosas") }
-            }
+            kotlinx.coroutines.delay(60_000L)
+            runCatching { dev.fluwy.app.browser.BrowserFleet.tick(this@FluwyApp) }
+                .onFailure { dev.fluwy.app.diag.ErrorLog.log("browser", it, "Revisão da frota de WebViews") }
         }
     }
 
