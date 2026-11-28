@@ -161,7 +161,7 @@ class ContextManager(private val store: Store, private val sandbox: Sandbox, pri
 
     companion object {
         private val OUTPUT_POINTER = Regex("""\.fluwy/out/(o[0-9a-f]+_\d+\.txt)""")
-        const val MEMORY_MAX_CHARS = 500
+        const val MEMORY_MAX_CHARS = MemoryCurator.MAX_CHARS
 
         /** Erro para o agente quando a memória passa do limite (null = cabe). */
         fun memoryTooLong(text: String): String? = text.trim().length.takeIf { it > MEMORY_MAX_CHARS }?.let {
@@ -300,15 +300,6 @@ class ContextManager(private val store: Store, private val sandbox: Sandbox, pri
     fun notesFile(sessionId: String) = File(sandbox.workspaceFor(sessionId), "NOTES.md")
     fun readNotes(sessionId: String): String = notesFile(sessionId).takeIf { it.exists() }?.readText().orEmpty()
 
-    private fun words(t: String) = t.lowercase().split(Regex("[^\\p{L}\\p{N}]+")).filter { it.length > 2 }.toSet()
-
-    private fun score(query: Set<String>, text: String, tags: List<String> = emptyList()): Double {
-        if (query.isEmpty()) return 0.0
-        val w = words(text) + tags.map { it.lowercase() }
-        val hit = query.count { it in w }
-        return hit / Math.sqrt(w.size.coerceAtLeast(1).toDouble())
-    }
-
     /** Recupera memórias relevantes com limite total de caracteres, não apenas limite por quantidade. */
     fun relevantMemories(query: String, agentId: String?, k: Int = 8, maxChars: Int = 2400): List<MemoryItem> {
         // Memórias com validade vencida ("· até AAAA-MM-DD") não entram mais no contexto.
@@ -331,10 +322,7 @@ class ContextManager(private val store: Store, private val sandbox: Sandbox, pri
 
     /** Knowledge ranqueado e truncado por orçamento para impedir que documentos grandes explodam o prompt. */
     fun relevantKnowledge(query: String, k: Int = 5, maxChars: Int = 4500): List<KnowledgeItem> {
-        val q = words(query)
-        val ranked = store.state.value.knowledge.filter { it.enabled }
-            .map { it to score(q, it.title + " " + it.content) }
-            .sortedByDescending { it.second }
+        val ranked = MemoryCurator.rankKnowledge(store.state.value.knowledge, query)
         var remaining = maxChars
         val result = mutableListOf<KnowledgeItem>()
         for ((item, relevance) in ranked) {
@@ -353,32 +341,26 @@ class ContextManager(private val store: Store, private val sandbox: Sandbox, pri
 
     fun searchMemories(query: String, agentId: String?): List<MemoryItem> = relevantMemories(query, agentId, 15)
 
-    private fun jaccard(a: String, b: String): Double {
-        val x = words(a); val y = words(b)
-        if (x.isEmpty() || y.isEmpty()) return 0.0
-        return x.intersect(y).size.toDouble() / x.union(y).size
-    }
-
-    /** Salva com deduplicação: fatos quase iguais atualizam o existente em vez de duplicar. */
-    fun saveMemory(text: String, agentId: String?, tags: List<String> = emptyList(), title: String = "", kind: String = "", links: List<String> = emptyList()): String {
+    /** Salva com deduplicação/merge: fatos parecidos no mesmo escopo atualizam o existente. Resposta curta para o agente. */
+    fun saveMemory(text: String, agentId: String?, tags: List<String> = emptyList(), title: String = "", kind: String = "", links: List<String> = emptyList(),
+                   source: String = MemoryCurator.SOURCE_AGENT, sessionId: String? = null): String {
         val t = text.trim().take(MEMORY_MAX_CHARS)
-        if (t.isBlank()) return "Nada a salvar."
+        if (t.isBlank()) return "ERRO: fact vazio. Envie o fato em uma frase."
         val all = store.state.value.memories
-        val k = MemoryGraph.norm(kind).takeIf { it in MemoryGraph.KINDS }.orEmpty()
-        val dup = all.firstOrNull { (it.agentId == agentId) && jaccard(it.text, t) >= 0.7 }
+        val dup = MemoryCurator.findDuplicate(all, t, agentId)
         val linkIds = MemoryGraph.linkIds(links + MemoryGraph.wikiTargets(t).map { "[[$it]]" }, all, dup?.id)
+        val now = System.currentTimeMillis()
         return if (dup != null) {
-            store.upsertMemory(dup.copy(text = if (t.length >= dup.text.length) t else dup.text, tags = (dup.tags + tags).distinct(), lastUsedAt = System.currentTimeMillis(),
-                title = title.trim().take(80).ifBlank { dup.title }, kind = k.ifBlank { dup.kind }, links = (dup.links + linkIds).distinct().take(MemoryGraph.MAX_LINKS)))
-            "Memória existente atualizada (id ${dup.id.take(8)})."
+            val merged = MemoryCurator.merge(dup, t, tags, title, kind, linkIds, now)
+            store.upsertMemory(merged)
+            "Atualizada (fundida com nota parecida ${dup.id.take(8)} «${MemoryGraph.titleOf(merged)}»)."
         } else {
-            val item = MemoryItem(text = t, agentId = agentId, tags = tags, title = title.trim().take(80), kind = k, links = linkIds)
+            val item = MemoryItem(text = t, agentId = agentId, tags = MemoryCurator.cleanTags(tags), title = title.trim().take(MemoryCurator.MAX_TITLE),
+                kind = MemoryCurator.canonicalKind(kind), links = linkIds, source = source, sessionId = sessionId)
             store.upsertMemory(item)
-            // poda: mantém no máximo 400 memórias (remove as menos usadas e mais antigas)
-            val all = store.state.value.memories
-            if (all.size > 400) all.sortedWith(compareBy({ it.uses }, { it.lastUsedAt })).take(all.size - 400).forEach { store.deleteMemory(it.id) }
-            "Memória salva (id ${item.id.take(8)}, nota \"${MemoryGraph.titleOf(item)}\", ${MemoryGraph.kindOf(item)}" +
-                (if (linkIds.isNotEmpty()) ", ligada a ${linkIds.size}" else "") + ")."
+            MemoryCurator.overflow(store.state.value.memories).forEach { store.deleteMemory(it) }
+            "Salva: ${item.id.take(8)} «${MemoryGraph.titleOf(item)}» (${MemoryGraph.kindOf(item)}" +
+                (if (linkIds.isNotEmpty()) ", ${linkIds.size} ligação(ões)" else "") + ")."
         }
     }
 
@@ -409,7 +391,7 @@ class ContextManager(private val store: Store, private val sandbox: Sandbox, pri
             .filter { it.second.length in 8..400 }
             // Anti-alucinação: número/URL/caminho e palavras do fato precisam ter vindo do próprio usuário.
             .filter { MemoryHygiene.factBackedByUser(MemoryGraph.plain(it.second), userTexts) }
-            .take(5).forEach { (kind, fact) -> saveMemory(fact, s.agentId, kind = kind) }
+            .take(5).forEach { (kind, fact) -> saveMemory(fact, s.agentId, kind = kind, source = MemoryCurator.SOURCE_AUTO, sessionId = s.id) }
     }
 }
 

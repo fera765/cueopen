@@ -18,6 +18,7 @@ object WfLogic {
         val ids = w.nodes.map { it.id }.toSet()
         val triggers = w.nodes.filter { WfCatalog.of(it.type).trigger }
         if (w.nodes.isEmpty()) out += "O fluxo está vazio: adicione um gatilho."
+        if (w.errorWorkflowId == w.id) out += "O fluxo de erro não pode ser o próprio fluxo."
         else if (triggers.isEmpty()) out += "Falta um gatilho (Manual, Agendamento ou Webhook)."
         w.edges.filter { it.from !in ids || it.to !in ids }.forEach { out += "Ligação aponta para um nó que não existe mais." }
         w.edges.filter { e -> w.nodes.firstOrNull { it.id == e.to }?.let { WfCatalog.of(it.type).trigger } == true }
@@ -32,7 +33,9 @@ object WfLogic {
             }
             // {{x}} / {{x.campo}} precisa apontar para um nó que existe (senão vira texto vazio na execução).
             val byLabel = w.nodes.associate { label(it).lowercase() to it.id }
-            n.config.values.flatMap { v -> TOKEN.findAll(v).map { it.groupValues[1].substringBefore('|').trim() }.toList() }.distinct().forEach { expr ->
+            n.config.values.flatMap { v -> TOKEN.findAll(v).map { it.groupValues[1].trim() }.toList() }.distinct().forEach { full ->
+                if (WfExpr.isNew(full)) { WfExprCheck.problem(full, w, n)?.let { out += "${label(n)}: $it" }; return@forEach }
+                val expr = full.substringBefore('|').trim()
                 val head = expr.substringBefore('.')
                 if (head == "prev" || head == "trigger" || head == "workflow") return@forEach
                 val target = if (head in ids) head else byLabel[head.lowercase()]
@@ -51,6 +54,9 @@ object WfLogic {
     }
 
     fun label(n: WfNode) = n.label.ifBlank { WfCatalog.of(n.type).title }
+
+    /** Portas de saída do nó: as do tipo + "error" quando "continuar em caso de erro" está ligado. */
+    fun ports(n: WfNode): List<String> = WfCatalog.of(n.type).ports + if (n.settings.continueOnFail) listOf("error") else emptyList()
 
     // ───────── Templates {{…}} ─────────
     private val TOKEN = Regex("""\{\{\s*([^\{\}]+?)\s*\}\}""")
@@ -167,7 +173,7 @@ object WfLogic {
     }
 
     /** Assinatura do conteúdo (nós + ligações) para saber se o teste ainda vale. */
-    fun signature(w: Workflow): String = (w.nodes.sortedBy { it.id }.joinToString("|") { it.id + it.type + it.config.toSortedMap() } +
+    fun signature(w: Workflow): String = (w.nodes.sortedBy { it.id }.joinToString("|") { it.id + it.type + it.config.toSortedMap() + (it.settings.copy(pinData = "").takeUnless { s -> s.isDefault }?.toString() ?: "") } +
         "#" + w.edges.sortedBy { it.from + it.to + it.port }.joinToString("|") { it.from + ">" + it.to + ":" + it.port }).hashCode().toString()
 
     // ───────── Condição ─────────

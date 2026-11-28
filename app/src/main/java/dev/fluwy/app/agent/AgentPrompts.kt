@@ -164,7 +164,10 @@ internal fun AgentRunner.systemPrompt(
                 val mentioned = Mentions.find(lastUserText(session), mentionTargets()).map { h ->
                     when (h.target.kind) {
                         Mentions.Kind.SKILL -> "skill ${h.target.label} (skill_load)"
-                        Mentions.Kind.CONNECTOR -> "conector ${h.target.label}"
+                        Mentions.Kind.CONNECTOR -> dev.fluwy.app.prompts.Prompts.render("agent_system.connector_mention", mapOf<String, Any?>(
+                            "name" to (h.target.displayName ?: h.target.label),
+                            "tools" to (if (h.target.id.startsWith("mcp:")) "mcp_" + h.target.id.removePrefix("mcp:") + "*" else "do UI Conector " + h.target.id.removePrefix("connector:")),
+                            "lb" to "{{"))
                         Mentions.Kind.AGENT -> "agent ${h.target.label}"
                         Mentions.Kind.COMMAND -> h.target.label
                         Mentions.Kind.WEBAPI -> if (h.target.id.isBlank()) "API Hub (webapi_list para escolher)" else dev.fluwy.app.prompts.Prompts.render("agent_system.1", mapOf<String, Any?>("target" to (h.target.id), "target_2" to (h.target.id), "lb" to "{{"))

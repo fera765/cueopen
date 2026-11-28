@@ -74,7 +74,8 @@ internal suspend fun BrowserHost.eval(js: String, timeoutMillis: Long = 15_000, 
         target?.let { ensureTabView(it, appCtx).also { v -> if (!v.isAttachedToWindow) ensureSized(v) } }
     } ?: return "ERROR: não há aba ativa no browser."
     onMain { view.evaluateJavascript(js) { d.complete(it ?: "null") } }
-    val raw = withTimeoutOrNull(timeoutMillis) { d.await() } ?: return "timeout: evaluateJavascript não respondeu em ${timeoutMillis / 1_000}s"
+    val raw = withTimeoutOrNull(timeoutMillis) { d.await() }
+        ?: return checkRendererHung(tab) ?: "timeout: evaluateJavascript não respondeu em ${timeoutMillis / 1_000}s"
     // evaluateJavascript devolve um literal JSON (string entre aspas); null/undefined
     // geralmente indica que o script não retornou valor. Preserve esse estado explicitamente.
     if (raw == "null") return "null"

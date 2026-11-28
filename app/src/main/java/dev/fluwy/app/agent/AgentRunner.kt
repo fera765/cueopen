@@ -1053,16 +1053,21 @@ class AgentRunner(
     /** Última versão de Web API que passou no teste, por sessão (salvar exige teste aprovado do mesmo código). */
     internal val webApiPassed = java.util.concurrent.ConcurrentHashMap<String, Int>()
     internal val webApiTests = java.util.concurrent.ConcurrentHashMap<String, Int>()
-    /** Tudo o que pode ser marcado com @: skills, conectores (MCP e UI) e agents. */
+    /** Tudo o que pode ser marcado com @: conectores (MCP e UI), Web APIs e, via /skill e /agent, skills e agents. */
     fun mentionTargets(): List<Mentions.Target> {
         val st = store.state.value
         val out = ArrayList<Mentions.Target>()
         st.skills.filter { it.enabled }.forEach { out += Mentions.Target(it.name, Mentions.Kind.SKILL, it.id) }
+        // Conectores: "@CONECTOR:<chave>" (caixa @ → Conectores) e o nome puro, por compatibilidade.
+        fun connector(name: String, id: String) {
+            out += Mentions.Target(MentionSuggest.CONNECTOR_PREFIX + MentionSuggest.connectorKey(id), Mentions.Kind.CONNECTOR, id, name)
+            out += Mentions.Target(name, Mentions.Kind.CONNECTOR, id)
+        }
         st.connectors.filter { it.enabled && it.connectedAt != null }.forEach {
-            out += Mentions.Target(it.name, Mentions.Kind.CONNECTOR, "mcp:" + it.id.replace(Regex("[^A-Za-z0-9_]"), "_"))
+            connector(it.name, "mcp:" + it.id.replace(Regex("[^A-Za-z0-9_]"), "_"))
         }
         runCatching { dev.fluwy.app.FluwyApp.instance.uiConnectors.connectors }.getOrNull().orEmpty().forEach {
-            out += Mentions.Target(it.spec.name, Mentions.Kind.CONNECTOR, "connector:" + it.spec.id)
+            connector(it.spec.name, "connector:" + it.spec.id)
         }
         st.agents.forEach { out += Mentions.Target(it.name, Mentions.Kind.AGENT, it.id) }
         // @APIHUB e @APIHUB:<slug> (Web API escolhida pelo usuário).

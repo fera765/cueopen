@@ -12,6 +12,7 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import dev.fluwy.app.agent.AgentRunner
 import dev.fluwy.app.browser.BrowserHost
+import dev.fluwy.app.browser.onMemoryPressure
 import dev.fluwy.app.data.Store
 import dev.fluwy.app.llm.OpenRouter
 import dev.fluwy.app.sandbox.Sandbox
@@ -50,6 +51,17 @@ class FluwyApp : Application() {
     private val _browserProxyStatus = MutableStateFlow("Aguardando configuração")
     val browserProxyStatus: StateFlow<String> = _browserProxyStatus.asStateFlow()
     /** Cada chat recebe WebView, perfil de dados e arquivo de restauração próprios. */
+    /** Pressão de memória: estaciona/pausa abas ociosas de todos os browsers (ver BrowserResilience.kt). */
+    private fun registerBrowserMemoryCallbacks() {
+        val main = android.os.Handler(android.os.Looper.getMainLooper())
+        fun dispatch(level: Int) = main.post { browsers.values.forEach { b -> runCatching { b.onMemoryPressure(level) } } }
+        registerComponentCallbacks(object : android.content.ComponentCallbacks2 {
+            override fun onTrimMemory(level: Int) { dispatch(level) }
+            @Deprecated("Deprecated in Java") override fun onLowMemory() { dispatch(dev.fluwy.app.browser.MemoryPressurePolicy.LOW_MEMORY) }
+            override fun onConfigurationChanged(newConfig: android.content.res.Configuration) {}
+        })
+    }
+
     fun browserFor(sessionId: String): BrowserHost = browsers.computeIfAbsent(sessionId) { BrowserHost(this, sessionId) }
     /** Browsers já abertos (um por chat/agente), sem criar novos — para a seção Browser listar. */
     fun openBrowsers(): Map<String, BrowserHost> = HashMap(browsers)
@@ -121,6 +133,7 @@ class FluwyApp : Application() {
         dev.fluwy.app.backup.DataTransfer.applyStagedBrowserData(this)
         dev.fluwy.app.diag.ErrorLog.init(this)
         dev.fluwy.app.diag.ActivityLog.init(this)
+        registerBrowserMemoryCallbacks()
         // Chave Demo opcional da CoinGecko (gratuita) para o mercado, se o usuário tiver configurado.
         runCatching {
             dev.fluwy.app.wallet.MarketApiConfig.geckoApiKey = getSharedPreferences("solana_wallet_settings", MODE_PRIVATE)
@@ -155,6 +168,7 @@ class FluwyApp : Application() {
         // Fluxos (estilo n8n): carrega e reagenda os gatilhos de horário ativos.
         dev.fluwy.app.workflow.WorkflowStore.init(filesDir)
         runCatching { dev.fluwy.app.workflow.WorkflowScheduler.syncAll(this) }
+        runCatching { dev.fluwy.app.scheduler.Scheduler.syncAll(this) }
         sandbox.relativeBase = { sid -> store.session(sid)?.squadParentId?.let { if (::agent.isInitialized) agent.projectDirOf(it) else null } }
         store.onDeleteWorkspace = { sid ->
             // Workspace compartilhado de Seção ainda ativa: não apaga ao remover só um chat do time.

@@ -255,7 +255,7 @@ class BrowserHost(internal val appCtx: Context, internal val sessionId: String =
     @SuppressLint("SetJavaScriptEnabled")
     internal fun ensureTabView(tab: BrowserTab, ctx: Context, restore: Boolean = true): WebView {
         tab.lastUsed = System.currentTimeMillis()
-        tab.webView?.let { return it }
+        tab.webView?.let { resumeView(it); return it }
         return createView(ctx, tab).also { view ->
             tab.webView = view
             ensureSized(view)
@@ -665,6 +665,8 @@ class BrowserHost(internal val appCtx: Context, internal val sessionId: String =
 
     /** Atualiza (ou remove) os cursores dos agentes na aba ativa, sem esperar resposta. */
     internal val rendererCrashes = mutableListOf<Long>()
+    /** Anti-loop da recuperação automática do renderer (ver BrowserResilience.kt). */
+    internal val rendererRecovery = RendererRecoveryPolicy()
 
     /** O motor caiu 2+ vezes nos últimos 5 min: modo leve (sem cursores/animações do time) para não derrubar de novo. */
     fun liteMode(): Boolean = synchronized(rendererCrashes) { rendererCrashes.count { System.currentTimeMillis() - it < 5 * 60_000L } >= 2 }
