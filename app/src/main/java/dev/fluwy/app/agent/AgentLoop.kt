@@ -268,7 +268,6 @@ internal suspend fun AgentRunner.loop(sessionId: String, maxStepsOverride: Int? 
         if (sectionMember) silentRounds = if (displayContent.isBlank() && reply.toolCalls.isNotEmpty()) silentRounds + 1 else 0
         // Anti-repetição: se o modelo repetir quase o mesmo texto várias vezes, interrompe.
         // Só é repetição real se o texto for quase igual E as ações também forem as mesmas
-        val resultLong = round.resultLong
         // (mesmas ferramentas com os mesmos argumentos). Mesma ferramenta com argumentos
         // diferentes (ex.: navegar em URLs distintas) é progresso, não loop.
         val cNow = displayContent.trim()
@@ -369,6 +368,7 @@ internal suspend fun AgentRunner.loop(sessionId: String, maxStepsOverride: Int? 
         val repeatedFileFailure = round.repeatedFileFailure
         val repeatedToolFailure = round.repeatedToolFailure
         val awaitingApproval = round.awaitingApproval
+        val resultLong = round.resultLong
         if (repeatedToolFailure != null && repeatedFileFailure == null) {
             runCatching { dev.fluwy.app.diag.ErrorLog.log("agent", "A mesma chamada de $repeatedToolFailure falhou 5 vezes igual; turno encerrado.", sessionId, repeatedToolFailure) }
             store.addItemUnique(sessionId, ChatItem.Error(text = "Parei: a ferramenta $repeatedToolFailure falhou 5 vezes do mesmo jeito. Ajuste o pedido ou troque de modelo e envie continuar."))
