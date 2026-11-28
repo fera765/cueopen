@@ -89,6 +89,6 @@ Arestas explícitas (`links` + `[[wikilinks]]`) e automáticas (tags e palavras 
 
 ## Limitações conhecidas
 
-- `knowledge_search` e `notes_read` aparecem em listas de política (`contentTool`, `POST_COMPACTION_READS`), mas não há `case` de execução para eles no dispatch.
+- `notes_read` lê o NOTES.md da tarefa e `knowledge_search` busca na base de conhecimento (ambos sempre disponíveis no núcleo de ferramentas).
 - Relevância é lexical (palavras normalizadas), sem embeddings.
 - Dedup por Jaccard pode fundir fatos parecidos porém distintos.
