@@ -87,6 +87,7 @@ fun WorkflowEditorScreen(nav: NavController, id: String) {
     var menu by remember { mutableStateOf(false) }
     var confirmDelete by remember { mutableStateOf(false) }
     var confirmAuto by remember { mutableStateOf(false) }
+    var errorFlowPick by remember { mutableStateOf(false) }
     var toast by remember { mutableStateOf<String?>(null) }
     var watchRun by remember { mutableStateOf<String?>(null) }
     var result by remember { mutableStateOf<WfRun?>(null) }
@@ -193,6 +194,7 @@ fun WorkflowEditorScreen(nav: NavController, id: String) {
                                 edges = w.edges.mapNotNull { e -> val f = idMap[e.from]; val t = idMap[e.to]; if (f != null && t != null) e.copy(id = WfIds.new(), from = f, to = t) else null }))
                             nav.navigate("workflow/${copy.id}")
                         }, leadingIcon = { Icon(Icons.Rounded.ContentCopy, null) })
+                        DropdownMenuItem({ Text("Fluxo de erro…") }, { menu = false; errorFlowPick = true }, leadingIcon = { Icon(Icons.Rounded.ReportProblem, null) })
                         DropdownMenuItem({ Text("Ver ajustes pendentes") }, { menu = false; problemsOpen = true }, leadingIcon = { Icon(Icons.Rounded.Rule, null) })
                         DropdownMenuItem({ Text("Excluir fluxo", color = c.err) }, { menu = false; confirmDelete = true }, leadingIcon = { Icon(Icons.Rounded.Delete, null, tint = c.err) })
                     }
@@ -235,13 +237,12 @@ fun WorkflowEditorScreen(nav: NavController, id: String) {
                         val a = w.nodes.firstOrNull { it.id == e.from } ?: return@forEach
                         val b = w.nodes.firstOrNull { it.id == e.to } ?: return@forEach
                         val pa = pos(a); val pb = pos(b)
-                        val ports = WfCatalog.of(a.type).ports
-                        val py = if (ports.size > 1) (if (e.port == "false") NODE_H * 0.70f else NODE_H * 0.32f) else NODE_H / 2
+                        val py = portY(WfLogic.ports(a), e.port)
                         val s0 = scr(pa.x + NODE_W, pa.y + py)
                         val t0 = scr(pb.x, pb.y + NODE_H / 2)
                         val dx = (kotlin.math.abs(t0.x - s0.x) / 2).coerceAtLeast(50f * k)
                         val path = Path().apply { moveTo(s0.x, s0.y); cubicTo(s0.x + dx, s0.y, t0.x - dx, t0.y, t0.x, t0.y) }
-                        val base = when (e.port) { "true" -> okColor; "false" -> errColor; else -> edgeColor }
+                        val base = when (e.port) { "true" -> okColor; "false", "error" -> errColor; else -> edgeColor }
                         val ran = nodeStatus[e.from] == "ok" && nodeStatus.containsKey(e.to)
                         val live = ran && nodeStatus[e.to] == "running"
                         drawPath(path, (if (live) accent else base).copy(alpha = if (ran) 1f else .55f), style = Stroke(width = (if (ran) 2.6f else 1.8f) * k,
@@ -375,6 +376,18 @@ fun WorkflowEditorScreen(nav: NavController, id: String) {
         title = { Text(if (problems.isEmpty()) "Tudo certo" else "Ajustes pendentes") },
         text = { Text(if (problems.isEmpty()) "O fluxo está pronto para rodar." else problems.joinToString("\n") { "• $it" }, fontSize = 14.sp) },
         confirmButton = { TextButton({ problemsOpen = false }) { Text("Ok") } })
+    if (errorFlowPick) AlertDialog(onDismissRequest = { errorFlowPick = false }, containerColor = c.surface,
+        title = { Text("Fluxo de erro") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Text("Quando uma execução real deste fluxo falhar, o fluxo escolhido roda com os dados da falha (use o gatilho \"Erro em outro fluxo\").", fontSize = 13.sp, color = c.ink3)
+                Chip("Nenhum", selected = w.errorWorkflowId.isBlank()) { save(w.copy(errorWorkflowId = "")); errorFlowPick = false }
+                WorkflowStore.flows.value.filter { it.id != w.id }.forEach { f ->
+                    Chip(f.name, selected = w.errorWorkflowId == f.id) { save(w.copy(errorWorkflowId = f.id)); errorFlowPick = false }
+                }
+            }
+        },
+        confirmButton = { TextButton({ errorFlowPick = false }) { Text("Fechar") } })
     if (confirmAuto) AlertDialog(onDismissRequest = { confirmAuto = false }, containerColor = c.surface,
         title = { Text("Autonomia total?") },
         text = { Text("Os nós \"Revisar e aprovar\" deste fluxo vão seguir sozinhos com o rascunho da IA — por exemplo, responder e-mails sem você ver antes. Você pode desligar a qualquer momento.") },

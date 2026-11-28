@@ -234,7 +234,7 @@ internal fun NodeTester(w: Workflow, node: WfNode, lastStep: WfStep?) {
     val scope = rememberCoroutineScope()
     val clip = androidx.compose.ui.platform.LocalClipboardManager.current
     var busy by remember(node.id) { mutableStateOf(false) }
-    var res by remember(node.id) { mutableStateOf<WorkflowEngine.NodeResult?>(null) }
+    var res by remember(node.id) { mutableStateOf<NodeResult?>(null) }
     var copied by remember { mutableStateOf<String?>(null) }
     var showRaw by remember(node.id) { mutableStateOf(false) }
     SectionLabel("Testar este nó")
@@ -261,12 +261,20 @@ internal fun NodeTester(w: Workflow, node: WfNode, lastStep: WfStep?) {
             Text("Use em outros nós (toque para copiar)" + (copied?.let { " · copiado $it" } ?: ""), fontSize = 12.sp, color = c.ink2)
             FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 (listOf("") + paths.take(30)).forEach { p ->
-                    val token = if (p.isEmpty()) "{{${node.id}}}" else "{{${node.id}.$p}}"
+                    val token = nodeExpr(WfLogic.label(node), p)
                     Chip(if (p.isEmpty()) "tudo" else p) { clip.setText(androidx.compose.ui.text.AnnotatedString(token)); copied = token }
                 }
             }
         }
     }
+}
+
+/** `{{ $node["Nome"].json.a[0].b }}` para o caminho "a.0.b" (formato do WfLogic.paths). */
+internal fun nodeExpr(label: String, path: String): String {
+    val segs = path.split('.').filter { it.isNotEmpty() }.joinToString("") { s ->
+        when { s.toIntOrNull() != null -> "[$s]"; Regex("^[A-Za-z_][A-Za-z0-9_]*$").matches(s) -> ".$s"; else -> "[\"" + s.replace("\"", "\\\"") + "\"]" }
+    }
+    return "{{ \$node[\"" + label.replace("\"", "\\\"") + "\"].json" + segs + " }}"
 }
 
 @Composable
@@ -294,7 +302,7 @@ internal fun RunsPanel(w: Workflow, runs: List<WfRun>, nav: NavController, onClo
                         Spacer(Modifier.width(8.dp))
                         Text(when (r.status) { "ok" -> "Concluída"; "error" -> "Falhou"; "running" -> "Executando"; "waiting" -> "Aguardando aprovação"; "paused" -> "Pausada"; "queued" -> "Na fila"; else -> "Parada" },
                             fontWeight = FontWeight.SemiBold, color = col, modifier = Modifier.weight(1f))
-                        Text("${when (r.trigger) { "schedule" -> "agendada"; "webhook" -> "webhook"; "test" -> "teste"; else -> "manual" }} · ${timeFmt.format(Date(r.startedAt))}", fontSize = 11.sp, color = c.ink3)
+                        Text("${when (r.trigger) { "schedule" -> "agendada"; "webhook" -> "webhook"; "test" -> if (r.until.isNotBlank()) "parcial" else "teste"; "whatsapp" -> "WhatsApp"; "error" -> "fluxo de erro"; else -> "manual" }} · ${timeFmt.format(Date(r.startedAt))}", fontSize = 11.sp, color = c.ink3)
                     }
                     r.finishedAt?.let { Text("Duração: ${((it - r.startedAt) / 1000).coerceAtLeast(0)} s", fontSize = 11.sp, color = c.ink3) }
                     if (r.error.isNotBlank()) Text(r.error.take(400), fontSize = 12.sp, color = c.err)
@@ -309,12 +317,17 @@ internal fun RunsPanel(w: Workflow, runs: List<WfRun>, nav: NavController, onClo
                             Icon(nodeIcon(s.type), null, Modifier.size(16.dp), tint = statusColor(s.status, c) ?: c.ink3)
                             Spacer(Modifier.width(6.dp))
                             Text(s.label, fontSize = 13.sp, fontWeight = FontWeight.Medium, modifier = Modifier.weight(1f))
+                            if (s.status != "running") Text(listOfNotNull("${s.inputItems}→${s.items} itens", if (s.attempts > 1) "${s.attempts}×" else null, if (s.pinned) "fixado" else null).joinToString(" · ") + "  ",
+                                fontSize = 10.sp, color = c.ink3)
                             s.finishedAt?.let { Text("${((it - s.startedAt) / 100) / 10.0} s", fontSize = 11.sp, color = c.ink3) }
                         }
                         // Leitura clara por padrão; os dados técnicos (JSON) só quando o usuário pede.
                         if (s.status == "error") Text(s.error.take(800), Modifier.fillMaxWidth().padding(start = 22.dp, top = 2.dp), fontSize = 12.sp, color = c.err)
                         else if (s.output.isNotBlank()) {
-                            if (raw) Text(prettyOut(s.output).take(3_000), Modifier.fillMaxWidth().padding(start = 22.dp, top = 2.dp), fontSize = 11.sp,
+                            if (s.error.isNotBlank()) Text(s.error.take(300), Modifier.padding(start = 22.dp, top = 2.dp), fontSize = 11.sp, color = c.warn)
+                            if (raw && s.input.isNotBlank()) Text("ENTRADA\n" + prettyOut(s.input).take(1_500), Modifier.fillMaxWidth().padding(start = 22.dp, top = 2.dp), fontSize = 11.sp,
+                                fontFamily = FontFamily.Monospace, color = c.ink3)
+                            if (raw) Text("SAÍDA\n" + prettyOut(s.output).take(3_000), Modifier.fillMaxWidth().padding(start = 22.dp, top = 2.dp), fontSize = 11.sp,
                                 fontFamily = FontFamily.Monospace, color = c.ink3)
                             else if (s.type.startsWith("trigger")) Text(if (r.trigger == "schedule") "Disparado pelo agendamento" else if (r.trigger == "test") "Teste" else "Disparado por você",
                                 Modifier.padding(start = 22.dp, top = 2.dp), fontSize = 12.sp, color = c.ink3)
