@@ -396,6 +396,11 @@ internal fun AgentRunner.tools(agentIn: AgentProfile?, allowMultiAgent: Boolean 
         put("fact", str("O fato, em uma frase autossuficiente. Pode citar notas relacionadas como [[Título]]")); put("scope", str("global (vale para todos os agentes) ou agent (só este)")); put("tags", strArray("Palavras-chave"))
         put("title", str("Título curto da nota (2 a 5 palavras), ex.: Tom · design")); put("kind", str("Categoria: ${MemoryGraph.KINDS.joinToString("/")}")); put("links", strArray("Notas relacionadas já existentes: título ou id (de memory_search)"))
     }, listOf("fact")))
+    add(tool("notes_read", "Lê o NOTES.md desta tarefa (a sua memória de trabalho). Use depois de uma compactação de contexto para recuperar achados, caminhos e próximos passos antes de continuar.", buildJsonObject {}))
+    add(tool("knowledge_search", "Busca na base de conhecimento do usuário (documentos cadastrados em Conhecimento) os trechos mais relevantes para a consulta. Use quando a resposta depender de material do usuário, como políticas, catálogos ou manuais.", buildJsonObject {
+        put("query", str("O que procurar, em poucas palavras (ex.: política de troca, preço do plano anual)"))
+        put("limit", int("Quantos documentos devolver (1 a 8; padrão 4)"))
+    }, listOf("query")))
     add(tool("memory_search", "Busca notas na memória de longo prazo (segundo cérebro). Cada resultado traz id, título, categoria e as notas ligadas (→ [[…]]).", buildJsonObject { put("query", str("O que procurar")) }, listOf("query")))
     add(tool("skill_load", "Carrega as instruções completas de uma skill da lista de skills disponíveis.", buildJsonObject { put("name", str("Nome da skill")) }, listOf("name")))
     if (builder) add(tool("connector_spec", "Devolve a especificação YAML completa do UI Connector SDK (campos, tipos, limites e guardrails), sem presets. Chame antes de escrever uma definição.", buildJsonObject {}))

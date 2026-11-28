@@ -34,11 +34,28 @@ class PixVault(context: Context) {
     }
 
     fun list(): List<PixKey> = runCatching {
+        migrateKey()
         val raw = prefs.getString(ENTRY, null) ?: return emptyList()
-        val blob = Base64.decode(raw, Base64.NO_WRAP)
-        val c = Cipher.getInstance("AES/GCM/NoPadding").apply { init(Cipher.DECRYPT_MODE, key(), GCMParameterSpec(128, blob, 0, 12)) }
-        json.decodeFromString(ListSerializer(PixKey.serializer()), c.doFinal(blob, 12, blob.size - 12).toString(Charsets.UTF_8))
+        decrypt(raw, key())
     }.getOrDefault(emptyList())
+
+    private fun decrypt(raw: String, k: SecretKey): List<PixKey> {
+        val blob = Base64.decode(raw, Base64.NO_WRAP)
+        val c = Cipher.getInstance("AES/GCM/NoPadding").apply { init(Cipher.DECRYPT_MODE, k, GCMParameterSpec(128, blob, 0, 12)) }
+        return json.decodeFromString(ListSerializer(PixKey.serializer()), c.doFinal(blob, 12, blob.size - 12).toString(Charsets.UTF_8))
+    }
+
+    /**
+     * Migração única: as chaves Pix eram cifradas com a mesma chave do Keystore dos cartões. Recifra com
+     * uma chave própria para que a perda de uma não afete a outra. A chave antiga continua com os cartões.
+     */
+    private fun migrateKey() {
+        val raw = prefs.getString(ENTRY, null) ?: return
+        val ks = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
+        if (ks.containsAlias(ALIAS)) return
+        val old = ks.getKey(SHARED_ALIAS, null) as? SecretKey ?: return
+        write(decrypt(raw, old))
+    }
 
     private fun write(list: List<PixKey>) {
         val c = Cipher.getInstance("AES/GCM/NoPadding").apply { init(Cipher.ENCRYPT_MODE, key()) }
@@ -59,7 +76,12 @@ class PixVault(context: Context) {
 
     fun remove(id: String) = write(list().filterNot { it.id == id })
 
-    private companion object { const val ALIAS = "fluwy_cofre_cards_v1"; const val ENTRY = "pix" }
+    private companion object {
+        const val ALIAS = "fluwy_cofre_pix_v1"
+        /** Chave dos cartões, usada pelo Pix antes da separação (só para migrar). */
+        const val SHARED_ALIAS = "fluwy_cofre_cards_v1"
+        const val ENTRY = "pix"
+    }
 }
 
 /**
