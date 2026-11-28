@@ -234,7 +234,7 @@ internal suspend fun AgentRunner.runTool(
             val fmt = SimpleDateFormat("dd/MM HH:mm", Locale.getDefault())
             val list = store.state.value.scheduled
             return ToolResult(if (list.isEmpty()) "Nenhuma tarefa agendada." else list.joinToString("\n") { t ->
-                "- ${t.id} · ${t.title} · ${t.repeat.name.lowercase()} · início ${fmt.format(Date(t.startAt))} · último disparo ${t.lastRunAt?.let { fmt.format(Date(it)) } ?: "nunca"} · ${if (t.enabled) "ligada" else "desligada"}"
+                "- ${t.id} · ${t.title} · ${dev.fluwy.app.scheduler.ScheduleText.rule(t)} · próximo ${t.nextRunAt?.let { fmt.format(Date(it)) } ?: "—"} · último ${t.runs.firstOrNull()?.let { r -> fmt.format(Date(r.startedAt)) + " " + dev.fluwy.app.scheduler.ScheduleText.status(r.status) } ?: "nunca"} · ${if (t.enabled) "ativa" else "pausada"}"
             })
         }
         "cron_remove" -> {
@@ -560,14 +560,32 @@ internal suspend fun AgentRunner.executeTool(
             val fact = s("fact").trim()
             // OpenBot 0.73: em vez de cortar em silêncio, diz o limite para o agente salvar fatos menores.
             ContextManager.memoryTooLong(fact) ?: ctxMgr.saveMemory(fact, if (agentScoped) sess?.agentId else null, tags,
-                s("title"), s("kind"), a["links"]?.jsonArray?.map { it.jsonPrimitive.content }.orEmpty())
+                s("title"), s("kind"), a["links"]?.jsonArray?.map { it.jsonPrimitive.content }.orEmpty(), sessionId = sessionId)
         }
-        "notes_read" -> ctxMgr.readNotes(sessionId).ifBlank { "NOTES.md está vazio: nada registrado com notes_write nesta tarefa." }.takeLast(12_000)
-        "knowledge_search" -> ctxMgr.relevantKnowledge(s("query"), k = (i("limit") ?: 4).coerceIn(1, 8), maxChars = 8_000)
-            .joinToString("\n\n") { "## ${it.title}\n${it.content.take(2_000)}" }
-            .ifBlank { "Nada encontrado na base de conhecimento para \"${s("query")}\". Tente outros termos ou siga sem esse material." }
-        "memory_search" -> ctxMgr.describeMemories(ctxMgr.searchMemories(s("query"), store.session(sessionId)?.agentId))
-            .joinToString("\n") { "- $it" }.ifBlank { "Nada encontrado." }
+        "notes_read" -> ctxMgr.readNotes(sessionId).let { n ->
+            when {
+                n.isBlank() -> "NOTES.md está vazio. Registre progresso com notes_write; fatos duradouros ficam em memory_search."
+                n.length > 12_000 -> "[NOTES.md tem ${n.length} caracteres; mostrando o final]\n" + n.takeLast(12_000)
+                else -> n
+            }
+        }
+        "knowledge_search" -> {
+            val q = s("query").trim()
+            when {
+                q.isBlank() -> "ERRO: informe query com poucas palavras-chave (ex.: política de troca)."
+                store.state.value.knowledge.none { it.enabled } -> "A base de conhecimento está vazia (o usuário cadastra documentos em Conhecimento). Siga sem esse material."
+                else -> ctxMgr.relevantKnowledge(q, k = (i("limit") ?: 4).coerceIn(1, 8), maxChars = 8_000)
+                    .joinToString("\n\n") { "## ${it.title}\n${it.content.take(2_000)}" }
+                    .ifBlank { "Nada relevante para \"$q\" na base de conhecimento. Tente sinônimos ou termos mais gerais." }
+            }
+        }
+        "memory_search" -> {
+            val q = s("query").trim()
+            if (q.isBlank()) "ERRO: informe query com palavras-chave (nome, projeto, tema)."
+            else ctxMgr.describeMemories(ctxMgr.searchMemories(q, store.session(sessionId)?.agentId))
+                .joinToString("\n") { "- $it" }
+                .ifBlank { "Nenhuma memória sobre \"$q\". Tente outros termos; se o fato for novo e duradouro, salve com memory_save." }
+        }
         "remember_legacy" -> {
             val sess = store.session(sessionId)
             val ag = store.agent(sess?.agentId)

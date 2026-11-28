@@ -178,10 +178,17 @@ class Store(context: Context) {
     }
 
     /** Cria a sessão de execução e atualiza o registro da agenda sob o mesmo lock da exclusão. */
-    internal fun setScheduledResult(taskId: String, failed: Boolean) = synchronized(stateLock) {
+    /** Fecha a execução: limpa o "em andamento", registra no histórico e o último resultado. */
+    internal fun finishScheduledRun(taskId: String, run: ScheduledRun) = patchScheduled(taskId) {
+        it.copy(runningSince = null, lastFailed = run.status == RunStatus.FAILED,
+            runs = dev.fluwy.app.scheduler.ScheduleCalc.appendRun(it.runs, run))
+    }
+
+    /** Atualiza uma agenda atomicamente (sem sobrescrever campos alterados em paralelo). */
+    internal fun patchScheduled(taskId: String, f: (ScheduledTask) -> ScheduledTask) = synchronized(stateLock) {
         val cur = _state.value
         if (cur.scheduled.none { it.id == taskId }) return@synchronized
-        val next = cur.copy(scheduled = cur.scheduled.map { if (it.id == taskId) it.copy(lastFailed = failed) else it })
+        val next = cur.copy(scheduled = cur.scheduled.map { if (it.id == taskId) f(it) else it })
         revision += 1
         _state.value = next
         snapshots.value = VersionedState(revision, next)
@@ -193,13 +200,15 @@ class Store(context: Context) {
         if (session.scheduledTaskId != taskId) return@synchronized false
         if (task.sourceSessionId != null && current.sessions.none { it.id == task.sourceSessionId })
             return@synchronized false
+        // Dedup: nunca duas execuções da mesma agenda em paralelo.
+        if (!dev.fluwy.app.scheduler.ScheduleCalc.canStart(task.runningSince, now())) return@synchronized false
 
         val next = current.copy(
             sessions = if (current.sessions.any { it.id == session.id })
                 current.sessions.map { if (it.id == session.id) session else it }
             else listOf(session) + current.sessions,
             scheduled = current.scheduled.map {
-                if (it.id == taskId) it.copy(lastRunAt = now(), lastSessionId = session.id) else it
+                if (it.id == taskId) it.copy(lastRunAt = now(), lastSessionId = session.id, runningSince = now()) else it
             },
         )
         revision += 1

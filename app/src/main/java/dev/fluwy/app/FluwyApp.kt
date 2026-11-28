@@ -168,6 +168,7 @@ class FluwyApp : Application() {
         // Fluxos (estilo n8n): carrega e reagenda os gatilhos de horário ativos.
         dev.fluwy.app.workflow.WorkflowStore.init(filesDir)
         runCatching { dev.fluwy.app.workflow.WorkflowScheduler.syncAll(this) }
+        runCatching { dev.fluwy.app.scheduler.Scheduler.syncAll(this) }
         sandbox.relativeBase = { sid -> store.session(sid)?.squadParentId?.let { if (::agent.isInitialized) agent.projectDirOf(it) else null } }
         store.onDeleteWorkspace = { sid ->
             // Workspace compartilhado de Seção ainda ativa: não apaga ao remover só um chat do time.

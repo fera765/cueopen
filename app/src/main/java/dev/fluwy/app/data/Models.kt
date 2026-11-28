@@ -362,6 +362,10 @@ data class MemoryItem(
     val title: String = "",
     val kind: String = "",
     val links: List<String> = emptyList(),
+    /** Origem do fato: "agente" (memory_save), "auto" (extração), "usuario" (tela); vazio = antigo. */
+    val source: String = "",
+    /** Sessão em que o fato foi salvo (quando conhecida). */
+    val sessionId: String? = null,
 )
 
 @Serializable
@@ -533,6 +537,37 @@ data class ScheduledTask(
     val lastFailed: Boolean = false,
     /** Chat de origem; excluir esse chat também encerra somente esta agenda. */
     val sourceSessionId: String? = null,
+    /** Expressão cron de 5 campos (minuto hora dia mês dia-da-semana); vazia = usa [repeat]. */
+    val cron: String = "",
+    /** Fuso IANA (ex.: America/Sao_Paulo); vazio = fuso do aparelho. */
+    val timeZone: String = "",
+    /** Janela de "não executar" em horas locais [quietStartHour, quietEndHour); -1 = desligada. */
+    val quietStartHour: Int = -1,
+    val quietEndHour: Int = -1,
+    val missedPolicy: MissedPolicy = MissedPolicy.RUN_ONCE,
+    /** Próximo disparo calculado (null = nenhum). */
+    val nextRunAt: Long? = null,
+    /** Execução em andamento desde (dedup: impede duas execuções em paralelo). */
+    val runningSince: Long? = null,
+    /** Histórico das últimas execuções (mais recente primeiro). */
+    val runs: List<ScheduledRun> = emptyList(),
+)
+
+/** O que fazer com disparos perdidos (aparelho desligado, Doze): rodar uma vez ou pular. */
+@Serializable
+enum class MissedPolicy { RUN_ONCE, SKIP }
+
+@Serializable
+enum class RunStatus { OK, QUIET, FAILED, SKIPPED }
+
+@Serializable
+data class ScheduledRun(
+    val startedAt: Long,
+    val durationMs: Long = 0,
+    val status: RunStatus = RunStatus.OK,
+    val error: String = "",
+    val sessionId: String? = null,
+    val manual: Boolean = false,
 )
 
 @Serializable
